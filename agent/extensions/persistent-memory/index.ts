@@ -379,12 +379,7 @@ function triggerBackgroundReconciliation(
 		return;
 	}
 
-	const capturedCtx = {
-		cwd: ctx.cwd ?? process.cwd(),
-		model: ctx.model,
-		modelRegistry: ctx.modelRegistry,
-		thinkingLevel: ctx.thinkingLevel,
-	};
+	const capturedCtx = captureCtx(ctx);
 
 	reconcileInFlight = true;
 	try {
