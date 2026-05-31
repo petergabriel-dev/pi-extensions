@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 
-import type { Model } from "@earendil-works/pi-ai";
+import { StringEnum, type Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -12,7 +12,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
+import { discoverAgents, formatAgentList, type AgentScope } from "./agents.ts";
+
 const TOOL_NAME = "subagents_inprocess_spike";
+const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
 const DEFAULT_READ_PATH = "agent/AGENTS.md";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
@@ -34,6 +37,17 @@ const SpikeParams = Type.Object({
 });
 
 type SpikeParams = Static<typeof SpikeParams>;
+
+const DebugListParams = Type.Object({
+	agentScope: Type.Optional(
+		StringEnum(["user", "project", "both"] as const, {
+			description: 'Which agent definitions to discover. Defaults to "user".',
+			default: "user",
+		}),
+	),
+});
+
+type DebugListParams = Static<typeof DebugListParams>;
 
 interface ParentSnapshot {
 	sessionFile: string | undefined;
@@ -274,6 +288,33 @@ function formatToolResult(details: SpikeDetails): string {
 }
 
 export default function subagentsSpikeExtension(pi: ExtensionAPI) {
+	pi.registerTool({
+		name: DEBUG_LIST_TOOL_NAME,
+		label: "Subagents Debug List Agents",
+		description:
+			"Debug helper for subagents development: list discovered agent definitions with source, model, and tools. Defaults to user-level ~/.pi/agent/agents/*.md definitions.",
+		parameters: DebugListParams,
+		async execute(_toolCallId, params: DebugListParams, _signal, _onUpdate, ctx) {
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
+			const discovery = discoverAgents(ctx.cwd, agentScope);
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`Agent scope: ${discovery.agentScope}`,
+							`User agents dir: ${discovery.userAgentsDir}`,
+							`Project agents dir: ${discovery.projectAgentsDir ?? "(none)"}`,
+							"",
+							formatAgentList(discovery.agents),
+						].join("\n"),
+					},
+				],
+				details: discovery,
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "Subagents In-Process Spike",
