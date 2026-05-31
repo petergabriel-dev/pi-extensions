@@ -12,10 +12,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
-import { discoverAgents, formatAgentList, type AgentScope } from "./agents.ts";
+import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
+import { runSubagent } from "./spawn.ts";
 
 const TOOL_NAME = "subagents_inprocess_spike";
 const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
+const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
 const DEFAULT_READ_PATH = "agent/AGENTS.md";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
@@ -48,6 +50,26 @@ const DebugListParams = Type.Object({
 });
 
 type DebugListParams = Static<typeof DebugListParams>;
+
+const DebugRunParams = Type.Object({
+	agent: StringEnum(["explorer", "worker"] as const, { description: "Agent role to run." }),
+	task: Type.String({ description: "Task string to send to the child subagent." }),
+	agentScope: Type.Optional(
+		StringEnum(["user", "project", "both"] as const, {
+			description: 'Which agent definitions to discover. Defaults to "user".',
+			default: "user",
+		}),
+	),
+	useCurrentModel: Type.Optional(
+		Type.Boolean({
+			description: "Debug-only: ignore the agent definition's model and use the current parent model.",
+			default: false,
+		}),
+	),
+	timeoutMs: Type.Optional(Type.Number({ description: "Child timeout in milliseconds.", minimum: 1000, maximum: 120000 })),
+});
+
+type DebugRunParams = Static<typeof DebugRunParams>;
 
 interface ParentSnapshot {
 	sessionFile: string | undefined;
@@ -311,6 +333,46 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					},
 				],
 				details: discovery,
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: DEBUG_RUN_TOOL_NAME,
+		label: "Subagents Debug Run Agent",
+		description:
+			"Debug helper for subagents development: run a discovered explorer or worker through the core in-process runSubagent module and return its parsed structured result.",
+		parameters: DebugRunParams,
+		async execute(_toolCallId, params: DebugRunParams, signal, _onUpdate, ctx) {
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
+			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const agent = discovery.agents.find((candidate) => candidate.name === params.agent);
+			if (!agent) {
+				return {
+					content: [{ type: "text", text: `Unknown agent ${params.agent}. Available: ${formatAgentList(discovery.agents)}` }],
+					details: { ok: false, discovery },
+				};
+			}
+
+			const result = await runSubagent({
+				agent,
+				role: params.agent as AgentRole,
+				task: params.task,
+				ctx,
+				signal,
+				timeoutMs: params.timeoutMs,
+				modelOverride: params.useCurrentModel ? ctx.model : undefined,
+			});
+			return {
+				content: [
+					{
+						type: "text",
+						text: result.ok
+							? `Subagent ${params.agent} OK.\n\n${JSON.stringify(result.parsed, null, 2)}`
+							: `Subagent ${params.agent} FAILED: ${result.error}\n\n${JSON.stringify(result.parsed ?? {}, null, 2)}`,
+					},
+				],
+				details: result,
 			};
 		},
 	});
