@@ -13,8 +13,9 @@ import {
 import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
-import { runSubagent } from "./spawn.ts";
+import { runSubagent, type ExplorerParsedResult } from "./spawn.ts";
 
+const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
 const TOOL_NAME = "subagents_inprocess_spike";
 const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
 const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
@@ -70,6 +71,27 @@ const DebugRunParams = Type.Object({
 });
 
 type DebugRunParams = Static<typeof DebugRunParams>;
+
+const SpawnExplorerParams = Type.Object({
+	task: Type.String({ description: "Discovery task for the read-only explorer subagent." }),
+	agent: Type.Optional(
+		Type.String({
+			description: 'Explorer agent definition name. Defaults to "explorer".',
+			default: "explorer",
+		}),
+	),
+	agentScope: Type.Optional(
+		StringEnum(["user", "project", "both"] as const, {
+			description: 'Which agent definitions to discover. Defaults to "user".',
+			default: "user",
+		}),
+	),
+	timeoutMs: Type.Optional(Type.Number({ description: "Child timeout in milliseconds.", minimum: 1000, maximum: 120000 })),
+});
+
+type SpawnExplorerParams = Static<typeof SpawnExplorerParams>;
+
+const READ_ONLY_EXPLORER_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 interface ParentSnapshot {
 	sessionFile: string | undefined;
@@ -309,7 +331,73 @@ function formatToolResult(details: SpikeDetails): string {
 	return lines.join("\n");
 }
 
+function validateExplorerTools(tools: string[] | undefined): string | undefined {
+	const activeTools = tools ?? [...READ_ONLY_EXPLORER_TOOLS];
+	const unsafeTools = activeTools.filter((tool) => !READ_ONLY_EXPLORER_TOOLS.has(tool));
+	if (unsafeTools.length > 0) return `Explorer agent includes non-read-only tool(s): ${unsafeTools.join(", ")}.`;
+	return undefined;
+}
+
 export default function subagentsSpikeExtension(pi: ExtensionAPI) {
+	pi.registerTool({
+		name: SPAWN_EXPLORER_TOOL_NAME,
+		label: "Spawn Explorer",
+		description:
+			"Run a read-only explorer subagent in an isolated child session and return structured findings without adding the child transcript to parent context.",
+		parameters: SpawnExplorerParams,
+		async execute(_toolCallId, params: SpawnExplorerParams, signal, _onUpdate, ctx) {
+			const agentName = params.agent?.trim() || "explorer";
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
+			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
+			if (!agent) {
+				return {
+					content: [{ type: "text", text: `Explorer agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }],
+					details: { ok: false, error: "Explorer agent not found", discovery },
+				};
+			}
+
+			const unsafeReason = validateExplorerTools(agent.tools);
+			if (unsafeReason) {
+				return {
+					content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }],
+					details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools },
+				};
+			}
+
+			const result = await runSubagent({
+				agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
+				role: "explorer",
+				task: params.task,
+				ctx,
+				signal,
+				timeoutMs: params.timeoutMs,
+			});
+
+			if (!result.ok) {
+				return {
+					content: [{ type: "text", text: `Explorer failed: ${result.error}` }],
+					details: result,
+				};
+			}
+
+			const parsed = result.parsed as ExplorerParsedResult;
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`Explorer summary: ${parsed.summary}`,
+							parsed.filesInspected.length > 0 ? `Files inspected: ${parsed.filesInspected.join(", ")}` : "Files inspected: none reported",
+							parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
+						].join("\n"),
+					},
+				],
+				details: result,
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: DEBUG_LIST_TOOL_NAME,
 		label: "Subagents Debug List Agents",
