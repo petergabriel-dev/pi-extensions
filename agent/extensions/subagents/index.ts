@@ -15,6 +15,7 @@ import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
 import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
+import { getProgressSnapshot, startSubagentProgress } from "./progress.ts";
 import { runSubagent, type ExplorerParsedResult, type WorkerParsedResult } from "./spawn.ts";
 
 const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
@@ -24,6 +25,7 @@ const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
 const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
 const DEBUG_CONCURRENCY_TOOL_NAME = "subagents_debug_concurrency";
 const DEBUG_GRAPH_TOOL_NAME = "subagents_debug_spawn_graph";
+const DEBUG_PROGRESS_TOOL_NAME = "subagents_debug_progress";
 const DEFAULT_READ_PATH = "agent/AGENTS.md";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
@@ -91,6 +93,12 @@ const DebugGraphParams = Type.Object({
 });
 
 type DebugGraphParams = Static<typeof DebugGraphParams>;
+
+const DebugProgressParams = Type.Object({
+	delayMs: Type.Optional(Type.Number({ description: "Milliseconds to keep a fake progress row visible.", minimum: 1, maximum: 2000, default: 300 })),
+});
+
+type DebugProgressParams = Static<typeof DebugProgressParams>;
 
 const SpawnExplorerParams = Type.Object({
 	task: Type.String({ description: "Discovery task for the read-only explorer subagent." }),
@@ -469,6 +477,7 @@ function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: Abo
 				parentCtx.cwd,
 				signal ?? parentSignal,
 				async (slot) => {
+					const progress = startSubagentProgress(parentCtx, "explorer", { depth });
 					const result = await runSubagent({
 						agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
 						role: "explorer",
@@ -476,6 +485,7 @@ function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: Abo
 						ctx: parentCtx,
 						signal: signal ?? parentSignal,
 						timeoutMs: params.timeoutMs,
+						progress,
 					});
 					return {
 						content: [{ type: "text", text: result.ok ? `Nested explorer summary: ${(result.parsed as ExplorerParsedResult).summary}` : `Nested explorer failed: ${result.error}` }],
@@ -557,6 +567,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 			}
 
 			return withSubagentSlot("explorer", ctx.cwd, signal, async (slot) => {
+				const progress = startSubagentProgress(ctx, "explorer");
 				const result = await runSubagent({
 					agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
 					role: "explorer",
@@ -564,6 +575,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					ctx,
 					signal,
 					timeoutMs: params.timeoutMs,
+					progress,
 				});
 
 				if (!result.ok) {
@@ -632,6 +644,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 			return withWorkerOwnership(ownership, (workerRunId) =>
 				withSubagentSlot("worker", ctx.cwd, signal, async (slot) => {
 					const workerTools = [...new Set([...(agent.tools ?? []), SPAWN_EXPLORER_TOOL_NAME])];
+					const progress = startSubagentProgress(ctx, "worker");
 					const result = await runSubagent({
 						agent: { ...agent, tools: workerTools },
 						role: "worker",
@@ -640,6 +653,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 						signal,
 						timeoutMs: params.timeoutMs,
 						customTools: [createNestedExplorerTool(ctx, signal, 1)],
+						progress,
 					});
 
 					if (!result.ok) {
@@ -666,6 +680,28 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					};
 				}),
 			);
+		},
+	});
+
+	pi.registerTool({
+		name: DEBUG_PROGRESS_TOOL_NAME,
+		label: "Subagents Debug Progress",
+		description: "Debug helper for subagents development: briefly render and clear the subagents progress widget.",
+		parameters: DebugProgressParams,
+		async execute(_toolCallId, params: DebugProgressParams, _signal, _onUpdate, ctx) {
+			const delayMs = Math.max(1, Math.min(2000, Math.floor(params.delayMs ?? 300)));
+			const progress = startSubagentProgress(ctx, "worker");
+			progress.setActivity("debug wait");
+			progress.incrementToolCount();
+			await new Promise((resolve) => setTimeout(resolve, delayMs));
+			const during = getProgressSnapshot();
+			progress.finish();
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			const after = getProgressSnapshot();
+			return {
+				content: [{ type: "text", text: `Progress widget debug complete; running after clear: ${after.running.length}.` }],
+				details: { ok: after.running.length === 0, during, after },
+			};
 		},
 	});
 

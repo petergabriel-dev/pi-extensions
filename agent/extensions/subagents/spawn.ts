@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig, AgentRole } from "./agents.ts";
+import type { ProgressHandle } from "./progress.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_RETURN_BYTES = 50 * 1024;
@@ -78,6 +79,7 @@ export interface RunSubagentOptions {
 	timeoutMs?: number;
 	modelOverride?: Model<any>;
 	customTools?: ToolDefinition[];
+	progress?: ProgressHandle;
 }
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
@@ -283,6 +285,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 		const resourceLoader = createSubagentResourceLoader(options.agent, options.ctx.cwd, agentDir, settingsManager);
 		await resourceLoader.reload();
 
+		options.progress?.setActivity("creating session");
 		const result = await createAgentSession({
 			cwd: options.ctx.cwd,
 			agentDir,
@@ -298,12 +301,16 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 
 		unsubscribe = childSession.subscribe((event: AgentSessionEvent) => {
 			eventCounts[event.type] = (eventCounts[event.type] ?? 0) + 1;
+			if (event.type === "agent_start") options.progress?.setActivity("running");
 			if (event.type === "tool_execution_start") {
+				options.progress?.setActivity(`tool ${event.toolName}`);
+				options.progress?.incrementToolCount();
 				toolCalls.push({
 					toolName: event.toolName,
 					argsPreview: truncateUtf8(JSON.stringify(event.args ?? {}), 1000),
 				});
 			}
+			if (event.type === "agent_end") options.progress?.setActivity("finishing");
 		});
 
 		const abortChild = () => {
@@ -362,6 +369,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			error: error instanceof Error ? error.message : String(error),
 		};
 	} finally {
+		options.progress?.finish();
 		if (timeoutId) clearTimeout(timeoutId);
 		removeAbortListener?.();
 		unsubscribe?.();
