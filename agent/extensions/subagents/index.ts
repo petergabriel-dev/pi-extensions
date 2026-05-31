@@ -13,9 +13,10 @@ import {
 import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
-import { runSubagent, type ExplorerParsedResult } from "./spawn.ts";
+import { runSubagent, type ExplorerParsedResult, type WorkerParsedResult } from "./spawn.ts";
 
 const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
+const SPAWN_WORKER_TOOL_NAME = "spawn_worker";
 const TOOL_NAME = "subagents_inprocess_spike";
 const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
 const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
@@ -90,6 +91,33 @@ const SpawnExplorerParams = Type.Object({
 });
 
 type SpawnExplorerParams = Static<typeof SpawnExplorerParams>;
+
+const SpawnWorkerParams = Type.Object({
+	task: Type.String({ description: "Scoped implementation task for the worker subagent. Requires workflow Build mode." }),
+	agent: Type.Optional(
+		Type.String({
+			description: 'Worker agent definition name. Defaults to "worker".',
+			default: "worker",
+		}),
+	),
+	agentScope: Type.Optional(
+		StringEnum(["user", "project", "both"] as const, {
+			description: 'Which agent definitions to discover. Defaults to "user".',
+			default: "user",
+		}),
+	),
+	timeoutMs: Type.Optional(Type.Number({ description: "Child timeout in milliseconds.", minimum: 1000, maximum: 120000 })),
+});
+
+type SpawnWorkerParams = Static<typeof SpawnWorkerParams>;
+
+type WorkflowMode = "off" | "discuss" | "plan" | "build";
+
+interface WorkflowModeQueryResult {
+	ok: boolean;
+	mode?: WorkflowMode;
+	error?: string;
+}
 
 const READ_ONLY_EXPLORER_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
@@ -338,6 +366,51 @@ function validateExplorerTools(tools: string[] | undefined): string | undefined 
 	return undefined;
 }
 
+function isWorkflowMode(value: unknown): value is WorkflowMode {
+	return value === "off" || value === "discuss" || value === "plan" || value === "build";
+}
+
+function queryWorkflowMode(pi: ExtensionAPI, signal: AbortSignal | undefined, timeoutMs = 1000): Promise<WorkflowModeQueryResult> {
+	return new Promise((resolve) => {
+		let settled = false;
+		let unsubscribe: (() => void) | undefined;
+		let timeoutId: ReturnType<typeof setTimeout> | undefined;
+		let removeAbortListener: (() => void) | undefined;
+
+		const settle = (result: WorkflowModeQueryResult) => {
+			if (settled) return;
+			settled = true;
+			if (timeoutId) clearTimeout(timeoutId);
+			removeAbortListener?.();
+			unsubscribe?.();
+			resolve(result);
+		};
+
+		const abort = () => settle({ ok: false, error: "Workflow mode query aborted." });
+		if (signal?.aborted) return abort();
+		if (signal) {
+			signal.addEventListener("abort", abort, { once: true });
+			removeAbortListener = () => signal.removeEventListener("abort", abort);
+		}
+
+		unsubscribe = pi.events.on("workflow-modes:state", (data: unknown) => {
+			const mode = (data as { mode?: unknown } | undefined)?.mode;
+			if (!isWorkflowMode(mode)) return settle({ ok: false, error: "workflow-modes returned an invalid mode state." });
+			settle({ ok: true, mode });
+		});
+
+		timeoutId = setTimeout(() => {
+			settle({ ok: false, error: "Timed out waiting for workflow-modes:state; refusing to spawn worker." });
+		}, timeoutMs);
+
+		try {
+			pi.events.emit("workflow-modes:get", undefined);
+		} catch (error) {
+			settle({ ok: false, error: error instanceof Error ? error.message : String(error) });
+		}
+	});
+}
+
 export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: SPAWN_EXPLORER_TOOL_NAME,
@@ -394,6 +467,68 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					},
 				],
 				details: result,
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: SPAWN_WORKER_TOOL_NAME,
+		label: "Spawn Worker",
+		description:
+			"Run a coding worker subagent in an isolated child session. Refuses unless workflow-modes reports Build mode.",
+		parameters: SpawnWorkerParams,
+		async execute(_toolCallId, params: SpawnWorkerParams, signal, _onUpdate, ctx) {
+			const workflowMode = await queryWorkflowMode(pi, signal);
+			if (!workflowMode.ok || workflowMode.mode !== "build") {
+				const modeLabel = workflowMode.mode ?? "unknown";
+				const reason = workflowMode.error ?? `spawn_worker is blocked in ${modeLabel} mode. Switch to Build mode with /mode build.`;
+				return {
+					content: [{ type: "text", text: reason }],
+					details: { ok: false, error: reason, workflowMode: modeLabel },
+				};
+			}
+
+			const agentName = params.agent?.trim() || "worker";
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
+			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
+			if (!agent) {
+				return {
+					content: [{ type: "text", text: `Worker agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }],
+					details: { ok: false, error: "Worker agent not found", workflowMode: workflowMode.mode, discovery },
+				};
+			}
+
+			const result = await runSubagent({
+				agent,
+				role: "worker",
+				task: params.task,
+				ctx,
+				signal,
+				timeoutMs: params.timeoutMs,
+			});
+
+			if (!result.ok) {
+				return {
+					content: [{ type: "text", text: `Worker failed: ${result.error}` }],
+					details: { ...result, workflowMode: workflowMode.mode },
+				};
+			}
+
+			const parsed = result.parsed as WorkerParsedResult;
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`Worker summary: ${parsed.summary}`,
+							parsed.filesTouched.length > 0 ? `Files touched: ${parsed.filesTouched.join(", ")}` : "Files touched: none reported",
+							parsed.followUps.length > 0 ? `Follow-ups: ${parsed.followUps.join("; ")}` : "Follow-ups: none",
+							parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
+						].join("\n"),
+					},
+				],
+				details: { ...result, workflowMode: workflowMode.mode },
 			};
 		},
 	});
