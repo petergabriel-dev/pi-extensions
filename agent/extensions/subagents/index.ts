@@ -4,6 +4,7 @@ import { StringEnum, type Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
+	defineTool,
 	getAgentDir,
 	SessionManager,
 	SettingsManager,
@@ -22,6 +23,7 @@ const TOOL_NAME = "subagents_inprocess_spike";
 const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
 const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
 const DEBUG_CONCURRENCY_TOOL_NAME = "subagents_debug_concurrency";
+const DEBUG_GRAPH_TOOL_NAME = "subagents_debug_spawn_graph";
 const DEFAULT_READ_PATH = "agent/AGENTS.md";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
@@ -83,6 +85,12 @@ const DebugConcurrencyParams = Type.Object({
 });
 
 type DebugConcurrencyParams = Static<typeof DebugConcurrencyParams>;
+
+const DebugGraphParams = Type.Object({
+	scenario: StringEnum(["depth3"] as const, { description: "Spawn graph enforcement scenario to exercise." }),
+});
+
+type DebugGraphParams = Static<typeof DebugGraphParams>;
 
 const SpawnExplorerParams = Type.Object({
 	task: Type.String({ description: "Discovery task for the read-only explorer subagent." }),
@@ -425,6 +433,61 @@ function addConcurrencyDetails<T extends object>(details: T, slot: SlotInfo, ext
 	return { ...details, ...extra, concurrency: slot };
 }
 
+function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number) {
+	return defineTool({
+		name: SPAWN_EXPLORER_TOOL_NAME,
+		label: "Spawn Explorer",
+		description: "Nested read-only explorer available to worker subagents. Depth is limited to main -> worker -> explorer.",
+		parameters: SpawnExplorerParams,
+		async execute(_toolCallId, params: SpawnExplorerParams, signal) {
+			if (depth >= 2) {
+				const reason = "Nested spawn depth limit exceeded: spawn graph is main -> worker -> explorer (max depth 2).";
+				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason, depth } };
+			}
+
+			const agentName = params.agent?.trim() || "explorer";
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
+			const discovery = discoverAgents(parentCtx.cwd, agentScope);
+			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
+			if (!agent) {
+				return {
+					content: [{ type: "text", text: `Explorer agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }],
+					details: { ok: false, error: "Explorer agent not found", discovery, depth: depth + 1 },
+				};
+			}
+
+			const unsafeReason = validateExplorerTools(agent.tools);
+			if (unsafeReason) {
+				return {
+					content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }],
+					details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools, depth: depth + 1 },
+				};
+			}
+
+			return withSubagentSlot(
+				"explorer",
+				parentCtx.cwd,
+				signal ?? parentSignal,
+				async (slot) => {
+					const result = await runSubagent({
+						agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
+						role: "explorer",
+						task: params.task,
+						ctx: parentCtx,
+						signal: signal ?? parentSignal,
+						timeoutMs: params.timeoutMs,
+					});
+					return {
+						content: [{ type: "text", text: result.ok ? `Nested explorer summary: ${(result.parsed as ExplorerParsedResult).summary}` : `Nested explorer failed: ${result.error}` }],
+						details: addConcurrencyDetails(result, slot, { depth: depth + 1 }),
+					};
+				},
+				{ explorerLane: true },
+			);
+		},
+	});
+}
+
 function queryWorkflowMode(pi: ExtensionAPI, signal: AbortSignal | undefined, timeoutMs = 1000): Promise<WorkflowModeQueryResult> {
 	return new Promise((resolve) => {
 		let settled = false;
@@ -568,13 +631,15 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 
 			return withWorkerOwnership(ownership, (workerRunId) =>
 				withSubagentSlot("worker", ctx.cwd, signal, async (slot) => {
+					const workerTools = [...new Set([...(agent.tools ?? []), SPAWN_EXPLORER_TOOL_NAME])];
 					const result = await runSubagent({
-						agent,
+						agent: { ...agent, tools: workerTools },
 						role: "worker",
 						task: params.task,
 						ctx,
 						signal,
 						timeoutMs: params.timeoutMs,
+						customTools: [createNestedExplorerTool(ctx, signal, 1)],
 					});
 
 					if (!result.ok) {
@@ -601,6 +666,24 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					};
 				}),
 			);
+		},
+	});
+
+	pi.registerTool({
+		name: DEBUG_GRAPH_TOOL_NAME,
+		label: "Subagents Debug Spawn Graph",
+		description: "Debug helper for subagents development: exercise nested spawn graph rejection paths.",
+		parameters: DebugGraphParams,
+		async execute(_toolCallId, _params: DebugGraphParams, signal, _onUpdate, ctx) {
+			const nestedTool = createNestedExplorerTool(ctx, signal, 2);
+			const result = await nestedTool.execute(
+				"debug-depth3",
+				{ task: "This should be rejected before spawning.", agentScope: "user" },
+				signal,
+				undefined,
+				ctx,
+			);
+			return result;
 		},
 	});
 

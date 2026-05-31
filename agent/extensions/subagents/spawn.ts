@@ -9,6 +9,7 @@ import {
 	SettingsManager,
 	type AgentSessionEvent,
 	type ExtensionContext,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig, AgentRole } from "./agents.ts";
@@ -76,6 +77,7 @@ export interface RunSubagentOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	modelOverride?: Model<any>;
+	customTools?: ToolDefinition[];
 }
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
@@ -287,6 +289,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			model,
 			modelRegistry: options.ctx.modelRegistry,
 			tools: options.agent.tools,
+			customTools: options.customTools,
 			resourceLoader,
 			sessionManager: SessionManager.create(options.ctx.cwd),
 			settingsManager,
