@@ -13,6 +13,7 @@ import {
 import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
+import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
 import { runSubagent, type ExplorerParsedResult, type WorkerParsedResult } from "./spawn.ts";
 
 const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
@@ -20,6 +21,7 @@ const SPAWN_WORKER_TOOL_NAME = "spawn_worker";
 const TOOL_NAME = "subagents_inprocess_spike";
 const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
 const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
+const DEBUG_CONCURRENCY_TOOL_NAME = "subagents_debug_concurrency";
 const DEFAULT_READ_PATH = "agent/AGENTS.md";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
@@ -73,6 +75,15 @@ const DebugRunParams = Type.Object({
 
 type DebugRunParams = Static<typeof DebugRunParams>;
 
+const DebugConcurrencyParams = Type.Object({
+	count: Type.Optional(Type.Number({ description: "Number of simulated spawns.", minimum: 1, maximum: 20, default: 5 })),
+	delayMs: Type.Optional(Type.Number({ description: "Milliseconds each simulated spawn holds its slot.", minimum: 1, maximum: 5000, default: 100 })),
+	role: Type.Optional(StringEnum(["explorer", "worker"] as const, { description: "Role lane to exercise.", default: "worker" })),
+	explorerLane: Type.Optional(Type.Boolean({ description: "Use the reserved explorer lane for explorer role.", default: false })),
+});
+
+type DebugConcurrencyParams = Static<typeof DebugConcurrencyParams>;
+
 const SpawnExplorerParams = Type.Object({
 	task: Type.String({ description: "Discovery task for the read-only explorer subagent." }),
 	agent: Type.Optional(
@@ -107,6 +118,12 @@ const SpawnWorkerParams = Type.Object({
 		}),
 	),
 	timeoutMs: Type.Optional(Type.Number({ description: "Child timeout in milliseconds.", minimum: 1000, maximum: 120000 })),
+	fileOwnership: Type.Optional(
+		Type.Array(Type.String(), {
+			description: "Paths or globs this worker is expected to modify. Parallel overlapping ownership is refused.",
+			default: [],
+		}),
+	),
 });
 
 type SpawnWorkerParams = Static<typeof SpawnWorkerParams>;
@@ -370,6 +387,44 @@ function isWorkflowMode(value: unknown): value is WorkflowMode {
 	return value === "off" || value === "discuss" || value === "plan" || value === "build";
 }
 
+const runningWorkerOwnership = new Map<string, Set<string>>();
+let nextWorkerRunId = 0;
+
+function normalizeOwnership(paths: string[] | undefined): string[] {
+	return [...new Set((paths ?? []).map((item) => item.trim()).filter(Boolean))].sort();
+}
+
+function ownershipOverlaps(a: string, b: string): boolean {
+	const left = a.replace(/\/+$|\/\*\*?$|\/\*$/g, "");
+	const right = b.replace(/\/+$|\/\*\*?$|\/\*$/g, "");
+	return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+function findOwnershipConflict(ownership: string[]): { runId: string; path: string; existingPath: string } | undefined {
+	for (const path of ownership) {
+		for (const [runId, existing] of runningWorkerOwnership.entries()) {
+			for (const existingPath of existing) {
+				if (ownershipOverlaps(path, existingPath)) return { runId, path, existingPath };
+			}
+		}
+	}
+	return undefined;
+}
+
+async function withWorkerOwnership<T>(ownership: string[], fn: (runId: string) => Promise<T>): Promise<T> {
+	const runId = `worker-${++nextWorkerRunId}`;
+	if (ownership.length > 0) runningWorkerOwnership.set(runId, new Set(ownership));
+	try {
+		return await fn(runId);
+	} finally {
+		runningWorkerOwnership.delete(runId);
+	}
+}
+
+function addConcurrencyDetails<T extends object>(details: T, slot: SlotInfo, extra: Record<string, unknown> = {}): T & { concurrency: SlotInfo } {
+	return { ...details, ...extra, concurrency: slot };
+}
+
 function queryWorkflowMode(pi: ExtensionAPI, signal: AbortSignal | undefined, timeoutMs = 1000): Promise<WorkflowModeQueryResult> {
 	return new Promise((resolve) => {
 		let settled = false;
@@ -438,36 +493,38 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const result = await runSubagent({
-				agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
-				role: "explorer",
-				task: params.task,
-				ctx,
-				signal,
-				timeoutMs: params.timeoutMs,
-			});
+			return withSubagentSlot("explorer", ctx.cwd, signal, async (slot) => {
+				const result = await runSubagent({
+					agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
+					role: "explorer",
+					task: params.task,
+					ctx,
+					signal,
+					timeoutMs: params.timeoutMs,
+				});
 
-			if (!result.ok) {
+				if (!result.ok) {
+					return {
+						content: [{ type: "text", text: `Explorer failed: ${result.error}` }],
+						details: addConcurrencyDetails(result, slot),
+					};
+				}
+
+				const parsed = result.parsed as ExplorerParsedResult;
 				return {
-					content: [{ type: "text", text: `Explorer failed: ${result.error}` }],
-					details: result,
+					content: [
+						{
+							type: "text",
+							text: [
+								`Explorer summary: ${parsed.summary}`,
+								parsed.filesInspected.length > 0 ? `Files inspected: ${parsed.filesInspected.join(", ")}` : "Files inspected: none reported",
+								parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
+							].join("\n"),
+						},
+					],
+					details: addConcurrencyDetails(result, slot),
 				};
-			}
-
-			const parsed = result.parsed as ExplorerParsedResult;
-			return {
-				content: [
-					{
-						type: "text",
-						text: [
-							`Explorer summary: ${parsed.summary}`,
-							parsed.filesInspected.length > 0 ? `Files inspected: ${parsed.filesInspected.join(", ")}` : "Files inspected: none reported",
-							parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
-						].join("\n"),
-					},
-				],
-				details: result,
-			};
+			});
 		},
 	});
 
@@ -499,36 +556,94 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const result = await runSubagent({
-				agent,
-				role: "worker",
-				task: params.task,
-				ctx,
-				signal,
-				timeoutMs: params.timeoutMs,
-			});
-
-			if (!result.ok) {
+			const ownership = normalizeOwnership(params.fileOwnership);
+			const conflict = findOwnershipConflict(ownership);
+			if (conflict) {
+				const reason = `spawn_worker ownership overlaps running ${conflict.runId}: requested ${conflict.path}, existing ${conflict.existingPath}.`;
 				return {
-					content: [{ type: "text", text: `Worker failed: ${result.error}` }],
-					details: { ...result, workflowMode: workflowMode.mode },
+					content: [{ type: "text", text: reason }],
+					details: { ok: false, error: reason, workflowMode: workflowMode.mode, fileOwnership: ownership, conflict },
 				};
 			}
 
-			const parsed = result.parsed as WorkerParsedResult;
+			return withWorkerOwnership(ownership, (workerRunId) =>
+				withSubagentSlot("worker", ctx.cwd, signal, async (slot) => {
+					const result = await runSubagent({
+						agent,
+						role: "worker",
+						task: params.task,
+						ctx,
+						signal,
+						timeoutMs: params.timeoutMs,
+					});
+
+					if (!result.ok) {
+						return {
+							content: [{ type: "text", text: `Worker failed: ${result.error}` }],
+							details: addConcurrencyDetails(result, slot, { workflowMode: workflowMode.mode, fileOwnership: ownership, workerRunId }),
+						};
+					}
+
+					const parsed = result.parsed as WorkerParsedResult;
+					return {
+						content: [
+							{
+								type: "text",
+								text: [
+									`Worker summary: ${parsed.summary}`,
+									parsed.filesTouched.length > 0 ? `Files touched: ${parsed.filesTouched.join(", ")}` : "Files touched: none reported",
+									parsed.followUps.length > 0 ? `Follow-ups: ${parsed.followUps.join("; ")}` : "Follow-ups: none",
+									parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
+								].join("\n"),
+							},
+						],
+						details: addConcurrencyDetails(result, slot, { workflowMode: workflowMode.mode, fileOwnership: ownership, workerRunId }),
+					};
+				}),
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: DEBUG_CONCURRENCY_TOOL_NAME,
+		label: "Subagents Debug Concurrency",
+		description:
+			"Debug helper for subagents development: exercise the concurrency limiter with simulated subagent runs and report queueing behavior.",
+		parameters: DebugConcurrencyParams,
+		async execute(_toolCallId, params: DebugConcurrencyParams, signal, _onUpdate, ctx) {
+			const count = Math.max(1, Math.min(20, Math.floor(params.count ?? 5)));
+			const delayMs = Math.max(1, Math.min(5000, Math.floor(params.delayMs ?? 100)));
+			const role = (params.role ?? "worker") as AgentRole;
+			const started: Array<{ index: number; slot: SlotInfo; startedAt: number }> = [];
+			const completed: Array<{ index: number; completedAt: number }> = [];
+			const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+			const before = getConcurrencySnapshot(ctx.cwd);
+			await Promise.all(
+				Array.from({ length: count }, (_unused, index) =>
+					withSubagentSlot(
+						role,
+						ctx.cwd,
+						signal,
+						async (slot) => {
+							started.push({ index, slot, startedAt: Date.now() });
+							await sleep(delayMs);
+							completed.push({ index, completedAt: Date.now() });
+						},
+						{ explorerLane: Boolean(params.explorerLane) },
+					),
+				),
+			);
+			const after = getConcurrencySnapshot(ctx.cwd);
+			const maxActive = Math.max(0, ...started.map((item) => item.slot.activeAtAcquire));
+			const queued = started.filter((item) => item.slot.queuedMs > 0).length;
 			return {
 				content: [
 					{
 						type: "text",
-						text: [
-							`Worker summary: ${parsed.summary}`,
-							parsed.filesTouched.length > 0 ? `Files touched: ${parsed.filesTouched.join(", ")}` : "Files touched: none reported",
-							parsed.followUps.length > 0 ? `Follow-ups: ${parsed.followUps.join("; ")}` : "Follow-ups: none",
-							parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
-						].join("\n"),
+						text: `Simulated ${count} ${role} spawn(s); max active ${maxActive}; queued ${queued}; cap ${started[0]?.slot.capacity ?? "unknown"}.`,
 					},
 				],
-				details: { ...result, workflowMode: workflowMode.mode },
+				details: { ok: true, before, after, count, delayMs, role, maxActive, queued, started, completed },
 			};
 		},
 	});
