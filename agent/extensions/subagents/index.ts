@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 import { StringEnum, type Model } from "@earendil-works/pi-ai";
 import {
@@ -150,6 +151,12 @@ interface WorkflowModeQueryResult {
 	ok: boolean;
 	mode?: WorkflowMode;
 	error?: string;
+}
+
+interface SubagentsSettings {
+	concurrencyCap?: number;
+	explorerLaneCap?: number;
+	models?: Partial<Record<AgentRole, string>>;
 }
 
 const READ_ONLY_EXPLORER_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -399,6 +406,50 @@ function validateExplorerTools(tools: string[] | undefined): string | undefined 
 	return undefined;
 }
 
+function settingsPath(): string {
+	return path.join(getAgentDir(), "settings.json");
+}
+
+function readSettings(): Record<string, unknown> {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+	} catch {
+		return {};
+	}
+}
+
+function readSubagentsSettings(): SubagentsSettings {
+	const value = readSettings().subagents;
+	return value && typeof value === "object" && !Array.isArray(value) ? value as SubagentsSettings : {};
+}
+
+function writeSubagentModel(role: AgentRole, modelRef: string): void {
+	const settings = readSettings();
+	const subagents = readSubagentsSettings();
+	settings.subagents = {
+		...subagents,
+		models: { ...(subagents.models ?? {}), [role]: modelRef },
+	};
+	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+}
+
+function modelReference(model: Model<any>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function resolveModelReference(reference: string | undefined, ctx: ExtensionContext): Model<any> | undefined {
+	if (!reference) return undefined;
+	const slashIndex = reference.indexOf("/");
+	if (slashIndex > 0) return ctx.modelRegistry.find(reference.slice(0, slashIndex), reference.slice(slashIndex + 1));
+	const available = ctx.modelRegistry.getAll();
+	return available.find((model) => model.id === reference) ?? available.find((model) => model.id.includes(reference));
+}
+
+function configuredModel(role: AgentRole, ctx: ExtensionContext): Model<any> | undefined {
+	return resolveModelReference(readSubagentsSettings().models?.[role], ctx);
+}
+
 function isWorkflowMode(value: unknown): value is WorkflowMode {
 	return value === "off" || value === "discuss" || value === "plan" || value === "build";
 }
@@ -485,6 +536,7 @@ function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: Abo
 						ctx: parentCtx,
 						signal: signal ?? parentSignal,
 						timeoutMs: params.timeoutMs,
+						modelOverride: configuredModel("explorer", parentCtx),
 						progress,
 					});
 					return {
@@ -539,7 +591,38 @@ function queryWorkflowMode(pi: ExtensionAPI, signal: AbortSignal | undefined, ti
 	});
 }
 
+async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise<void> {
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+	const role = (parts[0] === "explorer" || parts[0] === "worker"
+		? parts[0]
+		: await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
+	if (!role) return;
+
+	const available = await Promise.resolve(ctx.modelRegistry.getAvailable());
+	if (available.length === 0) return ctx.ui.notify("No available models found.", "warning");
+	const requestedModel = parts[0] === role ? parts[1] : parts[0];
+	const selected = requestedModel
+		? resolveModelReference(requestedModel, ctx)
+		: resolveModelReference(
+				await ctx.ui.select(
+					`Model for ${role}`,
+					available.map((model) => modelReference(model)),
+				),
+				ctx,
+			);
+	if (!selected) return ctx.ui.notify(`Unknown model${requestedModel ? `: ${requestedModel}` : ""}.`, "warning");
+
+	const reference = modelReference(selected);
+	writeSubagentModel(role, reference);
+	ctx.ui.notify(`Subagent ${role} model: ${reference}`, "info");
+}
+
 export default function subagentsSpikeExtension(pi: ExtensionAPI) {
+	pi.registerCommand("subagent-model", {
+		description: "Choose per-role subagent model defaults for explorer and worker.",
+		handler: chooseSubagentModel,
+	});
+
 	pi.registerTool({
 		name: SPAWN_EXPLORER_TOOL_NAME,
 		label: "Spawn Explorer",
@@ -575,6 +658,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					ctx,
 					signal,
 					timeoutMs: params.timeoutMs,
+					modelOverride: configuredModel("explorer", ctx),
 					progress,
 				});
 
@@ -652,6 +736,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 						ctx,
 						signal,
 						timeoutMs: params.timeoutMs,
+						modelOverride: configuredModel("worker", ctx),
 						customTools: [createNestedExplorerTool(ctx, signal, 1)],
 						progress,
 					});
