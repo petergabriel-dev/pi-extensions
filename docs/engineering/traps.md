@@ -12,6 +12,16 @@
 - **Claude MCP config source matters.** Editing `~/.claude/mcp.json` did not make `claude mcp list` show the server. `claude mcp add -s user ...` wrote the active config to `~/.claude.json`.
 - **Hook failures should deny closed.** The read-only hook intentionally denies Bash when policy is missing, stale, expired, or invalid.
 
+## Pi subagents
+
+- **In-process child sessions are viable but must be isolated.** The spike verified a child `AgentSession` can be created from a tool's `execute()`, read a file, persist a session, and leave parent branch/UI state unchanged. Keep child sessions on a fresh `SessionManager.create(ctx.cwd)` and dispose them in `finally`.
+- **Worker build-gate belongs in the parent tool.** Child sessions disable extensions, so they do not inherit workflow-modes mutation blocking. `spawn_worker` must fail closed before spawning unless workflow mode is build.
+- **Do not rely on child transcripts for parent context.** Parse and return the final assistant text into structured explorer/worker fields; inspect persisted child sessions only out-of-band.
+- **Progress redraws can outlive JSON-mode teardown.** Scheduled widget redraws may hit stale extension contexts after session teardown. Widget rendering must tolerate stale `ctx` and clear scheduled redraws when a progress handle finishes.
+- **Widget keys must not clobber other extensions.** Use the dedicated `subagents-progress` widget key; do not reuse discussion-notes or TPS footer widget/status keys.
+- **Faux-provider verification order matters.** For nested worker→explorer smokes, faux responses must match the parent worker call, nested explorer call, explorer final answer, then worker final answer.
+- **Agent scope in smokes must match file placement.** A project-scoped test agent must live under `<cwd>/.pi/agents`; placing it in a temp user agent dir while passing `agentScope: "project"` makes discovery return no agents.
+
 ## Persistent-Memory Reconciliation
 
 - **Immediate ref matching blocks re-staging.** `normalizeCandidateRefs` originally registered refs to the seen set eagerly. If validation downstream failed on a different check, the action was discarded but its refs remained registered as seen, causing subsequent reconciliation rounds to treat them as duplicates instead of re-staging them. Refs must only be matched and stored on successfully validated actions.

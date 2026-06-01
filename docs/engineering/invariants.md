@@ -15,6 +15,17 @@
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
 
+## Pi subagents
+
+- `spawn_worker` must query live workflow mode through the event bus before spawning and must refuse unless mode is `build`. This gate lives in the parent tool because worker children have coding tools.
+- Child sessions must not inherit the parent workflow-modes `tool_call` hook. `runSubagent()` uses a `DefaultResourceLoader` with `noExtensions: true`, and the parent performs the worker build-mode check before child creation.
+- Explorer tools are read-only by construction. `spawn_explorer` refuses agent definitions whose tools include anything outside `read`, `grep`, `find`, and `ls`.
+- Only a child subagent's final structured return may enter parent context. The child transcript remains in the persisted child session and is not appended to the parent branch.
+- Spawn graph is bounded to `main -> worker -> explorer`, max depth 2. Workers receive nested `spawn_explorer`; workers do not receive `spawn_worker`; explorers receive no spawn tools.
+- Global subagent concurrency defaults to 3 via the default lane. Nested worker-spawned explorers use the reserved explorer lane so workers cannot deadlock waiting on default worker slots.
+- Parallel worker file ownership must not overlap. `spawn_worker` refuses an overlapping `fileOwnership` request while another worker owns the same path/subtree.
+- Progress widget updates must be keyed by `subagents-progress`, throttled to 250 ms, and cleared when all runs finish.
+
 ## Persistent-Memory Reconciliation
 
 - Reconciliation uses partial-batch acceptance; valid actions are applied immediately to markdown files/index db, and leftover/offending candidates are re-staged back to staging files under the project memory directory, grouped by `session_id` using `schemaVersion: 1`.
