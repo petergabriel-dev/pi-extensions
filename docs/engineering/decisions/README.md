@@ -1,0 +1,8 @@
+# Decisions
+
+| ADR | Status | Summary | Read when |
+|---|---|---|---|
+| [ADR-0001](ADR-0001-pi-claude-bridge-boundary.md) | Active | Pi is source of truth; Claude Code is a thin read-only bridge client requiring live Pi and fail-loud behavior. | changing bridge protocol, Claude commands, memory/docs capture, read-only hooks, or workflow plan handoff |
+| [ADR-0002](ADR-0002-reliable-persistent-memory-reconciliation.md) | Active | Memory reconciliation transitions to partial application, re-staging leftovers (with bounded retry cap and dead-letter store), single repair retry, and custom pinned model configuration. | touching persistent-memory consolidation, model resolution, or staging files |
+| [ADR-0003](ADR-0003-non-blocking-reason-aware-persistent-memory-consolidation.md) | Active | Memory consolidation timing relies on transition reasons: reload transitions bypass model work, starts run in background, and quit shutdown blocks. Background swaps are generation-guarded. | modifying session lifecycle startup/shutdown events, or debugging SQLite closed/lock errors |
+| [ADR-0004](ADR-0004-pi-subagents.md) | Active | Pi subagents use persisted in-process child sessions, structured-return-only parent context, a parent-enforced worker Build gate, bounded main→worker→explorer graph, and concurrency lanes with ownership guards. | modifying subagent spawning, worker/explorer tools, workflow gates, concurrency, nested delegation, or child session persistence |
