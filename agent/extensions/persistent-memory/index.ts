@@ -30,6 +30,7 @@ const MAX_ERROR_DETAIL_CHARS = 500;
 
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
 const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
+const DEFAULT_CAREFUL_MODEL = "opencode-go/qwen3.6-plus";
 
 export function resolveCarefulModel(
 	envName: string,
@@ -37,13 +38,7 @@ export function resolveCarefulModel(
 	logger: { warn: (...args: unknown[]) => void }
 ): any {
 	const envValue = process.env[envName];
-	if (!envValue) {
-		return ctx.model;
-	}
-	const trimmed = envValue.trim();
-	if (!trimmed) {
-		return ctx.model;
-	}
+	const trimmed = envValue?.trim() || DEFAULT_CAREFUL_MODEL;
 
 	if (!ctx.modelRegistry) {
 		logger.warn(`[persistent-memory] Cannot resolve model "${trimmed}" because modelRegistry is not available on context. Falling back to default model.`);
