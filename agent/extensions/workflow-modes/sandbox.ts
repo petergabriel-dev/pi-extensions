@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -27,7 +27,8 @@ function shellQuote(value: string): string {
 }
 
 function normalizePath(path: string): string {
-	return resolve(path);
+	const resolved = resolve(path);
+	return existsSync(resolved) ? realpathSync(resolved) : resolved;
 }
 
 export function detectLauncher(options: DetectLauncherOptions = {}): SandboxLauncher {
@@ -50,7 +51,9 @@ export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; s
 		"(allow default)",
 		"(deny network*)",
 		"(deny file-write*)",
+		`(allow file-write* (literal ${JSON.stringify(scratch)}))`,
 		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
+		"(allow file-write* (literal \"/dev/null\"))",
 		`;; repo read-only: ${cwd}`,
 		`;; home read-only: ${home}`,
 	].join("\n");
