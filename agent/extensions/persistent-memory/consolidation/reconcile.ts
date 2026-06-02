@@ -112,6 +112,7 @@ export interface ReconciliationDeps {
 	wallClockBudgetMs?: number;
 	shouldContinue?: () => boolean;
 	nowMs?: () => number;
+	onChunkStart?: (chunkIndex: number, totalChunks: number) => void;
 }
 
 export interface CategoryTotals {
@@ -319,8 +320,10 @@ export async function runReconciliation(
 			const budgetMs = normalizePositiveInteger(deps.wallClockBudgetMs, Number.POSITIVE_INFINITY);
 			const startedAtMs = deps.nowMs?.() ?? Date.now();
 			let isFirstApply = true;
+			const chunks = chunkCandidates(preFilter.remaining, chunkSize);
 
-			for (const candidatesSubset of chunkCandidates(preFilter.remaining, chunkSize)) {
+			for (const [chunkIndex, candidatesSubset] of chunks.entries()) {
+				deps.onChunkStart?.(chunkIndex + 1, chunks.length);
 				if (deps.callCarefulModel) llmCalled = true;
 				const reconcileResult = await reconcileCandidateSet(projectMemory, candidatesSubset, projectScope, deps, logger);
 				for (const ref of reconcileResult.attemptedRefs) attemptedRefs.add(ref);

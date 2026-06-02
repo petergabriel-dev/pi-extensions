@@ -20,13 +20,17 @@ import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type Sqlit
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
 import { resolveCarefulModel } from "./model-resolution.js";
 
-const DEFAULT_EXTRACTION_TIMEOUT_MS = 120_000;
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
 const EXTRACTION_TIMEOUT_ENV = "PERSISTENT_MEMORY_EXTRACTION_TIMEOUT_MS";
 const DEFAULT_EXTRACTION_THINKING_LEVEL: ThinkingLevel = "off";
 const EXTRACTION_THINKING_LEVEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_THINKING_LEVEL";
 const ALLOWED_EXTRACTION_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
-const DEFAULT_RECONCILIATION_TIMEOUT_MS = 120_000;
+const DEFAULT_RECONCILIATION_TIMEOUT_MS = 180_000;
 const RECONCILIATION_TIMEOUT_ENV = "PERSISTENT_MEMORY_RECONCILIATION_TIMEOUT_MS";
+const DEFAULT_RECONCILIATION_CHUNK_SIZE = 20;
+const RECONCILIATION_CHUNK_SIZE_ENV = "PERSISTENT_MEMORY_RECONCILIATION_CHUNK_SIZE";
+const DEFAULT_RECONCILIATION_BUDGET_MS = 240_000;
+const RECONCILIATION_BUDGET_ENV = "PERSISTENT_MEMORY_RECONCILIATION_BUDGET_MS";
 const MAX_ERROR_DETAIL_CHARS = 500;
 
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
@@ -35,6 +39,11 @@ const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
 interface ExtractionConfig {
 	timeoutMs: number;
 	thinkingLevel: ThinkingLevel;
+}
+
+interface ReconciliationConfig {
+	chunkSize: number;
+	budgetMs: number;
 }
 
 interface RebuiltIndex {
@@ -335,9 +344,20 @@ function triggerBackgroundReconciliation(
 			const dbPath = indexPathForMemoryPaths(paths);
 			bgDb = openIndex(dbPath);
 
+			const reconciliation = reconciliationConfig();
 			const result = await runReconciliation(paths, bgDb, {
 				rebuildOnNoop: true,
 				logger: console,
+				chunkSize: reconciliation.chunkSize,
+				wallClockBudgetMs: reconciliation.budgetMs,
+				shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
+				onChunkStart: (chunkIndex, totalChunks) => {
+					try {
+						(ui as any).setStatus?.("persistent-memory", `Memory consolidating... (chunk ${chunkIndex}/${totalChunks})`);
+					} catch {
+						// ignore status errors
+					}
+				},
 				callCarefulModel: (systemPrompt, userPrompt) => {
 					const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, capturedCtx, console);
 					return callCarefulModelImpl(systemPrompt, userPrompt, {
@@ -441,6 +461,13 @@ function reconciliationTimeoutMs(): number {
 	if (!raw) return DEFAULT_RECONCILIATION_TIMEOUT_MS;
 	const parsed = Number(raw);
 	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_RECONCILIATION_TIMEOUT_MS;
+}
+
+function reconciliationConfig(): ReconciliationConfig {
+	return {
+		chunkSize: parsePositiveIntegerEnv(process.env[RECONCILIATION_CHUNK_SIZE_ENV], DEFAULT_RECONCILIATION_CHUNK_SIZE),
+		budgetMs: parsePositiveIntegerEnv(process.env[RECONCILIATION_BUDGET_ENV], DEFAULT_RECONCILIATION_BUDGET_MS),
+	};
 }
 
 function currentProjectScope(): string | null {
@@ -684,9 +711,20 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 	}
 
 	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
+	const reconciliation = reconciliationConfig();
 	const result = await runReconciliation(memoryPaths, db, {
 		rebuildOnNoop: true,
 		logger: console,
+		chunkSize: reconciliation.chunkSize,
+		wallClockBudgetMs: reconciliation.budgetMs,
+		shouldContinue: () => true,
+		onChunkStart: (chunkIndex, totalChunks) => {
+			try {
+				(ctx.ui as any).setStatus?.("persistent-memory", `Memory consolidating... (chunk ${chunkIndex}/${totalChunks})`);
+			} catch {
+				// ignore status errors
+			}
+		},
 		callCarefulModel: (systemPrompt, userPrompt) => {
 			const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, modelContext, console);
 			return callCarefulModelImpl(systemPrompt, userPrompt, {
@@ -698,6 +736,11 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 			});
 		},
 	});
+	try {
+		(ctx.ui as any).setStatus?.("persistent-memory", undefined);
+	} catch {
+		// ignore status errors
+	}
 
 	if (result.status === "failed") {
 		ctx.ui.notify(`Memory reconciliation failed (${result.reason}): ${formatError(result.error)}; staging preserved.`, "error");
