@@ -1,8 +1,19 @@
-export type SandboxLauncher = "none";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+
+export type SandboxLauncher = "sandbox-exec" | "bwrap" | "none";
+
+export interface DetectLauncherOptions {
+	platform?: NodeJS.Platform;
+	exists?: (path: string) => boolean;
+	force?: SandboxLauncher;
+}
 
 export interface SandboxWrapOptions {
 	cwd: string;
 	scratchDir?: string;
+	launcher?: SandboxLauncher;
 }
 
 export interface SandboxWrapResult {
@@ -11,22 +22,87 @@ export interface SandboxWrapResult {
 	wrapped: boolean;
 }
 
-/**
- * Placeholder launcher detection for the workflow-modes sandbox module.
- * Task 2 replaces this with real platform/launcher detection.
- */
-export function detectLauncher(): SandboxLauncher {
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function normalizePath(path: string): string {
+	return resolve(path);
+}
+
+export function detectLauncher(options: DetectLauncherOptions = {}): SandboxLauncher {
+	if (options.force) return options.force;
+	const platform = options.platform ?? process.platform;
+	const exists = options.exists ?? existsSync;
+
+	if (platform === "darwin" && exists("/usr/bin/sandbox-exec")) return "sandbox-exec";
+	if (platform === "linux" && (exists("/usr/bin/bwrap") || exists("/bin/bwrap"))) return "bwrap";
 	return "none";
 }
 
-/**
- * Placeholder command wrapper for the workflow-modes sandbox module.
- * With no launcher available, the command is returned unchanged.
- */
-export function wrapCommand(command: string, _options: SandboxWrapOptions): SandboxWrapResult {
+export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; scratchDir: string }): string {
+	const cwd = normalizePath(options.cwd);
+	const home = normalizePath(options.homeDir ?? process.env.HOME ?? cwd);
+	const scratch = normalizePath(options.scratchDir);
+
+	return [
+		"(version 1)",
+		"(allow default)",
+		"(deny network*)",
+		"(deny file-write*)",
+		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
+		`;; repo read-only: ${cwd}`,
+		`;; home read-only: ${home}`,
+	].join("\n");
+}
+
+export function buildBubblewrapCommand(command: string, options: { cwd: string; scratchDir: string }): string {
+	const cwd = normalizePath(options.cwd);
+	const scratch = normalizePath(options.scratchDir);
+	const inner = `cd ${shellQuote(cwd)} && ${command}`;
+	return [
+		"bwrap",
+		"--unshare-net",
+		"--ro-bind / /",
+		`--tmpfs ${shellQuote(scratch)}`,
+		`--setenv TMPDIR ${shellQuote(scratch)}`,
+		"--setenv PYTHONDONTWRITEBYTECODE 1",
+		`/bin/bash -lc ${shellQuote(inner)}`,
+	].join(" ");
+}
+
+export function wrapCommand(command: string, options: SandboxWrapOptions): SandboxWrapResult {
+	const launcher = options.launcher ?? detectLauncher();
+	if (launcher === "none") {
+		return { launcher, command, wrapped: false };
+	}
+
+	const cwd = normalizePath(options.cwd);
+	const scratchDir = normalizePath(options.scratchDir ?? `${tmpdir()}/pi-readonly-bash`);
+	const inner = `cd ${shellQuote(cwd)} && ${command}`;
+
+	if (launcher === "sandbox-exec") {
+		const profile = buildSeatbeltProfile({ cwd, scratchDir });
+		return {
+			launcher,
+			command: [
+				"/usr/bin/sandbox-exec",
+				"-p",
+				shellQuote(profile),
+				"/usr/bin/env",
+				`TMPDIR=${shellQuote(scratchDir)}`,
+				"PYTHONDONTWRITEBYTECODE=1",
+				"/bin/bash",
+				"-lc",
+				shellQuote(inner),
+			].join(" "),
+			wrapped: true,
+		};
+	}
+
 	return {
-		launcher: "none",
-		command,
-		wrapped: false,
+		launcher,
+		command: buildBubblewrapCommand(command, { cwd, scratchDir }),
+		wrapped: true,
 	};
 }
