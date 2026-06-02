@@ -52,9 +52,10 @@ function freshTarget(projectRoot) {
 	assert(exists(p.session), `Missing bridge session: ${p.session}`);
 	assert(exists(p.policy), `Missing bridge policy: ${p.policy}`);
 	const session = readJson(p.session);
-	const heartbeat = Date.parse(session.heartbeatAt || "");
-	assert(session.status === "active" && Number.isFinite(heartbeat) && Date.now() - heartbeat <= 5_000, "Bridge session stale/not active");
-	return { p, session };
+	const lock = session.lock || session;
+	const heartbeat = Date.parse(lock.heartbeatAt || "");
+	assert(lock.status === "active" && Number.isFinite(heartbeat) && Date.now() - heartbeat <= 5_000, "Bridge session stale/not active");
+	return { p, session: lock };
 }
 
 function makeTempPiProject() {
