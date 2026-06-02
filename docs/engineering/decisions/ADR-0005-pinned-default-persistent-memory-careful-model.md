@@ -9,7 +9,7 @@ date: 2026-06-02
 
 ## Decision
 
-- Pin the default persistent-memory careful model to `opencode-go/qwen3.6-plus` when `PERSISTENT_MEMORY_RECONCILIATION_MODEL` or `PERSISTENT_MEMORY_EXTRACTION_MODEL` is unset or blank.
+- Pin the default persistent-memory careful model to `opencode-go/glm-5.1` when `PERSISTENT_MEMORY_RECONCILIATION_MODEL` or `PERSISTENT_MEMORY_EXTRACTION_MODEL` is unset or blank.
 - Preserve explicit environment overrides: when either model env var is set to a resolvable, authenticated model, that model wins over the pinned default.
 - Preserve graceful fallback: if the pinned default is missing from the model registry, lacks configured auth, or resolution throws, persistent memory falls back to `ctx.model` and logs the existing warning rather than failing memory work.
 
@@ -38,7 +38,7 @@ Code:
 - Good: Default extraction and reconciliation no longer silently ride the active session model.
 - Good: Users can still override the careful model via `PERSISTENT_MEMORY_RECONCILIATION_MODEL` and `PERSISTENT_MEMORY_EXTRACTION_MODEL`.
 - Good: Missing registry entries or missing auth degrade to the previous `ctx.model` behavior instead of hard-failing memory.
-- Bad/risk: The extension now has a user/provider-specific default model id; this must be revisited if `opencode-go/qwen3.6-plus` is removed, renamed, or becomes unsuitable.
+- Bad/risk: The extension now has a user/provider-specific default model id; this must be revisited if `opencode-go/glm-5.1` is removed, renamed, or becomes unsuitable.
 
 ## Read when
 
