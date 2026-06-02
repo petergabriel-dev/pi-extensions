@@ -310,7 +310,10 @@ export async function runReconciliation(
 
 		let plan = emptyPlan();
 		let appliedRefs = new Set<string>();
+		let attemptedRefs = new Set<string>();
+		let bypassedRefsApplied = false;
 		let bestError: ReconciliationValidationError | undefined = undefined;
+		let terminalFailure: { reason: "model_error" | "parse_error" | "invalid_model_response"; error?: unknown } | undefined = undefined;
 		if (preFilter.llmNeeded) {
 			const chunkSize = normalizePositiveInteger(deps.chunkSize, totalCandidates(preFilter.remaining));
 			const budgetMs = normalizePositiveInteger(deps.wallClockBudgetMs, Number.POSITIVE_INFINITY);
@@ -318,10 +321,13 @@ export async function runReconciliation(
 			let isFirstApply = true;
 
 			for (const candidatesSubset of chunkCandidates(preFilter.remaining, chunkSize)) {
+				if (deps.callCarefulModel) llmCalled = true;
 				const reconcileResult = await reconcileCandidateSet(projectMemory, candidatesSubset, projectScope, deps, logger);
-				llmCalled = llmCalled || reconcileResult.attemptedRefs.size > 0;
+				for (const ref of reconcileResult.attemptedRefs) attemptedRefs.add(ref);
+				bestError = reconcileResult.bestError ?? bestError;
 				if (reconcileResult.status === "failed") {
-					return { status: "failed", reason: reconcileResult.reason, counts, llmCalled, indexRebuilt, error: reconcileResult.error };
+					terminalFailure = { reason: reconcileResult.reason, error: reconcileResult.error };
+					break;
 				}
 
 				const chunkPreFilter = preFilterForChunk(preFilter, candidatesSubset, isFirstApply);
@@ -333,10 +339,10 @@ export async function runReconciliation(
 					return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 				}
 
+				if (isFirstApply) bypassedRefsApplied = true;
 				projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
 				plan = mergePlans(plan, reconcileResult.plan);
 				for (const ref of reconcileResult.appliedRefs) appliedRefs.add(ref);
-				bestError = reconcileResult.bestError ?? bestError;
 				isFirstApply = false;
 
 				const elapsedMs = (deps.nowMs?.() ?? Date.now()) - startedAtMs;
@@ -348,6 +354,7 @@ export async function runReconciliation(
 			const nextMemory = materializeReconciliation(projectMemory, preFilter, plan, projectScope, nowIso);
 			try {
 				counts.writes = writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory);
+				bypassedRefsApplied = true;
 			} catch (error) {
 				return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 			}
@@ -355,17 +362,16 @@ export async function runReconciliation(
 
 		counts.actions = actionTotals(plan);
 
-		try {
-			indexRebuilt = rebuildIndexOrThrow(deps, db, memoryPaths);
-		} catch (error) {
-			return { status: "failed", reason: "index_error", counts, llmCalled, indexRebuilt, error };
-		}
-
+		const bypassedRefs = bypassedRefsApplied
+			? [
+				...preFilter.lessons.bypassed.map((b) => b.candidate.ref),
+				...preFilter.preferences.bypassed.map((b) => b.candidate.ref),
+				...preFilter.decisions.bypassed.map((b) => b.candidate.ref),
+				...preFilter.domain.bypassed.map((b) => b.candidate.ref),
+			]
+			: [];
 		const resolvedRefs = new Set<string>([
-			...preFilter.lessons.bypassed.map((b) => b.candidate.ref),
-			...preFilter.preferences.bypassed.map((b) => b.candidate.ref),
-			...preFilter.decisions.bypassed.map((b) => b.candidate.ref),
-			...preFilter.domain.bypassed.map((b) => b.candidate.ref),
+			...bypassedRefs,
 			...appliedRefs,
 		]);
 
@@ -375,21 +381,15 @@ export async function runReconciliation(
 
 			for (const file of loaded.valid) {
 				const stagingData = file.data;
-				const leftoverLessons = stagingData.candidates.lessons.filter((_, i) => 
-					!resolvedRefs.has(`${stagingData.session_id}:lessons:${i + 1}`)
-				);
-				const leftoverPreferences = stagingData.candidates.preferences.filter((_, i) => 
-					!resolvedRefs.has(`${stagingData.session_id}:preferences:${i + 1}`)
-				);
-				const leftoverDecisions = stagingData.candidates.decisions.filter((_, i) => 
-					!resolvedRefs.has(`${stagingData.session_id}:decisions:${i + 1}`)
-				);
-				const leftoverDomain = stagingData.candidates.domain.filter((_, i) => 
-					!resolvedRefs.has(`${stagingData.session_id}:domain:${i + 1}`)
-				);
 
 				const finalLeftoverLessons: LessonCandidate[] = [];
-				for (const lesson of leftoverLessons) {
+				for (const [i, lesson] of stagingData.candidates.lessons.entries()) {
+					const ref = `${stagingData.session_id}:lessons:${i + 1}`;
+					if (resolvedRefs.has(ref)) continue;
+					if (!attemptedRefs.has(ref)) {
+						finalLeftoverLessons.push(lesson);
+						continue;
+					}
 					const attempts = (lesson.reconcile_attempts ?? 0) + 1;
 					if (attempts > maxAttempts) {
 						writeDeadLetter(memoryPaths.projectMemoryDir!, {
@@ -411,7 +411,13 @@ export async function runReconciliation(
 				}
 
 				const finalLeftoverPreferences: StagingFile["candidates"]["preferences"] = [];
-				for (const pref of leftoverPreferences) {
+				for (const [i, pref] of stagingData.candidates.preferences.entries()) {
+					const ref = `${stagingData.session_id}:preferences:${i + 1}`;
+					if (resolvedRefs.has(ref)) continue;
+					if (!attemptedRefs.has(ref)) {
+						finalLeftoverPreferences.push(pref);
+						continue;
+					}
 					const attempts = (pref.reconcile_attempts ?? 0) + 1;
 					if (attempts > maxAttempts) {
 						writeDeadLetter(memoryPaths.projectMemoryDir!, {
@@ -433,7 +439,13 @@ export async function runReconciliation(
 				}
 
 				const finalLeftoverDecisions: StagingFile["candidates"]["decisions"] = [];
-				for (const dec of leftoverDecisions) {
+				for (const [i, dec] of stagingData.candidates.decisions.entries()) {
+					const ref = `${stagingData.session_id}:decisions:${i + 1}`;
+					if (resolvedRefs.has(ref)) continue;
+					if (!attemptedRefs.has(ref)) {
+						finalLeftoverDecisions.push(dec);
+						continue;
+					}
 					const attempts = (dec.reconcile_attempts ?? 0) + 1;
 					if (attempts > maxAttempts) {
 						writeDeadLetter(memoryPaths.projectMemoryDir!, {
@@ -455,7 +467,13 @@ export async function runReconciliation(
 				}
 
 				const finalLeftoverDomain: StagingFile["candidates"]["domain"] = [];
-				for (const dom of leftoverDomain) {
+				for (const [i, dom] of stagingData.candidates.domain.entries()) {
+					const ref = `${stagingData.session_id}:domain:${i + 1}`;
+					if (resolvedRefs.has(ref)) continue;
+					if (!attemptedRefs.has(ref)) {
+						finalLeftoverDomain.push(dom);
+						continue;
+					}
 					const attempts = (dom.reconcile_attempts ?? 0) + 1;
 					if (attempts > maxAttempts) {
 						writeDeadLetter(memoryPaths.projectMemoryDir!, {
@@ -502,6 +520,16 @@ export async function runReconciliation(
 			return { status: "failed", reason: "delete_error", counts, llmCalled, indexRebuilt, error };
 		}
 
+		try {
+			indexRebuilt = rebuildIndexOrThrow(deps, db, memoryPaths);
+		} catch (error) {
+			return { status: "failed", reason: "index_error", counts, llmCalled, indexRebuilt, error };
+		}
+
+		if (terminalFailure) {
+			return { status: "failed", reason: terminalFailure.reason, counts, llmCalled, indexRebuilt, error: terminalFailure.error };
+		}
+
 		return { status: "completed", counts, llmCalled, indexRebuilt };
 	} catch (error) {
 		logger.warn?.("[persistent-memory] reconciliation failed unexpectedly; preserving staging.");
@@ -536,7 +564,7 @@ async function reconcileCandidateSet(
 		rawResponse = await deps.callCarefulModel(RECONCILIATION_SYSTEM_PROMPT, userPrompt);
 	} catch (error) {
 		logger.warn?.("[persistent-memory] reconciliation model call failed; preserving staging.");
-		return { status: "failed", reason: "model_error", plan: emptyPlan(), appliedRefs: new Set(), attemptedRefs, modelErrored: true, error };
+		return { status: "failed", reason: "model_error", plan: emptyPlan(), appliedRefs: new Set(), attemptedRefs: new Set(), modelErrored: true, error };
 	}
 
 	let parsed: unknown;
@@ -544,7 +572,7 @@ async function reconcileCandidateSet(
 		parsed = parseModelJson(rawResponse);
 	} catch (error) {
 		logger.warn?.("[persistent-memory] reconciliation model returned malformed JSON; preserving staging.");
-		return { status: "failed", reason: "parse_error", plan: emptyPlan(), appliedRefs: new Set(), attemptedRefs, modelErrored: false, error };
+		return { status: "failed", reason: "parse_error", plan: emptyPlan(), appliedRefs: new Set(), attemptedRefs: new Set(), modelErrored: false, error };
 	}
 
 	let normalized = normalizeReconciliationResponse(parsed, existing, candidatesSubset);
@@ -585,7 +613,7 @@ Please correct these errors and output the complete and valid JSON matching the 
 		const plan = partial.plan;
 		const totalActions = plan.lessons.length + plan.preferences.length + plan.decisions.length + plan.domain.length;
 		if (totalActions === 0) {
-			logger.warn?.("[persistent-memory] reconciliation model response is entirely invalid; preserving staging.");
+			logger.warn?.("[persistent-memory] reconciliation model response is entirely invalid; re-staging validation-rejected candidates.");
 			return { status: "failed", reason: "invalid_model_response", plan, appliedRefs: partial.appliedRefs, attemptedRefs, modelErrored: false, error: bestError, bestError };
 		}
 		return { status: "completed", plan, appliedRefs: partial.appliedRefs, attemptedRefs, modelErrored: false, bestError };
