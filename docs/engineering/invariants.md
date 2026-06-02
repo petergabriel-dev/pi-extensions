@@ -10,10 +10,20 @@
 - `.pi` marker presence is the only condition for Claude Code read-only enforcement.
 - Claude Code mutation tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) are always denied in `.pi` projects.
 - Claude Code Bash in `.pi` projects must read a fresh bridge `policy.json`; missing/stale policy denies closed.
+- Claude Code Bash in `.pi` projects must deny `dangerouslyDisableSandbox`; sandbox bypass flags are not allowed in read-only bridge mode.
+- When `sandbox-exec` is available, Claude Code Bash allowed by fresh policy must be wrapped through `hookSpecificOutput.updatedInput.command`; if no launcher exists, policy allowlist enforcement remains the fallback.
 - Bridge requests are idempotent by UUID. Replayed request IDs return the processed response and must not duplicate notes, staging candidates, or saved plans.
 - v1 supports one active Pi bridge session per project. A second active watcher must become passive/refuse rather than process the same request stream.
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
+
+## Workflow modes read-only Bash
+
+- Discuss/plan Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
+- Structural read-only Bash must deny network access and writes to the repo and `$HOME` while allowing reads, read-only interpreters, and writes under scratch `TMPDIR`.
+- Scratch paths used in sandbox profiles must be resolved through real paths when they already exist, because macOS `/tmp` paths resolve under `/private/var`.
+- With no sandbox launcher, `wrapCommand()` must return the original command with `wrapped:false`; callers must then apply conservative policy and must not treat this as approval.
+- Behavioral sandbox tests must cover repo read, scratch write, repo write denial, network denial, and interpreter read when a real launcher is present.
 
 ## Pi subagents
 

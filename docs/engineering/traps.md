@@ -11,6 +11,8 @@
 - **Target project root follows nearest ancestor `.pi`.** A Pi session under `~/Documents/Projects/claude-bridge` resolved to `/Users/petergabrielrlopez` because `~/.pi` existed as ancestor marker.
 - **Claude MCP config source matters.** Editing `~/.claude/mcp.json` did not make `claude mcp list` show the server. `claude mcp add -s user ...` wrote the active config to `~/.claude.json`.
 - **Hook failures should deny closed.** The read-only hook intentionally denies Bash when policy is missing, stale, expired, or invalid.
+- **Claude bridge structural Bash wrapping depends on `updatedInput`.** PreToolUse hooks can rewrite tool input; if that support changes, Claude bridge falls back to policy enforcement but loses structural sandbox wrapping.
+- **Sandbox bypass flags must be denied explicitly.** Claude Code Bash `dangerouslyDisableSandbox` would undermine structural read-only; the Pi bridge hook rejects it before wrapping or allowlist approval.
 
 ## Pi subagents
 
@@ -36,6 +38,8 @@
 - **The reopen-without-rebuild assumption on reload:** During `/reload` commands, the index is reopened without running reconciliation or rebuildIndex ([index.ts#L143-L147](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L143-L147)). This assumes the database is already fully consistent. Out-of-band manual edits to markdown memory files will not be reconciled until the next non-reload start hook.
 - **Backgrounded extraction must use cloned memoryPaths and captured context:** The `session_shutdown` hook clears state like `memoryPaths = null` in its synchronous `finally` block, and session replacement (`new`, `resume`, `fork`) invalidates the live `ctx` object immediately after the handler returns. Any deferred background task (`setTimeout`) accessing `ctx` properties (like `ctx.cwd` or `ctx.model`) or `memoryPaths` asynchronously will crash with a stale context or null-pointer error. A shallow copy of `memoryPaths` and all `ctx`-derived values (`cwd`, `model`, `modelRegistry`, `thinkingLevel`) must be captured synchronously into plain locals (using `captureCtx`) before the hook returns ([index.ts#L252-L262](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L252-L262), [index.ts#L277-L282](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L277-L282)).
 - **Host-import limitation in standalone testing:** Standard Node test scripts cannot load index.ts directly because it imports Pi host packages (like `@mariozechner/pi-coding-agent`) and native node modules. Pure lifecycle decision logic must be isolated in lifecycle.ts to allow standalone imports and unit testing under tsx.
+- **macOS sandbox paths need realpath normalization:** Seatbelt profiles see `/tmp` scratch directories as `/private/var/...`; allowing only the unresolved path causes scratch writes to fail with `Operation not permitted`.
+- **`/dev/null` writes are part of shell startup reality:** Some shells or startup files redirect to `/dev/null`. The sandbox allows literal `/dev/null` writes while keeping repo and home writes denied.
 
 
 

@@ -17,7 +17,7 @@ Core boundaries:
 
 - **Pi bridge extension:** Pi-coupled layer. Reuses workflow-modes, discussion-notes, persistent-memory, and engineering-docs code.
 - **Claude MCP client:** Thin file-protocol client. Node stdlib only; no Pi imports.
-- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker.
+- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools, requires a fresh Pi bridge policy for Bash, and wraps allowed Bash commands in `sandbox-exec` on macOS when available.
 
 Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 
@@ -28,6 +28,18 @@ Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 - `session.json`: active bridge session lock + heartbeat
 
 `capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension updates its own `currentPlan`, appends `workflow-plan`, and returns `workflow-modes:save-plan-result`.
+
+## Workflow modes read-only Bash sandbox
+
+`agent/extensions/workflow-modes/index.ts` owns Pi-side discuss/plan tool gating. Mutation tools remain blocked in discuss/plan. For Bash, the hook first tries `wrapCommand()` from `agent/extensions/workflow-modes/sandbox.ts`; when a launcher is detected, the command is rewritten in place before execution. If no launcher exists, or wrapping throws, the hook falls back to the shared regex policy from `policy.ts`.
+
+Supported launcher paths:
+
+- macOS: `/usr/bin/sandbox-exec`, with a Seatbelt profile denying `network*` and `file-write*`, then re-allowing writes under a scratch `TMPDIR` and `/dev/null`.
+- Linux: `bwrap`, with `--unshare-net`, a read-only bind of `/`, scratch `TMPDIR`, and `PYTHONDONTWRITEBYTECODE=1`.
+- No launcher: conservative read-only allowlist plus mutation/redirect denies.
+
+Claude bridge read-only Bash uses the same policy snapshot through `getWorkflowPolicySnapshot()`. Its Node-stdlib PreToolUse hook can also return `hookSpecificOutput.updatedInput`, so macOS Claude Code Bash calls under `.pi` projects are wrapped in `sandbox-exec` when available; otherwise the hook remains fail-closed on stale/missing policy and uses the allowlist fallback.
 
 ## Pi subagents
 
