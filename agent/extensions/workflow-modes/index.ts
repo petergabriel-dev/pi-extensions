@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@mariozechner/pi-tui";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build";
@@ -11,10 +12,7 @@ export const PLAN_ENTRY = "workflow-plan";
 export const STATUS_KEY = "workflow-modes";
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
-export const DISCUSS_BASH_ALLOW = /^(pwd|ls(\s|$)|find(\s|$)|rg(\s|$)|grep(\s|$)|ccc\s+search(\s|$))/;
-export const PLAN_BASH_ALLOW = /^(pwd|ls(\s|$)|find(\s|$)|rg(\s|$)|grep(\s|$)|ccc\s+(search|index)(\s|$)|.*\b(test|tests|check|checks|lint|typecheck|tsc|build|compile|gradle|mvn|pytest|cargo test|go test|swift test)\b)/;
-export const BASH_MUTATION_DENY = /(^|[;&|()]\s*)(rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|tee|cat\s*>|python|python3|node|perl|ruby|sh|bash|zsh|fish|npm\s+(i|install|add|update|audit\s+fix)|pnpm\s+(i|install|add|update)|yarn\s+(add|install|upgrade)|bun\s+(add|install)|pip\s+install|cargo\s+(add|update|install)|go\s+get|git\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash)|.*\b(format|fmt|fix|write|migrate|migration)\b)/;
-export const BASH_WRITE_REDIRECT = /(^|[^<])>(?!>?)|>>/;
+export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
 
 export interface WorkflowPolicySnapshot {
 	mutationTools: string[];
