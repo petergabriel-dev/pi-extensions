@@ -1,11 +1,11 @@
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 
-const DEFAULT_CAREFUL_MODEL = "opencode-go/qwen3.6-plus";
+const DEFAULT_CAREFUL_MODEL = "opencode-go/glm-5.1";
 
 export function resolveCarefulModel(
 	envName: string,
 	ctx: { modelRegistry?: ModelRegistry; model?: any },
-	logger: { warn: (...args: unknown[]) => void }
+	logger: { warn: (...args: unknown[]) => void; info?: (...args: unknown[]) => void }
 ): any {
 	const envValue = process.env[envName];
 	const trimmed = envValue?.trim() || DEFAULT_CAREFUL_MODEL;
@@ -54,13 +54,20 @@ export function resolveCarefulModel(
 		}
 
 		if (!ctx.modelRegistry.hasConfiguredAuth(matched)) {
-			logger.warn(`[persistent-memory] Pinned model "${matched.provider}/${matched.id}" is found but auth/API key is not configured. Falling back to default model.`);
+			logger.warn(`[persistent-memory] Pinned model "${formatModelId(matched)}" is found but auth/API key is not configured. Falling back to default model.`);
 			return ctx.model;
 		}
 
+		logger.info?.(`[persistent-memory] Resolved careful model for ${envName}: ${formatModelId(matched)}.`);
 		return matched;
 	} catch (error) {
 		logger.warn(`[persistent-memory] Error resolving pinned model "${trimmed}": ${error instanceof Error ? error.message : String(error)}. Falling back to default model.`);
 		return ctx.model;
 	}
+}
+
+function formatModelId(model: any): string {
+	const provider = typeof model?.provider === "string" ? model.provider : String(model?.provider ?? "unknown-provider");
+	const id = typeof model?.id === "string" ? model.id : String(model?.id ?? model?.name ?? "unknown-model");
+	return `${provider}/${id}`;
 }

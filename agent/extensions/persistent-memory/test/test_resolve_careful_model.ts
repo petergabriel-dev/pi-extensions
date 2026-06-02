@@ -7,7 +7,7 @@ type TestModel = { provider: string; id: string; name: string };
 
 const ctxModel: TestModel = { provider: "session", id: "current-model", name: "Current Model" };
 const envModel: TestModel = { provider: "env-provider", id: "env-model", name: "Env Model" };
-const defaultModel: TestModel = { provider: "opencode-go", id: "qwen3.6-plus", name: "Qwen 3.6 Plus" };
+const defaultModel: TestModel = { provider: "opencode-go", id: "glm-5.1", name: "GLM 5.1" };
 
 function makeCtx(models: TestModel[], authedModels: TestModel[]) {
 	return {
@@ -50,7 +50,9 @@ withEnv("env-provider/env-model", () => {
 // Unset env resolves to the pinned default when it is present and authed.
 withEnv(undefined, () => {
 	const ctx = makeCtx([defaultModel], [defaultModel]);
-	assert.strictEqual(resolveCarefulModel(envName, ctx, logger), defaultModel);
+	const infoMessages: unknown[][] = [];
+	assert.strictEqual(resolveCarefulModel(envName, ctx, { ...logger, info: (...args) => infoMessages.push(args) }), defaultModel);
+	assert.deepStrictEqual(infoMessages, [["[persistent-memory] Resolved careful model for PERSISTENT_MEMORY_TEST_MODEL: opencode-go/glm-5.1."]]);
 });
 
 // Unset env falls back to ctx.model when the pinned default is not found.
