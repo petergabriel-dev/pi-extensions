@@ -108,6 +108,10 @@ export interface ReconciliationDeps {
 	logger?: ReconciliationLogger;
 	rebuildOnNoop?: boolean;
 	rebuildIndex?: (db: SqliteDatabase, paths: MemoryPaths) => unknown;
+	chunkSize?: number;
+	wallClockBudgetMs?: number;
+	shouldContinue?: () => boolean;
+	nowMs?: () => number;
 }
 
 export interface CategoryTotals {
@@ -291,7 +295,7 @@ export async function runReconciliation(
 				: { status: "skipped", reason: "no_valid_staging", counts, llmCalled: false, indexRebuilt };
 		}
 
-		const projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
+		let projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
 		const projectScope = projectScopeFromRoot(memoryPaths.projectRoot);
 		const candidates = prepareStagingCandidates(loaded.valid.map((file) => file.data));
 		counts.candidates.staged = candidateTotals(candidates);
@@ -308,27 +312,48 @@ export async function runReconciliation(
 		let appliedRefs = new Set<string>();
 		let bestError: ReconciliationValidationError | undefined = undefined;
 		if (preFilter.llmNeeded) {
-			const reconcileResult = await reconcileCandidateSet(projectMemory, preFilter.remaining, projectScope, deps, logger);
-			llmCalled = reconcileResult.attemptedRefs.size > 0;
-			if (reconcileResult.status === "failed") {
-				return { status: "failed", reason: reconcileResult.reason, counts, llmCalled, indexRebuilt, error: reconcileResult.error };
+			const chunkSize = normalizePositiveInteger(deps.chunkSize, totalCandidates(preFilter.remaining));
+			const budgetMs = normalizePositiveInteger(deps.wallClockBudgetMs, Number.POSITIVE_INFINITY);
+			const startedAtMs = deps.nowMs?.() ?? Date.now();
+			let isFirstApply = true;
+
+			for (const candidatesSubset of chunkCandidates(preFilter.remaining, chunkSize)) {
+				const reconcileResult = await reconcileCandidateSet(projectMemory, candidatesSubset, projectScope, deps, logger);
+				llmCalled = llmCalled || reconcileResult.attemptedRefs.size > 0;
+				if (reconcileResult.status === "failed") {
+					return { status: "failed", reason: reconcileResult.reason, counts, llmCalled, indexRebuilt, error: reconcileResult.error };
+				}
+
+				const chunkPreFilter = preFilterForChunk(preFilter, candidatesSubset, isFirstApply);
+				const nowIso = (deps.now?.() ?? new Date()).toISOString();
+				const nextMemory = materializeReconciliation(projectMemory, chunkPreFilter, reconcileResult.plan, projectScope, nowIso);
+				try {
+					counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
+				} catch (error) {
+					return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
+				}
+
+				projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
+				plan = mergePlans(plan, reconcileResult.plan);
+				for (const ref of reconcileResult.appliedRefs) appliedRefs.add(ref);
+				bestError = reconcileResult.bestError ?? bestError;
+				isFirstApply = false;
+
+				const elapsedMs = (deps.nowMs?.() ?? Date.now()) - startedAtMs;
+				if (elapsedMs >= budgetMs || deps.shouldContinue?.() === false) break;
 			}
-			plan = reconcileResult.plan;
-			appliedRefs = reconcileResult.appliedRefs;
-			bestError = reconcileResult.bestError;
 		} else {
 			// No LLM called, so all remaining candidates are considered applied/duplicate.
+			const nowIso = (deps.now?.() ?? new Date()).toISOString();
+			const nextMemory = materializeReconciliation(projectMemory, preFilter, plan, projectScope, nowIso);
+			try {
+				counts.writes = writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory);
+			} catch (error) {
+				return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
+			}
 		}
 
 		counts.actions = actionTotals(plan);
-		const nowIso = (deps.now?.() ?? new Date()).toISOString();
-		const nextMemory = materializeReconciliation(projectMemory, preFilter, plan, projectScope, nowIso);
-
-		try {
-			counts.writes = writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory);
-		} catch (error) {
-			return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
-		}
 
 		try {
 			indexRebuilt = rebuildIndexOrThrow(deps, db, memoryPaths);
@@ -804,6 +829,91 @@ function actionTotals(plan: NormalizedReconciliationPlan): ReconciliationRunCoun
 
 function emptyPlan(): NormalizedReconciliationPlan {
 	return { lessons: [], preferences: [], decisions: [], domain: [] };
+}
+
+function mergePlans(a: NormalizedReconciliationPlan, b: NormalizedReconciliationPlan): NormalizedReconciliationPlan {
+	return {
+		lessons: [...a.lessons, ...b.lessons],
+		preferences: [...a.preferences, ...b.preferences],
+		decisions: [...a.decisions, ...b.decisions],
+		domain: [...a.domain, ...b.domain],
+	};
+}
+
+function mergeWrites(
+	a: ReconciliationRunCounts["writes"],
+	b: ReconciliationRunCounts["writes"],
+): ReconciliationRunCounts["writes"] {
+	return {
+		lessons: a.lessons || b.lessons,
+		preferences: a.preferences || b.preferences,
+		decisions: a.decisions || b.decisions,
+		domain: a.domain || b.domain,
+	};
+}
+
+function totalCandidates(candidates: PreparedReconciliationCandidates): number {
+	return candidates.lessons.length + candidates.preferences.length + candidates.decisions.length + candidates.domain.length;
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+	if (value === Number.POSITIVE_INFINITY) return value;
+	if (!Number.isFinite(value) || value === undefined) return fallback;
+	const normalized = Math.floor(value);
+	return normalized > 0 ? normalized : fallback;
+}
+
+function chunkCandidates(candidates: PreparedReconciliationCandidates, chunkSize: number): PreparedReconciliationCandidates[] {
+	const flat = flattenCandidates(candidates);
+	const chunks: PreparedReconciliationCandidates[] = [];
+	for (let i = 0; i < flat.length; i += chunkSize) {
+		const chunk = emptyPreparedCandidates();
+		for (const candidate of flat.slice(i, i + chunkSize)) {
+			chunk[candidate.category].push(candidate as never);
+		}
+		chunks.push(chunk);
+	}
+	return chunks;
+}
+
+function flattenCandidates(candidates: PreparedReconciliationCandidates): ReconciliationCandidate<LessonCandidate | PreferenceCandidate | DecisionCandidate | DomainCandidate>[] {
+	const categoryOrder: Record<ReconciliationCategory, number> = { lessons: 0, preferences: 1, decisions: 2, domain: 3 };
+	return [
+		...candidates.lessons,
+		...candidates.preferences,
+		...candidates.decisions,
+		...candidates.domain,
+	].sort((a, b) =>
+		a.produced_at.localeCompare(b.produced_at) ||
+		a.session_id.localeCompare(b.session_id) ||
+		categoryOrder[a.category] - categoryOrder[b.category] ||
+		a.index - b.index
+	);
+}
+
+function emptyPreparedCandidates(): PreparedReconciliationCandidates {
+	return { lessons: [], preferences: [], decisions: [], domain: [] };
+}
+
+function preFilterForChunk(
+	preFilter: MemoryPreFilterResult,
+	remaining: PreparedReconciliationCandidates,
+	includeBypassed: boolean,
+): MemoryPreFilterResult {
+	const emptyBypassed = {
+		lessons: { bypassed: [], remaining: [], reinforcementBumps: [] },
+		preferences: { bypassed: [], remaining: [] },
+		decisions: { bypassed: [], remaining: [] },
+		domain: { bypassed: [], remaining: [] },
+	};
+	return {
+		lessons: includeBypassed ? preFilter.lessons : emptyBypassed.lessons,
+		preferences: includeBypassed ? preFilter.preferences : emptyBypassed.preferences,
+		decisions: includeBypassed ? preFilter.decisions : emptyBypassed.decisions,
+		domain: includeBypassed ? preFilter.domain : emptyBypassed.domain,
+		remaining,
+		llmNeeded: totalCandidates(remaining) > 0,
+	};
 }
 
 function materializeReconciliation(
