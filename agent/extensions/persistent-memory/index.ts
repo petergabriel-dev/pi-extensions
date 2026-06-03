@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
 import { callCarefulModelOneShot } from "./consolidation/careful-model.js";
 import { runExtraction } from "./consolidation/extract.js";
-import { runReconciliation } from "./consolidation/reconcile.js";
+import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
 import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
 import { applyReinforcementUpdates } from "./reinforcement/tracker.js";
@@ -17,6 +17,7 @@ import { registerRecallTool } from "./retrieval/tier3.js";
 import { initializeProjectMemory, type MemoryIgnoreResult, type MemoryInitResult } from "./storage/init.js";
 import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolveMemoryIndexPath, resolveMemoryPaths } from "./storage/paths.js";
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
+import { recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
 import { resolveCarefulModel } from "./model-resolution.js";
 
@@ -331,6 +332,8 @@ function triggerBackgroundReconciliation(
 
 	setTimeout(async () => {
 		let bgDb: SqliteDatabase | null = null;
+		const startedAt = new Date();
+		let chosenModel: string | null = null;
 		try {
 			if (!paths.projectMemoryDir) {
 				if (shouldSwap(startGen, lifecycleGeneration)) {
@@ -345,6 +348,7 @@ function triggerBackgroundReconciliation(
 			bgDb = openIndex(dbPath);
 
 			const reconciliation = reconciliationConfig();
+			chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, capturedCtx, console);
 			const result = await runReconciliation(paths, bgDb, {
 				rebuildOnNoop: true,
 				logger: console,
@@ -359,7 +363,6 @@ function triggerBackgroundReconciliation(
 					}
 				},
 				callCarefulModel: (systemPrompt, userPrompt) => {
-					const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, capturedCtx, console);
 					return callCarefulModelImpl(systemPrompt, userPrompt, {
 						cwd: capturedCtx.cwd,
 						...(chosenModel ? { model: chosenModel as never } : {}),
@@ -369,6 +372,7 @@ function triggerBackgroundReconciliation(
 					});
 				},
 			});
+			recordReconcileRunIfUseful(paths, "background", startedAt, result, chosenModel);
 
 			if (!shouldSwap(startGen, lifecycleGeneration)) {
 				console.warn(`[persistent-memory] background reconciliation finished but generation changed (${startGen} -> ${lifecycleGeneration}); discarding background index.`);
@@ -395,6 +399,7 @@ function triggerBackgroundReconciliation(
 			bgDb = null;
 		} catch (error) {
 			const message = formatError(error);
+			recordThrownReconcileRun(paths, "background", startedAt, chosenModel, error);
 			console.error(`[persistent-memory] background reconciliation threw: ${message}`);
 			ui.notify(`persistent-memory background reconciliation failed: ${message}`, "error");
 		} finally {
@@ -652,6 +657,82 @@ function closeDatabaseQuietly(targetDb: SqliteDatabase, label: string): void {
 	}
 }
 
+function recordReconcileRunIfUseful(
+	paths: MemoryPaths,
+	source: ReconcileRunSource,
+	startedAt: Date,
+	result: ReconciliationRunResult,
+	model: unknown,
+): void {
+	if (!shouldRecordReconcileResult(result)) return;
+	try {
+		const finishedAt = new Date();
+		recordReconcileRun(paths, {
+			source,
+			status: result.status,
+			startedAt: startedAt.toISOString(),
+			finishedAt: finishedAt.toISOString(),
+			durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+			model: formatModelForRunLog(model),
+			...("reason" in result ? { reason: result.reason } : {}),
+			counts: result.counts,
+			llmCalled: result.llmCalled,
+			indexRebuilt: result.indexRebuilt,
+			...(result.status === "failed" ? { message: formatError(result.error) } : {}),
+		});
+	} catch (error) {
+		console.warn(`[persistent-memory] failed to record ${source} reconciliation run: ${formatError(error)}`);
+	}
+}
+
+function recordThrownReconcileRun(
+	paths: MemoryPaths,
+	source: ReconcileRunSource,
+	startedAt: Date,
+	model: unknown,
+	error: unknown,
+): void {
+	try {
+		const finishedAt = new Date();
+		recordReconcileRun(paths, {
+			source,
+			status: "failed",
+			reason: "unexpected_error",
+			message: formatError(error),
+			startedAt: startedAt.toISOString(),
+			finishedAt: finishedAt.toISOString(),
+			durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+			model: formatModelForRunLog(model),
+		});
+	} catch (logError) {
+		console.warn(`[persistent-memory] failed to record thrown ${source} reconciliation run: ${formatError(logError)}`);
+	}
+}
+
+function shouldRecordReconcileResult(result: ReconciliationRunResult): boolean {
+	if (result.status === "failed") return true;
+	if (result.indexRebuilt) return true;
+	const counts = result.counts;
+	return counts.stagingFiles.total > 0
+		|| counts.stagingFiles.consumed > 0
+		|| counts.stagingFiles.preserved > 0
+		|| totalCategoryTotals(counts.candidates.deadLettered) > 0;
+}
+
+function totalCategoryTotals(totals: { lessons: number; preferences: number; decisions: number; domain: number }): number {
+	return totals.lessons + totals.preferences + totals.decisions + totals.domain;
+}
+
+function formatModelForRunLog(model: unknown): string | null {
+	if (!model) return null;
+	if (typeof model === "string") return model;
+	if (typeof model !== "object") return String(model);
+	const record = model as { provider?: unknown; id?: unknown; name?: unknown };
+	const id = typeof record.id === "string" ? record.id : typeof record.name === "string" ? record.name : null;
+	if (!id) return null;
+	return typeof record.provider === "string" ? `${record.provider}/${id}` : id;
+}
+
 function isReadonlySqliteError(error: unknown): boolean {
 	const record = error && typeof error === "object" ? error as { code?: unknown; message?: unknown; name?: unknown } : null;
 	const text = [record?.code, record?.name, record?.message, String(error)]
@@ -716,8 +797,10 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 
 	const runPaths = { ...memoryPaths };
 	const startGen = lifecycleGeneration;
+	const startedAt = new Date();
 	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
 	const reconciliation = reconciliationConfig();
+	const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, modelContext, console);
 	reconcileInFlight = true;
 
 	let ownDb: SqliteDatabase | null = null;
@@ -737,7 +820,6 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 				}
 			},
 			callCarefulModel: (systemPrompt, userPrompt) => {
-				const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, modelContext, console);
 				return callCarefulModelImpl(systemPrompt, userPrompt, {
 					cwd: modelContext.cwd ?? process.cwd(),
 					...(chosenModel ? { model: chosenModel as never } : {}),
@@ -747,6 +829,7 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 				});
 			},
 		});
+		recordReconcileRunIfUseful(runPaths, "manual", startedAt, result, chosenModel);
 
 		// Keep this check and swap/discard block await-free. An await here would let a lifecycle
 		// event interleave and could publish a stale reconciliation index into a newer generation.
@@ -768,6 +851,7 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 		lastRebuildError = null;
 		ctx.ui.notify(formatReconciliationResult(result), "info");
 	} catch (error) {
+		recordThrownReconcileRun(runPaths, "manual", startedAt, chosenModel, error);
 		ctx.ui.notify(`Memory reconciliation failed: ${formatError(error)}; staging preserved.`, "error");
 	} finally {
 		reconcileInFlight = false;
