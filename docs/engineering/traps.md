@@ -40,6 +40,8 @@
 - **Host-import limitation in standalone testing:** Standard Node test scripts cannot load index.ts directly because it imports Pi host packages (like `@mariozechner/pi-coding-agent`) and native node modules. Pure lifecycle decision logic must be isolated in lifecycle.ts to allow standalone imports and unit testing under tsx.
 - **macOS sandbox paths need realpath normalization:** Seatbelt profiles see `/tmp` scratch directories as `/private/var/...`; allowing only the unresolved path causes scratch writes to fail with `Operation not permitted`.
 - **`/dev/null` writes are part of shell startup reality:** Some shells or startup files redirect to `/dev/null`. The sandbox allows literal `/dev/null` writes while keeping repo and home writes denied.
+- **Reinforcement is not gated by `reconcileInFlight`:** `applyReinforcementUpdates` during `session_shutdown` also writes memory markdown and rebuilds the active module db, but it is not part of the manual/background reconcile single-flight guard. A manual reconcile in flight during shutdown could still interleave markdown writes with reinforcement; widening that guard is a separate change from the reconcile connection-ownership fix.
+- **`setFooter` is single-owner UI surface:** Persistent-memory metering must use `ui.setStatus` and `ui.setWidget` only. Do not use `ui.setFooter`; `tps-footer.ts` may own the footer and a second owner would clobber it.
 
 
 
