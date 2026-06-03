@@ -758,6 +758,7 @@ function updateMemoryMeter(
 	ui: ExtensionAPI["ui"],
 	options: { showPanel?: boolean; clearPanel?: boolean; clearAfterMs?: number; panelTitle?: string } = {},
 ): void {
+	if (!ui || typeof ui.setStatus !== "function") return;
 	try {
 		ui.setStatus?.(MEMORY_UI_KEY, formatMemoryStatusLine());
 		if (options.clearPanel) {
