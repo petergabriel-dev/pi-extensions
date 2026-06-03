@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
-import { callCarefulModelOneShot } from "./consolidation/careful-model.js";
+import type { callCarefulModelOneShot } from "./consolidation/careful-model.js";
 import { runExtraction } from "./consolidation/extract.js";
 import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
 import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter } from "./consolidation/staging.js";
@@ -62,11 +62,36 @@ let pendingReminderLessons = new Map<string, Match["lesson"]>();
 let lifecycleGeneration = 0;
 let reconcileInFlight = false;
 let extractionInFlight = false;
-let callCarefulModelImpl = callCarefulModelOneShot;
+type CarefulModelImpl = typeof callCarefulModelOneShot;
+const defaultCallCarefulModelImpl: CarefulModelImpl = async (...args) => {
+	const module = await import("./consolidation/careful-model.js");
+	return module.callCarefulModelOneShot(...args);
+};
+let callCarefulModelImpl: CarefulModelImpl = defaultCallCarefulModelImpl;
 let memoryPanelClearTimer: NodeJS.Timeout | null = null;
 
-export function setCallCarefulModelImplForTest(impl: typeof callCarefulModelOneShot): void {
+export function setCallCarefulModelImplForTest(impl: CarefulModelImpl): void {
 	callCarefulModelImpl = impl;
+}
+
+export function __resetCallCarefulModelImplForTest(): void {
+	callCarefulModelImpl = defaultCallCarefulModelImpl;
+}
+
+export function __setPersistentMemoryStateForTest(state: {
+	memoryPaths?: MemoryPaths | null;
+	db?: SqliteDatabase | null;
+	lifecycleGeneration?: number;
+	reconcileInFlight?: boolean;
+}): void {
+	if ("memoryPaths" in state) memoryPaths = state.memoryPaths ?? null;
+	if ("db" in state) db = state.db ?? null;
+	if (state.lifecycleGeneration !== undefined) lifecycleGeneration = state.lifecycleGeneration;
+	if (state.reconcileInFlight !== undefined) reconcileInFlight = state.reconcileInFlight;
+}
+
+export function __bumpPersistentMemoryGenerationForTest(): void {
+	lifecycleGeneration++;
 }
 
 export default function persistentMemory(pi: ExtensionAPI) {
@@ -862,7 +887,7 @@ function formatDisplayPath(filePath: string, cwd: string): string {
 	return filePath;
 }
 
-async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
+export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
 	if (!db || !memoryPaths) {
 		ctx.ui.notify(lastRebuildError ? `Memory not initialized: ${lastRebuildError}` : "Memory not initialized.", "error");
 		return;
