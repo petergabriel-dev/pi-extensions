@@ -8,7 +8,7 @@
     ]
   },
   "scripts": {
-    "test": "npx tsx test/test_classifier.ts && npx tsx test/test_reason_matrix.ts && npx tsx test/test_generation_swap.ts && npx tsx test/test_firing_log.ts && npx tsx test/test_capture_ctx.ts && npx tsx test/test_resolve_careful_model.ts && npx tsx test/test_chunked_reconcile.ts && npx tsx test/test_reconcile_run_log.ts && npx tsx test/test_memory_meter.ts",
+    "test": "npx tsx test/test_classifier.ts && npx tsx test/test_reason_matrix.ts && npx tsx test/test_generation_swap.ts && npx tsx test/test_firing_log.ts && npx tsx test/test_capture_ctx.ts && npx tsx test/test_resolve_careful_model.ts && npx tsx test/test_chunked_reconcile.ts && npx tsx test/test_reconcile_run_log.ts && npx tsx test/test_memory_meter.ts && npx tsx test/test_staging_repair.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -782,7 +782,7 @@ function loadValidSameProjectStaging(filePaths: string[], projectRoot: string): 
 	return { valid, malformed, wrongProject };
 }
 
-function normalizeStagingFile(raw: unknown): StagingFile | null {
+export function normalizeStagingFile(raw: unknown): StagingFile | null {
 	const root = asRecord(raw);
 	if (root.schemaVersion !== 1) return null;
 	const sessionId = requireString(root.session_id);
