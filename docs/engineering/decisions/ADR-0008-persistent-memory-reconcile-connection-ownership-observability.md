@@ -1,0 +1,52 @@
+---
+id: ADR-0008
+title: Persistent-memory reconcile connection ownership and observability
+status: Active
+date: 2026-06-03
+---
+
+# ADR-0008: Persistent-memory reconcile connection ownership and observability
+
+## Decision
+
+- Manual `/memory reconcile` owns a dedicated SQLite connection for the full run instead of using the module-level active `db`.
+- Manual and background reconciliation share `reconcileInFlight`; manual reconcile rejects while a reconcile is already active.
+- Manual reconcile publishes its rebuilt index only through a generation-guarded, await-free `shouldSwap(...)` to `swapActiveMemory(...)` block; stale runs close their owned connection.
+- Reconcile observability is recorded in a bounded append-only project run-log, surfaced by `/memory status` and a hybrid UI meter (`setStatus` plus temporary `setWidget`).
+- Persistent-memory metering must not use `setFooter`.
+
+## Why
+
+- A manual reconcile previously operated on the shared module `db`; a concurrent lifecycle/background swap could close that handle while reconciliation awaited the careful model, causing `better-sqlite3` closed-connection errors.
+- Connection ownership fixes the stale-handle class directly; single-flight reduces duplicate writers but is not the primary correctness mechanism.
+- A bounded run-log and visible meter make failures diagnosable without depending on console output.
+
+## Affects
+
+Docs:
+
+- `docs/engineering/invariants.md`
+- `docs/engineering/traps.md`
+
+Code:
+
+- `agent/extensions/persistent-memory/index.ts`
+- `agent/extensions/persistent-memory/storage/run-log.ts`
+- `agent/extensions/persistent-memory/test/test_reconcile_run_log.ts`
+
+## Consequences
+
+- Good: lifecycle db closes can no longer invalidate an in-flight manual reconcile connection.
+- Good: users can inspect staging depth, in-flight state, recent reconcile outcomes, and failure reasons.
+- Good: the generated SQLite index remains a replaceable cache; stale run indexes are discarded while markdown/staging remain source of truth.
+- Risk: reinforcement during shutdown is still outside `reconcileInFlight` and can interleave with manual reconcile markdown writes; documented as a trap and left for a separate change.
+
+## Read when
+
+- touching persistent-memory reconciliation entrypoints or SQLite lifecycle handling
+- changing `/memory` commands, reconcile status UI, or run-log storage
+- debugging closed SQLite connection, stale swap, or missing reconciliation observability issues
+
+## Supersedes
+
+- None. ADR-0002 and ADR-0006 still govern partial-batch and chunked reconciliation behavior.
