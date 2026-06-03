@@ -292,6 +292,11 @@ Per-task execution:
 - For [LOAD-BEARING] tasks, before editing restate the invariants from the task's Given/When/Then and why they are load-bearing.
 - Implement only what is needed for the current task.
 
+Worker delegation:
+- Use the worker-orchestration skill's A+B model for contract-first delegation. When spawn_worker is available and the confirmed task is substantial (multi-file or multi-step changes), spawn exactly one worker per task inside the Section-4 loop. Pass the task text as \`task\` and derive \`fileOwnership\` from the task's scope or target files. The parent agent retains task selection, Verification Gate, commit, and confirmation; the worker handles the isolated implementation.
+- Skip worker delegation for trivial one-line tasks — execute them directly in the parent.
+- Do not fan out multiple workers concurrently within the saved-plan loop. Parallel fan-out is reserved for ad-hoc multi-task requests that are not driven by a saved plan.
+
 Verification:
 - Run the task's Verification Gate first when possible.
 - Run targeted checks appropriate to the changed files and task.
