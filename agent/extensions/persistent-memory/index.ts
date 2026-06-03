@@ -33,6 +33,8 @@ const RECONCILIATION_CHUNK_SIZE_ENV = "PERSISTENT_MEMORY_RECONCILIATION_CHUNK_SI
 const DEFAULT_RECONCILIATION_BUDGET_MS = 240_000;
 const RECONCILIATION_BUDGET_ENV = "PERSISTENT_MEMORY_RECONCILIATION_BUDGET_MS";
 const MAX_ERROR_DETAIL_CHARS = 500;
+const MEMORY_UI_KEY = "persistent-memory";
+const MEMORY_PANEL_CLEAR_MS = 5_000;
 
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
 const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
@@ -61,6 +63,7 @@ let lifecycleGeneration = 0;
 let reconcileInFlight = false;
 let extractionInFlight = false;
 let callCarefulModelImpl = callCarefulModelOneShot;
+let memoryPanelClearTimer: NodeJS.Timeout | null = null;
 
 export function setCallCarefulModelImplForTest(impl: typeof callCarefulModelOneShot): void {
 	callCarefulModelImpl = impl;
@@ -90,6 +93,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 
 			lastRebuildError = null;
 			scheduleRegeneration(memoryPaths);
+			updateMemoryMeter(pi.ui);
 
 			triggerBackgroundReconciliation(ctx, memoryPaths, lifecycleGeneration, pi.ui);
 		} catch (error) {
@@ -328,11 +332,7 @@ function triggerBackgroundReconciliation(
 	const capturedCtx = captureCtx(ctx);
 
 	reconcileInFlight = true;
-	try {
-		(ui as any).setStatus?.("persistent-memory", "Memory consolidating...");
-	} catch (err) {
-		// ignore
-	}
+	updateMemoryMeter(ui, { showPanel: true, panelTitle: "Memory reconciliation running" });
 
 	setTimeout(async () => {
 		let bgDb: SqliteDatabase | null = null;
@@ -360,11 +360,7 @@ function triggerBackgroundReconciliation(
 				wallClockBudgetMs: reconciliation.budgetMs,
 				shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
 				onChunkStart: (chunkIndex, totalChunks) => {
-					try {
-						(ui as any).setStatus?.("persistent-memory", `Memory consolidating... (chunk ${chunkIndex}/${totalChunks})`);
-					} catch {
-						// ignore status errors
-					}
+					updateMemoryMeter(ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
 				},
 				callCarefulModel: (systemPrompt, userPrompt) => {
 					return callCarefulModelImpl(systemPrompt, userPrompt, {
@@ -408,11 +404,7 @@ function triggerBackgroundReconciliation(
 			ui.notify(`persistent-memory background reconciliation failed: ${message}`, "error");
 		} finally {
 			reconcileInFlight = false;
-			try {
-				(ui as any).setStatus?.("persistent-memory", undefined);
-			} catch (err) {
-				// ignore
-			}
+			updateMemoryMeter(ui, { clearPanel: true });
 			if (bgDb) {
 				closeDatabaseQuietly(bgDb, "failed background db");
 			}
@@ -737,6 +729,91 @@ function formatModelForRunLog(model: unknown): string | null {
 	return typeof record.provider === "string" ? `${record.provider}/${id}` : id;
 }
 
+function updateMemoryMeter(
+	ui: ExtensionAPI["ui"],
+	options: { showPanel?: boolean; clearPanel?: boolean; clearAfterMs?: number; panelTitle?: string } = {},
+): void {
+	try {
+		ui.setStatus?.(MEMORY_UI_KEY, formatMemoryStatusLine());
+		if (options.clearPanel) {
+			clearMemoryPanelTimer();
+			ui.setWidget?.(MEMORY_UI_KEY, undefined);
+			return;
+		}
+		if (options.showPanel) {
+			clearMemoryPanelTimer();
+			ui.setWidget?.(MEMORY_UI_KEY, formatMemoryPanelLines(options.panelTitle ?? "Memory status"), { placement: "belowEditor" });
+			if (options.clearAfterMs) {
+				memoryPanelClearTimer = setTimeout(() => {
+					memoryPanelClearTimer = null;
+					try {
+						ui.setWidget?.(MEMORY_UI_KEY, undefined);
+					} catch {
+						// ignore widget clear failures
+					}
+				}, options.clearAfterMs);
+			}
+		}
+	} catch (error) {
+		console.warn(`[persistent-memory] memory meter update failed: ${formatError(error)}`);
+	}
+}
+
+function clearMemoryPanelTimer(): void {
+	if (!memoryPanelClearTimer) return;
+	clearTimeout(memoryPanelClearTimer);
+	memoryPanelClearTimer = null;
+}
+
+function formatMemoryStatusLine(): string {
+	if (!memoryPaths?.projectMemoryDir) return lastRebuildError ? `Mem: error ${lastRebuildError}` : "Mem: not initialized";
+	const stagingCount = safeStagingCount(memoryPaths);
+	const lastRun = readRecentReconcileRuns(memoryPaths, 1).at(-1);
+	const active = reconcileInFlight ? " · reconciling" : "";
+	const last = lastRun ? ` · last ${lastRun.status}${lastRun.reason ? `/${lastRun.reason}` : ""} ${formatAge(lastRun.finishedAt)}` : " · no runs";
+	return `Mem: ${stagingCount} staged${active}${last}`;
+}
+
+function formatMemoryPanelLines(title: string): string[] {
+	if (!memoryPaths?.projectMemoryDir) return [title, "No project memory dir."];
+	const recent = readRecentReconcileRuns(memoryPaths, 3);
+	const lines = [
+		title,
+		`Staging files: ${safeStagingCount(memoryPaths)}`,
+		`Reconciliation: ${reconcileInFlight ? "in flight" : "idle"}`,
+		`Last index error: ${lastRebuildError ?? "none"}`,
+	];
+	if (recent.length === 0) {
+		lines.push("Recent runs: none");
+	} else {
+		lines.push("Recent runs:");
+		for (const run of recent) {
+			lines.push(`- ${run.source} ${run.status}${run.reason ? `/${run.reason}` : ""} ${formatAge(run.finishedAt)}`);
+		}
+	}
+	return lines;
+}
+
+function safeStagingCount(paths: MemoryPaths): number {
+	try {
+		return paths.projectMemoryDir ? listStagingFiles(paths.projectMemoryDir).length : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function formatAge(iso: string): string {
+	const timestamp = Date.parse(iso);
+	if (!Number.isFinite(timestamp)) return "unknown age";
+	const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+	if (seconds < 60) return `${seconds}s ago`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.floor(hours / 24)}d ago`;
+}
+
 function isReadonlySqliteError(error: unknown): boolean {
 	const record = error && typeof error === "object" ? error as { code?: unknown; message?: unknown; name?: unknown } : null;
 	const text = [record?.code, record?.name, record?.message, String(error)]
@@ -817,11 +894,7 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 			wallClockBudgetMs: reconciliation.budgetMs,
 			shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
 			onChunkStart: (chunkIndex, totalChunks) => {
-				try {
-					(ctx.ui as any).setStatus?.("persistent-memory", `Memory consolidating... (chunk ${chunkIndex}/${totalChunks})`);
-				} catch {
-					// ignore status errors
-				}
+				updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
 			},
 			callCarefulModel: (systemPrompt, userPrompt) => {
 				return callCarefulModelImpl(systemPrompt, userPrompt, {
@@ -859,11 +932,7 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 		ctx.ui.notify(`Memory reconciliation failed: ${formatError(error)}; staging preserved.`, "error");
 	} finally {
 		reconcileInFlight = false;
-		try {
-			(ctx.ui as any).setStatus?.("persistent-memory", undefined);
-		} catch {
-			// ignore status errors
-		}
+		updateMemoryMeter(ctx.ui, { clearPanel: true });
 		if (ownDb) closeDatabaseQuietly(ownDb, "manual reconcile db");
 	}
 }
@@ -918,6 +987,7 @@ async function memoryStatusCommand(ctx: ExtensionCommandContext): Promise<void> 
 	}
 
 	ctx.ui.notify(lines.join("\n"), "info");
+	updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: "Memory status", clearAfterMs: MEMORY_PANEL_CLEAR_MS });
 }
 
 async function listStaging(ctx: ExtensionCommandContext): Promise<void> {
