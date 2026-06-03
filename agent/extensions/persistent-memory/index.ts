@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
@@ -69,6 +69,7 @@ const defaultCallCarefulModelImpl: CarefulModelImpl = async (...args) => {
 };
 let callCarefulModelImpl: CarefulModelImpl = defaultCallCarefulModelImpl;
 let memoryPanelClearTimer: NodeJS.Timeout | null = null;
+let currentMemoryMeterCtx: ExtensionContext | undefined;
 
 export function setCallCarefulModelImplForTest(impl: CarefulModelImpl): void {
 	callCarefulModelImpl = impl;
@@ -346,7 +347,7 @@ type MessageLike = {
 };
 
 function triggerBackgroundReconciliation(
-	ctx: { cwd?: string; model?: unknown; modelRegistry?: any; thinkingLevel?: any; hasUI?: boolean; ui?: ExtensionAPI["ui"] },
+	ctx: ExtensionContext & { cwd?: string; model?: unknown; modelRegistry?: any; thinkingLevel?: any },
 	paths: MemoryPaths,
 	startGen: number,
 ): void {
@@ -356,10 +357,10 @@ function triggerBackgroundReconciliation(
 	}
 
 	const capturedCtx = captureCtx(ctx);
-	const ui = ctx.hasUI ? ctx.ui : undefined;
+	currentMemoryMeterCtx = ctx.hasUI ? ctx : undefined;
 
 	reconcileInFlight = true;
-	updateMemoryMeter(ui, { showPanel: true, panelTitle: "Memory reconciliation running" });
+	updateMemoryMeter(currentMemoryMeterCtx?.ui, { showPanel: true, panelTitle: "Memory reconciliation running" });
 
 	setTimeout(async () => {
 		let bgDb: SqliteDatabase | null = null;
@@ -387,7 +388,7 @@ function triggerBackgroundReconciliation(
 				wallClockBudgetMs: reconciliation.budgetMs,
 				shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
 				onChunkStart: (chunkIndex, totalChunks) => {
-					updateMemoryMeter(ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
+					updateMemoryMeter(currentMemoryMeterCtx?.ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
 				},
 				callCarefulModel: (systemPrompt, userPrompt) => {
 					return callCarefulModelImpl(systemPrompt, userPrompt, {
@@ -428,10 +429,11 @@ function triggerBackgroundReconciliation(
 			const message = formatError(error);
 			recordThrownReconcileRun(paths, "background", startedAt, chosenModel, error);
 			console.error(`[persistent-memory] background reconciliation threw: ${message}`);
-			ui?.notify?.(`persistent-memory background reconciliation failed: ${message}`, "error");
+			currentMemoryMeterCtx?.ui.notify?.(`persistent-memory background reconciliation failed: ${message}`, "error");
 		} finally {
 			reconcileInFlight = false;
-			updateMemoryMeter(ui, { clearPanel: true });
+			updateMemoryMeter(currentMemoryMeterCtx?.ui, { clearPanel: true });
+			currentMemoryMeterCtx = undefined;
 			if (bgDb) {
 				closeDatabaseQuietly(bgDb, "failed background db");
 			}
