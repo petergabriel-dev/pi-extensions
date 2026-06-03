@@ -17,7 +17,7 @@ import { registerRecallTool } from "./retrieval/tier3.js";
 import { initializeProjectMemory, type MemoryIgnoreResult, type MemoryInitResult } from "./storage/init.js";
 import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolveMemoryIndexPath, resolveMemoryPaths } from "./storage/paths.js";
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
-import { recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
+import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
 import { resolveCarefulModel } from "./model-resolution.js";
 
@@ -285,6 +285,10 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await listStaging(ctx);
 				return;
 			}
+			if (trimmed === "status") {
+				await memoryStatusCommand(ctx);
+				return;
+			}
 			if (trimmed === "reconcile") {
 				await reconcileMemoryCommand(ctx);
 				return;
@@ -297,7 +301,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await listDeadLetter(ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory reconcile, /memory firings, or /memory deadletter", "warning");
+			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, or /memory deadletter", "warning");
 		},
 	});
 }
@@ -885,6 +889,35 @@ function formatWriteFlags(writes: { lessons: boolean; preferences: boolean; deci
 		.filter(([, didWrite]) => didWrite)
 		.map(([name]) => name);
 	return changed.length > 0 ? changed.join(", ") : "none";
+}
+
+async function memoryStatusCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!memoryPaths?.projectMemoryDir) {
+		ctx.ui.notify(lastRebuildError ? `Memory not initialized: ${lastRebuildError}` : "No project memory dir.", "warning");
+		return;
+	}
+
+	const stagingFiles = listStagingFiles(memoryPaths.projectMemoryDir);
+	const recentRuns = readRecentReconcileRuns(memoryPaths, 5);
+	const lines = [
+		"Memory status:",
+		`  Staging files: ${stagingFiles.length}`,
+		`  Reconciliation: ${reconcileInFlight ? "in flight" : "idle"}`,
+		`  Last index error: ${lastRebuildError ?? "none"}`,
+	];
+
+	if (recentRuns.length === 0) {
+		lines.push("  Recent reconcile runs: none");
+	} else {
+		lines.push("  Recent reconcile runs:");
+		for (const run of recentRuns) {
+			const reason = run.reason ? ` (${run.reason})` : "";
+			const model = run.model ? ` model=${run.model}` : "";
+			lines.push(`    ${run.finishedAt} ${run.source} ${run.status}${reason} ${run.durationMs}ms${model}`);
+		}
+	}
+
+	ctx.ui.notify(lines.join("\n"), "info");
 }
 
 async function listStaging(ctx: ExtensionCommandContext): Promise<void> {
