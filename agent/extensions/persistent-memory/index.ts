@@ -118,9 +118,11 @@ export default function persistentMemory(pi: ExtensionAPI) {
 
 			lastRebuildError = null;
 			scheduleRegeneration(memoryPaths);
-			updateMemoryMeter(pi.ui);
+			if (ctx.hasUI) {
+				updateMemoryMeter(ctx.ui);
+			}
 
-			triggerBackgroundReconciliation(ctx, memoryPaths, lifecycleGeneration, pi.ui);
+			triggerBackgroundReconciliation(ctx, memoryPaths, lifecycleGeneration);
 		} catch (error) {
 			lastRebuildError = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`persistent-memory failed to initialize: ${lastRebuildError}`, "error");
@@ -344,10 +346,9 @@ type MessageLike = {
 };
 
 function triggerBackgroundReconciliation(
-	ctx: { cwd?: string; model?: unknown; modelRegistry?: any; thinkingLevel?: any },
+	ctx: { cwd?: string; model?: unknown; modelRegistry?: any; thinkingLevel?: any; hasUI?: boolean; ui?: ExtensionAPI["ui"] },
 	paths: MemoryPaths,
 	startGen: number,
-	ui: ExtensionAPI["ui"]
 ): void {
 	if (reconcileInFlight) {
 		console.log("[persistent-memory] reconciliation already in flight; skipping background trigger.");
@@ -355,6 +356,7 @@ function triggerBackgroundReconciliation(
 	}
 
 	const capturedCtx = captureCtx(ctx);
+	const ui = ctx.hasUI ? ctx.ui : undefined;
 
 	reconcileInFlight = true;
 	updateMemoryMeter(ui, { showPanel: true, panelTitle: "Memory reconciliation running" });
@@ -426,7 +428,7 @@ function triggerBackgroundReconciliation(
 			const message = formatError(error);
 			recordThrownReconcileRun(paths, "background", startedAt, chosenModel, error);
 			console.error(`[persistent-memory] background reconciliation threw: ${message}`);
-			ui.notify(`persistent-memory background reconciliation failed: ${message}`, "error");
+			ui?.notify?.(`persistent-memory background reconciliation failed: ${message}`, "error");
 		} finally {
 			reconcileInFlight = false;
 			updateMemoryMeter(ui, { clearPanel: true });
@@ -920,7 +922,9 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 			wallClockBudgetMs: reconciliation.budgetMs,
 			shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
 			onChunkStart: (chunkIndex, totalChunks) => {
-				updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
+				if ((ctx as ExtensionCommandContext & { hasUI?: boolean }).hasUI) {
+					updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
+				}
 			},
 			callCarefulModel: (systemPrompt, userPrompt) => {
 				return callCarefulModelImpl(systemPrompt, userPrompt, {
@@ -958,7 +962,9 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 		ctx.ui.notify(`Memory reconciliation failed: ${formatError(error)}; staging preserved.`, "error");
 	} finally {
 		reconcileInFlight = false;
-		updateMemoryMeter(ctx.ui, { clearPanel: true });
+		if ((ctx as ExtensionCommandContext & { hasUI?: boolean }).hasUI) {
+			updateMemoryMeter(ctx.ui, { clearPanel: true });
+		}
 		if (ownDb) closeDatabaseQuietly(ownDb, "manual reconcile db");
 	}
 }
@@ -1013,7 +1019,9 @@ async function memoryStatusCommand(ctx: ExtensionCommandContext): Promise<void> 
 	}
 
 	ctx.ui.notify(lines.join("\n"), "info");
-	updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: "Memory status", clearAfterMs: MEMORY_PANEL_CLEAR_MS });
+	if ((ctx as ExtensionCommandContext & { hasUI?: boolean }).hasUI) {
+		updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: "Memory status", clearAfterMs: MEMORY_PANEL_CLEAR_MS });
+	}
 }
 
 async function listStaging(ctx: ExtensionCommandContext): Promise<void> {
