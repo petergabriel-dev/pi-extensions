@@ -13,7 +13,6 @@ import { clearFiringLog, logFiring, logToolCall, type ToolCallObservation } from
 import { formatTier1Block, formatTier2Block } from "./retrieval/inject.js";
 import { selectTier1 } from "./retrieval/tier1.js";
 import { matchTier2, type Match } from "./retrieval/tier2.js";
-import { registerRecallTool } from "./retrieval/tier3.js";
 import { initializeProjectMemory, type MemoryIgnoreResult, type MemoryInitResult } from "./storage/init.js";
 import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolveMemoryIndexPath, resolveMemoryPaths } from "./storage/paths.js";
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
@@ -96,7 +95,9 @@ export function __bumpPersistentMemoryGenerationForTest(): void {
 }
 
 export default function persistentMemory(pi: ExtensionAPI) {
-	registerRecallTool(pi, () => db, currentProjectScope);
+	void import("./retrieval/tier3.js").then(({ registerRecallTool }) => {
+		registerRecallTool(pi, () => db, currentProjectScope);
+	});
 	registerMarkerHooks(pi);
 
 	pi.on("session_start", async (event, ctx) => {
@@ -758,7 +759,7 @@ function formatModelForRunLog(model: unknown): string | null {
 	return typeof record.provider === "string" ? `${record.provider}/${id}` : id;
 }
 
-function updateMemoryMeter(
+export function updateMemoryMeter(
 	ui: ExtensionAPI["ui"],
 	options: { showPanel?: boolean; clearPanel?: boolean; clearAfterMs?: number; panelTitle?: string } = {},
 ): void {
