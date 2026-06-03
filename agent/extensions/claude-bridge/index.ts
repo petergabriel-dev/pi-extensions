@@ -1,0 +1,888 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { FSWatcher } from "node:fs";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { BUILD_PROMPT, DISCUSS_PROMPT, getWorkflowPolicySnapshot, PLAN_PROMPT, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
+import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
+import { deriveLessonTriggers, readStaging, stagingPath, writeStaging } from "../persistent-memory/consolidation/staging.js";
+import { formatTier1Block, formatTier2Block } from "../persistent-memory/retrieval/inject.js";
+import { selectTier1 } from "../persistent-memory/retrieval/tier1.js";
+import { matchTier2 } from "../persistent-memory/retrieval/tier2.js";
+import { projectScopeFromMemoryPaths, resolveMemoryIndexPath, resolveMemoryPaths } from "../persistent-memory/storage/paths.js";
+import { openIndex } from "../persistent-memory/storage/sqlite.js";
+import type { StagingFile } from "../persistent-memory/types.js";
+
+const EXTENSION_ID = "claude-bridge";
+const REQUEST_TYPES = new Set(["recall", "capture", "validate_tags", "save_plan"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LOCK_TTL_MS = 5_000;
+const HEARTBEAT_MS = 2_000; // 2s; Pi lock TTL is 5s, so 2s gives 2.5x headroom.
+const POLICY_TTL_MS = 4_000;
+
+interface BridgePaths {
+	root: string;
+	requests: string;
+	responses: string;
+	processed: string;
+	policy: string;
+	session: string;
+}
+
+interface BridgeSessionLock {
+	schemaVersion: 1;
+	status: "active";
+	bridgeSessionId: string;
+	piSessionId: string | null;
+	pid: number;
+	projectRoot: string;
+	startedAt: string;
+	heartbeatAt: string;
+}
+
+interface BridgeRequest {
+	id: string;
+	type: string;
+	payload: Record<string, unknown>;
+	ts: number;
+}
+
+interface BridgeResponse {
+	id: string;
+	ok: boolean;
+	result?: Record<string, unknown>;
+	error?: {
+		code: string;
+		message: string;
+	};
+}
+
+interface RecallPayload {
+	query?: string;
+	mode?: "discuss" | "plan" | "build";
+}
+
+type CaptureNoteType = "requirement" | "decision" | "constraint" | "action" | "question" | "preference" | "implementation" | "lesson";
+
+interface CapturedNote {
+	id: number;
+	type: CaptureNoteType;
+	text: string;
+	createdAt: number;
+	source: string;
+}
+
+interface AddResult {
+	added: CapturedNote[];
+	skipped: Array<{ type: CaptureNoteType; text: string; reason: "duplicate" }>;
+}
+
+interface CaptureNoteInput {
+	type: CaptureNoteType;
+	text: string;
+}
+
+interface CapturePayload {
+	notes: CaptureNoteInput[];
+	claudeSessionId?: string;
+	context?: string;
+}
+
+interface ValidateTagsPayload {
+	planText: string;
+}
+
+interface SavePlanPayload {
+	planText: string;
+	planId?: string;
+	confirmed?: boolean;
+}
+
+interface PendingEventResult {
+	resolve: (result: Record<string, unknown>) => void;
+	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
+}
+
+let bridgeSessionId = randomUUID();
+let startedAt = new Date().toISOString();
+let activePaths: BridgePaths | null = null;
+let activeProjectRoot: string | null = null;
+let watcher: FSWatcher | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
+let passiveReason: string | null = null;
+const pendingSavePlans = new Map<string, PendingEventResult>();
+const pendingDiscussionNotes = new Map<string, PendingEventResult>();
+
+const SCAN_COALESCE_MS = 50; // coalesce rapid watcher events into one scan per window.
+let scanScheduled = false;
+let lastScanAt = 0;
+
+function ensureDir(dir: string): void {
+	fs.mkdirSync(dir, { recursive: true });
+}
+
+function writeFileAtomic(filePath: string, content: string): void {
+	const dir = path.dirname(filePath);
+	ensureDir(dir);
+	const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
+	let fd: number | undefined;
+	try {
+		fs.writeFileSync(tmp, content, "utf-8");
+		fd = fs.openSync(tmp, "r+");
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		fs.renameSync(tmp, filePath);
+	} catch (error) {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
+		throw error;
+	}
+}
+
+// Drop fsync for high-frequency writes — rename is sufficient safety.
+function writeJsonFast(filePath: string, value: unknown): void {
+	const dir = path.dirname(filePath);
+	ensureDir(dir);
+	const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
+	let fd: number | undefined;
+	try {
+		fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+		// No fsync — rename is atomic enough for idempotent cache files.
+		fs.closeSync(fs.openSync(tmp, "r+"));
+		fd = undefined;
+		fs.renameSync(tmp, filePath);
+	} catch (error) {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
+		throw error;
+	}
+}
+
+function writeJsonAtomic(filePath: string, value: unknown): void {
+	writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function safeUnlink(filePath: string): void {
+	try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+}
+
+function readTextIfExists(filePath: string): string | null {
+	try {
+		if (!fs.existsSync(filePath)) return null;
+		return fs.readFileSync(filePath, "utf-8");
+	} catch {
+		return null;
+	}
+}
+
+function readJson(filePath: string): unknown | null {
+	try {
+		return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+	} catch {
+		return null;
+	}
+}
+
+function toIso(ms: number): string {
+	return new Date(ms).toISOString();
+}
+
+function parseTime(value: unknown): number {
+	if (typeof value !== "string") return 0;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sessionIdFromContext(ctx: ExtensionContext): string | null {
+	try {
+		const sessionId = (ctx.sessionManager as { getSessionId?: () => string | null | undefined })?.getSessionId?.();
+		return sessionId ? String(sessionId) : null;
+	} catch {
+		return null;
+	}
+}
+
+function bridgePaths(projectMemoryDir: string): BridgePaths {
+	const root = path.join(projectMemoryDir, "bridge");
+	return {
+		root,
+		requests: path.join(root, "requests"),
+		responses: path.join(root, "responses"),
+		processed: path.join(root, "processed"),
+		policy: path.join(root, "policy.json"),
+		session: path.join(root, "session.json"),
+	};
+}
+
+function ensureBridgeDirs(paths: BridgePaths): void {
+	ensureDir(paths.requests);
+	ensureDir(paths.responses);
+	ensureDir(paths.processed);
+}
+
+function isStaleLock(lock: unknown, now = Date.now()): { stale: true; reason: string } | { stale: false } {
+	if (!lock || typeof lock !== "object") return { stale: false }; // no/unreadable lock file → free to claim
+	const record = lock as Partial<BridgeSessionLock>;
+	if (record.status !== "active" || typeof record.bridgeSessionId !== "string") {
+		return { stale: false }; // missing/unset is okay for us to claim
+	}
+	// Same bridge session: fine, we refresh it.
+	if (record.bridgeSessionId === bridgeSessionId) return { stale: false };
+	const heartbeat = parseTime(record.heartbeatAt);
+	// Stale if: heartbeat is older than our lock TTL (another session's heartbeat expired).
+	if (heartbeat > 0 && now - heartbeat <= LOCK_TTL_MS) {
+		return { stale: true, reason: `Another active Pi bridge owns this project (${record.bridgeSessionId}).` };
+	}
+	// Heartbeat expired: treat it as our session (it was ours before Pi restart).
+	return { stale: false };
+}
+
+function claimSessionLock(paths: BridgePaths, projectRoot: string, piSessionId: string | null): { active: true } | { active: false; reason: string } {
+	const existing = readJson(paths.session);
+	const stale = isStaleLock(existing);
+	if (stale.stale) {
+		return { active: false, reason: stale.reason };
+	}
+	const now = new Date().toISOString();
+	const policy = getWorkflowPolicySnapshot();
+	const batch = JSON.stringify({
+		lock: {
+			schemaVersion: 1,
+			status: "active",
+			bridgeSessionId,
+			piSessionId,
+			pid: process.pid,
+			projectRoot,
+			startedAt,
+			heartbeatAt: now,
+		},
+		policy,
+		writtenAt: now,
+	}, null, 2);
+	const tmp = path.join(paths.root, `policy.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
+	let fd: number | undefined;
+	try {
+		fs.writeFileSync(tmp, batch, "utf-8");
+		fs.closeSync(fs.openSync(tmp, "r+"));
+		fs.renameSync(tmp, paths.session);
+		writeJsonFast(paths.policy, { schemaVersion: 1, projectRoot, bridgeSessionId, pid: process.pid, writtenAt: now, expiresAt: new Date(Date.now() + POLICY_TTL_MS).toISOString(), policy });
+	} catch (error) {
+		if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
+		throw error;
+	}
+	return { active: true };
+}
+
+function refreshSessionLock(paths: BridgePaths, projectRoot: string, piSessionId: string | null): boolean {
+	const existing = readJson(paths.session);
+	const stale = isStaleLock(existing);
+	if (stale.stale) {
+		passiveReason = stale.reason;
+		return false;
+	}
+	const now = new Date().toISOString();
+	const policy = getWorkflowPolicySnapshot();
+	const batch = JSON.stringify({
+		lock: {
+			schemaVersion: 1,
+			status: "active",
+			bridgeSessionId,
+			piSessionId,
+			pid: process.pid,
+			projectRoot,
+			startedAt,
+			heartbeatAt: now,
+		},
+		policy,
+		writtenAt: now,
+	}, null, 2);
+	const tmp = path.join(paths.root, `policy.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
+	let fd: number | undefined;
+	try {
+		fs.writeFileSync(tmp, batch, "utf-8");
+		fs.closeSync(fs.openSync(tmp, "r+"));
+		fs.renameSync(tmp, paths.session);
+		writeJsonFast(paths.policy, { schemaVersion: 1, projectRoot, bridgeSessionId, pid: process.pid, writtenAt: now, expiresAt: new Date(Date.now() + POLICY_TTL_MS).toISOString(), policy });
+	} catch (error) {
+		if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
+		throw error;
+	}
+	return true;
+}
+
+function cleanupAllBridgeFiles(paths: BridgePaths): void {
+	const existing = readJson(paths.session);
+	if (existing && typeof existing === "object" && (existing as { bridgeSessionId?: unknown }).bridgeSessionId !== bridgeSessionId) {
+		return; // Not ours — leave it alone.
+	}
+	for (const dir of [paths.requests, paths.responses, paths.processed]) {
+		try {
+			for (const fileName of fs.readdirSync(dir)) {
+				if (fileName.endsWith(".json")) {
+					try { fs.unlinkSync(path.join(dir, fileName)); } catch { /* ignore */ }
+				}
+			}
+		} catch { /* dir missing or empty */ }
+	}
+	try { fs.unlinkSync(paths.session); } catch { /* ignore */ }
+	try { fs.unlinkSync(paths.policy); } catch { /* ignore */ }
+}
+
+function writePolicy(paths: BridgePaths, projectRoot: string): void {
+	const now = Date.now();
+	writeJsonAtomic(paths.policy, {
+		schemaVersion: 1,
+		projectRoot,
+		bridgeSessionId,
+		pid: process.pid,
+		writtenAt: toIso(now),
+		expiresAt: toIso(now + POLICY_TTL_MS),
+		policy: getWorkflowPolicySnapshot(),
+	});
+}
+
+function responsePath(paths: BridgePaths, id: string): string {
+	return path.join(paths.responses, `${id}.json`);
+}
+
+function processedPath(paths: BridgePaths, id: string): string {
+	return path.join(paths.processed, `${id}.json`);
+}
+
+function requestPath(paths: BridgePaths, fileName: string): string {
+	return path.join(paths.requests, fileName);
+}
+
+function errorResponse(id: string, code: string, message: string): BridgeResponse {
+	return { id, ok: false, error: { code, message } };
+}
+
+function validateRequest(fileId: string, raw: unknown): BridgeRequest {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error("Request must be a JSON object.");
+	}
+	const record = raw as Record<string, unknown>;
+	if (record.id !== fileId) throw new Error("Request id must match request filename.");
+	if (typeof record.id !== "string" || !UUID_RE.test(record.id)) throw new Error("Request id must be a UUID.");
+	if (typeof record.type !== "string" || !REQUEST_TYPES.has(record.type)) {
+		throw new Error(`Request type must be one of: ${Array.from(REQUEST_TYPES).join(", ")}.`);
+	}
+	if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) throw new Error("Request ts must be a finite number.");
+	if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) throw new Error("Request payload must be an object.");
+	return {
+		id: record.id,
+		type: record.type,
+		payload: record.payload as Record<string, unknown>,
+		ts: record.ts,
+	};
+}
+
+function existsSync(filePath: string): boolean {
+	try { fs.accessSync(filePath); return true; } catch { return false; }
+}
+
+function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: string }> {
+	const docsRoot = path.join(projectRoot, "docs", "engineering");
+	const docs: Array<{ path: string; text: string }> = [];
+	for (const fileName of ["README.md", "architecture.md", "dev-workflow.md", "conventions.md", "invariants.md", "traps.md"]) {
+		const filePath = path.join(docsRoot, fileName);
+		const text = readTextIfExists(filePath);
+		if (text && text.trim()) docs.push({ path: path.relative(projectRoot, filePath), text });
+	}
+	const decisionsDir = path.join(docsRoot, "decisions");
+	try {
+		for (const fileName of fs.readdirSync(decisionsDir).sort()) {
+			if (!fileName.endsWith(".md") || fileName === "ADR-template.md") continue;
+			const filePath = path.join(decisionsDir, fileName);
+			const text = readTextIfExists(filePath);
+			if (text && text.trim()) docs.push({ path: path.relative(projectRoot, filePath), text });
+		}
+	} catch {
+		// No decisions dir.
+	}
+	return docs;
+}
+
+function promptContextForMode(mode: RecallPayload["mode"]): Record<string, unknown> {
+	return {
+		mode: mode ?? "plan",
+		discussPrompt: DISCUSS_PROMPT,
+		planPrompt: PLAN_PROMPT,
+		buildPrompt: BUILD_PROMPT,
+		planTemplatePath: PLAN_TEMPLATE_PATH,
+		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
+	};
+}
+
+function normalizeRecallPayload(payload: Record<string, unknown>): RecallPayload {
+	const query = typeof payload.query === "string" ? payload.query : "";
+	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" ? payload.mode : "plan";
+	return { query, mode };
+}
+
+function isNoteType(value: unknown): value is CaptureNoteType {
+	return typeof value === "string" && ["requirement", "decision", "constraint", "action", "question", "preference", "implementation", "lesson"].includes(value);
+}
+
+function normalizeCapturePayload(payload: Record<string, unknown>): CapturePayload {
+	const rawNotes = Array.isArray(payload.notes) ? payload.notes : [];
+	const notes = rawNotes.map((raw) => {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Each capture note must be an object.");
+		const record = raw as Record<string, unknown>;
+		if (!isNoteType(record.type)) throw new Error("Capture note type is invalid.");
+		if (typeof record.text !== "string" || record.text.trim().length === 0) throw new Error("Capture note text is required.");
+		return { type: record.type, text: record.text };
+	});
+	if (notes.length === 0) throw new Error("Capture request requires at least one note.");
+	if (notes.length > 10) throw new Error("Capture request supports at most 10 notes.");
+	return {
+		notes,
+		...(typeof payload.claudeSessionId === "string" && payload.claudeSessionId.trim() ? { claudeSessionId: payload.claudeSessionId.trim() } : {}),
+		...(typeof payload.context === "string" && payload.context.trim() ? { context: payload.context.trim() } : {}),
+	};
+}
+
+function sessionIdForStaging(_ctx: ExtensionContext, payload: CapturePayload): string {
+	return payload.claudeSessionId ? `claude-code-${payload.claudeSessionId}` : `claude-code-${bridgeSessionId}`;
+}
+
+function emptyStaging(sessionId: string, projectRoot: string): StagingFile {
+	return {
+		schemaVersion: 1,
+		session_id: sessionId,
+		produced_at: new Date().toISOString(),
+		project_root: projectRoot,
+		candidates: {
+			lessons: [],
+			preferences: [],
+			decisions: [],
+			domain: [],
+		},
+	};
+}
+
+function appendCaptureToStaging(projectMemoryDir: string, projectRoot: string, ctx: ExtensionContext, payload: CapturePayload, request: BridgeRequest, result: AddResult): string {
+	const sessionId = sessionIdForStaging(ctx, payload);
+	const filePath = stagingPath(projectMemoryDir, sessionId);
+	const staging = readStaging(filePath) ?? emptyStaging(sessionId, projectRoot);
+	staging.produced_at = new Date().toISOString();
+	staging.project_root = projectRoot;
+	const evidence = {
+		discussion_note_ids: result.added.map((note) => note.id),
+		source: "claude-code",
+		request_id: request.id,
+		bridge_session_id: bridgeSessionId,
+		...(payload.claudeSessionId ? { claude_session_id: payload.claudeSessionId } : {}),
+		...(payload.context ? { context: payload.context } : {}),
+	};
+	const scopeSuggestion = projectRoot.startsWith(".") ? projectRoot.slice(1) : path.basename(projectRoot);
+	const triggerContext = {
+		...(payload.context ? { topic: payload.context } : {}),
+		project_root: projectRoot,
+	};
+	for (const note of result.added) {
+		if (note.type === "lesson") {
+			staging.candidates.lessons.push({
+				summary: note.text.slice(0, 96),
+				detail: note.text,
+				triggers: deriveLessonTriggers(note.text, triggerContext, scopeSuggestion),
+				scope_suggestion: scopeSuggestion,
+				source_evidence: evidence,
+			});
+		} else if (note.type === "preference") {
+			staging.candidates.preferences.push({ text: note.text, source_evidence: evidence });
+		} else if (note.type === "decision") {
+			staging.candidates.decisions.push({ summary: note.text.slice(0, 96), detail: note.text, source_evidence: evidence });
+		} else if (note.type === "requirement" || note.type === "constraint") {
+			staging.candidates.domain.push({ summary: note.text.slice(0, 96), detail: note.text, source_evidence: evidence });
+		} else {
+			staging.candidates.domain.push({
+				summary: note.text.slice(0, 96),
+				detail: `[${note.type}] ${note.text}`,
+				source_evidence: evidence,
+			});
+		}
+	}
+	writeStaging(filePath, staging);
+	return filePath;
+}
+
+function normalizeValidateTagsPayload(payload: Record<string, unknown>): ValidateTagsPayload {
+	if (typeof payload.planText !== "string") throw new Error("validate_tags requires planText string.");
+	return { planText: payload.planText };
+}
+
+function normalizeSavePlanPayload(payload: Record<string, unknown>): SavePlanPayload {
+	if (typeof payload.planText !== "string" || payload.planText.trim().length === 0) throw new Error("save_plan requires non-empty planText string.");
+	if (payload.confirmed !== true) throw new Error("save_plan requires confirmed:true.");
+	return {
+		planText: payload.planText,
+		...(typeof payload.planId === "string" && payload.planId.trim() ? { planId: payload.planId.trim() } : {}),
+		confirmed: true,
+	};
+}
+
+function handleValidateTags(request: BridgeRequest): BridgeResponse {
+	try {
+		const payload = normalizeValidateTagsPayload(request.payload);
+		const validations = validatePlanDocsTags(payload.planText);
+		const invalid = validations.filter((item) => !item.valid);
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				valid: invalid.length === 0,
+				validations,
+				invalid,
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "validate_tags_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+function requestWorkflowSavePlan(pi: ExtensionAPI, requestId: string, payload: SavePlanPayload): Promise<Record<string, unknown>> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			pendingSavePlans.delete(requestId);
+			reject(new Error("workflow-modes save-plan event timed out."));
+		}, 1_500);
+		timer.unref?.();
+		pendingSavePlans.set(requestId, { resolve, reject, timer });
+		pi.events.emit("workflow-modes:save-plan", {
+			requestId,
+			planId: payload.planId ?? requestId,
+			plan: payload.planText,
+		});
+	});
+}
+
+async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeSavePlanPayload(request.payload);
+		const result = await requestWorkflowSavePlan(pi, request.id, payload);
+		if (result.ok !== true) {
+			return errorResponse(request.id, "save_plan_failed", typeof result.error === "string" ? result.error : "workflow-modes save-plan failed.");
+		}
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				planId: typeof result.planId === "string" ? result.planId : payload.planId ?? request.id,
+				savedAt: typeof result.savedAt === "string" ? result.savedAt : new Date().toISOString(),
+				chars: typeof result.chars === "number" ? result.chars : payload.planText.length,
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "save_plan_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+function handleRecall(request: BridgeRequest): BridgeResponse {
+	const payload = normalizeRecallPayload(request.payload);
+	const cwd = activeProjectRoot ?? process.cwd();
+	const memoryPaths = resolveMemoryPaths(cwd);
+	if (!memoryPaths.projectRoot || !memoryPaths.projectMemoryDir) {
+		return errorResponse(request.id, "not_pi_project", "Pi bridge recall requires an existing Pi project with .pi memory.");
+	}
+
+	const db = openIndex(resolveMemoryIndexPath(memoryPaths));
+	try {
+		const projectScope = projectScopeFromMemoryPaths(memoryPaths);
+		const tier1 = selectTier1(db, projectScope);
+		const tier2Matches = payload.query?.trim()
+			? matchTier2(db, projectScope, { user_message_text: payload.query })
+			: [];
+		const tier2Lessons = tier2Matches.map((match) => match.lesson);
+		const memoryBlocks = [formatTier1Block(tier1.lessons), formatTier2Block(tier2Lessons)].filter((block) => block.trim().length > 0);
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				projectRoot: memoryPaths.projectRoot,
+				projectScope,
+				query: payload.query ?? "",
+				memory: {
+					tier1: {
+						count: tier1.lessons.length,
+						budgetUsed: tier1.budget_used,
+						truncated: tier1.truncated,
+						block: formatTier1Block(tier1.lessons),
+					},
+					tier2: {
+						count: tier2Lessons.length,
+						matches: tier2Matches.map((match) => ({ lessonId: match.lesson.id, trigger: match.matched_trigger })),
+						block: formatTier2Block(tier2Lessons),
+					},
+					blocks: memoryBlocks,
+				},
+				docs: readEngineeringDocs(memoryPaths.projectRoot),
+				prompts: promptContextForMode(payload.mode),
+			},
+		};
+	} finally {
+		db.close();
+	}
+}
+
+function requestDiscussionNotesAdd(pi: ExtensionAPI, requestId: string, payload: CapturePayload): Promise<AddResult> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			pendingDiscussionNotes.delete(requestId);
+			reject(new Error("discussion-notes add event timed out."));
+		}, 1_500);
+		timer.unref?.();
+		pendingDiscussionNotes.set(requestId, {
+			resolve: (result) => {
+				if (result.ok !== true) {
+					reject(new Error(typeof result.error === "string" ? result.error : "discussion-notes add failed."));
+					return;
+				}
+				resolve({
+					added: Array.isArray(result.added) ? result.added as CapturedNote[] : [],
+					skipped: Array.isArray(result.skipped) ? result.skipped as AddResult["skipped"] : [],
+				});
+			},
+			reject,
+			timer,
+		});
+		pi.events.emit("discussion-notes:add", {
+			requestId,
+			notes: payload.notes,
+			source: "claude-code",
+		});
+	});
+}
+
+async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
+	let payload: CapturePayload;
+	try {
+		payload = normalizeCapturePayload(request.payload);
+	} catch (error) {
+		return errorResponse(request.id, "invalid_capture", error instanceof Error ? error.message : String(error));
+	}
+	const memoryPaths = resolveMemoryPaths(activeProjectRoot ?? ctx.cwd ?? process.cwd());
+	if (!memoryPaths.projectRoot || !memoryPaths.projectMemoryDir) {
+		return errorResponse(request.id, "not_pi_project", "Pi bridge capture requires an existing Pi project with .pi memory.");
+	}
+	try {
+		const addResult = await requestDiscussionNotesAdd(pi, request.id, payload);
+		const stagingFile = appendCaptureToStaging(memoryPaths.projectMemoryDir, memoryPaths.projectRoot, ctx, payload, request, addResult);
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				noteIds: addResult.added.map((note) => note.id),
+				noteId: addResult.added[0]?.id ?? null,
+				added: addResult.added.length,
+				skipped: addResult.skipped,
+				stagingFile,
+				widgetUpdated: true,
+				source: "claude-code",
+				projectRoot: memoryPaths.projectRoot,
+				...(payload.claudeSessionId ? { claudeSessionId: payload.claudeSessionId } : {}),
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "capture_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
+	if (request.type === "recall") return handleRecall(request);
+	if (request.type === "capture") return handleCapture(pi, ctx, request);
+	if (request.type === "validate_tags") return handleValidateTags(request);
+	if (request.type === "save_plan") return handleSavePlan(pi, ctx, request);
+	return errorResponse(request.id, "not_implemented", `Bridge handler not implemented for request type: ${request.type}.`);
+}
+
+function writeResponse(paths: BridgePaths, response: BridgeResponse): void {
+	// Write processed/ first (source of truth for idempotency), then responses/.
+	// Both use writeJsonFast — no fsync, rename-only. Safe since we unlink the
+	// request file immediately after, so no concurrent reader can see a
+	// partial-in-progress response before both files are stable.
+	writeJsonFast(processedPath(paths, response.id), response);
+	writeJsonFast(responsePath(paths, response.id), response);
+}
+
+function replayProcessedResponse(paths: BridgePaths, id: string): boolean {
+	// Fast path: if response already exists, nothing to do (no read of processed/).
+	if (existsSync(responsePath(paths, id))) return true;
+	const processed = readJson(processedPath(paths, id));
+	if (!processed) return false;
+	writeJsonFast(responsePath(paths, id), processed);
+	return true;
+}
+
+async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths, fileName: string): Promise<void> {
+	if (!fileName.endsWith(".json")) return;
+	const fileId = fileName.slice(0, -".json".length);
+	if (!UUID_RE.test(fileId)) return;
+	if (replayProcessedResponse(paths, fileId)) return;
+
+	const absolute = requestPath(paths, fileName);
+	const resolved = path.resolve(absolute);
+	const requestRoot = path.resolve(paths.requests) + path.sep;
+	if (!resolved.startsWith(requestRoot)) {
+		writeResponse(paths, errorResponse(fileId, "path_traversal", "Request path escaped bridge requests directory."));
+		return;
+	}
+
+	let response: BridgeResponse;
+	try {
+		const raw = JSON.parse(fs.readFileSync(resolved, "utf-8"));
+		const request = validateRequest(fileId, raw);
+		response = await handleRequest(pi, ctx, request);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		response = errorResponse(fileId, "invalid_request", message);
+	}
+	writeResponse(paths, response);
+	// Unlink request file so subsequent scans are O(in-flight), not O(history).
+	safeUnlink(requestPath(paths, fileName));
+}
+
+async function scanRequests(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): Promise<void> {
+	let fileNames: string[] = [];
+	try {
+		fileNames = fs.readdirSync(paths.requests);
+	} catch {
+		return;
+	}
+	for (const fileName of fileNames) await processRequestFile(pi, ctx, paths, fileName);
+}
+
+function scheduleScan(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): void {
+	const now = Date.now();
+	if (scanScheduled) return;
+	if (now - lastScanAt < SCAN_COALESCE_MS) return;
+	scanScheduled = true;
+	lastScanAt = now;
+	setTimeout(() => {
+		scanScheduled = false;
+		void scanRequests(pi, ctx, paths);
+	}, SCAN_COALESCE_MS).unref?.();
+}
+
+function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContext): void {
+	watcher?.close();
+	watcher = fs.watch(paths.requests, (_eventType, _fileName) => scheduleScan(pi, ctx, paths));
+	watcher.on("error", (error) => {
+		const message = error instanceof Error ? error.message : String(error);
+		ctx.ui.notify(`claude-bridge watcher failed: ${message}`, "error");
+	});
+	// No backup poll — fs.watch is sufficient on modern macOS/Node with O(1) in-flight requests.
+}
+
+function stopActiveBridge(reason?: string): void {
+	watcher?.close();
+	watcher = null;
+	if (heartbeatTimer) clearInterval(heartbeatTimer);
+	heartbeatTimer = null;
+	if (activePaths) {
+		const paths = activePaths;
+		if (reason) {
+			// Graceful stop: write inactive marker so MCP clients can detect us stopping.
+			writeJsonFast(paths.session, {
+				schemaVersion: 1,
+				status: "inactive",
+				bridgeSessionId,
+				stoppedAt: new Date().toISOString(),
+				reason: reason ?? "shutdown",
+			});
+		}
+		cleanupAllBridgeFiles(paths);
+	}
+	activePaths = null;
+	activeProjectRoot = null;
+}
+
+export default function claudeBridge(pi: ExtensionAPI) {
+	pi.events.on("workflow-modes:save-plan-result", (data: unknown) => {
+		const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
+		const requestId = typeof result.requestId === "string" ? result.requestId : undefined;
+		if (!requestId) return;
+		const pending = pendingSavePlans.get(requestId);
+		if (!pending) return;
+		pendingSavePlans.delete(requestId);
+		clearTimeout(pending.timer);
+		pending.resolve(result);
+	});
+
+	pi.events.on("discussion-notes:add-result", (data: unknown) => {
+		const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
+		const requestId = typeof result.requestId === "string" ? result.requestId : undefined;
+		if (!requestId) return;
+		const pending = pendingDiscussionNotes.get(requestId);
+		if (!pending) return;
+		pendingDiscussionNotes.delete(requestId);
+		clearTimeout(pending.timer);
+		pending.resolve(result);
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		stopActiveBridge();
+		passiveReason = null;
+		const memoryPaths = resolveMemoryPaths(ctx.cwd ?? process.cwd());
+		if (!memoryPaths.projectRoot || !memoryPaths.projectMemoryDir) {
+			ctx.ui.setStatus(EXTENSION_ID, undefined);
+			return;
+		}
+
+		const paths = bridgePaths(memoryPaths.projectMemoryDir);
+		ensureBridgeDirs(paths);
+		const piSessionId = sessionIdFromContext(ctx);
+		const claim = claimSessionLock(paths, memoryPaths.projectRoot, piSessionId);
+		if (!claim.active) {
+			passiveReason = claim.reason;
+			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+			ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
+			return;
+		}
+
+		activePaths = paths;
+		activeProjectRoot = memoryPaths.projectRoot;
+		writePolicy(paths, memoryPaths.projectRoot);
+		startWatcher(pi, paths, ctx);
+		heartbeatTimer = setInterval(() => {
+			if (!activePaths || !activeProjectRoot) return;
+			if (!refreshSessionLock(activePaths, activeProjectRoot, piSessionId)) {
+				watcher?.close();
+				watcher = null;
+				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+				return;
+			}
+		}, HEARTBEAT_MS);
+		heartbeatTimer.unref?.();
+		ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: active");
+		ctx.ui.notify(`claude-bridge active: ${paths.root}`, "info");
+	});
+
+	pi.on("session_shutdown", async () => {
+		stopActiveBridge("session_shutdown");
+	});
+
+	pi.registerCommand("claude-bridge", {
+		description: "Show Claude Code bridge status",
+		handler: async (_args, ctx) => {
+			if (activePaths && activeProjectRoot) {
+				ctx.ui.notify(`Claude bridge active\nRoot: ${activePaths.root}\nSession: ${bridgeSessionId}`, "info");
+				return;
+			}
+			ctx.ui.notify(`Claude bridge passive/off${passiveReason ? `\n${passiveReason}` : ""}`, passiveReason ? "warning" : "info");
+		},
+	});
+}
