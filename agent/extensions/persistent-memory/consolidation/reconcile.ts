@@ -1,7 +1,8 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { normalizeExtractionResult, parseModelJson } from "./extract.js";
 import { buildReconciliationUserPrompt, RECONCILIATION_SYSTEM_PROMPT } from "./prompts.js";
-import { deleteStaging, listStagingFiles, readStaging, writeStaging, writeDeadLetter, type DeadLetteredCandidate } from "./staging.js";
+import { deleteStaging, listStagingFiles, repairStagingFile, writeStaging, writeDeadLetter, type DeadLetteredCandidate } from "./staging.js";
 import {
 	parseDecisionsFile,
 	parseDomainFile,
@@ -128,6 +129,7 @@ export interface ReconciliationRunCounts {
 		valid: number;
 		malformed: number;
 		wrongProject: number;
+		deadLettered: number;
 		consumed: number;
 		preserved: number;
 	};
@@ -277,11 +279,13 @@ export async function runReconciliation(
 				: { status: "skipped", reason: "no_staging", counts, llmCalled: false, indexRebuilt };
 		}
 
-		const loaded = loadValidSameProjectStaging(stagingFiles, memoryPaths.projectRoot);
+		const loaded = loadValidSameProjectStaging(stagingFiles, memoryPaths.projectRoot, memoryPaths.projectMemoryDir);
 		counts.stagingFiles.valid = loaded.valid.length;
-		counts.stagingFiles.malformed = loaded.malformed.length;
+		counts.stagingFiles.malformed = 0;
 		counts.stagingFiles.wrongProject = loaded.wrongProject.length;
-		counts.stagingFiles.preserved = loaded.malformed.length + loaded.wrongProject.length;
+		counts.stagingFiles.deadLettered = loaded.deadLettered.length;
+		counts.stagingFiles.preserved = loaded.wrongProject.length;
+		counts.candidates.deadLettered = loaded.deadLetteredCandidates;
 
 		if (loaded.valid.length === 0) {
 			if (deps.rebuildOnNoop) {
@@ -739,7 +743,7 @@ export function prepareStagingCandidates(stagingFiles: StagingFile[]): PreparedR
 
 function emptyRunCounts(): ReconciliationRunCounts {
 	return {
-		stagingFiles: { total: 0, valid: 0, malformed: 0, wrongProject: 0, consumed: 0, preserved: 0 },
+		stagingFiles: { total: 0, valid: 0, malformed: 0, wrongProject: 0, deadLettered: 0, consumed: 0, preserved: 0 },
 		candidates: {
 			staged: { ...EMPTY_TOTALS },
 			exactDuplicates: { ...EMPTY_TOTALS },
@@ -756,20 +760,37 @@ function emptyRunCounts(): ReconciliationRunCounts {
 	};
 }
 
-function loadValidSameProjectStaging(filePaths: string[], projectRoot: string): {
+export function loadValidSameProjectStaging(filePaths: string[], projectRoot: string, projectMemoryDir: string): {
 	valid: LoadedStagingFile[];
-	malformed: string[];
+	deadLettered: string[];
+	deadLetteredCandidates: CategoryTotals;
 	wrongProject: string[];
 } {
 	const valid: LoadedStagingFile[] = [];
-	const malformed: string[] = [];
+	const deadLettered: string[] = [];
+	const deadLetteredCandidates: CategoryTotals = { ...EMPTY_TOTALS };
 	const wrongProject: string[] = [];
 
 	for (const filePath of filePaths) {
-		const raw = readStaging(filePath);
-		const data = normalizeStagingFile(raw);
+		const raw = readRawStaging(filePath);
+		let data = normalizeStagingFile(raw);
 		if (!data) {
-			malformed.push(filePath);
+			const repaired = repairStagingFile(raw);
+			data = normalizeStagingFile(repaired);
+			if (data) writeStaging(filePath, data);
+		}
+		if (!data) {
+			const rawProjectRoot = requireString(asRecord(raw).project_root);
+			if (rawProjectRoot && !sameProjectRoot(rawProjectRoot, projectRoot)) {
+				wrongProject.push(filePath);
+				continue;
+			}
+			for (const deadLetter of malformedStagingDeadLetters(raw, filePath)) {
+				writeDeadLetter(projectMemoryDir, deadLetter);
+				deadLetteredCandidates[deadLetter.category] += 1;
+			}
+			deleteStaging(filePath);
+			deadLettered.push(filePath);
 			continue;
 		}
 		if (!sameProjectRoot(data.project_root, projectRoot)) {
@@ -779,7 +800,44 @@ function loadValidSameProjectStaging(filePaths: string[], projectRoot: string): 
 		valid.push({ filePath, data });
 	}
 
-	return { valid, malformed, wrongProject };
+	return { valid, deadLettered, deadLetteredCandidates, wrongProject };
+}
+
+function readRawStaging(filePath: string): unknown {
+	const text = fs.readFileSync(filePath, "utf-8");
+	try {
+		return JSON.parse(text);
+	} catch {
+		return text;
+	}
+}
+
+function malformedStagingDeadLetters(raw: unknown, filePath: string): DeadLetteredCandidate[] {
+	const root = asRecord(raw);
+	const session_id = requireString(root.session_id) ?? `malformed-${path.basename(filePath, ".json")}`;
+	const produced_at = requireTimestamp(root.produced_at) ?? new Date(0).toISOString();
+	const last_gate_reason = "malformed staging file";
+	const categories: ReconciliationCategory[] = ["lessons", "preferences", "decisions", "domain"];
+	const candidates = asRecord(root.candidates);
+	const extracted: DeadLetteredCandidate[] = [];
+	for (const category of categories) {
+		const values = candidates[category];
+		if (!Array.isArray(values)) continue;
+		for (const candidate of values) {
+			const attemptValue = asRecord(candidate).reconcile_attempts;
+			extracted.push({
+				session_id,
+				produced_at,
+				attempts: typeof attemptValue === "number" && Number.isFinite(attemptValue) ? attemptValue : 0,
+				last_gate_reason,
+				category,
+				candidate: { candidate, original_staging_file: raw },
+			});
+		}
+	}
+	return extracted.length > 0
+		? extracted
+		: [{ session_id, produced_at, attempts: 0, last_gate_reason, category: "lessons", candidate: raw }];
 }
 
 export function normalizeStagingFile(raw: unknown): StagingFile | null {
