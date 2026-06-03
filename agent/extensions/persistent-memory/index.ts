@@ -709,46 +709,75 @@ async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<voi
 		ctx.ui.notify("No project memory dir.", "warning");
 		return;
 	}
-
-	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
-	const reconciliation = reconciliationConfig();
-	const result = await runReconciliation(memoryPaths, db, {
-		rebuildOnNoop: true,
-		logger: console,
-		chunkSize: reconciliation.chunkSize,
-		wallClockBudgetMs: reconciliation.budgetMs,
-		shouldContinue: () => true,
-		onChunkStart: (chunkIndex, totalChunks) => {
-			try {
-				(ctx.ui as any).setStatus?.("persistent-memory", `Memory consolidating... (chunk ${chunkIndex}/${totalChunks})`);
-			} catch {
-				// ignore status errors
-			}
-		},
-		callCarefulModel: (systemPrompt, userPrompt) => {
-			const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, modelContext, console);
-			return callCarefulModelImpl(systemPrompt, userPrompt, {
-				cwd: modelContext.cwd ?? process.cwd(),
-				...(chosenModel ? { model: chosenModel as never } : {}),
-				...(modelContext.thinkingLevel ? { thinkingLevel: modelContext.thinkingLevel as never } : {}),
-				timeoutMs: reconciliationTimeoutMs(),
-				logger: console,
-			});
-		},
-	});
-	try {
-		(ctx.ui as any).setStatus?.("persistent-memory", undefined);
-	} catch {
-		// ignore status errors
-	}
-
-	if (result.status === "failed") {
-		ctx.ui.notify(`Memory reconciliation failed (${result.reason}): ${formatError(result.error)}; staging preserved.`, "error");
+	if (reconcileInFlight) {
+		ctx.ui.notify("Memory reconciliation already running; staging will be processed by the in-flight run.", "warning");
 		return;
 	}
 
-	lastRebuildError = null;
-	ctx.ui.notify(formatReconciliationResult(result), "info");
+	const runPaths = { ...memoryPaths };
+	const startGen = lifecycleGeneration;
+	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
+	const reconciliation = reconciliationConfig();
+	reconcileInFlight = true;
+
+	let ownDb: SqliteDatabase | null = null;
+	try {
+		ownDb = openIndex(indexPathForMemoryPaths(runPaths));
+		const result = await runReconciliation(runPaths, ownDb, {
+			rebuildOnNoop: true,
+			logger: console,
+			chunkSize: reconciliation.chunkSize,
+			wallClockBudgetMs: reconciliation.budgetMs,
+			shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
+			onChunkStart: (chunkIndex, totalChunks) => {
+				try {
+					(ctx.ui as any).setStatus?.("persistent-memory", `Memory consolidating... (chunk ${chunkIndex}/${totalChunks})`);
+				} catch {
+					// ignore status errors
+				}
+			},
+			callCarefulModel: (systemPrompt, userPrompt) => {
+				const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, modelContext, console);
+				return callCarefulModelImpl(systemPrompt, userPrompt, {
+					cwd: modelContext.cwd ?? process.cwd(),
+					...(chosenModel ? { model: chosenModel as never } : {}),
+					...(modelContext.thinkingLevel ? { thinkingLevel: modelContext.thinkingLevel as never } : {}),
+					timeoutMs: reconciliationTimeoutMs(),
+					logger: console,
+				});
+			},
+		});
+
+		// Keep this check and swap/discard block await-free. An await here would let a lifecycle
+		// event interleave and could publish a stale reconciliation index into a newer generation.
+		if (shouldSwap(startGen, lifecycleGeneration)) {
+			swapActiveMemory(runPaths, ownDb);
+			ownDb = null;
+		} else {
+			console.warn(`[persistent-memory] manual reconciliation finished but generation changed (${startGen} -> ${lifecycleGeneration}); discarding manual index.`);
+			closeDatabaseQuietly(ownDb, "stale manual db");
+			ownDb = null;
+		}
+
+		if (result.status === "failed") {
+			lastRebuildError = result.reason === "index_error" ? formatError(result.error) : lastRebuildError;
+			ctx.ui.notify(`Memory reconciliation failed (${result.reason}): ${formatError(result.error)}; staging preserved.`, "error");
+			return;
+		}
+
+		lastRebuildError = null;
+		ctx.ui.notify(formatReconciliationResult(result), "info");
+	} catch (error) {
+		ctx.ui.notify(`Memory reconciliation failed: ${formatError(error)}; staging preserved.`, "error");
+	} finally {
+		reconcileInFlight = false;
+		try {
+			(ctx.ui as any).setStatus?.("persistent-memory", undefined);
+		} catch {
+			// ignore status errors
+		}
+		if (ownDb) closeDatabaseQuietly(ownDb, "manual reconcile db");
+	}
 }
 
 function formatReconciliationResult(result: Exclude<Awaited<ReturnType<typeof runReconciliation>>, { status: "failed" }>): string {
