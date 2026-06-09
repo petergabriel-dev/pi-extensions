@@ -113,6 +113,7 @@ let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
 const pendingSavePlans = new Map<string, PendingEventResult>();
 const pendingDiscussionNotes = new Map<string, PendingEventResult>();
+let latestSavedPlan: { planId: string; planText: string; savedAt: string } | null = null;
 
 const SCAN_COALESCE_MS = 50; // coalesce rapid watcher events into one scan per window.
 let scanScheduled = false;
@@ -573,13 +574,16 @@ async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request:
 		if (result.ok !== true) {
 			return errorResponse(request.id, "save_plan_failed", typeof result.error === "string" ? result.error : "workflow-modes save-plan failed.");
 		}
+		const planId = typeof result.planId === "string" ? result.planId : payload.planId ?? request.id;
+		const savedAt = typeof result.savedAt === "string" ? result.savedAt : new Date().toISOString();
+		latestSavedPlan = { planId, planText: payload.planText, savedAt };
 		return {
 			id: request.id,
 			ok: true,
 			result: {
 				requestId: request.id,
-				planId: typeof result.planId === "string" ? result.planId : payload.planId ?? request.id,
-				savedAt: typeof result.savedAt === "string" ? result.savedAt : new Date().toISOString(),
+				planId,
+				savedAt,
 				chars: typeof result.chars === "number" ? result.chars : payload.planText.length,
 			},
 		};
@@ -588,7 +592,24 @@ async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request:
 	}
 }
 
-function handleRecall(request: BridgeRequest): BridgeResponse {
+function requestWorkflowState(pi: ExtensionAPI): Promise<Record<string, unknown> | null> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => {
+			pi.events.off?.("workflow-modes:state", onState);
+			resolve(null);
+		}, 300);
+		timer.unref?.();
+		const onState = (data: unknown) => {
+			clearTimeout(timer);
+			pi.events.off?.("workflow-modes:state", onState);
+			resolve(data && typeof data === "object" ? data as Record<string, unknown> : null);
+		};
+		pi.events.on("workflow-modes:state", onState);
+		pi.events.emit("workflow-modes:get");
+	});
+}
+
+async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
 	const payload = normalizeRecallPayload(request.payload);
 	const cwd = activeProjectRoot ?? process.cwd();
 	const memoryPaths = resolveMemoryPaths(cwd);
@@ -605,6 +626,15 @@ function handleRecall(request: BridgeRequest): BridgeResponse {
 			: [];
 		const tier2Lessons = tier2Matches.map((match) => match.lesson);
 		const memoryBlocks = [formatTier1Block(tier1.lessons), formatTier2Block(tier2Lessons)].filter((block) => block.trim().length > 0);
+		const workflowState = await requestWorkflowState(pi);
+		const workflowPlan = typeof workflowState?.plan === "string" ? workflowState.plan : undefined;
+		const savedPlan = workflowPlan
+			? {
+				planId: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.planId : null,
+				planText: workflowPlan,
+				savedAt: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.savedAt : null,
+			}
+			: latestSavedPlan;
 		return {
 			id: request.id,
 			ok: true,
@@ -629,6 +659,7 @@ function handleRecall(request: BridgeRequest): BridgeResponse {
 				},
 				docs: readEngineeringDocs(memoryPaths.projectRoot),
 				prompts: promptContextForMode(payload.mode),
+				savedPlan: latestSavedPlan,
 			},
 		};
 	} finally {
@@ -701,7 +732,7 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 }
 
 async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
-	if (request.type === "recall") return handleRecall(request);
+	if (request.type === "recall") return handleRecall(pi, request);
 	if (request.type === "capture") return handleCapture(pi, ctx, request);
 	if (request.type === "validate_tags") return handleValidateTags(request);
 	if (request.type === "save_plan") return handleSavePlan(pi, ctx, request);

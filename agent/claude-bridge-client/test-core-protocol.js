@@ -120,6 +120,17 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	const first = await sendRequest(projectRoot, "save_plan", { planText, planId: `core-${id}`, confirmed: true }, id);
 	assert(first.response.ok, `save_plan failed: ${JSON.stringify(first.response)}`);
 	assert(first.response.result.planId === `core-${id}`, "planId mismatch");
+
+	// Recall must see the saved plan after a successful save.
+	const recall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
+	assert(recall.response.ok, "recall after save_plan failed");
+	const sp = recall.response.result.savedPlan;
+	assert(sp && typeof sp === "object", "recall missing savedPlan after save_plan");
+	assert(sp.planId === `core-${id}`, `recall savedPlan.planId mismatch: got ${sp.planId}`);
+	assert(sp.planText === planText, `recall savedPlan.planText mismatch`);
+	assert(typeof sp.savedAt === "string" && sp.savedAt.length > 0, "recall savedPlan missing savedAt");
+
+	// Duplicate save_plan response must remain stable.
 	fs.unlinkSync(first.responsePath);
 	const second = await sendRequest(projectRoot, "save_plan", { planText: "DIFFERENT", confirmed: true }, id);
 	assert(JSON.stringify(second.response) === JSON.stringify(first.response), "duplicate save response changed");
