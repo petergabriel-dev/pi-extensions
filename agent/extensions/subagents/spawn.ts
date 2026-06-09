@@ -14,8 +14,10 @@ import {
 
 import type { AgentConfig, AgentRole } from "./agents.ts";
 import type { ProgressHandle } from "./progress.ts";
+import { createSubagentWatchdog, type SubagentTimeoutKind, type SubagentWatchdog } from "./timeout.ts";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+export const DEFAULT_IDLE_TIMEOUT_MS = 240_000;
+export const DEFAULT_MAX_TOTAL_MS = 1_200_000;
 const MAX_RETURN_BYTES = 50 * 1024;
 
 export interface ExplorerParsedResult {
@@ -34,6 +36,7 @@ export interface WorkerParsedResult {
 }
 
 export type ParsedSubagentResult = ExplorerParsedResult | WorkerParsedResult;
+export type SubagentFailureKind = SubagentTimeoutKind | "error";
 
 export interface SubagentToolCallSummary {
 	toolName: string;
@@ -66,6 +69,8 @@ export interface SubagentRunFailure {
 	rawText: string;
 	parsed?: ParsedSubagentResult;
 	error: string;
+	failureKind: SubagentFailureKind;
+	partialWork: boolean;
 }
 
 export type SubagentRunResult = SubagentRunSuccess | SubagentRunFailure;
@@ -76,7 +81,10 @@ export interface RunSubagentOptions {
 	task: string;
 	ctx: ExtensionContext;
 	signal?: AbortSignal;
+	/** @deprecated Use idleTimeoutMs. Legacy timeoutMs maps to the idle timeout. */
 	timeoutMs?: number;
+	idleTimeoutMs?: number;
+	maxTotalMs?: number;
 	modelOverride?: Model<any>;
 	customTools?: ToolDefinition[];
 	progress?: ProgressHandle;
@@ -263,14 +271,53 @@ function emptyFailureBase(role: AgentRole, agent: AgentConfig, session: Session 
 	};
 }
 
+function hasPartialWork(eventCounts: Record<string, number>): boolean {
+	return (eventCounts.tool_execution_start ?? 0) > 0;
+}
+
+function formatTimeoutThreshold(ms: number): string {
+	const seconds = ms / 1000;
+	return Number.isInteger(seconds) ? `${seconds}s` : `${seconds.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}s`;
+}
+
+function timeoutErrorMessage(kind: SubagentTimeoutKind, idleMs: number, maxTotalMs: number): string {
+	return kind === "idle"
+		? `idle timeout: no activity for ${formatTimeoutThreshold(idleMs)}`
+		: `max-total timeout: exceeded ${formatTimeoutThreshold(maxTotalMs)}`;
+}
+
+class SubagentTimeoutError extends Error {
+	constructor(readonly kind: SubagentTimeoutKind, message: string) {
+		super(message);
+		this.name = "SubagentTimeoutError";
+	}
+}
+
+class SubagentExternalAbortError extends Error {
+	constructor() {
+		super("Subagent aborted by parent signal.");
+		this.name = "SubagentExternalAbortError";
+	}
+}
+
+function failureKindForError(error: unknown): SubagentFailureKind {
+	return error instanceof SubagentTimeoutError ? error.kind : "error";
+}
+
+function errorMessageForFailure(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentRunResult> {
 	const role = inferRole(options.agent, options.role);
-	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const idleTimeoutMs = options.idleTimeoutMs ?? options.timeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+	const maxTotalMs = options.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS;
 	const eventCounts: Record<string, number> = {};
 	const toolCalls: SubagentToolCallSummary[] = [];
 	let childSession: Session | undefined;
 	let unsubscribe: (() => void) | undefined;
-	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	let watchdog: SubagentWatchdog | undefined;
 	let removeAbortListener: (() => void) | undefined;
 
 	try {
@@ -300,6 +347,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 		childSession = result.session;
 
 		unsubscribe = childSession.subscribe((event: AgentSessionEvent) => {
+			watchdog?.touch();
 			eventCounts[event.type] = (eventCounts[event.type] ?? 0) + 1;
 			if (event.type === "agent_start") options.progress?.setActivity("running");
 			if (event.type === "tool_execution_start") {
@@ -316,22 +364,40 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 		const abortChild = () => {
 			void childSession?.abort().catch(() => undefined);
 		};
+
+		let rejectExternalAbort: ((error: SubagentExternalAbortError) => void) | undefined;
+		const externalAbortPromise = new Promise<never>((_resolve, reject) => {
+			rejectExternalAbort = reject;
+		});
+		const abortFromParent = () => {
+			abortChild();
+			rejectExternalAbort?.(new SubagentExternalAbortError());
+		};
 		if (options.signal) {
-			if (options.signal.aborted) abortChild();
-			options.signal.addEventListener("abort", abortChild, { once: true });
-			removeAbortListener = () => options.signal?.removeEventListener("abort", abortChild);
+			if (options.signal.aborted) abortFromParent();
+			else {
+				options.signal.addEventListener("abort", abortFromParent, { once: true });
+				removeAbortListener = () => options.signal?.removeEventListener("abort", abortFromParent);
+			}
 		}
+
+		let rejectTimeout: ((error: SubagentTimeoutError) => void) | undefined;
+		const timeoutPromise = new Promise<never>((_resolve, reject) => {
+			rejectTimeout = reject;
+		});
+		watchdog = createSubagentWatchdog({
+			idleMs: idleTimeoutMs,
+			maxTotalMs,
+			onFire: (kind) => {
+				abortChild();
+				rejectTimeout?.(new SubagentTimeoutError(kind, timeoutErrorMessage(kind, idleTimeoutMs, maxTotalMs)));
+			},
+		});
 
 		const promptPromise = childSession.prompt(options.task, { expandPromptTemplates: false, source: "extension" });
 		void promptPromise.catch(() => undefined);
-		const timeoutPromise = new Promise<never>((_resolve, reject) => {
-			timeoutId = setTimeout(() => {
-				abortChild();
-				reject(new Error(`Subagent ${options.agent.name} timed out after ${timeoutMs}ms.`));
-			}, timeoutMs);
-		});
 
-		await Promise.race([promptPromise, timeoutPromise]);
+		await Promise.race([promptPromise, timeoutPromise, externalAbortPromise]);
 
 		const rawText = truncateUtf8(extractLastAssistantText(childSession));
 		const parsed = parseSubagentResult(role, rawText);
@@ -343,6 +409,8 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				rawText,
 				parsed,
 				error: lastAssistant.errorMessage ?? `Subagent stopped with ${lastAssistant.stopReason}.`,
+				failureKind: "error",
+				partialWork: hasPartialWork(eventCounts),
 			};
 		}
 
@@ -366,11 +434,13 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			...emptyFailureBase(role, options.agent, childSession, eventCounts, toolCalls),
 			rawText,
 			parsed: rawText ? parseSubagentResult(role, rawText) : undefined,
-			error: error instanceof Error ? error.message : String(error),
+			error: errorMessageForFailure(error),
+			failureKind: failureKindForError(error),
+			partialWork: hasPartialWork(eventCounts),
 		};
 	} finally {
 		options.progress?.finish();
-		if (timeoutId) clearTimeout(timeoutId);
+		watchdog?.cancel();
 		removeAbortListener?.();
 		unsubscribe?.();
 		childSession?.dispose();

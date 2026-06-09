@@ -11,6 +11,6 @@
     "types": ["node"],
     "allowImportingTsExtensions": true
   },
-  "include": ["timeout.ts", "test/**/*.ts"],
+  "include": ["**/*.ts"],
   "exclude": ["node_modules"]
 }

@@ -17,7 +17,7 @@ import { Type, type Static } from "typebox";
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
 import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
 import { getProgressSnapshot, startSubagentProgress } from "./progress.ts";
-import { runSubagent, type ExplorerParsedResult, type WorkerParsedResult } from "./spawn.ts";
+import { runSubagent, type ExplorerParsedResult, type SubagentRunResult, type WorkerParsedResult } from "./spawn.ts";
 
 const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
 const SPAWN_WORKER_TOOL_NAME = "spawn_worker";
@@ -492,8 +492,12 @@ function addConcurrencyDetails<T extends object>(details: T, slot: SlotInfo, ext
 	return { ...details, ...extra, concurrency: slot };
 }
 
+function subagentFailureMessage(result: SubagentRunResult): string {
+	return "error" in result ? result.error : "unknown subagent failure";
+}
+
 function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number) {
-	return defineTool({
+	return defineTool<typeof SpawnExplorerParams, unknown>({
 		name: SPAWN_EXPLORER_TOOL_NAME,
 		label: "Spawn Explorer",
 		description: "Nested read-only explorer available to worker subagents. Depth is limited to main -> worker -> explorer.",
@@ -540,7 +544,7 @@ function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: Abo
 						progress,
 					});
 					return {
-						content: [{ type: "text", text: result.ok ? `Nested explorer summary: ${(result.parsed as ExplorerParsedResult).summary}` : `Nested explorer failed: ${result.error}` }],
+						content: [{ type: "text", text: result.ok ? `Nested explorer summary: ${(result.parsed as ExplorerParsedResult).summary}` : `Nested explorer failed: ${subagentFailureMessage(result)}` }],
 						details: addConcurrencyDetails(result, slot, { depth: depth + 1 }),
 					};
 				},
@@ -664,7 +668,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 
 				if (!result.ok) {
 					return {
-						content: [{ type: "text", text: `Explorer failed: ${result.error}` }],
+						content: [{ type: "text", text: `Explorer failed: ${subagentFailureMessage(result)}` }],
 						details: addConcurrencyDetails(result, slot),
 					};
 				}
@@ -743,7 +747,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 
 					if (!result.ok) {
 						return {
-							content: [{ type: "text", text: `Worker failed: ${result.error}` }],
+							content: [{ type: "text", text: `Worker failed: ${subagentFailureMessage(result)}` }],
 							details: addConcurrencyDetails(result, slot, { workflowMode: workflowMode.mode, fileOwnership: ownership, workerRunId }),
 						};
 					}
@@ -911,7 +915,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 						type: "text",
 						text: result.ok
 							? `Subagent ${params.agent} OK.\n\n${JSON.stringify(result.parsed, null, 2)}`
-							: `Subagent ${params.agent} FAILED: ${result.error}\n\n${JSON.stringify(result.parsed ?? {}, null, 2)}`,
+							: `Subagent ${params.agent} FAILED: ${subagentFailureMessage(result)}\n\n${JSON.stringify(result.parsed ?? {}, null, 2)}`,
 					},
 				],
 				details: result,
