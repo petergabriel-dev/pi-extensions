@@ -8,8 +8,10 @@ import type {
 	SettingsManager as SettingsManagerType,
 } from "@mariozechner/pi-coding-agent";
 import type { ExtractionLogger } from "./extract.js";
+import { EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT } from "./prompts.js";
 
 export const EXTRACTION_TIMEOUT_MS = 30_000;
+export const SUBMIT_PLAN_TOOL_NAME = "submit_plan";
 
 export class CarefulModelTimeoutError extends Error {
 	constructor(timeoutMs: number) {
@@ -75,36 +77,137 @@ export async function callCarefulModelOneShot(
 		retry: { enabled: false },
 	} as never);
 
-	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+	if (options.model) {
+		try {
+			const forcedToolResult = await callCarefulModelWithForcedSubmitPlanTool(systemPrompt, userPrompt, {
+				model: options.model,
+				modelRegistry,
+				thinkingLevel: options.thinkingLevel,
+				timeoutMs,
+			});
+			if (forcedToolResult.toolArgumentsJson) return forcedToolResult.toolArgumentsJson;
+			if (forcedToolResult.text.trim()) return forcedToolResult.text.trim();
+			logger.warn?.("[persistent-memory] careful model returned no submit_plan tool call; falling back to free-text session path.");
+		} catch (error) {
+			if (error instanceof CarefulModelTimeoutError) throw error;
+			logger.warn?.("[persistent-memory] forced submit_plan careful model call unavailable; falling back to free-text session path.");
+		}
+	}
+
+	return callCarefulModelSessionFreeText(systemPrompt, userPrompt, {
+		cwd,
+		agentDir,
+		authStorage,
+		modelRegistry,
+		model: options.model,
+		thinkingLevel: options.thinkingLevel,
+		timeoutMs,
+		logger,
+		createAgentSession,
+		DefaultResourceLoader,
+		SessionManager,
+		settingsManager,
+	});
+}
+
+interface ForcedSubmitPlanCallOptions {
+	model: Model<any>;
+	modelRegistry: ModelRegistryType;
+	thinkingLevel?: ThinkingLevel;
+	timeoutMs: number;
+}
+
+interface ForcedSubmitPlanCallResult {
+	toolArgumentsJson: string | null;
+	text: string;
+}
+
+async function callCarefulModelWithForcedSubmitPlanTool(
+	systemPrompt: string,
+	userPrompt: string,
+	options: ForcedSubmitPlanCallOptions,
+): Promise<ForcedSubmitPlanCallResult> {
+	const { complete } = await import("@mariozechner/pi-ai") as any;
+	const auth = await (options.modelRegistry as any).getApiKeyAndHeaders(options.model as never);
+	if (!auth.ok) throw new Error("Careful model auth unavailable.");
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs);
+	try {
+		const context = {
+			systemPrompt,
+			messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+			tools: [buildSubmitPlanTool(systemPrompt)],
+		};
+		const message = await complete(options.model as never, context, {
+			...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
+			...(auth.headers ? { headers: auth.headers } : {}),
+			...(options.thinkingLevel ? { reasoningEffort: options.thinkingLevel, reasoning: options.thinkingLevel } : {}),
+			timeoutMs: options.timeoutMs,
+			signal: controller.signal,
+			toolChoice: { type: "function", function: { name: SUBMIT_PLAN_TOOL_NAME } },
+		});
+		return {
+			toolArgumentsJson: extractSubmitPlanToolArguments(message),
+			text: extractAssistantMessageText(message),
+		};
+	} catch (error) {
+		if (controller.signal.aborted) throw new CarefulModelTimeoutError(options.timeoutMs);
+		throw error;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+interface SessionFreeTextOptions {
+	cwd: string;
+	agentDir: string;
+	authStorage: AuthStorageType;
+	modelRegistry: ModelRegistryType;
+	model?: Model<any>;
+	thinkingLevel?: ThinkingLevel;
+	timeoutMs: number;
+	logger: ExtractionLogger;
+	createAgentSession: typeof createAgentSessionType;
+	DefaultResourceLoader: typeof DefaultResourceLoaderType;
+	SessionManager: { inMemory: (cwd?: string) => unknown };
+	settingsManager: SettingsManagerType;
+}
+
+async function callCarefulModelSessionFreeText(
+	systemPrompt: string,
+	userPrompt: string,
+	options: SessionFreeTextOptions,
+): Promise<string> {
+	let session: Awaited<ReturnType<typeof createAgentSessionType>>["session"] | undefined;
 	let timedOut = false;
 	let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
 	const callPromise = (async () => {
-		const resourceLoader = new DefaultResourceLoader(
-			isolatedResourceLoaderOptions(systemPrompt, cwd, agentDir, settingsManager),
+		const resourceLoader = new options.DefaultResourceLoader(
+			isolatedResourceLoaderOptions(systemPrompt, options.cwd, options.agentDir, options.settingsManager),
 		);
 		await resourceLoader.reload();
 		assertNoResources(resourceLoader);
 
-		const result = await createAgentSession({
-			cwd,
-			agentDir,
-			authStorage,
-			modelRegistry,
+		const result = await options.createAgentSession({
+			cwd: options.cwd,
+			agentDir: options.agentDir,
+			authStorage: options.authStorage,
+			modelRegistry: options.modelRegistry,
 			...(options.model ? { model: options.model } : {}),
 			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			noTools: "all",
 			tools: [],
 			customTools: [],
 			resourceLoader,
-			sessionManager: SessionManager.inMemory(cwd),
-			settingsManager,
+			sessionManager: options.SessionManager.inMemory(options.cwd) as never,
+			settingsManager: options.settingsManager,
 		});
 		session = result.session;
 
 		if (timedOut) {
 			session.dispose();
-			throw new CarefulModelTimeoutError(timeoutMs);
+			throw new CarefulModelTimeoutError(options.timeoutMs);
 		}
 
 		const activeTools = session.getActiveToolNames();
@@ -119,10 +222,10 @@ export async function callCarefulModelOneShot(
 	const timeoutPromise = new Promise<never>((_resolve, reject) => {
 		timeoutId = setTimeout(() => {
 			timedOut = true;
-			logger.error?.(`[persistent-memory] careful model call timed out after ${timeoutMs}ms.`);
+			options.logger.error?.(`[persistent-memory] careful model call timed out after ${options.timeoutMs}ms.`);
 			void session?.abort().catch(() => undefined);
-			reject(new CarefulModelTimeoutError(timeoutMs));
-		}, timeoutMs);
+			reject(new CarefulModelTimeoutError(options.timeoutMs));
+		}, options.timeoutMs);
 	});
 
 	try {
@@ -131,6 +234,129 @@ export async function callCarefulModelOneShot(
 		if (timeoutId) clearTimeout(timeoutId);
 		session?.dispose();
 	}
+}
+
+export function buildSubmitPlanTool(systemPrompt: string): { name: string; description: string; parameters: unknown } {
+	return {
+		name: SUBMIT_PLAN_TOOL_NAME,
+		description: "Submit the complete structured memory extraction or reconciliation plan. Do not include host-owned IDs or metadata unless the schema explicitly asks for them.",
+		parameters: selectSubmitPlanSchema(systemPrompt),
+	};
+}
+
+function selectSubmitPlanSchema(systemPrompt: string) {
+	if (systemPrompt === EXTRACTION_SYSTEM_PROMPT) return extractionSubmitPlanSchema();
+	if (systemPrompt === RECONCILIATION_SYSTEM_PROMPT) return reconciliationSubmitPlanSchema();
+	return objectSchema({}, { additionalProperties: true });
+}
+
+function extractionSubmitPlanSchema() {
+	const evidence = objectSchema({
+		discussion_note_ids: optional(arraySchema(numberSchema())),
+		lesson_candidate_marker_ids: optional(arraySchema(stringSchema())),
+	});
+	const trigger = unionSchema([
+		objectSchema({ type: literalSchema("path"), value: stringSchema() }),
+		objectSchema({ type: literalSchema("filename"), value: stringSchema() }),
+		objectSchema({ type: literalSchema("topic"), value: stringSchema() }),
+		objectSchema({ type: literalSchema("tool"), value: stringSchema(), pattern: optional(stringSchema()) }),
+		objectSchema({ type: literalSchema("command"), pattern: stringSchema() }),
+	]);
+	return objectSchema({
+		candidates: objectSchema({
+			lessons: arraySchema(objectSchema({
+				summary: stringSchema(),
+				detail: stringSchema(),
+				triggers: arraySchema(trigger),
+				scope_suggestion: stringSchema(),
+				source_evidence: evidence,
+			})),
+			preferences: arraySchema(objectSchema({ text: stringSchema(), source_evidence: evidence })),
+			decisions: arraySchema(objectSchema({ summary: stringSchema(), detail: stringSchema(), source_evidence: evidence })),
+			domain: arraySchema(objectSchema({ summary: stringSchema(), detail: stringSchema(), source_evidence: evidence })),
+		}),
+	});
+}
+
+function reconciliationSubmitPlanSchema() {
+	const refs = arraySchema(stringSchema());
+	const trigger = unionSchema([
+		objectSchema({ type: literalSchema("path"), value: stringSchema() }),
+		objectSchema({ type: literalSchema("filename"), value: stringSchema() }),
+		objectSchema({ type: literalSchema("topic"), value: stringSchema() }),
+		objectSchema({ type: literalSchema("tool"), value: stringSchema(), pattern: optional(stringSchema()) }),
+		objectSchema({ type: literalSchema("command"), pattern: stringSchema() }),
+	]);
+	const lessonAction = unionSchema([
+		objectSchema({ action: literalSchema("add"), candidate_refs: refs, summary: stringSchema(), detail: stringSchema(), triggers: arraySchema(trigger) }),
+		objectSchema({ action: literalSchema("merge"), candidate_refs: refs, target_id: stringSchema(), summary: stringSchema(), detail: stringSchema(), triggers: arraySchema(trigger) }),
+		objectSchema({ action: literalSchema("supersede"), candidate_refs: refs, target_id: stringSchema(), summary: stringSchema(), detail: stringSchema(), triggers: arraySchema(trigger) }),
+		objectSchema({ action: literalSchema("discard"), candidate_refs: refs, reason: stringSchema() }),
+	]);
+	const preferenceAction = unionSchema([
+		objectSchema({ action: literalSchema("add"), candidate_refs: refs, text: stringSchema() }),
+		objectSchema({ action: literalSchema("merge"), candidate_refs: refs, target_id: stringSchema(), text: stringSchema() }),
+		objectSchema({ action: literalSchema("discard"), candidate_refs: refs, reason: stringSchema() }),
+	]);
+	const summaryDetailAction = unionSchema([
+		objectSchema({ action: literalSchema("add"), candidate_refs: refs, summary: stringSchema(), detail: stringSchema() }),
+		objectSchema({ action: literalSchema("merge"), candidate_refs: refs, target_id: stringSchema(), summary: stringSchema(), detail: stringSchema() }),
+		objectSchema({ action: literalSchema("discard"), candidate_refs: refs, reason: stringSchema() }),
+	]);
+	return objectSchema({
+		lessons: arraySchema(lessonAction),
+		preferences: arraySchema(preferenceAction),
+		decisions: arraySchema(summaryDetailAction),
+		domain: arraySchema(summaryDetailAction),
+	});
+}
+
+function objectSchema(properties: Record<string, any>, options: Record<string, unknown> = {}): Record<string, unknown> {
+	const required = Object.entries(properties)
+		.filter(([, value]) => !value?.[OPTIONAL_SCHEMA])
+		.map(([key]) => key);
+	const normalized = Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, value?.[OPTIONAL_SCHEMA] ?? value]));
+	return { type: "object", properties: normalized, required, additionalProperties: false, ...options };
+}
+
+const OPTIONAL_SCHEMA = Symbol("optional-schema");
+
+function optional(schema: Record<string, unknown>): Record<symbol, Record<string, unknown>> {
+	return { [OPTIONAL_SCHEMA]: schema };
+}
+
+function arraySchema(items: unknown): Record<string, unknown> {
+	return { type: "array", items };
+}
+
+function unionSchema(anyOf: unknown[]): Record<string, unknown> {
+	return { anyOf };
+}
+
+function stringSchema(): Record<string, unknown> {
+	return { type: "string" };
+}
+
+function numberSchema(): Record<string, unknown> {
+	return { type: "number" };
+}
+
+function literalSchema(value: string): Record<string, unknown> {
+	return { const: value };
+}
+
+export function extractSubmitPlanToolArguments(message: any): string | null {
+	for (const part of message.content) {
+		if (part.type === "toolCall" && part.name === SUBMIT_PLAN_TOOL_NAME) return JSON.stringify(part.arguments ?? {});
+	}
+	return null;
+}
+
+function extractAssistantMessageText(message: any): string {
+	return message.content
+		.map((part) => part.type === "text" ? part.text : "")
+		.filter(Boolean)
+		.join("\n");
 }
 
 function assertNoResources(resourceLoader: DefaultResourceLoaderType): void {
