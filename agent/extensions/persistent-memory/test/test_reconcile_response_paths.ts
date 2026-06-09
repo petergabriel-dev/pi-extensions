@@ -19,6 +19,16 @@ function setup(sessionId = "s1", candidate: DomainCandidate = domainCandidate())
 	for (const name of ["lessons.md", "preferences.md", "decisions.md", "domain.md"]) {
 		fs.writeFileSync(path.join(mem, name), "", "utf8");
 	}
+	fs.writeFileSync(path.join(mem, "domain.md"), `## dom_01 — persistent-memory existing anchor
+
+<!-- meta:
+scope: ${path.basename(root)}
+source_session: s0
+created_at: 2025-01-01T00:00:00.000Z
+-->
+
+existing persistent-memory consolidation anchor
+`, "utf8");
 	writeStaging(path.join(mem, "staging", `${sessionId}.json`), {
 		schemaVersion: 1,
 		session_id: sessionId,
@@ -55,8 +65,9 @@ async function reconcileWithRawResponse(rawResponse: string) {
 	});
 	assert.equal(result.status, "completed");
 	const facts = parseDomainFile(path.join(mem, "domain.md"));
-	assert.equal(facts.length, 1);
-	return facts[0];
+	const modelFact = facts.find((fact) => fact.summary === "merged summary");
+	assert.ok(modelFact, `expected model-produced fact, got: ${facts.map((fact) => fact.summary).join(", ")}`);
+	return modelFact;
 }
 
 async function testForcedSubmitPlanToolArgumentsFeedReconciliation() {

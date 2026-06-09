@@ -14,7 +14,7 @@ type DomainCandidate = StagingFile["candidates"]["domain"][number];
 function domainCandidate(n: number, attempts?: number): DomainCandidate {
 	return {
 		summary: `D${n}`,
-		detail: `detail ${n}`,
+		detail: `detail ${n} collision-anchor`,
 		source_evidence: { discussion_note_ids: [n] },
 		...(attempts === undefined ? {} : { reconcile_attempts: attempts }),
 	};
@@ -27,6 +27,16 @@ function setup(sessionId: string, candidates: DomainCandidate[]) {
 	for (const name of ["lessons.md", "preferences.md", "decisions.md", "domain.md"]) {
 		fs.writeFileSync(path.join(mem, name), "", "utf8");
 	}
+	fs.writeFileSync(path.join(mem, "domain.md"), `## dom_01 — collision anchor
+
+<!-- meta:
+scope: ${path.basename(root)}
+source_session: s0
+created_at: 2025-01-01T00:00:00.000Z
+-->
+
+existing collision-anchor fact
+`, "utf8");
 	writeStaging(path.join(mem, "staging", `${sessionId}.json`), {
 		schemaVersion: 1,
 		session_id: sessionId,
@@ -46,7 +56,7 @@ function addResponse(candidateRefs: string[], summary = "merged domain", detail 
 		lessons: [],
 		preferences: [],
 		decisions: [],
-		domain: [{ action: "add", candidate_refs: candidateRefs, summary, detail }],
+		domain: [{ action: "merge", candidate_refs: candidateRefs, target_id: "dom_01", summary, detail }],
 	});
 }
 
@@ -69,9 +79,7 @@ async function testChunkSlicingOrderAndCrossChunkMerge() {
 			callNo += 1;
 			const candidateRefs = refs(userPrompt);
 			calls.push(candidateRefs);
-			const actions = callNo === 1
-				? [{ action: "add", candidate_refs: candidateRefs, summary: "merged", detail: "first" }]
-				: [{ action: "merge", candidate_refs: candidateRefs, target_id: "dom_01", summary: "merged", detail: `call ${callNo}` }];
+			const actions = [{ action: "merge", candidate_refs: candidateRefs, target_id: "dom_01", summary: "merged", detail: callNo === 1 ? "first" : `call ${callNo}` }];
 			return JSON.stringify({ lessons: [], preferences: [], decisions: [], domain: actions });
 		},
 	});
@@ -85,7 +93,7 @@ async function testChunkSlicingOrderAndCrossChunkMerge() {
 
 async function testPerChunkPartialFallback() {
 	const { root, mem } = setup("s1", [domainCandidate(1), domainCandidate(2)]);
-	const partial = JSON.stringify({ lessons: [], preferences: [], decisions: [], domain: [{ action: "add", candidate_refs: ["s1:domain:1"], summary: "one", detail: "one" }] });
+	const partial = JSON.stringify({ lessons: [], preferences: [], decisions: [], domain: [{ action: "merge", candidate_refs: ["s1:domain:1"], target_id: "dom_01", summary: "one", detail: "one" }] });
 	const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, {} as any, {
 		chunkSize: 2,
 		rebuildIndex: () => undefined,
@@ -147,7 +155,7 @@ async function testDeadLetterOnlyAfterValidationCap() {
 		assert.equal(result.reason, "invalid_model_response");
 		assert.equal(stagingDomain(mem).length, 0);
 		assert.equal(listDeadLetterFiles(mem).length, 1);
-		assert.equal(conservationCount(mem), 1);
+		assert.equal(conservationCount(mem), 2);
 	} finally {
 		if (previous === undefined) delete process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS;
 		else process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS = previous;

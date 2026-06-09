@@ -14,8 +14,16 @@ import {
 	rewritePreferencesFile,
 } from "../storage/markdown.js";
 import type { MemoryPaths } from "../storage/paths.js";
-import { rebuildIndex as rebuildSqliteIndex, type SqliteDatabase } from "../storage/sqlite.js";
+import {
+	rebuildIndex as rebuildSqliteIndex,
+	insertLessons,
+	insertPreferences,
+	insertDecisions,
+	insertDomainFacts,
+	type SqliteDatabase,
+} from "../storage/sqlite.js";
 import type { Decision, DomainFact, Lesson, LessonCandidate, Preference, StagingFile, Trigger } from "../types.js";
+import { shortlist, type ShortlistCandidate, type ShortlistRecord } from "./shortlist.js";
 
 export class ReconciliationValidationError extends Error {
 	constructor(
@@ -97,6 +105,11 @@ export interface MemoryPreFilterResult {
 	llmNeeded: boolean;
 }
 
+export interface DeterministicAddSplit {
+	deterministic: PreparedReconciliationCandidates;
+	collision: PreparedReconciliationCandidates;
+}
+
 export interface ReconciliationLogger {
 	info?: (...args: unknown[]) => void;
 	warn?: (...args: unknown[]) => void;
@@ -114,6 +127,9 @@ export interface ReconciliationDeps {
 	shouldContinue?: () => boolean;
 	nowMs?: () => number;
 	onChunkStart?: (chunkIndex: number, totalChunks: number) => void;
+	/** Test hook called after each deterministic add is committed to markdown + sqlite.
+	 *  If it throws, reconciliation fails but already-committed candidates persist. */
+	afterDeterministicAddForTest?: (ref: string) => void;
 }
 
 export interface CategoryTotals {
@@ -313,57 +329,140 @@ export async function runReconciliation(
 		counts.candidates.exactDuplicates = exactTotals(preFilter);
 		counts.candidates.remainingForModel = candidateTotals(preFilter.remaining);
 
+		const shortlistSplit = splitByShortlist(preFilter.remaining, projectMemory, projectScope);
+		counts.candidates.remainingForModel = candidateTotals(shortlistSplit.collision);
+
 		let plan = emptyPlan();
 		let appliedRefs = new Set<string>();
 		let attemptedRefs = new Set<string>();
 		let bypassedRefsApplied = false;
 		let bestError: ReconciliationValidationError | undefined = undefined;
 		let terminalFailure: { reason: "model_error" | "parse_error" | "invalid_model_response"; error?: unknown } | undefined = undefined;
-		if (preFilter.llmNeeded) {
-			const chunkSize = normalizePositiveInteger(deps.chunkSize, totalCandidates(preFilter.remaining));
-			const budgetMs = normalizePositiveInteger(deps.wallClockBudgetMs, Number.POSITIVE_INFINITY);
-			const startedAtMs = deps.nowMs?.() ?? Date.now();
-			let isFirstApply = true;
-			const chunks = chunkCandidates(preFilter.remaining, chunkSize);
 
-			for (const [chunkIndex, candidatesSubset] of chunks.entries()) {
-				deps.onChunkStart?.(chunkIndex + 1, chunks.length);
-				if (deps.callCarefulModel) llmCalled = true;
-				const reconcileResult = await reconcileCandidateSet(projectMemory, candidatesSubset, projectScope, deps, logger);
-				for (const ref of reconcileResult.attemptedRefs) attemptedRefs.add(ref);
-				bestError = reconcileResult.bestError ?? bestError;
-				if (reconcileResult.status === "failed") {
-					terminalFailure = { reason: reconcileResult.reason, error: reconcileResult.error };
-					break;
+		const deterministicRefs: string[] = [];
+		const hasDeterministic = hasRemainingCandidates(shortlistSplit.deterministic);
+		const hasCollision = hasRemainingCandidates(shortlistSplit.collision);
+
+		// --- Deterministic ADD path (zero-model) -----------------------------------
+		// Candidates with empty shortlists are added deterministically before any
+		// model path, with host-owned ids/timestamps, committed one at a time for
+		// crash safety.
+		// Helper: process a single deterministic candidate with per-category commit.
+		const processOne = async (
+			category: ReconciliationCategory,
+			candidate: ReconciliationCandidate<any>,
+		) => {
+			const single = emptyPreparedCandidates();
+			(single as any)[category].push(candidate);
+			const detPlan = buildDeterministicPlan(single);
+			const nowIso = (deps.now?.() ?? new Date()).toISOString();
+			// For lessons, use scope_suggestion || projectScope per T4 spec
+			const effectiveScope = category === "lessons"
+				? ((candidate.candidate as LessonCandidate).scope_suggestion || projectScope)
+				: projectScope;
+			const effectivePreFilter = bypassedRefsApplied
+				? preFilterForChunk(preFilter, single, false)
+				: preFilterForChunk(preFilter, single, true);
+			const nextMemory = materializeReconciliation(projectMemory, effectivePreFilter, detPlan, effectiveScope, nowIso);
+
+			try {
+				counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
+
+				// Incremental sqlite update so committed candidates are immediately observable.
+				// Some legacy unit tests pass a fake db while stubbing rebuildIndex; skip
+				// incremental writes unless this is a real sqlite-like connection.
+				if (isSqliteLike(db)) {
+					const newRecords = diffNewRecords(projectMemory, nextMemory, category);
+					const memDir = memoryPaths.projectMemoryDir!;
+					if (newRecords.lessons.length > 0) insertLessons(db, path.join(memDir, "lessons.md"), newRecords.lessons);
+					if (newRecords.preferences.length > 0) insertPreferences(db, path.join(memDir, "preferences.md"), newRecords.preferences);
+					if (newRecords.decisions.length > 0) insertDecisions(db, path.join(memDir, "decisions.md"), newRecords.decisions);
+					if (newRecords.domain.length > 0) insertDomainFacts(db, path.join(memDir, "domain.md"), newRecords.domain);
 				}
 
-				const chunkPreFilter = preFilterForChunk(preFilter, candidatesSubset, isFirstApply);
+				// Test hook: throw here to simulate crash after first commit
+				deps.afterDeterministicAddForTest?.(candidate.ref);
+			} catch (error) {
+				// Crash between candidates: first candidate already committed,
+				// later candidates remain staged.
+				throw error;
+			}
+
+			bypassedRefsApplied = true;
+			deterministicRefs.push(candidate.ref);
+			plan = mergePlans(plan, detPlan);
+			projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
+		};
+
+		if (hasDeterministic) {
+			try {
+				for (const candidate of shortlistSplit.deterministic.lessons) await processOne("lessons", candidate);
+				for (const candidate of shortlistSplit.deterministic.preferences) await processOne("preferences", candidate);
+				for (const candidate of shortlistSplit.deterministic.decisions) await processOne("decisions", candidate);
+				for (const candidate of shortlistSplit.deterministic.domain) await processOne("domain", candidate);
+			} catch (error) {
+				return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
+			}
+		}
+
+		// --- Model path for collision candidates -----------------------------------
+		const modelCandidates = shortlistSplit.collision;
+
+		if (hasRemainingCandidates(modelCandidates)) {
+			if (!deps.callCarefulModel) {
+				// No model available but collision candidates exist — they stay staged.
+				// deterministicRefs already committed; collision candidates remain for model.
+				counts.candidates.remainingForModel = candidateTotals(shortlistSplit.collision);
+				// Fall through to staging cleanup below (collision candidates remain staged)
+			} else {
+				// Model available: existing chunked reconciliation
+				const chunkSize = normalizePositiveInteger(deps.chunkSize, totalCandidates(modelCandidates));
+				const budgetMs = normalizePositiveInteger(deps.wallClockBudgetMs, Number.POSITIVE_INFINITY);
+				const startedAtMs = deps.nowMs?.() ?? Date.now();
+				let isFirstApply = !bypassedRefsApplied;
+				const chunks = chunkCandidates(modelCandidates, chunkSize);
+
+				for (const [chunkIndex, candidatesSubset] of chunks.entries()) {
+					deps.onChunkStart?.(chunkIndex + 1, chunks.length);
+					if (deps.callCarefulModel) llmCalled = true;
+					const reconcileResult = await reconcileCandidateSet(projectMemory, candidatesSubset, projectScope, deps, logger);
+					for (const ref of reconcileResult.attemptedRefs) attemptedRefs.add(ref);
+					bestError = reconcileResult.bestError ?? bestError;
+					if (reconcileResult.status === "failed") {
+						terminalFailure = { reason: reconcileResult.reason, error: reconcileResult.error };
+						break;
+					}
+
+					const chunkPreFilter = preFilterForChunk(preFilter, candidatesSubset, isFirstApply);
+					const nowIso = (deps.now?.() ?? new Date()).toISOString();
+					const nextMemory = materializeReconciliation(projectMemory, chunkPreFilter, reconcileResult.plan, projectScope, nowIso);
+					try {
+						counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
+					} catch (error) {
+						return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
+					}
+
+					if (isFirstApply) bypassedRefsApplied = true;
+					projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
+					plan = mergePlans(plan, reconcileResult.plan);
+					for (const ref of reconcileResult.appliedRefs) appliedRefs.add(ref);
+					isFirstApply = false;
+
+					const elapsedMs = (deps.nowMs?.() ?? Date.now()) - startedAtMs;
+					if (elapsedMs >= budgetMs || deps.shouldContinue?.() === false) break;
+				}
+			}
+		} else {
+			// No remaining candidates for model — handle bypassed-only case
+			if (!bypassedRefsApplied && !preFilter.llmNeeded) {
 				const nowIso = (deps.now?.() ?? new Date()).toISOString();
-				const nextMemory = materializeReconciliation(projectMemory, chunkPreFilter, reconcileResult.plan, projectScope, nowIso);
+				const nextMemory = materializeReconciliation(projectMemory, preFilter, plan, projectScope, nowIso);
 				try {
-					counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
+					counts.writes = writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory);
+					bypassedRefsApplied = true;
 				} catch (error) {
 					return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 				}
-
-				if (isFirstApply) bypassedRefsApplied = true;
-				projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
-				plan = mergePlans(plan, reconcileResult.plan);
-				for (const ref of reconcileResult.appliedRefs) appliedRefs.add(ref);
-				isFirstApply = false;
-
-				const elapsedMs = (deps.nowMs?.() ?? Date.now()) - startedAtMs;
-				if (elapsedMs >= budgetMs || deps.shouldContinue?.() === false) break;
-			}
-		} else {
-			// No LLM called, so all remaining candidates are considered applied/duplicate.
-			const nowIso = (deps.now?.() ?? new Date()).toISOString();
-			const nextMemory = materializeReconciliation(projectMemory, preFilter, plan, projectScope, nowIso);
-			try {
-				counts.writes = writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory);
-				bypassedRefsApplied = true;
-			} catch (error) {
-				return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 			}
 		}
 
@@ -380,6 +479,7 @@ export async function runReconciliation(
 		const resolvedRefs = new Set<string>([
 			...bypassedRefs,
 			...appliedRefs,
+			...deterministicRefs,
 		]);
 
 		try {
@@ -1678,6 +1778,135 @@ function setsEqual(a: Set<string>, b: Set<string>): boolean {
 
 function sameJson(a: unknown, b: unknown): boolean {
 	return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Split remaining candidates by shortlist collision detection.
+ *  Candidates with an empty shortlist (no plausible collision) go to deterministic;
+ *  candidates with a non-empty shortlist go to collision for model adjudication. */
+export function splitByShortlist(
+	remaining: PreparedReconciliationCandidates,
+	existing: ProjectMemory,
+	projectScope: string,
+): DeterministicAddSplit {
+	const deterministic = emptyPreparedCandidates();
+	const collision = emptyPreparedCandidates();
+
+	for (const candidate of remaining.lessons) {
+		const sc: ShortlistCandidate = {
+			type: "lesson",
+			summary: candidate.candidate.summary,
+			detail: candidate.candidate.detail,
+			scope_suggestion: candidate.candidate.scope_suggestion,
+			triggers: candidate.candidate.triggers,
+		};
+		const results = shortlist(sc, existing.lessons as ShortlistRecord[]);
+		(results.length === 0 ? deterministic : collision).lessons.push(candidate);
+	}
+
+	for (const candidate of remaining.preferences) {
+		const sc: ShortlistCandidate = {
+			type: "preference",
+			text: candidate.candidate.text,
+			scope: projectScope,
+		};
+		const results = shortlist(sc, existing.preferences as ShortlistRecord[]);
+		(results.length === 0 ? deterministic : collision).preferences.push(candidate);
+	}
+
+	for (const candidate of remaining.decisions) {
+		const sc: ShortlistCandidate = {
+			type: "decision",
+			summary: candidate.candidate.summary,
+			detail: candidate.candidate.detail,
+			scope: projectScope,
+		};
+		const results = shortlist(sc, existing.decisions as ShortlistRecord[]);
+		(results.length === 0 ? deterministic : collision).decisions.push(candidate);
+	}
+
+	for (const candidate of remaining.domain) {
+		const sc: ShortlistCandidate = {
+			type: "domain",
+			summary: candidate.candidate.summary,
+			detail: candidate.candidate.detail,
+			scope: projectScope,
+		};
+		const results = shortlist(sc, existing.domain as ShortlistRecord[]);
+		(results.length === 0 ? deterministic : collision).domain.push(candidate);
+	}
+
+	return { deterministic, collision };
+}
+
+/** Build a reconciliation plan of ADD actions for deterministic (no-collision) candidates.
+ *  Every candidate gets its own ADD action with host-owned ids/timestamps/scopes/triggers. */
+export function buildDeterministicPlan(candidates: PreparedReconciliationCandidates): NormalizedReconciliationPlan {
+	const plan = emptyPlan();
+
+	for (const candidate of candidates.lessons) {
+		plan.lessons.push({
+			action: "add",
+			candidate_refs: [candidate.ref],
+			summary: candidate.candidate.summary,
+			detail: candidate.candidate.detail,
+			triggers: cloneTriggers(candidate.candidate.triggers),
+		});
+	}
+
+	for (const candidate of candidates.preferences) {
+		plan.preferences.push({
+			action: "add",
+			candidate_refs: [candidate.ref],
+			text: candidate.candidate.text,
+		});
+	}
+
+	for (const candidate of candidates.decisions) {
+		plan.decisions.push({
+			action: "add",
+			candidate_refs: [candidate.ref],
+			summary: candidate.candidate.summary,
+			detail: candidate.candidate.detail,
+		});
+	}
+
+	for (const candidate of candidates.domain) {
+		plan.domain.push({
+			action: "add",
+			candidate_refs: [candidate.ref],
+			summary: candidate.candidate.summary,
+			detail: candidate.candidate.detail,
+		});
+	}
+
+	return plan;
+}
+
+/** Find records that were added to nextMemory compared to prevMemory for a given category. */
+function isSqliteLike(db: SqliteDatabase): boolean {
+	return typeof (db as { prepare?: unknown }).prepare === "function";
+}
+
+function diffNewRecords(
+	prev: ProjectMemory,
+	next: ProjectMemory,
+	category: ReconciliationCategory,
+): { lessons: Lesson[]; preferences: Preference[]; decisions: Decision[]; domain: DomainFact[] } {
+	const prevIds = (() => {
+		switch (category) {
+			case "lessons": return new Set(prev.lessons.map((r) => r.id));
+			case "preferences": return new Set(prev.preferences.map((r) => r.id));
+			case "decisions": return new Set(prev.decisions.map((r) => r.id));
+			case "domain": return new Set(prev.domain.map((r) => r.id));
+		}
+	})();
+
+	return {
+		lessons: category === "lessons" ? next.lessons.filter((r) => !prevIds.has(r.id)) : [],
+		preferences: category === "preferences" ? next.preferences.filter((r) => !prevIds.has(r.id)) : [],
+		decisions: category === "decisions" ? next.decisions.filter((r) => !prevIds.has(r.id)) : [],
+		domain: category === "domain" ? next.domain.filter((r) => !prevIds.has(r.id)) : [],
+	};
 }
 
 export function preFilterMemoryCandidates(input: MemoryPreFilterInput): MemoryPreFilterResult {
