@@ -1,0 +1,24 @@
+{
+  "name": "pi-subagents",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "tsx test/test_timeout.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.78.1",
+    "@earendil-works/pi-coding-agent": "^0.78.1",
+    "typebox": "^1.1.38"
+  }
+}
