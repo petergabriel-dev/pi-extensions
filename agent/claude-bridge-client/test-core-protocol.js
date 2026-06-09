@@ -146,7 +146,11 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 		assert(updatedInput(rg)?.command?.includes("/usr/bin/sandbox-exec"), "Pi rg was not sandbox-wrapped");
 	}
 	assert(!denied(runHook({ tool_name: "Bash", tool_input: { command: "pytest" } }, projectRoot)), "Pi pytest denied");
-	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "git commit -m x" } }, projectRoot)), "Pi git commit not denied");
+	if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+		assert(!denied(runHook({ tool_name: "Bash", tool_input: { command: "git commit -m x" } }, projectRoot)), "Pi git commit denied under sandbox");
+	} else {
+		assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "git commit -m x" } }, projectRoot)), "Pi git commit not denied");
+	}
 	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "rg bridge", dangerouslyDisableSandbox: true } }, projectRoot)), "Pi sandbox-disable flag not denied");
 	const stale = makeTempPiProject();
 	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "rg x" } }, stale)), "missing policy did not deny");

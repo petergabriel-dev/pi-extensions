@@ -179,13 +179,14 @@ function main() {
 			return;
 		}
 		const command = bashCommand(input);
-		if (!bashAllowed(command, policy)) {
-			console.log(JSON.stringify(deny(`Bash command blocked in Pi project ${projectRoot}. Allowed only by fresh Pi bridge plan policy; mutations require Pi /mode build.`)));
-			return;
-		}
 		const wrapped = wrapBashForSandbox(command, projectRoot);
 		if (wrapped) {
+			// macOS Seatbelt sandbox enforces read-only; bypass planBashAllow allowlist gate.
 			console.log(JSON.stringify(allow({ ...toolInput, command: wrapped })));
+			return;
+		}
+		if (!bashAllowed(command, policy)) {
+			console.log(JSON.stringify(deny(`Bash command blocked in Pi project ${projectRoot}. Allowed only by fresh Pi bridge plan policy; mutations require Pi /mode build.`)));
 			return;
 		}
 	}
