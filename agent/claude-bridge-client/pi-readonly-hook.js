@@ -126,22 +126,9 @@ function readPolicy(projectRoot) {
 	return policy.policy;
 }
 
-function compile(pattern, name) {
-	if (typeof pattern !== "string" || !pattern) throw new Error(`Pi bridge policy missing ${name}.`);
-	return new RegExp(pattern);
-}
-
 function bashCommand(input) {
 	const toolInput = input.tool_input || input.toolInput || input.input || {};
 	return String(toolInput.command || "").trim();
-}
-
-function bashAllowed(command, policy) {
-	const normalized = command.replace(/\s+/g, " ");
-	const planAllow = compile(policy.planBashAllow, "planBashAllow");
-	const mutationDeny = compile(policy.bashMutationDeny, "bashMutationDeny");
-	const writeRedirect = compile(policy.bashWriteRedirect, "bashWriteRedirect");
-	return planAllow.test(normalized) && !mutationDeny.test(normalized) && !writeRedirect.test(normalized);
 }
 
 function main() {
@@ -166,9 +153,8 @@ function main() {
 	}
 
 	if (toolName === "Bash") {
-		let policy;
 		try {
-			policy = readPolicy(projectRoot);
+			readPolicy(projectRoot); // validate freshness; fail closed if stale/missing
 		} catch (error) {
 			console.log(JSON.stringify(deny(error.message)));
 			return;
@@ -185,10 +171,9 @@ function main() {
 			console.log(JSON.stringify(allow({ ...toolInput, command: wrapped })));
 			return;
 		}
-		if (!bashAllowed(command, policy)) {
-			console.log(JSON.stringify(deny(`Bash command blocked in Pi project ${projectRoot}. Allowed only by fresh Pi bridge plan policy; mutations require Pi /mode build.`)));
-			return;
-		}
+		// Sandbox unavailable: fail closed. No unsandboxed Bash in Pi projects.
+		console.log(JSON.stringify(deny(`Bash is blocked in Pi project ${projectRoot}: macOS Seatbelt sandbox (sandbox-exec) is unavailable on this system. Pi read-only Bash requires sandbox-exec.`)));
+		return;
 	}
 
 	console.log(JSON.stringify(allow()));

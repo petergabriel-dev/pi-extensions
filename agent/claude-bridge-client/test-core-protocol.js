@@ -140,13 +140,24 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 	const nonPi = fs.mkdtempSync(path.join(os.tmpdir(), "nonpi-"));
 	assert(!denied(runHook({ tool_name: "Edit", tool_input: {} }, nonPi)), "non-Pi Edit denied");
 	assert(denied(runHook({ tool_name: "Edit", tool_input: {} }, projectRoot)), "Pi Edit not denied");
+	const isSandboxed = process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec");
+
 	const rg = runHook({ tool_name: "Bash", tool_input: { command: "rg bridge" } }, projectRoot);
-	assert(!denied(rg), "Pi rg denied");
-	if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+	if (isSandboxed) {
+		assert(!denied(rg), "Pi rg denied");
 		assert(updatedInput(rg)?.command?.includes("/usr/bin/sandbox-exec"), "Pi rg was not sandbox-wrapped");
+	} else {
+		assert(denied(rg), "Pi rg not denied when sandbox unavailable");
 	}
-	assert(!denied(runHook({ tool_name: "Bash", tool_input: { command: "pytest" } }, projectRoot)), "Pi pytest denied");
-	if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+
+	const pytest = runHook({ tool_name: "Bash", tool_input: { command: "pytest" } }, projectRoot);
+	if (isSandboxed) {
+		assert(!denied(pytest), "Pi pytest denied");
+	} else {
+		assert(denied(pytest), "Pi pytest not denied when sandbox unavailable");
+	}
+
+	if (isSandboxed) {
 		assert(!denied(runHook({ tool_name: "Bash", tool_input: { command: "git commit -m x" } }, projectRoot)), "Pi git commit denied under sandbox");
 	} else {
 		assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "git commit -m x" } }, projectRoot)), "Pi git commit not denied");
