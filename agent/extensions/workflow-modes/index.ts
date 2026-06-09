@@ -17,18 +17,12 @@ export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_
 export interface WorkflowPolicySnapshot {
 	mutationTools: string[];
 	discussBashAllow: string;
-	planBashAllow: string;
-	bashMutationDeny: string;
-	bashWriteRedirect: string;
 }
 
 export function getWorkflowPolicySnapshot(): WorkflowPolicySnapshot {
 	return {
 		mutationTools: Array.from(MUTATION_TOOLS),
 		discussBashAllow: DISCUSS_BASH_ALLOW.source,
-		planBashAllow: PLAN_BASH_ALLOW.source,
-		bashMutationDeny: BASH_MUTATION_DENY.source,
-		bashWriteRedirect: BASH_WRITE_REDIRECT.source,
 	};
 }
 

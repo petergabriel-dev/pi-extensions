@@ -68,7 +68,7 @@ test("bridge active dirs, session, policy", async ({ projectRoot }) => {
 	const { p, session } = freshTarget(projectRoot);
 	for (const key of ["requests", "responses", "processed"]) assert(exists(p[key]), `Missing ${key}`);
 	const policy = readJson(p.policy);
-	assert(policy.policy?.planBashAllow, "policy missing planBashAllow");
+	assert(Array.isArray(policy.policy?.mutationTools), "policy missing mutationTools");
 	assert(session.bridgeSessionId, "session missing bridgeSessionId");
 });
 
@@ -187,7 +187,7 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 	// Expired policy must NOT block sandboxed Bash either.
 	const expired = makeTempPiProject();
 	const expiredPolicyPath = paths(expired).policy;
-	writeJson(expiredPolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { planBashAllow: [] } });
+	writeJson(expiredPolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { mutationTools: [] } });
 	const expiredResult = runHook({ tool_name: "Bash", tool_input: { command: "echo stale" } }, expired);
 	if (isSandboxed) {
 		assert(!denied(expiredResult), "expired policy denied sandboxed Bash (policy should be decoupled)");
@@ -198,7 +198,7 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 	// Stale (old writtenAt) policy must NOT block sandboxed Bash.
 	const stalePolicy = makeTempPiProject();
 	const stalePolicyPath = paths(stalePolicy).policy;
-	writeJson(stalePolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), policy: { planBashAllow: [] } });
+	writeJson(stalePolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), policy: { mutationTools: [] } });
 	const stalePolicyResult = runHook({ tool_name: "Bash", tool_input: { command: "echo stale" } }, stalePolicy);
 	if (isSandboxed) {
 		assert(!denied(stalePolicyResult), "stale-writtenAt policy denied sandboxed Bash (policy should be decoupled)");
