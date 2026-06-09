@@ -9,9 +9,10 @@
 - Bridge tools fail loudly if Pi bridge is down or stale. No direct memory-file fallback is allowed.
 - `.pi` marker presence is the only condition for Claude Code read-only enforcement.
 - Claude Code mutation tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) are always denied in `.pi` projects.
-- Claude Code Bash in `.pi` projects must read a fresh bridge `policy.json`; missing/stale policy denies closed.
+- Claude Code Bash in `.pi` projects must not depend on bridge `policy.json` freshness, `planBashAllow`, or any Pi round-trip for allow/deny decisions.
 - Claude Code Bash in `.pi` projects must deny `dangerouslyDisableSandbox`; sandbox bypass flags are not allowed in read-only bridge mode.
-- When `sandbox-exec` is available, Claude Code Bash allowed by fresh policy must be wrapped through `hookSpecificOutput.updatedInput.command`; if no launcher exists, policy allowlist enforcement remains the fallback.
+- When `sandbox-exec` is available, Claude Code Bash must be wrapped through `hookSpecificOutput.updatedInput.command` and allowed only through that Seatbelt sandbox.
+- When `sandbox-exec` is unavailable, Claude Code Bash in `.pi` projects must deny closed; there is no unsandboxed allowlist fallback.
 - Bridge requests are idempotent by UUID. Replayed request IDs return the processed response and must not duplicate notes, staging candidates, or saved plans.
 - v1 supports one active Pi bridge session per project. A second active watcher must become passive/refuse rather than process the same request stream.
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.

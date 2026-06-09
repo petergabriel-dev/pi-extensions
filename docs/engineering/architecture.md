@@ -17,7 +17,7 @@ Core boundaries:
 
 - **Pi bridge extension:** Pi-coupled layer. Reuses workflow-modes, discussion-notes, persistent-memory, and engineering-docs code.
 - **Claude MCP client:** Thin file-protocol client. Node stdlib only; no Pi imports.
-- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools, requires a fresh Pi bridge policy for Bash, and wraps allowed Bash commands in `sandbox-exec` on macOS when available.
+- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools and `dangerouslyDisableSandbox`. On macOS with `/usr/bin/sandbox-exec`, Bash is allowed only by rewriting the command through a Seatbelt sandbox. If that sandbox is unavailable, Bash denies closed rather than using an unsandboxed regex allowlist.
 
 Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 
@@ -41,7 +41,7 @@ Supported launcher paths:
 - Linux: `bwrap`, with `--unshare-net`, a read-only bind of `/`, scratch `TMPDIR`, and `PYTHONDONTWRITEBYTECODE=1`.
 - No launcher: conservative read-only allowlist plus mutation/redirect denies.
 
-Claude bridge read-only Bash uses the same policy snapshot through `getWorkflowPolicySnapshot()`. Its Node-stdlib PreToolUse hook can also return `hookSpecificOutput.updatedInput`, so macOS Claude Code Bash calls under `.pi` projects are wrapped in `sandbox-exec` when available; otherwise the hook remains fail-closed on stale/missing policy and uses the allowlist fallback.
+The Pi bridge still writes `policy.json` snapshots for clients and compatibility, but Claude bridge read-only Bash no longer depends on policy freshness or `planBashAllow` gating. Its Node-stdlib PreToolUse hook returns `hookSpecificOutput.updatedInput` so macOS Claude Code Bash calls under `.pi` projects are wrapped in `sandbox-exec` whenever available. Missing, stale, or expired bridge policy does not block sandboxed Bash; absence of `sandbox-exec` blocks Bash entirely.
 
 ## Pi subagents
 
