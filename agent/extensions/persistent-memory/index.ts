@@ -27,6 +27,9 @@ const EXTRACTION_THINKING_LEVEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_THINKING_LEV
 const ALLOWED_EXTRACTION_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const DEFAULT_RECONCILIATION_TIMEOUT_MS = 180_000;
 const RECONCILIATION_TIMEOUT_ENV = "PERSISTENT_MEMORY_RECONCILIATION_TIMEOUT_MS";
+const DEFAULT_RECONCILIATION_THINKING_LEVEL: ThinkingLevel = "off";
+const RECONCILIATION_THINKING_LEVEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_THINKING_LEVEL";
+const ALLOWED_RECONCILIATION_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const DEFAULT_RECONCILIATION_CHUNK_SIZE = 20;
 const RECONCILIATION_CHUNK_SIZE_ENV = "PERSISTENT_MEMORY_RECONCILIATION_CHUNK_SIZE";
 const DEFAULT_RECONCILIATION_BUDGET_MS = 240_000;
@@ -46,6 +49,7 @@ interface ExtractionConfig {
 interface ReconciliationConfig {
 	chunkSize: number;
 	budgetMs: number;
+	thinkingLevel: ThinkingLevel;
 }
 
 interface RebuiltIndex {
@@ -395,7 +399,7 @@ function triggerBackgroundReconciliation(
 					return callCarefulModelImpl(systemPrompt, userPrompt, {
 						cwd: capturedCtx.cwd,
 						...(chosenModel ? { model: chosenModel as never } : {}),
-						...(capturedCtx.thinkingLevel ? { thinkingLevel: capturedCtx.thinkingLevel as never } : {}),
+						thinkingLevel: reconciliation.thinkingLevel,
 						timeoutMs: reconciliationTimeoutMs(),
 						logger: console,
 					});
@@ -479,6 +483,16 @@ function isAllowedExtractionThinkingLevel(value: string): value is ThinkingLevel
 	return ALLOWED_EXTRACTION_THINKING_LEVELS.includes(value as ThinkingLevel);
 }
 
+function parseReconciliationThinkingLevel(raw: string | undefined): ThinkingLevel {
+	if (!raw) return DEFAULT_RECONCILIATION_THINKING_LEVEL;
+	const normalized = raw.trim().toLowerCase();
+	return isAllowedReconciliationThinkingLevel(normalized) ? normalized : DEFAULT_RECONCILIATION_THINKING_LEVEL;
+}
+
+function isAllowedReconciliationThinkingLevel(value: string): value is ThinkingLevel {
+	return ALLOWED_RECONCILIATION_THINKING_LEVELS.includes(value as ThinkingLevel);
+}
+
 function parsePositiveIntegerEnv(raw: string | undefined, fallback: number): number {
 	if (!raw) return fallback;
 	const normalized = raw.trim();
@@ -498,6 +512,7 @@ function reconciliationConfig(): ReconciliationConfig {
 	return {
 		chunkSize: parsePositiveIntegerEnv(process.env[RECONCILIATION_CHUNK_SIZE_ENV], DEFAULT_RECONCILIATION_CHUNK_SIZE),
 		budgetMs: parsePositiveIntegerEnv(process.env[RECONCILIATION_BUDGET_ENV], DEFAULT_RECONCILIATION_BUDGET_MS),
+		thinkingLevel: parseReconciliationThinkingLevel(process.env[RECONCILIATION_THINKING_LEVEL_ENV]),
 	};
 }
 
@@ -933,7 +948,7 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 				return callCarefulModelImpl(systemPrompt, userPrompt, {
 					cwd: modelContext.cwd ?? process.cwd(),
 					...(chosenModel ? { model: chosenModel as never } : {}),
-					...(modelContext.thinkingLevel ? { thinkingLevel: modelContext.thinkingLevel as never } : {}),
+					thinkingLevel: reconciliation.thinkingLevel,
 					timeoutMs: reconciliationTimeoutMs(),
 					logger: console,
 				});

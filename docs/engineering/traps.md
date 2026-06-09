@@ -28,6 +28,7 @@
 
 ## Persistent-Memory Reconciliation
 
+- **Reconciliation must not inherit interactive thinking.** Thinking-on host sessions can produce thinking-only or otherwise hard-to-parse reconciliation output on some careful-model gateways. Keep reconciliation on `PERSISTENT_MEMORY_RECONCILIATION_THINKING_LEVEL` (default `off`) rather than `ctx.thinkingLevel`; extraction has its own analogous env var.
 - **Immediate ref matching blocks re-staging.** `normalizeCandidateRefs` originally registered refs to the seen set eagerly. If validation downstream failed on a different check, the action was discarded but its refs remained registered as seen, causing subsequent reconciliation rounds to treat them as duplicates instead of re-staging them. Refs must only be matched and stored on successfully validated actions.
 - **Malformed staging evidence crashes loader.** Malformed candidates in staging files will crash the staging loader if `source_evidence` is checked without validating the presence of non-empty `discussion_note_ids` or `lesson_candidate_marker_ids`.
 - **Applied refs tracking scope.** If tracking variables like `appliedRefs` are declared inside conditional blocks (such as those requiring model intervention), leftovers calculations will fail to account for pre-filtered actions, causing already applied candidates to be falsely re-staged as leftovers. Keep tracking variables scoped to the root of the consolidation run.
