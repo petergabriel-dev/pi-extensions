@@ -8,7 +8,7 @@
     ]
   },
   "scripts": {
-    "test": "npx tsx test/test_classifier.ts && npx tsx test/test_reason_matrix.ts && npx tsx test/test_generation_swap.ts && npx tsx test/test_firing_log.ts && npx tsx test/test_capture_ctx.ts && npx tsx test/test_resolve_careful_model.ts && npx tsx test/test_careful_model_extract.ts && npx tsx test/test_chunked_reconcile.ts && npx tsx test/test_reconcile_run_log.ts && npx tsx test/test_memory_meter.ts && npx tsx test/test_staging_repair.ts && npx tsx test/test_bridge_capture_staging.ts && npx tsx test/test_reconcile_loader_repair_quarantine.ts",
+    "test": "npx tsx test/test_classifier.ts && npx tsx test/test_reason_matrix.ts && npx tsx test/test_generation_swap.ts && npx tsx test/test_firing_log.ts && npx tsx test/test_capture_ctx.ts && npx tsx test/test_resolve_careful_model.ts && npx tsx test/test_careful_model_extract.ts && npx tsx test/test_tolerant_model_json.ts && npx tsx test/test_chunked_reconcile.ts && npx tsx test/test_reconcile_run_log.ts && npx tsx test/test_memory_meter.ts && npx tsx test/test_staging_repair.ts && npx tsx test/test_bridge_capture_staging.ts && npx tsx test/test_reconcile_loader_repair_quarantine.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
