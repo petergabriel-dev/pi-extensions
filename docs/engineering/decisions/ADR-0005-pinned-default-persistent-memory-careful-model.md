@@ -1,23 +1,26 @@
 ---
 id: ADR-0005
-title: Pinned Default Persistent-Memory Careful Model
+title: Pinned Default Persistent-Memory Model Resolution
 status: Active
 date: 2026-06-02
 ---
 
-# ADR-0005: Pinned Default Persistent-Memory Careful Model
+# ADR-0005: Pinned Default Persistent-Memory Model Resolution
 
 ## Decision
 
-- Pin the default persistent-memory careful model to `opencode-go/glm-5.1` when `PERSISTENT_MEMORY_RECONCILIATION_MODEL` or `PERSISTENT_MEMORY_EXTRACTION_MODEL` is unset or blank.
-- Preserve explicit environment overrides: when either model env var is set to a resolvable, authenticated model, that model wins over the pinned default.
+- Pin extraction / careful work to `opencode-go/glm-5.1` (heavy model) via `DEFAULT_EXTRACTION_MODEL`. Env-var: `PERSISTENT_MEMORY_EXTRACTION_MODEL`.
+- Pin adjudication / reconciliation judgements to `opencode-go/glm-4-flash` (small, fast model) via `DEFAULT_ADJUDICATION_MODEL`. Env-var: `PERSISTENT_MEMORY_ADJUDICATION_MODEL`.
+- Legacy reconciliation env-var `PERSISTENT_MEMORY_RECONCILIATION_MODEL` remains supported via the backward-compatible `resolveCarefulModel` entrypoint (defaults to `opencode-go/glm-5.1`).
+- Preserve explicit environment overrides: when a model env var is set to a resolvable, authenticated model, that model wins over the pinned default.
 - Preserve graceful fallback: if the pinned default is missing from the model registry, lacks configured auth, or resolution throws, persistent memory falls back to `ctx.model` and logs the existing warning rather than failing memory work.
 
 ## Why
 
-- Recent reconciliation work using the active session model hit `CarefulModelTimeoutError` after the 120s timeout, making memory consolidation unreliable under some chat-model choices.
+- Extraction (heavy analysis of conversation transcripts) benefits from a capable model; a small model risks poor extraction quality.
+- Adjudication (reconciliation judgements over shortlisted candidates) is a classification task well-suited to a small, fast, cheap model, keeping consolidation latency and cost low.
 - Persistent-memory consolidation should be independent from launch context and active session model drift. A code-level default avoids relying on shell profiles or inherited environment variables.
-- The tradeoff is coupling this extension to one configured provider/model id. The risk is acceptable because env overrides still win and the registry/auth fallback keeps memory functional if the provider is unavailable.
+- The tradeoff is coupling this extension to configured provider/model ids. The risk is acceptable because env overrides still win and the registry/auth fallback keeps memory functional if a provider is unavailable.
 
 ## Affects
 
@@ -35,16 +38,17 @@ Code:
 
 ## Consequences
 
-- Good: Default extraction and reconciliation no longer silently ride the active session model.
-- Good: Users can still override the careful model via `PERSISTENT_MEMORY_RECONCILIATION_MODEL` and `PERSISTENT_MEMORY_EXTRACTION_MODEL`.
+- Good: Extraction and adjudication each have a role-appropriate pinned default, no longer silently riding the active session model.
+- Good: Users can override each model independently via `PERSISTENT_MEMORY_EXTRACTION_MODEL` and `PERSISTENT_MEMORY_ADJUDICATION_MODEL`.
 - Good: Missing registry entries or missing auth degrade to the previous `ctx.model` behavior instead of hard-failing memory.
-- Bad/risk: The extension now has a user/provider-specific default model id; this must be revisited if `opencode-go/glm-5.1` is removed, renamed, or becomes unsuitable.
+- Bad/risk: The extension now has provider-specific default model ids; these must be revisited if `opencode-go/glm-5.1` or `opencode-go/glm-4-flash` is removed, renamed, or becomes unsuitable.
 
 ## Read when
 
 - Touching persistent-memory model resolution.
-- Troubleshooting memory consolidation timeouts.
+- Troubleshooting memory consolidation timeouts or cost.
 - Changing default providers/models or model-registry auth behavior.
+- Adding or changing model roles (extraction vs adjudication).
 
 ## Supersedes
 

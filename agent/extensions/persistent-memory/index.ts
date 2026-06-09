@@ -18,7 +18,7 @@ import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolv
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
-import { resolveCarefulModel } from "./model-resolution.js";
+import { resolveAdjudicationModel, resolveExtractionModel } from "./model-resolution.js";
 
 const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
 const EXTRACTION_TIMEOUT_ENV = "PERSISTENT_MEMORY_EXTRACTION_TIMEOUT_MS";
@@ -40,6 +40,17 @@ const MEMORY_PANEL_CLEAR_MS = 5_000;
 
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
 const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
+export const ADJUDICATION_MODEL_ENV = "PERSISTENT_MEMORY_ADJUDICATION_MODEL";
+
+function resolveReconciliationAdjudicationModel(
+	ctx: { modelRegistry?: any; model?: any },
+	logger: { warn: (...args: unknown[]) => void; info?: (...args: unknown[]) => void },
+): any {
+	const adjudicationOverride = process.env[ADJUDICATION_MODEL_ENV]?.trim();
+	const legacyReconciliationOverride = process.env[RECONCILIATION_MODEL_ENV]?.trim();
+	const envName = adjudicationOverride ? ADJUDICATION_MODEL_ENV : legacyReconciliationOverride ? RECONCILIATION_MODEL_ENV : ADJUDICATION_MODEL_ENV;
+	return resolveAdjudicationModel(envName, ctx, logger);
+}
 
 interface ExtractionConfig {
 	timeoutMs: number;
@@ -230,7 +241,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				const sessionId = getSessionId(ctx);
 				const capturedCtx = captureCtx(ctx);
 				const extraction = extractionConfig();
-				const chosenModel = resolveCarefulModel(EXTRACTION_MODEL_ENV, capturedCtx as any, shutdownExtractionLogger);
+				const chosenModel = resolveExtractionModel(EXTRACTION_MODEL_ENV, capturedCtx as any, shutdownExtractionLogger);
 
 				const branchSnapshot = ctx.sessionManager?.getBranch
 					? JSON.parse(JSON.stringify(ctx.sessionManager.getBranch()))
@@ -385,7 +396,7 @@ function triggerBackgroundReconciliation(
 			bgDb = openIndex(dbPath);
 
 			const reconciliation = reconciliationConfig();
-			chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, capturedCtx, console);
+			chosenModel = resolveReconciliationAdjudicationModel(capturedCtx, console);
 			const result = await runReconciliation(paths, bgDb, {
 				rebuildOnNoop: true,
 				logger: console,
@@ -927,7 +938,7 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 	const startedAt = new Date();
 	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
 	const reconciliation = reconciliationConfig();
-	const chosenModel = resolveCarefulModel(RECONCILIATION_MODEL_ENV, modelContext, console);
+	const chosenModel = resolveReconciliationAdjudicationModel(modelContext, console);
 	reconcileInFlight = true;
 
 	let ownDb: SqliteDatabase | null = null;
