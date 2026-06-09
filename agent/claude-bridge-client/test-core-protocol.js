@@ -34,9 +34,9 @@ async function sendRequest(projectRoot, type, payload, id = crypto.randomUUID())
 	if (!(await waitFor(res))) throw new Error(`No response for ${type} within ${TIMEOUT_MS}ms`);
 	return { id, response: readJson(res), responsePath: res };
 }
-function runHook(input, cwd) {
+function runHook(input, cwd, env = {}) {
 	const hook = path.resolve(__dirname, "pi-readonly-hook.js");
-	const out = cp.spawnSync("node", [hook], { input: JSON.stringify(input), cwd, encoding: "utf8" });
+	const out = cp.spawnSync("node", [hook], { input: JSON.stringify(input), cwd, encoding: "utf8", env: { ...process.env, ...env } });
 	if (out.status !== 0) throw new Error(out.stderr || `hook exit ${out.status}`);
 	return JSON.parse(out.stdout || "{}");
 }
@@ -209,6 +209,45 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 	// Mutation tools must still be blocked regardless of policy state.
 	assert(denied(runHook({ tool_name: "Edit", tool_input: {} }, stale)), "Edit not denied in stale Pi project");
 	assert(denied(runHook({ tool_name: "Write", tool_input: {} }, expired)), "Write not denied in expired Pi project");
+});
+
+// Deterministic fail-closed coverage via PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC=1.
+// Ensures the deny path is exercised even on macOS hosts where sandbox-exec exists.
+test("read-only hook fail-closed path deterministically via env override", async ({ projectRoot }) => {
+	freshTarget(projectRoot);
+	const env = { PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC: "1" };
+
+	// 1) Bash denied when sandbox is unavailable.
+	const bashResult = runHook({ tool_name: "Bash", tool_input: { command: "echo hello" } }, projectRoot, env);
+	assert(denied(bashResult), "Bash not denied when sandbox disabled via env");
+	assert(bashResult.systemMessage?.includes("sandbox-exec"), "Deny message missing sandbox-exec mention");
+
+	// 2) Read commands also denied (no sandbox → no Bash at all).
+	const readResult = runHook({ tool_name: "Bash", tool_input: { command: "rg bridge" } }, projectRoot, env);
+	assert(denied(readResult), "Read Bash not denied when sandbox disabled");
+
+	// 3) Mutation tools remain denied regardless of sandbox status.
+	assert(denied(runHook({ tool_name: "Edit", tool_input: {} }, projectRoot, env)), "Edit not denied");
+	assert(denied(runHook({ tool_name: "Write", tool_input: {} }, projectRoot, env)), "Write not denied");
+	assert(denied(runHook({ tool_name: "MultiEdit", tool_input: {} }, projectRoot, env)), "MultiEdit not denied");
+	assert(denied(runHook({ tool_name: "NotebookEdit", tool_input: {} }, projectRoot, env)), "NotebookEdit not denied");
+
+	// 4) dangerouslyDisableSandbox flag denied.
+	const disableResult = runHook({ tool_name: "Bash", tool_input: { command: "echo", dangerouslyDisableSandbox: true } }, projectRoot, env);
+	assert(denied(disableResult), "dangerouslyDisableSandbox not denied");
+
+	// 5) No policy freshness dependency: stale/missing/expired policy does not change deny.
+	const stale = makeTempPiProject();
+	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "echo" } }, stale, env)), "stale-project Bash not denied");
+
+	const expired = makeTempPiProject();
+	writeJson(paths(expired).policy, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { mutationTools: [] } });
+	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "echo" } }, expired, env)), "expired-policy Bash not denied");
+
+	// 6) Non-Pi directory: Bash allowed even with env override (no .pi ancestor).
+	const nonPi = fs.mkdtempSync(path.join(os.tmpdir(), "nonpi-failclosed-"));
+	assert(!denied(runHook({ tool_name: "Bash", tool_input: { command: "echo ok" } }, nonPi, env)), "non-Pi Bash denied under env override");
+	assert(!denied(runHook({ tool_name: "Edit", tool_input: {} }, nonPi, env)), "non-Pi Edit denied under env override");
 });
 
 async function main() {

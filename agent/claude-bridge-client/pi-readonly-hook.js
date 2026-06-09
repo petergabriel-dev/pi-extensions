@@ -57,6 +57,8 @@ function shellQuote(value) {
 }
 
 function detectSandboxExec() {
+	// Test-only env override: set PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC=1 to force fail-closed path.
+	if (process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC === "1") return false;
 	return process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec");
 }
 
