@@ -163,8 +163,41 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 		assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "git commit -m x" } }, projectRoot)), "Pi git commit not denied");
 	}
 	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "rg bridge", dangerouslyDisableSandbox: true } }, projectRoot)), "Pi sandbox-disable flag not denied");
+	// Stale/missing policy must NOT block sandboxed Bash (decoupled from policy freshness).
 	const stale = makeTempPiProject();
-	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "rg x" } }, stale)), "missing policy did not deny");
+	const staleResult = runHook({ tool_name: "Bash", tool_input: { command: "rg x" } }, stale);
+	if (isSandboxed) {
+		assert(!denied(staleResult), "missing/stale policy denied sandboxed Bash (policy should be decoupled)");
+		assert(updatedInput(staleResult)?.command?.includes("/usr/bin/sandbox-exec"), "stale-project Bash was not sandbox-wrapped");
+	} else {
+		assert(denied(staleResult), "missing policy did not deny Bash when sandbox unavailable");
+	}
+
+	// Expired policy must NOT block sandboxed Bash either.
+	const expired = makeTempPiProject();
+	const expiredPolicyPath = paths(expired).policy;
+	writeJson(expiredPolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { planBashAllow: [] } });
+	const expiredResult = runHook({ tool_name: "Bash", tool_input: { command: "echo stale" } }, expired);
+	if (isSandboxed) {
+		assert(!denied(expiredResult), "expired policy denied sandboxed Bash (policy should be decoupled)");
+	} else {
+		assert(denied(expiredResult), "expired policy did not deny Bash when sandbox unavailable");
+	}
+
+	// Stale (old writtenAt) policy must NOT block sandboxed Bash.
+	const stalePolicy = makeTempPiProject();
+	const stalePolicyPath = paths(stalePolicy).policy;
+	writeJson(stalePolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), policy: { planBashAllow: [] } });
+	const stalePolicyResult = runHook({ tool_name: "Bash", tool_input: { command: "echo stale" } }, stalePolicy);
+	if (isSandboxed) {
+		assert(!denied(stalePolicyResult), "stale-writtenAt policy denied sandboxed Bash (policy should be decoupled)");
+	} else {
+		assert(denied(stalePolicyResult), "stale-writtenAt policy did not deny Bash when sandbox unavailable");
+	}
+
+	// Mutation tools must still be blocked regardless of policy state.
+	assert(denied(runHook({ tool_name: "Edit", tool_input: {} }, stale)), "Edit not denied in stale Pi project");
+	assert(denied(runHook({ tool_name: "Write", tool_input: {} }, expired)), "Write not denied in expired Pi project");
 });
 
 async function main() {

@@ -8,8 +8,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const MUTATION_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-const POLICY_MAX_AGE_MS = 5_000;
-
 function isDir(p) {
 	try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
@@ -104,28 +102,6 @@ function wrapBashForSandbox(command, projectRoot) {
 	].join(" ");
 }
 
-function readPolicy(projectRoot) {
-	const policyPath = path.join(projectRoot, ".pi", "memory", "bridge", "policy.json");
-	let policy;
-	try {
-		policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
-	} catch {
-		throw new Error("Pi bridge policy unavailable; start/focus Pi in this project.");
-	}
-	const writtenAt = Date.parse(policy.writtenAt || "");
-	const expiresAt = Date.parse(policy.expiresAt || "");
-	if (!Number.isFinite(writtenAt) || Date.now() - writtenAt > POLICY_MAX_AGE_MS) {
-		throw new Error("Pi bridge policy stale; start/focus Pi in this project.");
-	}
-	if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) {
-		throw new Error("Pi bridge policy expired; start/focus Pi in this project.");
-	}
-	if (!policy.policy || typeof policy.policy !== "object") {
-		throw new Error("Pi bridge policy invalid; start/focus Pi in this project.");
-	}
-	return policy.policy;
-}
-
 function bashCommand(input) {
 	const toolInput = input.tool_input || input.toolInput || input.input || {};
 	return String(toolInput.command || "").trim();
@@ -153,12 +129,6 @@ function main() {
 	}
 
 	if (toolName === "Bash") {
-		try {
-			readPolicy(projectRoot); // validate freshness; fail closed if stale/missing
-		} catch (error) {
-			console.log(JSON.stringify(deny(error.message)));
-			return;
-		}
 		const toolInput = input.tool_input || input.toolInput || input.input || {};
 		if (toolInput.dangerouslyDisableSandbox) {
 			console.log(JSON.stringify(deny("Bash dangerouslyDisableSandbox is blocked in Pi projects; mutations require Pi /mode build.")));
@@ -167,7 +137,7 @@ function main() {
 		const command = bashCommand(input);
 		const wrapped = wrapBashForSandbox(command, projectRoot);
 		if (wrapped) {
-			// macOS Seatbelt sandbox enforces read-only; bypass planBashAllow allowlist gate.
+			// macOS Seatbelt sandbox enforces read-only; no Pi bridge policy round-trip required.
 			console.log(JSON.stringify(allow({ ...toolInput, command: wrapped })));
 			return;
 		}
