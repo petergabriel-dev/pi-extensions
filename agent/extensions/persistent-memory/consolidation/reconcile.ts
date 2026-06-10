@@ -24,6 +24,7 @@ import {
 } from "../storage/sqlite.js";
 import type { Decision, DomainFact, Lesson, LessonCandidate, Preference, StagingFile, Trigger } from "../types.js";
 import { shortlist, type ShortlistCandidate, type ShortlistRecord } from "./shortlist.js";
+import { parseAdjudication, type AdjudicationVerdict } from "./adjudication.js";
 
 export class ReconciliationValidationError extends Error {
 	constructor(
@@ -130,6 +131,12 @@ export interface ReconciliationDeps {
 	/** Test hook called after each deterministic add is committed to markdown + sqlite.
 	 *  If it throws, reconciliation fails but already-committed candidates persist. */
 	afterDeterministicAddForTest?: (ref: string) => void;
+	/** Adjudication model for batched lesson collision resolution (T6).
+	 *  Receives a single prompt listing all candidates with their shortlists.
+	 *  Must return a JSON object with a `verdicts` array in the same order. */
+	callAdjudicationModel?: (prompt: string) => Promise<string>;
+	/** Maximum number of lesson candidates per adjudication batch (default 20). */
+	adjudicationBatchSize?: number;
 }
 
 export interface CategoryTotals {
@@ -408,11 +415,108 @@ export async function runReconciliation(
 		// --- Model path for collision candidates -----------------------------------
 		const modelCandidates = shortlistSplit.collision;
 
+		// --- T6 adjudication path for lesson collision candidates ------------------
+		if (deps.callAdjudicationModel && modelCandidates.lessons.length > 0) {
+			const batchSize = normalizePositiveInteger(deps.adjudicationBatchSize, 20);
+			const lessonCandidates = modelCandidates.lessons;
+
+			// Compute shortlists for each lesson candidate (re-fetch from current memory).
+			const lessonShortlists: ShortlistRecord[][] = [];
+			for (const candidate of lessonCandidates) {
+				const sc: ShortlistCandidate = {
+					type: "lesson",
+					summary: candidate.candidate.summary,
+					detail: candidate.candidate.detail,
+					scope_suggestion: candidate.candidate.scope_suggestion,
+					triggers: candidate.candidate.triggers,
+				};
+				lessonShortlists.push(shortlist(sc, projectMemory.lessons as ShortlistRecord[]));
+			}
+
+			// Batch and adjudicate.
+			let adjudicationErrored = false;
+			for (let offset = 0; offset < lessonCandidates.length; offset += batchSize) {
+				const batchCandidates = lessonCandidates.slice(offset, offset + batchSize);
+				const batchShortlists = lessonShortlists.slice(offset, offset + batchSize);
+
+				// Mark all in batch as attempted.
+				for (const c of batchCandidates) attemptedRefs.add(c.ref);
+
+				const prompt = buildAdjudicationPrompt(batchCandidates, batchShortlists);
+
+				let rawResponse: string;
+				try {
+					rawResponse = await deps.callAdjudicationModel(prompt);
+					llmCalled = true;
+				} catch (error) {
+					logger.warn?.("[persistent-memory] adjudication model call failed; parking batch.");
+					adjudicationErrored = true;
+					// Park entire batch — no verdicts applied, candidates stay staged.
+					continue;
+				}
+
+				const adjudicationResult = parseAdjudication(rawResponse);
+				if (adjudicationResult.status === "parked") {
+					logger.warn?.(`[persistent-memory] adjudication parse returned parked: ${adjudicationResult.message}; parking batch.`);
+					adjudicationErrored = true;
+					continue;
+				}
+
+				// Map valid verdicts to plan actions. Partial batches are tolerated:
+				// salvaged valid verdicts are applied; missing/invalid ones are parked.
+				const mapped = mapVerdictsToPlan(adjudicationResult.verdicts, batchCandidates, batchShortlists, projectMemory, adjudicationResult.parked);
+
+				// Track parked refs as attempted so they get reconcile_attempts incremented.
+				for (const ref of mapped.parkedRefs) attemptedRefs.add(ref);
+
+				if (mapped.appliedRefs.size > 0) {
+					// Build a minimal prefilter for materializeReconciliation.
+					// Only the adjudicated batch candidates are "remaining"; no bypassed here.
+					const batchRemaining: PreparedReconciliationCandidates = {
+						lessons: batchCandidates.filter((c) => mapped.appliedRefs.has(c.ref)),
+						preferences: [],
+						decisions: [],
+						domain: [],
+					};
+					const batchPreFilter = preFilterForChunk(preFilter, batchRemaining, !bypassedRefsApplied);
+					const nowIso = (deps.now?.() ?? new Date()).toISOString();
+					const effectiveScope = projectScope;
+					const nextMemory = materializeReconciliation(projectMemory, batchPreFilter, mapped.plan, effectiveScope, nowIso);
+
+					try {
+						counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
+					} catch (error) {
+						return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
+					}
+
+					// Incremental sqlite.
+					if (isSqliteLike(db)) {
+						const newRecords = diffNewRecords(projectMemory, nextMemory, "lessons");
+						const memDir = memoryPaths.projectMemoryDir!;
+						if (newRecords.lessons.length > 0) insertLessons(db, path.join(memDir, "lessons.md"), newRecords.lessons);
+					}
+
+					bypassedRefsApplied = true;
+					projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
+					plan = mergePlans(plan, mapped.plan);
+					for (const ref of mapped.appliedRefs) appliedRefs.add(ref);
+				}
+			}
+
+			if (adjudicationErrored) {
+				terminalFailure = { reason: "model_error", error: new Error("Adjudication model call(s) failed; affected candidates parked.") };
+			}
+		}
+
+		// Remove adjudicated lesson candidates from modelCandidates so the
+		// legacy path below only sees non-lesson collision candidates.
+		modelCandidates.lessons = [];
+
 		if (hasRemainingCandidates(modelCandidates)) {
 			if (!deps.callCarefulModel) {
 				// No model available but collision candidates exist — they stay staged.
 				// deterministicRefs already committed; collision candidates remain for model.
-				counts.candidates.remainingForModel = candidateTotals(shortlistSplit.collision);
+				counts.candidates.remainingForModel = candidateTotals(modelCandidates);
 				// Fall through to staging cleanup below (collision candidates remain staged)
 			} else {
 				// Model available: existing chunked reconciliation
@@ -2104,6 +2208,180 @@ function compareStagingFiles(a: StagingFile, b: StagingFile): number {
 function normalizeTimestamp(value: string): string {
 	const timestamp = Date.parse(value);
 	return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value;
+}
+
+// ---------------------------------------------------------------------------
+// T6 — Batched adjudication helpers
+// ---------------------------------------------------------------------------
+
+const ADJUDICATION_SYSTEM_PROMPT = `You are a lesson reconciliation adjudicator. For each new lesson candidate below, compare it against the shortlisted existing lessons and decide the relationship.
+
+Return a JSON object with a "verdicts" array containing one verdict object per candidate in the same order as listed.
+
+Verdict options:
+- {"verdict": "distinct"}: The candidate is a new, distinct lesson not represented by any existing lesson. Create it as a new active lesson.
+- {"verdict": "duplicate"}: The candidate is essentially the same as the top shortlist entry. The existing lesson's reinforcement should be bumped.
+- {"verdict": "supersedes"}: The candidate represents an improved version that should replace the top shortlist entry. The old lesson becomes superseded.
+- {"verdict": "merge", "merged_text": "..."}: The candidate and the top shortlist entry should be merged into a new lesson. Provide the merged summary text.`;
+
+/**
+ * Build a batched adjudication prompt for lesson candidates with their shortlists.
+ * The model must return verdicts in the same order as the candidates appear.
+ */
+export function buildAdjudicationPrompt(
+	candidates: ReconciliationCandidate<LessonCandidate>[],
+	shortlists: ShortlistRecord[][],
+): string {
+	const lines: string[] = [];
+	lines.push(ADJUDICATION_SYSTEM_PROMPT);
+	lines.push("");
+	lines.push("CANDIDATES:");
+	lines.push("");
+
+	for (let i = 0; i < candidates.length; i++) {
+		const c = candidates[i];
+		const sl = shortlists[i] ?? [];
+
+		lines.push(`Candidate ${i + 1}:`);
+		lines.push(`  Summary: "${c.candidate.summary}"`);
+		lines.push(`  Detail: "${c.candidate.detail}"`);
+		lines.push(`  Scope: ${c.candidate.scope_suggestion}`);
+		if (c.candidate.triggers.length > 0) {
+			lines.push(`  Triggers: ${c.candidate.triggers.map((t) => {
+				if (t.type === "command") return `${t.type}:${t.pattern}`;
+				return `${t.type}:${t.value}`;
+			}).join(", ")}`);
+		}
+		lines.push("  Shortlist:");
+		if (sl.length === 0) {
+			lines.push("    (none)");
+		} else {
+			for (const record of sl) {
+				const r = record as Lesson;
+				lines.push(`    - [${r.id}] "${r.summary}" (${r.meta.status}, r:${r.meta.reinforcement_count})`);
+			}
+		}
+		lines.push("");
+	}
+
+	lines.push("Respond with ONLY a JSON object:");
+	lines.push("{");
+	lines.push('  "verdicts": [');
+	for (let i = 0; i < candidates.length; i++) {
+		const comma = i < candidates.length - 1 ? "," : "";
+		lines.push(`    {"verdict": "..."}${comma}`);
+	}
+	lines.push("  ]");
+	lines.push("}");
+
+	return lines.join("\n");
+}
+
+/**
+ * Map parsed adjudication verdicts onto NormalizedReconciliationPlan actions.
+ *
+ * Returns the plan, the set of applied refs, and any parked candidate refs
+ * (verdicts that could not be mapped, e.g. missing shortlist target).
+ *
+ * Verdict routing for lessons:
+ *  - distinct → add action (new active lesson from candidate)
+ *  - duplicate → merge action (reinforce target, unchanged text)
+ *  - supersedes → supersede action (target superseded, new record from candidate)
+ *  - merge → supersede action (target superseded, new record with merged_text)
+ */
+export function mapVerdictsToPlan(
+	verdicts: AdjudicationVerdict[],
+	candidates: ReconciliationCandidate<LessonCandidate>[],
+	shortlists: ShortlistRecord[][],
+	existing: ProjectMemory,
+	parkedItems: Array<{ index: number }> = [],
+): { plan: NormalizedReconciliationPlan; appliedRefs: Set<string>; parkedRefs: Set<string> } {
+	void existing;
+	const plan = emptyPlan();
+	const appliedRefs = new Set<string>();
+	const parkedRefs = new Set<string>();
+	const parkedIndexes = new Set(parkedItems.map((item) => item.index));
+	let verdictIndex = 0;
+
+	for (let i = 0; i < candidates.length; i++) {
+		const candidate = candidates[i];
+		if (parkedIndexes.has(i)) {
+			parkedRefs.add(candidate.ref);
+			continue;
+		}
+		const verdict = verdicts[verdictIndex++];
+		if (!verdict) {
+			parkedRefs.add(candidate.ref);
+			continue;
+		}
+
+		const sl = shortlists[i] ?? [];
+		const topTarget = sl[0] as Lesson | undefined;
+
+		if (!topTarget && verdict.verdict !== "distinct") {
+			// A non-distinct verdict requires a target but none exists.
+			// Park this candidate — can't apply.
+			parkedRefs.add(candidate.ref);
+			continue;
+		}
+
+		switch (verdict.verdict) {
+			case "distinct": {
+				// New active lesson — deterministic add.
+				plan.lessons.push({
+					action: "add",
+					candidate_refs: [candidate.ref],
+					summary: candidate.candidate.summary,
+					detail: candidate.candidate.detail,
+					triggers: cloneTriggers(candidate.candidate.triggers),
+				});
+				appliedRefs.add(candidate.ref);
+				break;
+			}
+			case "duplicate": {
+				// Reinforce existing target — merge action with unchanged text.
+				plan.lessons.push({
+					action: "merge",
+					candidate_refs: [candidate.ref],
+					target_id: topTarget!.id,
+					summary: topTarget!.summary,
+					detail: topTarget!.detail,
+					triggers: cloneTriggers(topTarget!.meta.triggers),
+				});
+				appliedRefs.add(candidate.ref);
+				break;
+			}
+			case "supersedes": {
+				// New active supersedes target.
+				plan.lessons.push({
+					action: "supersede",
+					candidate_refs: [candidate.ref],
+					target_id: topTarget!.id,
+					summary: candidate.candidate.summary,
+					detail: candidate.candidate.detail,
+					triggers: cloneTriggers(candidate.candidate.triggers),
+				});
+				appliedRefs.add(candidate.ref);
+				break;
+			}
+			case "merge": {
+				// New merged record supersedes target.
+				const mergedText = verdict.merged_text ?? candidate.candidate.summary;
+				plan.lessons.push({
+					action: "supersede",
+					candidate_refs: [candidate.ref],
+					target_id: topTarget!.id,
+					summary: mergedText,
+					detail: candidate.candidate.detail,
+					triggers: cloneTriggers(candidate.candidate.triggers),
+				});
+				appliedRefs.add(candidate.ref);
+				break;
+			}
+		}
+	}
+
+	return { plan, appliedRefs, parkedRefs };
 }
 
 function parsePositiveIntegerEnv(raw: string | undefined, fallback: number): number {
