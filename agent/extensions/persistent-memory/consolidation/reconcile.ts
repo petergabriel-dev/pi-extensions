@@ -307,7 +307,8 @@ export async function runReconciliation(
 		counts.stagingFiles.malformed = 0;
 		counts.stagingFiles.wrongProject = loaded.wrongProject.length;
 		counts.stagingFiles.deadLettered = loaded.deadLettered.length;
-		counts.stagingFiles.preserved = loaded.wrongProject.length;
+		// T9: wrongProject is a terminal state (preserved on disk but not for re-processing).
+		// preserved stays 0 — no staging file survives cross-cycle for re-processing.
 		counts.candidates.deadLettered = loaded.deadLetteredCandidates;
 
 		if (loaded.valid.length === 0) {
@@ -604,145 +605,104 @@ export async function runReconciliation(
 			...deterministicRefs,
 		]);
 
+		// T9: Staging consumption — every candidate reaches a terminal state within
+		// a single reconciliation run. No candidate is re-staged for a future cycle.
+		// Resolved candidates were committed to markdown/sqlite above; all other
+		// candidates are dead-lettered and the staging file is deleted.
 		try {
-			const maxAttempts = parsePositiveIntegerEnv(process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS, 3);
-			const lastGateReason = bestError ? bestError.message : "unknown validation failure";
+			const unattemptedReason = "not attempted (no model, budget exhausted, or generation stopped)";
+			const validationReason = bestError ? bestError.message : "validation rejection (T9: no cross-cycle preservation)";
 
 			for (const file of loaded.valid) {
 				const stagingData = file.data;
+				const totalCandidatesInFile = stagingData.candidates.lessons.length
+					+ stagingData.candidates.preferences.length
+					+ stagingData.candidates.decisions.length
+					+ stagingData.candidates.domain.length;
+				let hadAnyResolved = false;
 
-				const finalLeftoverLessons: LessonCandidate[] = [];
+				// Lessons
 				for (const [i, lesson] of stagingData.candidates.lessons.entries()) {
 					const ref = `${stagingData.session_id}:lessons:${i + 1}`;
-					if (resolvedRefs.has(ref)) continue;
-					if (!attemptedRefs.has(ref)) {
-						finalLeftoverLessons.push(lesson);
-						continue;
-					}
-					const attempts = (lesson.reconcile_attempts ?? 0) + 1;
-					if (attempts > maxAttempts) {
-						writeDeadLetter(memoryPaths.projectMemoryDir!, {
-							session_id: stagingData.session_id,
-							produced_at: stagingData.produced_at,
-							attempts,
-							last_gate_reason: lastGateReason,
-							category: "lessons",
-							candidate: { ...lesson, reconcile_attempts: attempts },
-						});
-						counts.candidates.deadLettered.lessons += 1;
-						console.warn(`[persistent-memory] Dead-lettered lesson candidate from session ${stagingData.session_id} after ${attempts} attempts: ${lastGateReason}`);
-					} else {
-						finalLeftoverLessons.push({
-							...lesson,
-							reconcile_attempts: attempts,
-						});
-					}
-				}
-
-				const finalLeftoverPreferences: StagingFile["candidates"]["preferences"] = [];
-				for (const [i, pref] of stagingData.candidates.preferences.entries()) {
-					const ref = `${stagingData.session_id}:preferences:${i + 1}`;
-					if (resolvedRefs.has(ref)) continue;
-					if (!attemptedRefs.has(ref)) {
-						finalLeftoverPreferences.push(pref);
-						continue;
-					}
-					const attempts = (pref.reconcile_attempts ?? 0) + 1;
-					if (attempts > maxAttempts) {
-						writeDeadLetter(memoryPaths.projectMemoryDir!, {
-							session_id: stagingData.session_id,
-							produced_at: stagingData.produced_at,
-							attempts,
-							last_gate_reason: lastGateReason,
-							category: "preferences",
-							candidate: { ...pref, reconcile_attempts: attempts },
-						});
-						counts.candidates.deadLettered.preferences += 1;
-						console.warn(`[persistent-memory] Dead-lettered preference candidate from session ${stagingData.session_id} after ${attempts} attempts: ${lastGateReason}`);
-					} else {
-						finalLeftoverPreferences.push({
-							...pref,
-							reconcile_attempts: attempts,
-						});
-					}
-				}
-
-				const finalLeftoverDecisions: StagingFile["candidates"]["decisions"] = [];
-				for (const [i, dec] of stagingData.candidates.decisions.entries()) {
-					const ref = `${stagingData.session_id}:decisions:${i + 1}`;
-					if (resolvedRefs.has(ref)) continue;
-					if (!attemptedRefs.has(ref)) {
-						finalLeftoverDecisions.push(dec);
-						continue;
-					}
-					const attempts = (dec.reconcile_attempts ?? 0) + 1;
-					if (attempts > maxAttempts) {
-						writeDeadLetter(memoryPaths.projectMemoryDir!, {
-							session_id: stagingData.session_id,
-							produced_at: stagingData.produced_at,
-							attempts,
-							last_gate_reason: lastGateReason,
-							category: "decisions",
-							candidate: { ...dec, reconcile_attempts: attempts },
-						});
-						counts.candidates.deadLettered.decisions += 1;
-						console.warn(`[persistent-memory] Dead-lettered decision candidate from session ${stagingData.session_id} after ${attempts} attempts: ${lastGateReason}`);
-					} else {
-						finalLeftoverDecisions.push({
-							...dec,
-							reconcile_attempts: attempts,
-						});
-					}
-				}
-
-				const finalLeftoverDomain: StagingFile["candidates"]["domain"] = [];
-				for (const [i, dom] of stagingData.candidates.domain.entries()) {
-					const ref = `${stagingData.session_id}:domain:${i + 1}`;
-					if (resolvedRefs.has(ref)) continue;
-					if (!attemptedRefs.has(ref)) {
-						finalLeftoverDomain.push(dom);
-						continue;
-					}
-					const attempts = (dom.reconcile_attempts ?? 0) + 1;
-					if (attempts > maxAttempts) {
-						writeDeadLetter(memoryPaths.projectMemoryDir!, {
-							session_id: stagingData.session_id,
-							produced_at: stagingData.produced_at,
-							attempts,
-							last_gate_reason: lastGateReason,
-							category: "domain",
-							candidate: { ...dom, reconcile_attempts: attempts },
-						});
-						counts.candidates.deadLettered.domain += 1;
-						console.warn(`[persistent-memory] Dead-lettered domain candidate from session ${stagingData.session_id} after ${attempts} attempts: ${lastGateReason}`);
-					} else {
-						finalLeftoverDomain.push({
-							...dom,
-							reconcile_attempts: attempts,
-						});
-					}
-				}
-
-				const totalActiveLeftovers = finalLeftoverLessons.length + finalLeftoverPreferences.length + finalLeftoverDecisions.length + finalLeftoverDomain.length;
-
-				if (totalActiveLeftovers === 0) {
-					deleteStaging(file.filePath);
-					counts.stagingFiles.consumed += 1;
-				} else {
-					const updatedStaging: StagingFile = {
-						schemaVersion: 1,
+					if (resolvedRefs.has(ref)) { hadAnyResolved = true; continue; }
+					const attempted = attemptedRefs.has(ref);
+					const attempts = attempted ? (lesson.reconcile_attempts ?? 0) + 1 : (lesson.reconcile_attempts ?? 0);
+					const reason = attempted ? validationReason : unattemptedReason;
+					writeDeadLetter(memoryPaths.projectMemoryDir!, {
 						session_id: stagingData.session_id,
 						produced_at: stagingData.produced_at,
-						project_root: stagingData.project_root,
-						candidates: {
-							lessons: finalLeftoverLessons,
-							preferences: finalLeftoverPreferences,
-							decisions: finalLeftoverDecisions,
-							domain: finalLeftoverDomain,
-						}
-					};
-					writeStaging(file.filePath, updatedStaging);
-					counts.stagingFiles.preserved += 1;
+						attempts,
+						last_gate_reason: reason,
+						category: "lessons",
+						candidate: { ...lesson, reconcile_attempts: attempts },
+					});
+					counts.candidates.deadLettered.lessons += 1;
+					console.warn(`[persistent-memory] Dead-lettered lesson candidate from session ${stagingData.session_id}: ${reason}`);
+				}
+
+				// Preferences
+				for (const [i, pref] of stagingData.candidates.preferences.entries()) {
+					const ref = `${stagingData.session_id}:preferences:${i + 1}`;
+					if (resolvedRefs.has(ref)) { hadAnyResolved = true; continue; }
+					const attempted = attemptedRefs.has(ref);
+					const attempts = attempted ? (pref.reconcile_attempts ?? 0) + 1 : (pref.reconcile_attempts ?? 0);
+					const reason = attempted ? validationReason : unattemptedReason;
+					writeDeadLetter(memoryPaths.projectMemoryDir!, {
+						session_id: stagingData.session_id,
+						produced_at: stagingData.produced_at,
+						attempts,
+						last_gate_reason: reason,
+						category: "preferences",
+						candidate: { ...pref, reconcile_attempts: attempts },
+					});
+					counts.candidates.deadLettered.preferences += 1;
+					console.warn(`[persistent-memory] Dead-lettered preference candidate from session ${stagingData.session_id}: ${reason}`);
+				}
+
+				// Decisions
+				for (const [i, dec] of stagingData.candidates.decisions.entries()) {
+					const ref = `${stagingData.session_id}:decisions:${i + 1}`;
+					if (resolvedRefs.has(ref)) { hadAnyResolved = true; continue; }
+					const attempted = attemptedRefs.has(ref);
+					const attempts = attempted ? (dec.reconcile_attempts ?? 0) + 1 : (dec.reconcile_attempts ?? 0);
+					const reason = attempted ? validationReason : unattemptedReason;
+					writeDeadLetter(memoryPaths.projectMemoryDir!, {
+						session_id: stagingData.session_id,
+						produced_at: stagingData.produced_at,
+						attempts,
+						last_gate_reason: reason,
+						category: "decisions",
+						candidate: { ...dec, reconcile_attempts: attempts },
+					});
+					counts.candidates.deadLettered.decisions += 1;
+					console.warn(`[persistent-memory] Dead-lettered decision candidate from session ${stagingData.session_id}: ${reason}`);
+				}
+
+				// Domain facts
+				for (const [i, dom] of stagingData.candidates.domain.entries()) {
+					const ref = `${stagingData.session_id}:domain:${i + 1}`;
+					if (resolvedRefs.has(ref)) { hadAnyResolved = true; continue; }
+					const attempted = attemptedRefs.has(ref);
+					const attempts = attempted ? (dom.reconcile_attempts ?? 0) + 1 : (dom.reconcile_attempts ?? 0);
+					const reason = attempted ? validationReason : unattemptedReason;
+					writeDeadLetter(memoryPaths.projectMemoryDir!, {
+						session_id: stagingData.session_id,
+						produced_at: stagingData.produced_at,
+						attempts,
+						last_gate_reason: reason,
+						category: "domain",
+						candidate: { ...dom, reconcile_attempts: attempts },
+					});
+					counts.candidates.deadLettered.domain += 1;
+					console.warn(`[persistent-memory] Dead-lettered domain candidate from session ${stagingData.session_id}: ${reason}`);
+				}
+
+				// Delete the staging file — every candidate reached a terminal state.
+				deleteStaging(file.filePath);
+				if (hadAnyResolved || totalCandidatesInFile === 0) {
+					counts.stagingFiles.consumed += 1;
+				} else {
+					counts.stagingFiles.deadLettered += 1;
 				}
 			}
 		} catch (error) {

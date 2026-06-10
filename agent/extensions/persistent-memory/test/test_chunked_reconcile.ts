@@ -101,7 +101,9 @@ async function testPerChunkPartialFallback() {
 	});
 	assert.equal(result.status, "completed");
 	assert.equal(parseDomainFile(path.join(mem, "domain.md")).length, 1);
-	assert.deepEqual(stagingDomain(mem).map((c) => c.reconcile_attempts), [1]);
+	// T9: leftovers are dead-lettered, not re-staged.
+	assert.equal(stagingDomain(mem).length, 0, "no staging leftovers survive");
+	assert.equal(listDeadLetterFiles(mem).length, 1, "leftover dead-lettered");
 	assert.equal(conservationCount(mem), 2);
 }
 
@@ -116,7 +118,9 @@ async function testBudgetCutoffAttemptsUnchanged() {
 		callCarefulModel: async (_system, userPrompt) => addResponse(refs(userPrompt)),
 	});
 	assert.equal(result.status, "completed");
-	assert.deepEqual(stagingDomain(mem).map((c) => c.reconcile_attempts), [7, 8]);
+	// T9: budget-skipped candidates dead-lettered (not re-staged), attempts unchanged.
+	assert.equal(stagingDomain(mem).length, 0, "no staging leftovers survive");
+	assert.equal(listDeadLetterFiles(mem).length, 2, "two budget-skipped candidates dead-lettered");
 	assert.equal(conservationCount(mem), 3);
 }
 
@@ -135,31 +139,27 @@ async function testModelErrorChunkAttemptsUnchanged() {
 	assert.equal(result.status, "failed");
 	if (result.status !== "failed") throw new Error("expected failed reconciliation");
 	assert.equal(result.reason, "model_error");
-	assert.deepEqual(stagingDomain(mem).map((c) => c.reconcile_attempts), [2, 3]);
+	// T9: model-error and unattempted candidates dead-lettered (not re-staged).
+	assert.equal(stagingDomain(mem).length, 0, "no staging leftovers survive");
+	assert.equal(listDeadLetterFiles(mem).length, 2, "model-error and unprocessed candidates dead-lettered");
 	assert.equal(conservationCount(mem), 3);
 }
 
 async function testDeadLetterOnlyAfterValidationCap() {
-	const previous = process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS;
-	process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS = "1";
-	try {
-		const { root, mem } = setup("s1", [domainCandidate(1, 1)]);
-		const emptyInvalid = JSON.stringify({ lessons: [], preferences: [], decisions: [], domain: [] });
-		const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, {} as any, {
-			chunkSize: 1,
-			rebuildIndex: () => undefined,
-			callCarefulModel: async () => emptyInvalid,
-		});
-		assert.equal(result.status, "failed");
-		if (result.status !== "failed") throw new Error("expected failed reconciliation");
-		assert.equal(result.reason, "invalid_model_response");
-		assert.equal(stagingDomain(mem).length, 0);
-		assert.equal(listDeadLetterFiles(mem).length, 1);
-		assert.equal(conservationCount(mem), 2);
-	} finally {
-		if (previous === undefined) delete process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS;
-		else process.env.PERSISTENT_MEMORY_RECONCILIATION_MAX_ATTEMPTS = previous;
-	}
+	// T9: all leftovers dead-lettered immediately; max-attempts env var is a no-op.
+	const { root, mem } = setup("s1", [domainCandidate(1, 1)]);
+	const emptyInvalid = JSON.stringify({ lessons: [], preferences: [], decisions: [], domain: [] });
+	const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, {} as any, {
+		chunkSize: 1,
+		rebuildIndex: () => undefined,
+		callCarefulModel: async () => emptyInvalid,
+	});
+	assert.equal(result.status, "failed");
+	if (result.status !== "failed") throw new Error("expected failed reconciliation");
+	assert.equal(result.reason, "invalid_model_response");
+	assert.equal(stagingDomain(mem).length, 0, "staging file deleted (terminal)");
+	assert.equal(listDeadLetterFiles(mem).length, 1);
+	assert.equal(conservationCount(mem), 2);
 }
 
 async function main() {

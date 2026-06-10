@@ -24,7 +24,7 @@ import {
   mapVerdictsToPlan,
   splitByShortlist,
 } from "../consolidation/reconcile.js";
-import { writeStaging, listStagingFiles, readStaging } from "../consolidation/staging.js";
+import { writeStaging, listStagingFiles, readStaging, listDeadLetterFiles } from "../consolidation/staging.js";
 import { parseLessonsFile, serializeLessonsFile } from "../storage/markdown.js";
 import { openIndex, getIndexCounts } from "../storage/sqlite.js";
 import type { AdjudicationVerdict } from "../consolidation/adjudication.js";
@@ -543,17 +543,12 @@ async function testAdjudicationFailureAfterDeterministicAdd() {
     const original = lessons.find((l) => l.id === "lsn_01");
     assert.ok(original, "original lesson still on disk");
 
-    // Collision candidate should remain staged
-    assert.strictEqual(stagingCount(mem), 1, "staging preserved for collision candidate");
+    // T9: collision candidate dead-lettered (not re-staged).
+    assert.strictEqual(stagingCount(mem), 0, "staging empty (T9 terminal)");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "collision candidate dead-lettered");
     const staged = readStagedLessons(mem);
-    assert.strictEqual(staged.length, 1, "one staged lesson");
-    assert.strictEqual(staged[0].summary, "Existing collision anchor",
-      "collision candidate still staged");
-    // reconcile_attempts should be incremented
-    assert.strictEqual(staged[0].reconcile_attempts, 1,
-      "reconcile_attempts incremented");
-
-    // The run should complete while parking only the failed batch.
+    assert.strictEqual(staged.length, 0, "no staged lessons");
+    // T9: reconcile_attempts tracked in dead letter.
     assert.strictEqual(result.status, "completed");
     // Deterministic work was NOT rolled back
     assert.strictEqual(lessons.length, 2, "only 2 lessons on disk (original + deterministic)");
@@ -589,11 +584,12 @@ async function testNoAdjudicationWithoutModel() {
       // callAdjudicationModel NOT provided
     });
 
-    // Should complete (collision candidate stays staged — no model to resolve)
+    // T9: collision candidate dead-lettered when no model available.
     assert.strictEqual(result.llmCalled, false);
     const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
     assert.strictEqual(lessons.length, 1, "only original lesson");
-    assert.strictEqual(stagingCount(mem), 1, "collision candidate stays staged");
+    assert.strictEqual(stagingCount(mem), 0, "staging empty (T9 terminal)");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "collision candidate dead-lettered");
   } finally {
     try { db.close(); } catch {}
     fs.rmSync(root, { recursive: true, force: true });

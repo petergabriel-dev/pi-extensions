@@ -765,9 +765,10 @@ function shouldRecordReconcileResult(result: ReconciliationRunResult): boolean {
 	if (result.status === "failed") return true;
 	if (result.indexRebuilt) return true;
 	const counts = result.counts;
+	// T9: preserved is always 0; deadLettered files are also terminal activity.
 	return counts.stagingFiles.total > 0
 		|| counts.stagingFiles.consumed > 0
-		|| counts.stagingFiles.preserved > 0
+		|| counts.stagingFiles.deadLettered > 0
 		|| totalCategoryTotals(counts.candidates.deadLettered) > 0;
 }
 
@@ -1002,7 +1003,7 @@ function formatReconciliationResult(result: Exclude<Awaited<ReturnType<typeof ru
 	const counts = result.counts;
 	const lines = [
 		`Memory reconciliation ${result.status}.`,
-		`Staging: ${counts.stagingFiles.consumed}/${counts.stagingFiles.total} consumed, ${counts.stagingFiles.preserved} preserved.`,
+		`Staging: ${counts.stagingFiles.consumed}/${counts.stagingFiles.total} consumed, ${counts.stagingFiles.deadLettered} dead-lettered.`,
 		`Candidates: ${formatTotals(counts.candidates.staged)} staged, ${formatTotals(counts.candidates.exactDuplicates)} exact duplicates, ${formatTotals(counts.candidates.remainingForModel)} model candidates, ${formatTotals(counts.candidates.deadLettered)} dead-lettered.`,
 		`Actions: ${formatTotals(counts.actions.add)} added, ${formatTotals(counts.actions.merge)} merged, ${counts.actions.supersede} superseded, ${formatTotals(counts.actions.discard)} discarded.`,
 		`Writes: ${formatWriteFlags(counts.writes)}. Index rebuilt: ${result.indexRebuilt ? "yes" : "no"}.`,

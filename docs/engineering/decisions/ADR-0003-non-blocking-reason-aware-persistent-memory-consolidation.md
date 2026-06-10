@@ -3,6 +3,7 @@ id: ADR-0003
 title: Non-Blocking Reason-Aware Persistent-Memory Consolidation
 status: Active
 date: 2026-05-30
+updated: 2026-06-10
 ---
 
 # ADR-0003: Non-Blocking Reason-Aware Persistent-Memory Consolidation
@@ -23,7 +24,7 @@ To resolve the tradeoff between persistent memory consistency and interactive se
 | Event | Reason | Extraction | Reconciliation | Reinforcement | Timing | Status Indicator |
 |---|---|---|---|---|---|---|
 | `session_start` | `reload` | N/A | None (reopen only) | N/A | Synchronous | None |
-| `session_start` | `startup`, `new`, `resume`, `fork` | N/A | Full (rebuilt copy) | N/A | Asynchronous (`setTimeout`) | `"Memory consolidating..."` |
+| `session_start` | `startup`, `new`, `resume`, `fork` | N/A | Full (owned connection, incremental candidate writes) | N/A | Asynchronous (`setTimeout`) | `"Memory consolidating..."` |
 | `session_shutdown` | `reload` | None | N/A | None (log preserved) | Synchronous | None |
 | `session_shutdown` | `new`, `resume`, `fork` | Full | N/A | Full (log cleared) | Synchronous (v1) | None |
 | `session_shutdown` | `quit` | Full | N/A | Full (log cleared) | Synchronous | None |
@@ -31,8 +32,8 @@ To resolve the tradeoff between persistent memory consistency and interactive se
 ## Why
 
 - **Performance:** Bypassing model calls on `/reload` drops reload latency to the no-staging fast path (<50ms). Running reconciliation in the background on startup makes the session immediately interactive.
-- **Reliability:** Out-of-band markdown edits or leftover candidates are safely reconciled on the next non-reload session start.
-- **Safety:** Stale or closed database handle writes are prevented by the generation guard, discarding outdated background handles cleanly without crash or candidate loss.
+- **Reliability:** Out-of-band markdown edits are safely reconciled on the next non-reload session start. Staging leftovers are dead-lettered within a single reconciliation run (T9 terminal consumption), so no candidate is carried across cycles unresolved.
+- **Safety:** Stale or closed database handle writes are prevented by the generation guard, discarding outdated background handles cleanly without crash; unresolved same-project candidates are terminalized under staging-consumption semantics rather than preserved across cycles.
 - **Structured-output reliability:** Tool-call arguments avoid dependence on free-form text placement for careful-model plans, while the fallback preserves backward compatibility for gateways that omit real `tool_calls`.
 
 ## Alternatives Rejected

@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import Database from "better-sqlite3";
 import { runReconciliation, splitByShortlist, buildDeterministicPlan } from "../consolidation/reconcile.js";
-import { writeStaging, listStagingFiles, readStaging } from "../consolidation/staging.js";
+import { writeStaging, listStagingFiles, readStaging, listDeadLetterFiles } from "../consolidation/staging.js";
 import { parseLessonsFile, parsePreferencesFile, parseDecisionsFile, parseDomainFile } from "../storage/markdown.js";
 import { openIndex, getIndexCounts } from "../storage/sqlite.js";
 import { shortlist } from "../consolidation/shortlist.js";
@@ -345,7 +345,7 @@ async function testNoCollisionDomainDeterministicAdd() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: shortlist collision candidate NOT deterministically added (stays staged, zero-model)
+// Test: shortlist collision candidate NOT deterministically added (T9: dead-lettered when no model, terminal)
 // ---------------------------------------------------------------------------
 
 async function testCollisionCandidateStaysStagedWhenNoModel() {
@@ -388,14 +388,14 @@ Always use JWT tokens for API endpoints.
       callCarefulModel: undefined, // no model available
     });
 
-    // Should complete (or skip) — collision candidate stays staged
-    // No new lesson added because shortlist is non-empty and no model to adjudicate
+    // T9: collision candidate dead-lettered when no model to adjudicate.
     const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
     assert.strictEqual(lessons.length, 1, "Only the original lesson should exist");
     assert.strictEqual(lessons[0].id, "lsn_01");
 
-    // Staging should still have the candidate
-    assert.strictEqual(stagingCount(mem), 1, "Collision candidate should remain staged");
+    // T9: candidate dead-lettered, not re-staged.
+    assert.strictEqual(stagingCount(mem), 0, "Collision candidate dead-lettered, staging empty");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "Collision candidate dead-lettered");
   } finally {
     try { db.close(); } catch {}
     fs.rmSync(root, { recursive: true, force: true });
@@ -613,7 +613,7 @@ async function main() {
   await testNoCollisionDomainDeterministicAdd();
   console.log("  ✓ no-collision domain deterministic add");
   await testCollisionCandidateStaysStagedWhenNoModel();
-  console.log("  ✓ collision candidate stays staged (no model)");
+  console.log("  ✓ collision candidate dead-lettered (no model, T9 terminal)");
   await testCrashBetweenCandidatesPreservesFirst();
   console.log("  ✓ crash between candidates preserves first");
   await testMultipleNoCollisionAllCategories();
