@@ -9,8 +9,8 @@ date: 2026-06-02
 
 ## Decision
 
-- Pin extraction / careful work to `opencode-go/glm-5.1` (heavy model) via `DEFAULT_EXTRACTION_MODEL`. Env-var: `PERSISTENT_MEMORY_EXTRACTION_MODEL`.
-- Pin adjudication / reconciliation judgements to `opencode-go/glm-4-flash` (small, fast model) via `DEFAULT_ADJUDICATION_MODEL`. Env-var: `PERSISTENT_MEMORY_ADJUDICATION_MODEL`.
+- Pin extraction work to `opencode-go/deepseek-v4-flash` via `DEFAULT_EXTRACTION_MODEL`. Env-var: `PERSISTENT_MEMORY_EXTRACTION_MODEL`.
+- Pin adjudication / reconciliation judgements to `opencode-go/deepseek-v4-flash` via `DEFAULT_ADJUDICATION_MODEL`. Env-var: `PERSISTENT_MEMORY_ADJUDICATION_MODEL`.
 - Legacy reconciliation env-var `PERSISTENT_MEMORY_RECONCILIATION_MODEL` remains supported via the backward-compatible `resolveCarefulModel` entrypoint (defaults to `opencode-go/glm-5.1`).
 - Preserve explicit environment overrides: when a model env var is set to a resolvable, authenticated model, that model wins over the pinned default.
 - Preserve graceful fallback: if the pinned default is missing from the model registry, lacks configured auth, or resolution throws, persistent memory falls back to `ctx.model` and logs the existing warning rather than failing memory work.
@@ -41,7 +41,7 @@ Code:
 - Good: Extraction and adjudication each have a role-appropriate pinned default, no longer silently riding the active session model.
 - Good: Users can override each model independently via `PERSISTENT_MEMORY_EXTRACTION_MODEL` and `PERSISTENT_MEMORY_ADJUDICATION_MODEL`.
 - Good: Missing registry entries or missing auth degrade to the previous `ctx.model` behavior instead of hard-failing memory.
-- Bad/risk: The extension now has provider-specific default model ids; these must be revisited if `opencode-go/glm-5.1` or `opencode-go/glm-4-flash` is removed, renamed, or becomes unsuitable.
+- Bad/risk: The extension now has provider-specific default model ids; these must be revisited if `opencode-go/deepseek-v4-flash` or the legacy careful default `opencode-go/glm-5.1` is removed, renamed, or becomes unsuitable.
 
 ## Read when
 

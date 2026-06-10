@@ -3,11 +3,11 @@ import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 /** Pinned default for careful / extraction work (heavy model). */
 const DEFAULT_CAREFUL_MODEL = "opencode-go/glm-5.1";
 
-/** Pinned default for extraction (same heavy model, kept for clarity). */
-export const DEFAULT_EXTRACTION_MODEL = "opencode-go/glm-5.1";
+/** Pinned default for extraction. */
+export const DEFAULT_EXTRACTION_MODEL = "opencode-go/deepseek-v4-flash";
 
-/** Pinned default for adjudication / reconciliation judgements (small, fast model). */
-export const DEFAULT_ADJUDICATION_MODEL = "opencode-go/glm-4-flash";
+/** Pinned default for adjudication / reconciliation judgements. */
+export const DEFAULT_ADJUDICATION_MODEL = "opencode-go/deepseek-v4-flash";
 
 /**
  * Resolve a model by env-var override, registry lookup, and auth check.

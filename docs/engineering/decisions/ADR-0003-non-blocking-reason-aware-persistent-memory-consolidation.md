@@ -34,7 +34,7 @@ To resolve the tradeoff between persistent memory consistency and interactive se
 3. **Blocking Shutdown on Quit:** The shutdown handler blocks on extraction and reinforcement for the `"quit"` reason to prevent early process termination from cutting off file writes.
 4. **Generation-Guarded Index Swaps:** To mitigate teardown races when switching/forking sessions, a module-level `lifecycleGeneration` counter is incremented on every start and shutdown handler execution. The background task works on a separate database connection and only swaps it into the live global state if the generation token is unchanged upon completion.
 5. **Observability via Status Widget:** A non-blocking status indicator (`"Memory consolidating..."`) is shown using the UI setStatus widget while reconciliation is in flight, so a user recall issued before completion is explicable.
-6. **Forced Tool-Call Structured Output for Careful Models:** Extraction and reconciliation register a single custom `submit_plan` tool whose TypeBox-compatible schema mirrors the prompt JSON schema, and force that tool via the provider `toolChoice` option when a resolved careful model is available. The host reads the returned `ToolCall.arguments` as the model plan. If the provider/gateway does not return a tool call, or forced tool use is unavailable, the system falls back to the existing free-text JSON plus tolerant parse/salvage path. We do not use `response_format`/JSON mode because the opencode-go `glm-5.1` path is through an OpenAI-completions-compatible adapter where tool calls are the compatible structured-output mechanism.
+6. **Forced Tool-Call Structured Output for Careful Models:** Extraction and reconciliation register a single custom `submit_plan` tool whose TypeBox-compatible schema mirrors the prompt JSON schema, and force that tool via the provider `toolChoice` option when a resolved careful model is available. The host reads the returned `ToolCall.arguments` as the model plan. If the provider/gateway does not return a tool call, or forced tool use is unavailable, the system falls back to the existing free-text JSON plus tolerant parse/salvage path. We do not use `response_format`/JSON mode because the opencode-go model path is through an OpenAI-completions-compatible adapter where tool calls are the compatible structured-output mechanism.
 
 ## The Reason Matrix
 
@@ -87,7 +87,7 @@ Code:
 
 ## Probe Result
 
-A live one-shot `opencode-go/glm-5.1` gateway probe was not run in this worker environment: the extension package typecheck stubs compile against `@mariozechner/*`, but the runtime package is not resolvable from this isolated package outside the host pi process. The implementation therefore uses conservative fallback behavior and should be empirically probed from the host runtime before relying on forced tool-call availability.
+A live one-shot `opencode-go/deepseek-v4-flash` gateway probe should be run from the host Pi runtime before relying on forced tool-call availability. The extension keeps conservative fallback behavior for gateways that omit tool calls or return invalid schema.
 
 ## Read when
 

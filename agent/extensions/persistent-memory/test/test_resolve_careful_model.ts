@@ -13,8 +13,9 @@ type TestModel = { provider: string; id: string; name: string };
 
 const ctxModel: TestModel = { provider: "session", id: "current-model", name: "Current Model" };
 const envModel: TestModel = { provider: "env-provider", id: "env-model", name: "Env Model" };
-const extractionDefault: TestModel = { provider: "opencode-go", id: "glm-5.1", name: "GLM 5.1" };
-const adjudicationDefault: TestModel = { provider: "opencode-go", id: "glm-4-flash", name: "GLM 4 Flash" };
+const carefulDefault: TestModel = { provider: "opencode-go", id: "glm-5.1", name: "GLM 5.1" };
+const extractionDefault: TestModel = { provider: "opencode-go", id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" };
+const adjudicationDefault: TestModel = { provider: "opencode-go", id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" };
 
 function makeCtx(models: TestModel[], authedModels: TestModel[]) {
 	return {
@@ -51,15 +52,15 @@ const envName = "PERSISTENT_MEMORY_TEST_MODEL";
 
 // Env override takes precedence over the pinned default.
 withEnv(envName, "env-provider/env-model", () => {
-	const ctx = makeCtx([envModel, extractionDefault], [envModel, extractionDefault]);
+	const ctx = makeCtx([envModel, carefulDefault], [envModel, carefulDefault]);
 	assert.strictEqual(resolveCarefulModel(envName, ctx, logger), envModel);
 });
 
 // Unset env resolves to the pinned default when it is present and authed.
 withEnv(envName, undefined, () => {
-	const ctx = makeCtx([extractionDefault], [extractionDefault]);
+	const ctx = makeCtx([carefulDefault], [carefulDefault]);
 	const infoMessages: unknown[][] = [];
-	assert.strictEqual(resolveCarefulModel(envName, ctx, { ...logger, info: (...args) => infoMessages.push(args) }), extractionDefault);
+	assert.strictEqual(resolveCarefulModel(envName, ctx, { ...logger, info: (...args) => infoMessages.push(args) }), carefulDefault);
 	assert.deepStrictEqual(infoMessages, [["[persistent-memory] Resolved careful model for PERSISTENT_MEMORY_TEST_MODEL: opencode-go/glm-5.1."]]);
 });
 
@@ -71,13 +72,13 @@ withEnv(envName, undefined, () => {
 
 // Unset env falls back to ctx.model when the pinned default is present but auth is not configured.
 withEnv(envName, undefined, () => {
-	const ctx = makeCtx([extractionDefault], []);
+	const ctx = makeCtx([carefulDefault], []);
 	assert.strictEqual(resolveCarefulModel(envName, ctx, logger), ctxModel);
 });
 
 // === resolveExtractionModel ===
 
-// Extraction default is unchanged (opencode-go/glm-5.1, the heavy model).
+// Extraction default uses opencode-go/deepseek-v4-flash.
 withEnv(envName, undefined, () => {
 	const ctx = makeCtx([extractionDefault], [extractionDefault]);
 	assert.strictEqual(resolveExtractionModel(envName, ctx, logger), extractionDefault);
@@ -109,11 +110,10 @@ withEnv(envName, undefined, () => {
 
 // === resolveAdjudicationModel ===
 
-// Adjudication default is a small/fast model (opencode-go/glm-4-flash), distinct from extraction.
+// Adjudication default uses the same available flash model as extraction.
 withEnv(envName, undefined, () => {
-	const ctx = makeCtx([adjudicationDefault, extractionDefault], [adjudicationDefault]);
+	const ctx = makeCtx([adjudicationDefault], [adjudicationDefault]);
 	assert.strictEqual(resolveAdjudicationModel(envName, ctx, logger), adjudicationDefault);
-	assert.notStrictEqual(resolveAdjudicationModel(envName, ctx, logger), extractionDefault);
 });
 
 // Adjudication env override wins over the small/fast default.
@@ -122,15 +122,15 @@ withEnv(envName, "env-provider/env-model", () => {
 	assert.strictEqual(resolveAdjudicationModel(envName, ctx, logger), envModel);
 });
 
-// Adjudication falls back to ctx.model when small/fast default is not found.
+// Adjudication falls back to ctx.model when flash default is not found.
 withEnv(envName, undefined, () => {
-	const ctx = makeCtx([extractionDefault], [extractionDefault]);
+	const ctx = makeCtx([carefulDefault], [carefulDefault]);
 	assert.strictEqual(resolveAdjudicationModel(envName, ctx, logger), ctxModel);
 });
 
 // Adjudication falls back to ctx.model when small/fast default has no configured auth.
 withEnv(envName, undefined, () => {
-	const ctx = makeCtx([adjudicationDefault, extractionDefault], [extractionDefault]); // adjudicationDefault present but not authed
+	const ctx = makeCtx([adjudicationDefault], []); // adjudicationDefault present but not authed
 	assert.strictEqual(resolveAdjudicationModel(envName, ctx, logger), ctxModel);
 });
 
@@ -147,7 +147,7 @@ withEnv(envName, undefined, () => {
 });
 
 // Verify exported defaults match expected values.
-assert.strictEqual(DEFAULT_EXTRACTION_MODEL, "opencode-go/glm-5.1");
-assert.strictEqual(DEFAULT_ADJUDICATION_MODEL, "opencode-go/glm-4-flash");
+assert.strictEqual(DEFAULT_EXTRACTION_MODEL, "opencode-go/deepseek-v4-flash");
+assert.strictEqual(DEFAULT_ADJUDICATION_MODEL, "opencode-go/deepseek-v4-flash");
 
 console.log("test_resolve_careful_model passed!");
