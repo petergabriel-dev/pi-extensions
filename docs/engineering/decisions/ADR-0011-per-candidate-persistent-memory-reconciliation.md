@@ -3,33 +3,51 @@ id: ADR-0011
 title: Per-Candidate Persistent-Memory Reconciliation
 status: Active
 date: 2026-06-10
+updated: 2026-06-10
+supersedes:
+  - ADR-0002
+  - ADR-0006
 ---
 
 # ADR-0011: Per-Candidate Persistent-Memory Reconciliation
 
 ## Decision
 
-- Reconcile staged memory candidates with monotonic per-candidate progress: normalize/prepare, shortlist, deterministic add when no collision exists, adjudicate collisions, then commit successful candidates without waiting for unrelated candidates.
-- Treat an empty shortlist as a deterministic ADD path with host-filled ids, timestamps, scopes, triggers, refs, and per-candidate markdown/SQLite writes.
-- Treat lesson shortlist collisions through bounded adjudication verdicts (`distinct`, `duplicate`, `supersedes`, `merge`) whose model output contains no host-owned structural fields.
-- Isolate failures to the affected candidate or adjudication batch: failed/invalid candidates are dead-lettered immediately with `reconcile_attempts` tracked for forensic audit; no candidate is re-staged for a future reconciliation cycle (T9 terminal staging consumption). Unattempted candidates (no model, budget exhausted, generation stopped) are also dead-lettered with unchanged attempts.
-- Keep records reversible: duplicate reinforces, supersede/merge mark old lessons superseded and create/keep records rather than deleting.
-- Supersede ADR-0002 and ADR-0006 as the active reconciliation design; their partial-acceptance, retry, dead-letter, and bounded-work goals are preserved under per-candidate orchestration.
+Persistent-memory reconciliation uses a deterministic, per-candidate write pipeline instead of whole-run or chunk-level all-or-nothing reconciliation:
+
+1. **Validate before staging.** Extraction validates every candidate before writing `staging/`. Malformed candidates are dropped, and lesson candidates missing/empty triggers are repaired with deterministic `deriveLessonTriggers(...)` so the ADR-0009 trigger invariant holds at write time.
+2. **Shortlist before model calls.** Reconciliation computes a pure lexical shortlist over same-scope records. Candidates with an empty shortlist follow the zero-model deterministic ADD path.
+3. **Host-owned structure.** Code fills ids, timestamps, scopes, refs, triggers, status flags, and supersede pointers. Models emit only bounded verdicts.
+4. **Small-model lesson adjudication.** Lesson collisions are adjudicated with a constrained verdict contract: `distinct`, `duplicate`, `supersedes`, or `merge`. Parser failures park/terminalize only affected candidates.
+5. **Atomic per-candidate progress.** Each successful candidate/batch writes markdown and incrementally upserts changed SQLite rows through the reconcile-owned connection. Candidate-processing paths do not run a final whole-index rebuild-and-swap.
+6. **Terminal staging consumption.** Every same-project staging file reaches a terminal state in one run: consumed or dead-lettered. Wrong-project files are terminal for the current project and remain for their owner. No same-project candidate is re-staged across cycles.
+7. **Reversible memory state.** Duplicate reinforces; supersede/merge flips status and pointers or creates a replacement. Records are never deleted. Offline sweep only flags/archives via reversible status/metadata.
+8. **Bounded observability.** The append-only bounded run-log records per-candidate outcomes and discard/dup-rate metrics, surfaced by `/memory status`.
+
+ADR-0011 supersedes ADR-0002 and ADR-0006. ADR-0003 remains the lifecycle home, ADR-0005 the model-role home, ADR-0008 the connection/observability home, and ADR-0009 the staging validity/trigger home.
 
 ## Why
 
-- Whole-run and chunk-level failure still allowed one bad candidate or one model failure to make reconciliation feel like a coinflip.
-- Most staged candidates are distinct enough to add without a model call once lexical shortlist finds no plausible collision.
-- Candidate-level commits make crashes monotonic: process death loses at most in-flight work, not already-committed candidates.
-- Keeping the model verdict bounded preserves the determinism boundary and makes failures parkable rather than destructive.
+- Whole-run and chunk-level failure made saving/reconciliation feel like a coinflip: one bad candidate or one model timeout could preserve a backlog indefinitely.
+- Most candidates can be safely added without model involvement when lexical shortlist finds no plausible collision.
+- Candidate-level commits make progress monotonic: process death loses at most in-flight work, not already-committed candidates.
+- Deterministic structure plus bounded model verdicts improves reliability and makes failures auditable.
+- Terminal staging semantics make backlog health measurable: files drain, dead letters explain unresolved candidates, and run-log metrics expose duplicate/discard pressure.
 
 ## Affects
 
 Docs:
 
+- `docs/engineering/architecture.md`
+- `docs/engineering/invariants.md`
+- `docs/engineering/traps.md`
 - `docs/engineering/decisions/README.md`
 - `docs/engineering/decisions/ADR-0002-reliable-persistent-memory-reconciliation.md`
+- `docs/engineering/decisions/ADR-0003-non-blocking-reason-aware-persistent-memory-consolidation.md`
+- `docs/engineering/decisions/ADR-0005-pinned-default-persistent-memory-careful-model.md`
 - `docs/engineering/decisions/ADR-0006-chunked-persistent-memory-reconciliation.md`
+- `docs/engineering/decisions/ADR-0008-persistent-memory-reconcile-connection-ownership-observability.md`
+- `docs/engineering/decisions/ADR-0009-bridge-staging-validity-malformed-quarantine.md`
 - `docs/engineering/decisions/ADR-0011-per-candidate-persistent-memory-reconciliation.md`
 
 Code:
@@ -38,21 +56,29 @@ Code:
 - `agent/extensions/persistent-memory/consolidation/shortlist.ts`
 - `agent/extensions/persistent-memory/consolidation/adjudication.ts`
 - `agent/extensions/persistent-memory/consolidation/verdict-apply.ts`
-- `agent/extensions/persistent-memory/test/test_per_candidate_reconcile.ts`
+- `agent/extensions/persistent-memory/consolidation/extract.ts`
+- `agent/extensions/persistent-memory/consolidation/sweep.ts`
+- `agent/extensions/persistent-memory/storage/sqlite.ts`
+- `agent/extensions/persistent-memory/storage/run-log.ts`
+- `agent/extensions/persistent-memory/index.ts`
 
 ## Consequences
 
 - Good: Non-colliding candidates commit with zero model calls.
-- Good: A failing candidate parks or dead-letters without rolling back deterministic adds or successful supersedes.
-- Good: Reconciliation has clearer per-candidate conservation and terminal semantics (T9: every candidate consumed or dead-lettered, no cross-cycle preservation).
-- Bad/risk: Some compatibility code remains for non-lesson legacy reconciliation until later tasks finish replacing every category path.
-- Bad/risk: Lesson adjudication is currently richer than preference/decision/domain adjudication because only lessons have status/supersede metadata.
+- Good: A failing candidate cannot abort or roll back unrelated committed candidates.
+- Good: Staging drains to a terminal state; no same-project file is preserved across cycles unresolved.
+- Good: SQLite updates are incremental on the owned connection, preserving ADR-0008 connection ownership and generation-guard behavior.
+- Good: Per-candidate outcomes and discard/dup-rate metrics make future extraction-volume and embedding decisions evidence-based.
+- Good: Existing markdown/dead-letter formats remain readable; new metadata fields are optional/backward-compatible.
+- Tradeoff: Collision adjudication is rich for lessons first; non-lesson collision candidates without a model callback are conservatively dead-lettered under terminal staging semantics.
+- Tradeoff: Terminal dead-lettering favors bounded drains over indefinite retry. Forensic content remains in `deadletter/`.
 
 ## Read when
 
 - Changing `runReconciliation`, shortlist routing, adjudication, staging cleanup, or dead-letter behavior.
-- Debugging staged candidates that park, dead-letter, or appear not to drain.
-- Modifying persistent-memory write-path crash safety or model-verdict contracts.
+- Debugging staged candidates that appear not to drain.
+- Modifying persistent-memory write-path crash safety, SQLite indexing, run-log metrics, or model-verdict contracts.
+- Changing extraction staging validity, lesson trigger requirements, or offline sweep behavior.
 
 ## Supersedes
 
