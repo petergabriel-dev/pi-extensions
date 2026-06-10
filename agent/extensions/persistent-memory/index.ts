@@ -19,6 +19,8 @@ import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type Sqlit
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
 import { resolveAdjudicationModel, resolveExtractionModel } from "./model-resolution.js";
+import { sweepLessons } from "./consolidation/sweep.js";
+import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
 
 const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
 const EXTRACTION_TIMEOUT_ENV = "PERSISTENT_MEMORY_EXTRACTION_TIMEOUT_MS";
@@ -349,7 +351,11 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await listDeadLetter(ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, or /memory deadletter", "warning");
+			if (trimmed === "sweep") {
+				await sweepMemoryCommand(ctx);
+				return;
+			}
+			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, /memory deadletter, /memory sweep", "warning");
 		},
 	});
 }
@@ -1230,6 +1236,58 @@ async function listMemory(ctx: ExtensionCommandContext): Promise<void> {
 	];
 
 	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+async function sweepMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!memoryPaths?.projectMemoryDir) {
+		ctx.ui.notify("No project memory dir.", "warning");
+		return;
+	}
+
+	if (reconcileInFlight) {
+		ctx.ui.notify("Reconciliation is in flight; wait for it to finish before running /memory sweep.", "warning");
+		return;
+	}
+
+	try {
+		const result = runOfflineSweep(memoryPaths);
+		if (!result.changed) {
+			ctx.ui.notify("Sweep found nothing to archive.", "info");
+			return;
+		}
+
+		// Rebuild sqlite index to reflect archived statuses
+		if (db) {
+			try {
+				rebuildIndex(db, memoryPaths);
+				lastRebuildError = null;
+			} catch (error) {
+				lastRebuildError = formatError(error);
+				ctx.ui.notify(`Sweep archived ${result.archivedCount} lesson(s) but index rebuild failed: ${lastRebuildError}`, "warning");
+				return;
+			}
+		}
+
+		ctx.ui.notify(`Sweep complete: archived ${result.archivedCount} lesson(s).`, "info");
+	} catch (error) {
+		ctx.ui.notify(`Sweep failed: ${formatError(error)}`, "error");
+	}
+}
+
+function runOfflineSweep(paths: MemoryPaths): { changed: boolean; archivedCount: number } {
+	if (!paths.projectMemoryDir) return { changed: false, archivedCount: 0 };
+
+	const lessonsPath = path.join(paths.projectMemoryDir, "lessons.md");
+	const lessons = parseLessonsFile(lessonsPath);
+	if (lessons.length === 0) return { changed: false, archivedCount: 0 };
+
+	const { lessons: swept, result } = sweepLessons(lessons);
+	if (!result.changed) return { changed: false, archivedCount: 0 };
+
+	// Write back to markdown
+	rewriteLessonsFile(lessonsPath, swept);
+
+	return { changed: true, archivedCount: result.archivedLessonIds.length };
 }
 
 export function getLifecycleGenerationForTest(): number {
