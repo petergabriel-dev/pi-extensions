@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { EXTRACTION_SYSTEM_PROMPT, buildExtractionUserPrompt, type SessionEntryLike } from "./prompts.js";
-import { stagingPath, writeStaging } from "./staging.js";
+import { deriveLessonTriggers, stagingPath, writeStaging } from "./staging.js";
 import type { MemoryPaths } from "../storage/paths.js";
 import type { LessonCandidate, StagingFile, Trigger } from "../types.js";
 
@@ -81,11 +81,16 @@ export async function runExtraction(
 			return { status: "failed", reason: "parse_error", error };
 		}
 
-		const candidates = normalizeExtractionResult(parsed);
-		if (!candidates) {
+		// T10: Validate-at-write — sanitize each candidate before staging.
+		// Malformed individual candidates are dropped; lessons with missing/empty triggers
+		// have triggers derived deterministically (ADR-0009). Only structurally valid
+		// candidates reach the staging queue.
+		const sanitized = sanitizeExtractionResult(parsed, logger);
+		if (!sanitized) {
 			logger.error?.("[persistent-memory] extraction produced invalid schema; not writing staging.");
 			return { status: "failed", reason: "invalid_schema" };
 		}
+		const candidates = sanitized;
 
 		const totalCandidates = countCandidates(candidates);
 		if (totalCandidates === 0) {
@@ -151,6 +156,74 @@ function stripJsonFence(raw: string): string {
 
 export function validateExtractionResult(result: unknown): boolean {
 	return normalizeExtractionResult(result) !== null;
+}
+
+// ---------------------------------------------------------------------------
+// T10: Validate-at-write sanitization
+// Filters out individual malformed candidates and derives triggers for lessons
+// that lack a non-empty trigger list (ADR-0009).
+// ---------------------------------------------------------------------------
+
+export function sanitizeExtractionResult(
+	result: unknown,
+	logger?: { warn?: (...args: unknown[]) => void },
+): ExtractionCandidates | null {
+	const root = asRecord(result);
+	const candidates = asRecord(root.candidates);
+	if (!Array.isArray(candidates.lessons)) return null;
+	if (!Array.isArray(candidates.preferences)) return null;
+	if (!Array.isArray(candidates.decisions)) return null;
+	if (!Array.isArray(candidates.domain)) return null;
+
+	const lessons = sanitizeArray(candidates.lessons, sanitizeLessonCandidate, logger, "lesson");
+	const preferences = sanitizeArray(candidates.preferences, normalizePreferenceCandidate, logger, "preference");
+	const decisions = sanitizeArray(candidates.decisions, normalizeDecisionCandidate, logger, "decision");
+	const domain = sanitizeArray(candidates.domain, normalizeDomainCandidate, logger, "domain");
+
+	return { lessons, preferences, decisions, domain };
+}
+
+function sanitizeArray<T>(
+	raw: unknown[],
+	normalize: (value: unknown) => T | null,
+	logger: { warn?: (...args: unknown[]) => void } | undefined,
+	label: string,
+): T[] {
+	const out: T[] = [];
+	for (const item of raw) {
+		const normalized = normalize(item);
+		if (!normalized) {
+			logger?.warn?.(`[persistent-memory] extraction dropped malformed ${label} candidate`);
+			continue;
+		}
+		out.push(normalized);
+	}
+	return out;
+}
+
+function sanitizeLessonCandidate(raw: unknown): LessonCandidate | null {
+	// First try strict normalization — if it passes, the lesson is fully valid.
+	const lesson = normalizeLessonCandidate(raw);
+	if (lesson) return lesson;
+
+	// Lesson failed strict normalization. Check if it failed ONLY because of
+	// missing/empty triggers. If the rest of the structure is sound, derive
+	// triggers deterministically (ADR-0009, no extra model call).
+	const item = asRecord(raw);
+	const summary = requireString(item.summary);
+	const detail = requireString(item.detail);
+	const scopeSuggestion = requireString(item.scope_suggestion);
+	const sourceEvidence = normalizeEvidence(item.source_evidence);
+	if (!summary || !detail || !scopeSuggestion || !sourceEvidence) return null;
+
+	// Structurally valid but triggers are missing or empty → derive them.
+	const reconcile_attempts = typeof item.reconcile_attempts === "number" ? item.reconcile_attempts : 0;
+	const derived = deriveLessonTriggers(
+		`${summary}\n${detail}`,
+		/* context */ undefined,
+		scopeSuggestion,
+	);
+	return { summary, detail, triggers: derived, scope_suggestion: scopeSuggestion, source_evidence: sourceEvidence, reconcile_attempts };
 }
 
 export function normalizeExtractionResult(result: unknown): ExtractionCandidates | null {
