@@ -433,8 +433,8 @@ export async function runReconciliation(
 				lessonShortlists.push(shortlist(sc, projectMemory.lessons as ShortlistRecord[]));
 			}
 
-			// Batch and adjudicate.
-			let adjudicationErrored = false;
+			// Batch and adjudicate. Failures park only the affected batch; they do
+			// not fail the whole run or roll back earlier per-candidate commits.
 			for (let offset = 0; offset < lessonCandidates.length; offset += batchSize) {
 				const batchCandidates = lessonCandidates.slice(offset, offset + batchSize);
 				const batchShortlists = lessonShortlists.slice(offset, offset + batchSize);
@@ -450,7 +450,6 @@ export async function runReconciliation(
 					llmCalled = true;
 				} catch (error) {
 					logger.warn?.("[persistent-memory] adjudication model call failed; parking batch.");
-					adjudicationErrored = true;
 					// Park entire batch — no verdicts applied, candidates stay staged.
 					continue;
 				}
@@ -458,7 +457,6 @@ export async function runReconciliation(
 				const adjudicationResult = parseAdjudication(rawResponse);
 				if (adjudicationResult.status === "parked") {
 					logger.warn?.(`[persistent-memory] adjudication parse returned parked: ${adjudicationResult.message}; parking batch.`);
-					adjudicationErrored = true;
 					continue;
 				}
 
@@ -501,10 +499,6 @@ export async function runReconciliation(
 					plan = mergePlans(plan, mapped.plan);
 					for (const ref of mapped.appliedRefs) appliedRefs.add(ref);
 				}
-			}
-
-			if (adjudicationErrored) {
-				terminalFailure = { reason: "model_error", error: new Error("Adjudication model call(s) failed; affected candidates parked.") };
 			}
 		}
 

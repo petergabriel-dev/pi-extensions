@@ -1,7 +1,7 @@
 ---
 id: ADR-0006
 title: Chunked Persistent-Memory Reconciliation
-status: Active
+status: Superseded
 date: 2026-06-02
 ---
 
@@ -63,3 +63,7 @@ Code:
 ## Supersedes
 
 - None.
+
+## Superseded by
+
+- ADR-0011

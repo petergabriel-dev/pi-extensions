@@ -528,14 +528,7 @@ async function testAdjudicationFailureAfterDeterministicAdd() {
       },
     });
 
-    // Should complete (NOT throw). terminalFailure is set but status is "completed".
     assert.ok(adjudicationCalled, "adjudication was attempted");
-    // The run may report "failed" due to terminalFailure, but let's check behavior.
-    // Actually, per implementation, terminalFailure causes status "failed".
-    // The task says: "run does not throw (may return completed or failed?
-    // Prefer completed with preserved staging if consistent)."
-    // Our implementation sets terminalFailure = model_error, which leads to
-    // status "failed" at the end. Let me verify.
 
     // Deterministic add should be committed
     const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
@@ -560,10 +553,9 @@ async function testAdjudicationFailureAfterDeterministicAdd() {
     assert.strictEqual(staged[0].reconcile_attempts, 1,
       "reconcile_attempts incremented");
 
-    // The run should report failure (terminalFailure)
-    assert.strictEqual(result.status, "failed");
-    assert.strictEqual(result.reason, "model_error");
-    // But deterministic work was NOT rolled back
+    // The run should complete while parking only the failed batch.
+    assert.strictEqual(result.status, "completed");
+    // Deterministic work was NOT rolled back
     assert.strictEqual(lessons.length, 2, "only 2 lessons on disk (original + deterministic)");
   } finally {
     try { db.close(); } catch {}
