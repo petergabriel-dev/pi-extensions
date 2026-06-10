@@ -8,6 +8,23 @@ updated: 2026-06-10
 
 # ADR-0003: Non-Blocking Reason-Aware Persistent-Memory Consolidation
 
+## T12 Sweep Home — Low-Signal Flagging + Contradiction Detection
+
+As of 2026-06-10, the offline sweep (`/memory sweep`) runs three non-destructive phases:
+
+1. **Archival (T11):** Fully-superseded chains and expired session-scoped lessons are archived (status change only, reversible).
+2. **Low-Signal Flagging (T12):** Active lessons with old `last_seen_at`, low `reinforcement_count`, and no presence in the firing log are flagged `low_signal: true`. Flagged records remain active; they are surfaced for human review, never deleted or archived.
+3. **Contradiction Detection (T12):** Pairs of active lessons sharing at least one trigger (same type, value, and pattern) are identified as suspected contradictions and assigned a shared `contradiction_group` id. Contradictions are queued for adjudication, never auto-resolved.
+
+Both low-signal flags and contradiction groups are surfaced via `/memory` (list view and dedicated subcommands `/memory lowsignal`, `/memory contradictions`). All flags are reversible: `unflagLowSignalLessons` clears the `low_signal` flag, `clearContradictionGroups` removes the `contradiction_group` assignment.
+
+### Conservative Defaults
+
+- Low-signal age threshold: 30 days (configurable via `lowSignalAgeMs`).
+- Low-signal reinforcement threshold: `< 1` (configurable via `lowSignalMaxReinforcement`).
+- Firing log presence: derived from `firings.jsonl` lesson_id entries.
+- Contradictions: detected purely heuristically (shared triggers); no LLM involved.
+
 ## Decision
 
 To resolve the tradeoff between persistent memory consistency and interactive session startup latency, we map lifecycle events to actions based on their reasons:
@@ -57,6 +74,9 @@ Code:
 - [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L391-L485) (`triggerBackgroundReconciliation` helper)
 - [lifecycle.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/lifecycle.ts) (extracted lifecycle logic)
 - [careful-model.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/careful-model.ts) (forced `submit_plan` tool-call careful-model path with free-text fallback)
+- [sweep.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/sweep.ts) (T11 archival + T12 low-signal flagging + contradiction detection)
+- [markdown.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/storage/markdown.ts) (T12 optional field parsing: `low_signal`, `contradiction_group`)
+- [types.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/types.ts) (T12 `LessonMeta` optional fields)
 
 ## Consequences
 
@@ -74,3 +94,6 @@ A live one-shot `opencode-go/glm-5.1` gateway probe was not run in this worker e
 - modifying session lifecycle events, startup, or shutdown hooks.
 - changing careful-model extraction/reconciliation structured-output behavior.
 - debugging SQLite database locking, closed connection, or thread/asynchronous errors.
+- running or modifying the sweep pipeline (`/memory sweep`): archival, low-signal flagging, or contradiction detection.
+- tuning low-signal thresholds (`lowSignalAgeMs`, `lowSignalMaxReinforcement`).
+- adding new lesson metadata fields (ensure backward-compatible optional parsing in markdown.ts).

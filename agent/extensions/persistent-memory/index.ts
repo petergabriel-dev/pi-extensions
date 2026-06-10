@@ -19,7 +19,7 @@ import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type Sqlit
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
 import { resolveAdjudicationModel, resolveExtractionModel } from "./model-resolution.js";
-import { sweepLessons } from "./consolidation/sweep.js";
+import { sweepLessons, flagLowSignalLessons, detectContradictions } from "./consolidation/sweep.js";
 import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
 
 const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
@@ -355,7 +355,15 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await sweepMemoryCommand(ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, /memory deadletter, /memory sweep", "warning");
+			if (trimmed === "lowsignal") {
+				await lowSignalCommand(ctx);
+				return;
+			}
+			if (trimmed === "contradictions") {
+				await contradictionsCommand(ctx);
+				return;
+			}
+			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions", "warning");
 		},
 	});
 }
@@ -1116,6 +1124,132 @@ async function listDeadLetter(ctx: ExtensionCommandContext): Promise<void> {
 	ctx.ui.notify(lines.join("\n"), "info");
 }
 
+// ---------------------------------------------------------------------------
+// T12 — /memory lowsignal
+// ---------------------------------------------------------------------------
+
+async function lowSignalCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!memoryPaths?.projectMemoryDir) {
+		ctx.ui.notify("No project memory dir.", "warning");
+		return;
+	}
+
+	const lessonsPath = path.join(memoryPaths.projectMemoryDir, "lessons.md");
+	if (!fs.existsSync(lessonsPath)) {
+		ctx.ui.notify("No lessons file found.", "info");
+		return;
+	}
+
+	const lessons = parseLessonsFile(lessonsPath);
+
+	// Show currently flagged low-signal lessons
+	const flagged = lessons.filter((l) => l.meta.low_signal);
+	if (flagged.length === 0) {
+		// Also compute what would be flagged
+		const firedIds = gatherFiredLessonIds(memoryPaths.projectMemoryDir);
+		const { result } = flagLowSignalLessons(lessons, { firedLessonIds: firedIds });
+		if (result.flaggedIds.length === 0) {
+			ctx.ui.notify("No low-signal lessons detected.", "info");
+		} else {
+			ctx.ui.notify(`No currently flagged lessons, but ${result.flaggedIds.length} would be flagged on next sweep: ${result.flaggedIds.join(", ")}`, "info");
+		}
+		return;
+	}
+
+	const lines = [`⚠ Low-signal lessons (${flagged.length}):`];
+	for (const lesson of flagged) {
+		const age = lesson.meta.last_seen_at ?? lesson.meta.created_at;
+		lines.push(`  ${lesson.id} [rc=${lesson.meta.reinforcement_count}] last=${age} — ${lesson.summary}`);
+	}
+	lines.push("", "Run /memory sweep to refresh flags. Low-signal lessons are flagged for review, never deleted.");
+	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+// ---------------------------------------------------------------------------
+// T12 — /memory contradictions
+// ---------------------------------------------------------------------------
+
+async function contradictionsCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!memoryPaths?.projectMemoryDir) {
+		ctx.ui.notify("No project memory dir.", "warning");
+		return;
+	}
+
+	const lessonsPath = path.join(memoryPaths.projectMemoryDir, "lessons.md");
+	if (!fs.existsSync(lessonsPath)) {
+		ctx.ui.notify("No lessons file found.", "info");
+		return;
+	}
+
+	const lessons = parseLessonsFile(lessonsPath);
+	const existingGroups = new Map<string, string[]>();
+	for (const lesson of lessons) {
+		if (!lesson.meta.contradiction_group) continue;
+		const group = existingGroups.get(lesson.meta.contradiction_group) ?? [];
+		group.push(lesson.id);
+		existingGroups.set(lesson.meta.contradiction_group, group);
+	}
+
+	if (existingGroups.size > 0) {
+		const lines = [`⚡ Queued contradiction groups (${existingGroups.size}):`];
+		for (const [groupId, memberIds] of existingGroups) {
+			const summaries = memberIds
+				.map((id) => {
+					const lesson = lessons.find((l) => l.id === id);
+					return lesson ? `${id} — ${lesson.summary}` : id;
+				})
+				.join(", ");
+			lines.push(`  ${groupId}: ${summaries}`);
+		}
+		lines.push("", "Contradictions are queued for adjudication, never auto-resolved.");
+		ctx.ui.notify(lines.join("\n"), "info");
+		return;
+	}
+
+	const { result } = detectContradictions(lessons);
+	if (result.pairs.length === 0) {
+		ctx.ui.notify("No contradictions detected among active lessons.", "info");
+		return;
+	}
+
+	const lines = [`⚡ Suspected contradictions (${result.pairs.length} pairs in ${result.groups.size} groups):`];
+	for (const [groupId, memberIds] of result.groups) {
+		const summaries = Array.from(memberIds)
+			.map((id) => {
+				const lesson = lessons.find((l) => l.id === id);
+				return lesson ? `${id} — ${lesson.summary}` : id;
+			})
+			.join(", ");
+		lines.push(`  ${groupId}: ${summaries}`);
+	}
+
+	lines.push("", "Shared triggers:");
+	for (const pair of result.pairs) {
+		lines.push(`  ${pair.lessonA} ↔ ${pair.lessonB}: ${pair.sharedTrigger}`);
+	}
+
+	lines.push("", "Run /memory sweep to assign contradiction groups. Contradictions are queued for adjudication, never auto-resolved.");
+	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+/** Read the firing log and return the set of lesson IDs that have fired. */
+function gatherFiredLessonIds(projectMemoryDir: string): Set<string> {
+	const firedIds = new Set<string>();
+	const logPath = path.join(projectMemoryDir, "firings.jsonl");
+	if (!fs.existsSync(logPath)) return firedIds;
+	try {
+		const raw = fs.readFileSync(logPath, "utf-8");
+		for (const line of raw.split(/\r?\n/)) {
+			if (!line.trim()) continue;
+			try {
+				const record = JSON.parse(line);
+				if (record?.lesson_id) firedIds.add(record.lesson_id);
+			} catch { /* skip malformed lines */ }
+		}
+	} catch { /* skip unreadable log */ }
+	return firedIds;
+}
+
 async function listFirings(ctx: ExtensionCommandContext): Promise<void> {
 	if (!memoryPaths?.projectMemoryDir) {
 		ctx.ui.notify("No project memory dir.", "warning");
@@ -1209,6 +1343,23 @@ async function listMemory(ctx: ExtensionCommandContext): Promise<void> {
 		"SELECT id, summary, scope FROM domain_facts ORDER BY id",
 	);
 
+	// T12: gather low-signal and contradiction info from markdown
+	let lowSignalLessonIds: string[] = [];
+	let contradictionGroups: Map<string, string[]> = new Map();
+	if (memoryPaths.projectMemoryDir) {
+		const lessonsPath = path.join(memoryPaths.projectMemoryDir, "lessons.md");
+		const allLessons = parseLessonsFile(lessonsPath);
+		for (const lesson of allLessons) {
+			if (lesson.meta.low_signal) lowSignalLessonIds.push(lesson.id);
+			if (lesson.meta.contradiction_group) {
+				const group = contradictionGroups.get(lesson.meta.contradiction_group) ?? [];
+				group.push(lesson.id);
+				contradictionGroups.set(lesson.meta.contradiction_group, group);
+			}
+		}
+	}
+	const lowSignalSet = new Set(lowSignalLessonIds);
+
 	const lines = [
 		"Memory paths:",
 		`  Project: ${memoryPaths.projectMemoryDir ?? "(none — running outside a project)"}`,
@@ -1216,7 +1367,19 @@ async function listMemory(ctx: ExtensionCommandContext): Promise<void> {
 		"",
 		`Lessons (${counts.lessons}):`,
 		...(lessons.length > 0
-			? lessons.map((lesson) => `  ${lesson.id} [${lesson.status}] ${lesson.project_scope} — ${lesson.summary}`)
+			? lessons.map((lesson) => {
+					const tags: string[] = [];
+					if (lowSignalSet.has(lesson.id)) tags.push("⚠low-signal");
+					// Check if this lesson is in a contradiction group
+					for (const [group, ids] of contradictionGroups) {
+						if (ids.includes(lesson.id)) {
+							tags.push(`⚡${group}`);
+							break;
+						}
+					}
+					const tagStr = tags.length > 0 ? ` [${tags.join(", ")}]` : "";
+					return `  ${lesson.id} [${lesson.status}] ${lesson.project_scope} — ${lesson.summary}${tagStr}`;
+				})
 			: ["  (none)"]),
 		"",
 		`Preferences (${counts.preferences}):`,
@@ -1235,6 +1398,17 @@ async function listMemory(ctx: ExtensionCommandContext): Promise<void> {
 			: ["  (none)"]),
 	];
 
+	// T12: append low-signal + contradiction summaries
+	if (lowSignalLessonIds.length > 0) {
+		lines.push("", `⚠ Low-signal (${lowSignalLessonIds.length}): ${lowSignalLessonIds.join(", ")}`);
+	}
+	if (contradictionGroups.size > 0) {
+		lines.push("", `⚡ Contradiction groups (${contradictionGroups.size}):`);
+		for (const [group, ids] of contradictionGroups) {
+			lines.push(`  ${group}: ${ids.join(", ")}`);
+		}
+	}
+
 	ctx.ui.notify(lines.join("\n"), "info");
 }
 
@@ -1251,43 +1425,134 @@ async function sweepMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
 
 	try {
 		const result = runOfflineSweep(memoryPaths);
-		if (!result.changed) {
-			ctx.ui.notify("Sweep found nothing to archive.", "info");
+
+		const summaryLines: string[] = [];
+
+		// T11: archival results
+		if (result.archivalChanged) {
+			summaryLines.push(`Archived: ${result.archivedCount} lesson(s).`);
+		} else {
+			summaryLines.push("Archival: nothing to archive.");
+		}
+
+		// T12: low-signal results
+		if (result.lowSignalChanged) {
+			summaryLines.push(`⚠ Low-signal flagged: ${result.lowSignalCount} lesson(s).`);
+		} else {
+			summaryLines.push("Low-signal: no new flags.");
+		}
+
+		// T12: contradiction results
+		if (result.contradictionChanged) {
+			summaryLines.push(`⚡ Contradictions detected: ${result.contradictionPairs} pair(s) in ${result.contradictionGroups} group(s).`);
+		} else {
+			summaryLines.push("Contradictions: none detected.");
+		}
+
+		if (!result.anyChange) {
+			ctx.ui.notify("Sweep found nothing to change.", "info");
 			return;
 		}
 
-		// Rebuild sqlite index to reflect archived statuses
+		// Rebuild sqlite index to reflect all changes
 		if (db) {
 			try {
 				rebuildIndex(db, memoryPaths);
 				lastRebuildError = null;
 			} catch (error) {
 				lastRebuildError = formatError(error);
-				ctx.ui.notify(`Sweep archived ${result.archivedCount} lesson(s) but index rebuild failed: ${lastRebuildError}`, "warning");
+				ctx.ui.notify(`Sweep applied but index rebuild failed: ${lastRebuildError}`, "warning");
 				return;
 			}
 		}
 
-		ctx.ui.notify(`Sweep complete: archived ${result.archivedCount} lesson(s).`, "info");
+		ctx.ui.notify(`Sweep complete: ${summaryLines.join(" ")}`, "info");
 	} catch (error) {
 		ctx.ui.notify(`Sweep failed: ${formatError(error)}`, "error");
 	}
 }
 
-function runOfflineSweep(paths: MemoryPaths): { changed: boolean; archivedCount: number } {
-	if (!paths.projectMemoryDir) return { changed: false, archivedCount: 0 };
+function runOfflineSweep(paths: MemoryPaths): {
+	anyChange: boolean;
+	archivalChanged: boolean;
+	archivedCount: number;
+	lowSignalChanged: boolean;
+	lowSignalCount: number;
+	contradictionChanged: boolean;
+	contradictionPairs: number;
+	contradictionGroups: number;
+} {
+	if (!paths.projectMemoryDir) {
+		return { anyChange: false, archivalChanged: false, archivedCount: 0, lowSignalChanged: false, lowSignalCount: 0, contradictionChanged: false, contradictionPairs: 0, contradictionGroups: 0 };
+	}
 
 	const lessonsPath = path.join(paths.projectMemoryDir, "lessons.md");
-	const lessons = parseLessonsFile(lessonsPath);
-	if (lessons.length === 0) return { changed: false, archivedCount: 0 };
+	let lessons = parseLessonsFile(lessonsPath);
+	if (lessons.length === 0) {
+		return { anyChange: false, archivalChanged: false, archivedCount: 0, lowSignalChanged: false, lowSignalCount: 0, contradictionChanged: false, contradictionPairs: 0, contradictionGroups: 0 };
+	}
 
-	const { lessons: swept, result } = sweepLessons(lessons);
-	if (!result.changed) return { changed: false, archivedCount: 0 };
+	let anyChange = false;
 
-	// Write back to markdown
-	rewriteLessonsFile(lessonsPath, swept);
+	// Phase 1: T11 archival sweep
+	const sweepResult = sweepLessons(lessons);
+	const archivalChanged = sweepResult.result.changed;
+	const archivedCount = sweepResult.result.archivedLessonIds.length;
+	if (archivalChanged) {
+		lessons = sweepResult.lessons;
+		anyChange = true;
+	}
 
-	return { changed: true, archivedCount: result.archivedLessonIds.length };
+	// Phase 2: T12 low-signal flagging
+	// Gather fired lesson IDs from the firing log
+	const firedIds = new Set<string>();
+	const logPath = path.join(paths.projectMemoryDir, "firings.jsonl");
+	if (fs.existsSync(logPath)) {
+		try {
+			const raw = fs.readFileSync(logPath, "utf-8");
+			for (const line of raw.split(/\r?\n/)) {
+				if (!line.trim()) continue;
+				try {
+					const record = JSON.parse(line);
+					if (record?.lesson_id) firedIds.add(record.lesson_id);
+				} catch { /* skip malformed lines */ }
+			}
+		} catch { /* skip unreadable log */ }
+	}
+
+	const lowSignalResult = flagLowSignalLessons(lessons, { firedLessonIds: firedIds });
+	const lowSignalChanged = lowSignalResult.result.changed;
+	const lowSignalCount = lowSignalResult.result.flaggedIds.length;
+	if (lowSignalChanged) {
+		lessons = lowSignalResult.lessons;
+		anyChange = true;
+	}
+
+	// Phase 3: T12 contradiction detection
+	const contradictionResult = detectContradictions(lessons);
+	const contradictionChanged = contradictionResult.result.changed;
+	const contradictionPairs = contradictionResult.result.pairs.length;
+	const contradictionGroups = contradictionResult.result.groups.size;
+	if (contradictionChanged) {
+		lessons = contradictionResult.lessons;
+		anyChange = true;
+	}
+
+	// Write back to markdown if anything changed
+	if (anyChange) {
+		rewriteLessonsFile(lessonsPath, lessons);
+	}
+
+	return {
+		anyChange,
+		archivalChanged,
+		archivedCount,
+		lowSignalChanged,
+		lowSignalCount,
+		contradictionChanged,
+		contradictionPairs,
+		contradictionGroups,
+	};
 }
 
 export function getLifecycleGenerationForTest(): number {
