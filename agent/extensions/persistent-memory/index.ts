@@ -742,6 +742,8 @@ function recordReconcileRunIfUseful(
 			model: formatModelForRunLog(model),
 			...("reason" in result ? { reason: result.reason } : {}),
 			counts: result.counts,
+			...(result.candidateOutcomes ? { candidateOutcomes: result.candidateOutcomes } : {}),
+			...(result.candidateMetrics ? { candidateMetrics: result.candidateMetrics } : {}),
 			llmCalled: result.llmCalled,
 			indexRebuilt: result.indexRebuilt,
 			...(result.status === "failed" ? { message: formatError(result.error) } : {}),
@@ -1020,6 +1022,7 @@ function formatReconciliationResult(result: Exclude<Awaited<ReturnType<typeof ru
 		`Staging: ${counts.stagingFiles.consumed}/${counts.stagingFiles.total} consumed, ${counts.stagingFiles.deadLettered} dead-lettered.`,
 		`Candidates: ${formatTotals(counts.candidates.staged)} staged, ${formatTotals(counts.candidates.exactDuplicates)} exact duplicates, ${formatTotals(counts.candidates.remainingForModel)} model candidates, ${formatTotals(counts.candidates.deadLettered)} dead-lettered.`,
 		`Actions: ${formatTotals(counts.actions.add)} added, ${formatTotals(counts.actions.merge)} merged, ${counts.actions.supersede} superseded, ${formatTotals(counts.actions.discard)} discarded.`,
+		...(result.candidateMetrics ? [`Per-candidate outcomes: ${result.candidateMetrics.total} total, discard/dup rate ${formatPercent(result.candidateMetrics.discardDupRate)}.`] : []),
 		`Writes: ${formatWriteFlags(counts.writes)}. Index rebuilt: ${result.indexRebuilt ? "yes" : "no"}.`,
 	];
 	return lines.join("\n");
@@ -1029,7 +1032,17 @@ function formatTotals(totals: { lessons: number; preferences: number; decisions:
 	return `${totals.lessons} lessons/${totals.preferences} prefs/${totals.decisions} decisions/${totals.domain} domain`;
 }
 
-function formatWriteFlags(writes: { lessons: boolean; preferences: boolean; decisions: boolean; domain: boolean }): string {
+function formatPercent(value: number): string {
+	return `${Math.round(value * 1000) / 10}%`;
+}
+
+function summarizeCandidateOutcomes(outcomes: Array<{ outcome: string }>): string {
+	const counts = new Map<string, number>();
+	for (const row of outcomes) counts.set(row.outcome, (counts.get(row.outcome) ?? 0) + 1);
+	return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([outcome, count]) => `${outcome}=${count}`).join(", ");
+}
+
+function formatWriteFlags(writes: { lessons: boolean; preferences: boolean; domain: boolean; decisions: boolean }): string {
 	const changed = Object.entries(writes)
 		.filter(([, didWrite]) => didWrite)
 		.map(([name]) => name);
@@ -1058,7 +1071,14 @@ async function memoryStatusCommand(ctx: ExtensionCommandContext): Promise<void> 
 		for (const run of recentRuns) {
 			const reason = run.reason ? ` (${run.reason})` : "";
 			const model = run.model ? ` model=${run.model}` : "";
-			lines.push(`    ${run.finishedAt} ${run.source} ${run.status}${reason} ${run.durationMs}ms${model}`);
+			const metric = run.candidateMetrics
+				? ` outcomes=${run.candidateMetrics.total} discard/dup=${formatPercent(run.candidateMetrics.discardDupRate)}`
+				: "";
+			lines.push(`    ${run.finishedAt} ${run.source} ${run.status}${reason} ${run.durationMs}ms${model}${metric}`);
+			if (run.candidateOutcomes && run.candidateOutcomes.length > 0) {
+				const summarized = summarizeCandidateOutcomes(run.candidateOutcomes);
+				lines.push(`      per-candidate: ${summarized}`);
+			}
 		}
 	}
 

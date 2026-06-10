@@ -146,6 +146,32 @@ export interface CategoryTotals {
 	domain: number;
 }
 
+/** T13: Per-candidate outcome counts for run-log observability. */
+export type CandidateOutcomeKind = "add" | "duplicate" | "supersede" | "merge" | "discard" | "parked" | "dead_lettered";
+
+export interface CandidateOutcomes {
+	add: number;
+	duplicate: number;
+	supersede: number;
+	merge: number;
+	discard: number;
+	parked: number;
+	dead_lettered: number;
+}
+
+export interface CandidateOutcomeRecord {
+	ref: string;
+	category: ReconciliationCategory;
+	outcome: CandidateOutcomeKind;
+	reason?: string;
+}
+
+export interface CandidateOutcomeMetrics {
+	total: number;
+	discardOrDuplicate: number;
+	discardDupRate: number;
+}
+
 export interface ReconciliationRunCounts {
 	stagingFiles: {
 		total: number;
@@ -174,6 +200,8 @@ export interface ReconciliationRunCounts {
 		decisions: boolean;
 		domain: boolean;
 	};
+	/** T13: Per-candidate outcome summary for run-log recording. */
+	candidate_outcomes: CandidateOutcomes;
 }
 
 export type ReconciliationRunResult =
@@ -183,12 +211,16 @@ export type ReconciliationRunResult =
 			counts: ReconciliationRunCounts;
 			llmCalled: false;
 			indexRebuilt: boolean;
+			candidateOutcomes?: CandidateOutcomeRecord[];
+			candidateMetrics?: CandidateOutcomeMetrics;
 	  }
 	| {
 			status: "completed";
 			counts: ReconciliationRunCounts;
 			llmCalled: boolean;
 			indexRebuilt: boolean;
+			candidateOutcomes?: CandidateOutcomeRecord[];
+			candidateMetrics?: CandidateOutcomeMetrics;
 	  }
 	| {
 			status: "failed";
@@ -203,6 +235,8 @@ export type ReconciliationRunResult =
 			counts: ReconciliationRunCounts;
 			llmCalled: boolean;
 			indexRebuilt: boolean;
+			candidateOutcomes?: CandidateOutcomeRecord[];
+			candidateMetrics?: CandidateOutcomeMetrics;
 			error?: unknown;
 	  };
 
@@ -279,6 +313,15 @@ export async function runReconciliation(
 ): Promise<ReconciliationRunResult> {
 	const counts = emptyRunCounts();
 	const logger = deps.logger ?? console;
+	const candidateOutcomeRows: CandidateOutcomeRecord[] = [];
+	const recordedOutcomeRefs = new Set<string>();
+	const recordCandidateOutcome = (category: ReconciliationCategory, ref: string, outcome: CandidateOutcomeKind, reason?: string): void => {
+		if (recordedOutcomeRefs.has(ref)) return;
+		recordedOutcomeRefs.add(ref);
+		counts.candidate_outcomes[outcome] += 1;
+		candidateOutcomeRows.push({ ref, category, outcome, ...(reason ? { reason } : {}) });
+	};
+	const candidateMetrics = (): CandidateOutcomeMetrics => calculateCandidateOutcomeMetrics(candidateOutcomeRows);
 	let llmCalled = false;
 	let indexRebuilt = false;
 
@@ -395,6 +438,7 @@ export async function runReconciliation(
 
 			bypassedRefsApplied = true;
 			deterministicRefs.push(candidate.ref);
+			recordCandidateOutcome(category, candidate.ref, "add");
 			plan = mergePlans(plan, detPlan);
 			projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
 		};
@@ -512,7 +556,10 @@ export async function runReconciliation(
 					bypassedRefsApplied = true;
 					projectMemory = readProjectMemory(memoryPaths.projectMemoryDir);
 					plan = mergePlans(plan, mapped.plan);
-					for (const ref of mapped.appliedRefs) appliedRefs.add(ref);
+					for (const ref of mapped.appliedRefs) {
+						appliedRefs.add(ref);
+						recordCandidateOutcome("lessons", ref, mapped.outcomes.get(ref) ?? "add");
+					}
 				}
 			}
 		}
@@ -604,6 +651,8 @@ export async function runReconciliation(
 			...appliedRefs,
 			...deterministicRefs,
 		]);
+		if (bypassedRefsApplied) recordBypassedDuplicateOutcomes(preFilter, recordCandidateOutcome);
+		recordPlanOutcomes(plan, recordCandidateOutcome);
 
 		// T9: Staging consumption — every candidate reaches a terminal state within
 		// a single reconciliation run. No candidate is re-staged for a future cycle.
@@ -637,6 +686,7 @@ export async function runReconciliation(
 						candidate: { ...lesson, reconcile_attempts: attempts },
 					});
 					counts.candidates.deadLettered.lessons += 1;
+					recordCandidateOutcome("lessons", ref, "dead_lettered", reason);
 					console.warn(`[persistent-memory] Dead-lettered lesson candidate from session ${stagingData.session_id}: ${reason}`);
 				}
 
@@ -656,6 +706,7 @@ export async function runReconciliation(
 						candidate: { ...pref, reconcile_attempts: attempts },
 					});
 					counts.candidates.deadLettered.preferences += 1;
+					recordCandidateOutcome("preferences", ref, "dead_lettered", reason);
 					console.warn(`[persistent-memory] Dead-lettered preference candidate from session ${stagingData.session_id}: ${reason}`);
 				}
 
@@ -675,6 +726,7 @@ export async function runReconciliation(
 						candidate: { ...dec, reconcile_attempts: attempts },
 					});
 					counts.candidates.deadLettered.decisions += 1;
+					recordCandidateOutcome("decisions", ref, "dead_lettered", reason);
 					console.warn(`[persistent-memory] Dead-lettered decision candidate from session ${stagingData.session_id}: ${reason}`);
 				}
 
@@ -694,6 +746,7 @@ export async function runReconciliation(
 						candidate: { ...dom, reconcile_attempts: attempts },
 					});
 					counts.candidates.deadLettered.domain += 1;
+					recordCandidateOutcome("domain", ref, "dead_lettered", reason);
 					console.warn(`[persistent-memory] Dead-lettered domain candidate from session ${stagingData.session_id}: ${reason}`);
 				}
 
@@ -715,11 +768,13 @@ export async function runReconciliation(
 		void incrementalWritesDone;
 		void generationStopped;
 
+		const outcomeMetrics = candidateMetrics();
+		const outcomeRows = [...candidateOutcomeRows];
 		if (terminalFailure) {
-			return { status: "failed", reason: terminalFailure.reason, counts, llmCalled, indexRebuilt, error: terminalFailure.error };
+			return { status: "failed", reason: terminalFailure.reason, counts, llmCalled, indexRebuilt, candidateOutcomes: outcomeRows, candidateMetrics: outcomeMetrics, error: terminalFailure.error };
 		}
 
-		return { status: "completed", counts, llmCalled, indexRebuilt };
+		return { status: "completed", counts, llmCalled, indexRebuilt, candidateOutcomes: outcomeRows, candidateMetrics: outcomeMetrics };
 	} catch (error) {
 		logger.warn?.("[persistent-memory] reconciliation failed unexpectedly; preserving staging.");
 		return { status: "failed", reason: "unexpected_error", counts, llmCalled, indexRebuilt, error };
@@ -923,6 +978,50 @@ export function prepareStagingCandidates(stagingFiles: StagingFile[]): PreparedR
 	return prepared;
 }
 
+const EMPTY_OUTCOMES: CandidateOutcomes = { add: 0, duplicate: 0, supersede: 0, merge: 0, discard: 0, parked: 0, dead_lettered: 0 };
+
+function calculateCandidateOutcomeMetrics(rows: readonly CandidateOutcomeRecord[]): CandidateOutcomeMetrics {
+	const total = rows.length;
+	const discardOrDuplicate = rows.filter((row) => row.outcome === "discard" || row.outcome === "duplicate").length;
+	return {
+		total,
+		discardOrDuplicate,
+		discardDupRate: total === 0 ? 0 : discardOrDuplicate / total,
+	};
+}
+
+function recordPlanOutcomes(
+	plan: NormalizedReconciliationPlan,
+	record: (category: ReconciliationCategory, ref: string, outcome: CandidateOutcomeKind, reason?: string) => void,
+): void {
+	for (const action of plan.lessons) {
+		const outcome: CandidateOutcomeKind = action.action === "supersede" ? "supersede" : action.action;
+		for (const ref of action.candidate_refs) record("lessons", ref, outcome, action.action === "discard" ? action.reason : undefined);
+	}
+	for (const action of plan.preferences) {
+		const outcome: CandidateOutcomeKind = action.action === "merge" ? "merge" : action.action;
+		for (const ref of action.candidate_refs) record("preferences", ref, outcome, action.action === "discard" ? action.reason : undefined);
+	}
+	for (const action of plan.decisions) {
+		const outcome: CandidateOutcomeKind = action.action === "merge" ? "merge" : action.action;
+		for (const ref of action.candidate_refs) record("decisions", ref, outcome, action.action === "discard" ? action.reason : undefined);
+	}
+	for (const action of plan.domain) {
+		const outcome: CandidateOutcomeKind = action.action === "merge" ? "merge" : action.action;
+		for (const ref of action.candidate_refs) record("domain", ref, outcome, action.action === "discard" ? action.reason : undefined);
+	}
+}
+
+function recordBypassedDuplicateOutcomes(
+	preFilter: MemoryPreFilterResult,
+	record: (category: ReconciliationCategory, ref: string, outcome: CandidateOutcomeKind, reason?: string) => void,
+): void {
+	for (const item of preFilter.lessons.bypassed) record("lessons", item.candidate.ref, "duplicate", `exact duplicate of ${item.matchedExisting.id}`);
+	for (const item of preFilter.preferences.bypassed) record("preferences", item.candidate.ref, "duplicate", `exact duplicate of ${item.matchedExisting.id}`);
+	for (const item of preFilter.decisions.bypassed) record("decisions", item.candidate.ref, "duplicate", `exact duplicate of ${item.matchedExisting.id}`);
+	for (const item of preFilter.domain.bypassed) record("domain", item.candidate.ref, "duplicate", `exact duplicate of ${item.matchedExisting.id}`);
+}
+
 function emptyRunCounts(): ReconciliationRunCounts {
 	return {
 		stagingFiles: { total: 0, valid: 0, malformed: 0, wrongProject: 0, deadLettered: 0, consumed: 0, preserved: 0 },
@@ -939,6 +1038,7 @@ function emptyRunCounts(): ReconciliationRunCounts {
 			discard: { ...EMPTY_TOTALS },
 		},
 		writes: { lessons: false, preferences: false, decisions: false, domain: false },
+		candidate_outcomes: { ...EMPTY_OUTCOMES },
 	};
 }
 
@@ -2285,11 +2385,12 @@ export function mapVerdictsToPlan(
 	shortlists: ShortlistRecord[][],
 	existing: ProjectMemory,
 	parkedItems: Array<{ index: number }> = [],
-): { plan: NormalizedReconciliationPlan; appliedRefs: Set<string>; parkedRefs: Set<string> } {
+): { plan: NormalizedReconciliationPlan; appliedRefs: Set<string>; parkedRefs: Set<string>; outcomes: Map<string, CandidateOutcomeKind> } {
 	void existing;
 	const plan = emptyPlan();
 	const appliedRefs = new Set<string>();
 	const parkedRefs = new Set<string>();
+	const outcomes = new Map<string, CandidateOutcomeKind>();
 	const parkedIndexes = new Set(parkedItems.map((item) => item.index));
 	let verdictIndex = 0;
 
@@ -2297,11 +2398,13 @@ export function mapVerdictsToPlan(
 		const candidate = candidates[i];
 		if (parkedIndexes.has(i)) {
 			parkedRefs.add(candidate.ref);
+			outcomes.set(candidate.ref, "parked");
 			continue;
 		}
 		const verdict = verdicts[verdictIndex++];
 		if (!verdict) {
 			parkedRefs.add(candidate.ref);
+			outcomes.set(candidate.ref, "parked");
 			continue;
 		}
 
@@ -2312,6 +2415,7 @@ export function mapVerdictsToPlan(
 			// A non-distinct verdict requires a target but none exists.
 			// Park this candidate — can't apply.
 			parkedRefs.add(candidate.ref);
+			outcomes.set(candidate.ref, "parked");
 			continue;
 		}
 
@@ -2326,6 +2430,7 @@ export function mapVerdictsToPlan(
 					triggers: cloneTriggers(candidate.candidate.triggers),
 				});
 				appliedRefs.add(candidate.ref);
+				outcomes.set(candidate.ref, "add");
 				break;
 			}
 			case "duplicate": {
@@ -2339,6 +2444,7 @@ export function mapVerdictsToPlan(
 					triggers: cloneTriggers(topTarget!.meta.triggers),
 				});
 				appliedRefs.add(candidate.ref);
+				outcomes.set(candidate.ref, "duplicate");
 				break;
 			}
 			case "supersedes": {
@@ -2352,6 +2458,7 @@ export function mapVerdictsToPlan(
 					triggers: cloneTriggers(candidate.candidate.triggers),
 				});
 				appliedRefs.add(candidate.ref);
+				outcomes.set(candidate.ref, "supersede");
 				break;
 			}
 			case "merge": {
@@ -2366,12 +2473,13 @@ export function mapVerdictsToPlan(
 					triggers: cloneTriggers(candidate.candidate.triggers),
 				});
 				appliedRefs.add(candidate.ref);
+				outcomes.set(candidate.ref, "merge");
 				break;
 			}
 		}
 	}
 
-	return { plan, appliedRefs, parkedRefs };
+	return { plan, appliedRefs, parkedRefs, outcomes };
 }
 
 function parsePositiveIntegerEnv(raw: string | undefined, fallback: number): number {

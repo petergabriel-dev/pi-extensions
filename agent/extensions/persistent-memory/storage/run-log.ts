@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ReconciliationRunCounts } from "../consolidation/reconcile.js";
+import type { CandidateOutcomeMetrics, CandidateOutcomeRecord, ReconciliationRunCounts } from "../consolidation/reconcile.js";
 import type { MemoryPaths } from "./paths.js";
 
 export type ReconcileRunSource = "manual" | "background";
@@ -17,6 +17,8 @@ export interface ReconcileRunRecord {
 	reason?: string | null;
 	message?: string | null;
 	counts?: ReconciliationRunCounts;
+	candidateOutcomes?: CandidateOutcomeRecord[];
+	candidateMetrics?: CandidateOutcomeMetrics;
 	llmCalled?: boolean;
 	indexRebuilt?: boolean;
 }
