@@ -345,6 +345,8 @@ export async function runReconciliation(
 		let bypassedRefsApplied = false;
 		let bestError: ReconciliationValidationError | undefined = undefined;
 		let terminalFailure: { reason: "model_error" | "parse_error" | "invalid_model_response"; error?: unknown } | undefined = undefined;
+		let incrementalWritesDone = false;
+		let generationStopped = false;
 
 		const deterministicRefs: string[] = [];
 		const hasDeterministic = hasRemainingCandidates(shortlistSplit.deterministic);
@@ -375,16 +377,11 @@ export async function runReconciliation(
 			try {
 				counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
 
-				// Incremental sqlite update so committed candidates are immediately observable.
-				// Some legacy unit tests pass a fake db while stubbing rebuildIndex; skip
-				// incremental writes unless this is a real sqlite-like connection.
+				// Incremental sqlite: upsert any new *or changed* records so that
+				// supersedes/merges/bumps are reflected without a final full rebuild.
 				if (isSqliteLike(db)) {
-					const newRecords = diffNewRecords(projectMemory, nextMemory, category);
-					const memDir = memoryPaths.projectMemoryDir!;
-					if (newRecords.lessons.length > 0) insertLessons(db, path.join(memDir, "lessons.md"), newRecords.lessons);
-					if (newRecords.preferences.length > 0) insertPreferences(db, path.join(memDir, "preferences.md"), newRecords.preferences);
-					if (newRecords.decisions.length > 0) insertDecisions(db, path.join(memDir, "decisions.md"), newRecords.decisions);
-					if (newRecords.domain.length > 0) insertDomainFacts(db, path.join(memDir, "domain.md"), newRecords.domain);
+					upsertChangedProjectMemoryToSqlite(db, memoryPaths.projectMemoryDir!, projectMemory, nextMemory);
+					incrementalWritesDone = true;
 				}
 
 				// Test hook: throw here to simulate crash after first commit
@@ -403,10 +400,24 @@ export async function runReconciliation(
 
 		if (hasDeterministic) {
 			try {
-				for (const candidate of shortlistSplit.deterministic.lessons) await processOne("lessons", candidate);
-				for (const candidate of shortlistSplit.deterministic.preferences) await processOne("preferences", candidate);
-				for (const candidate of shortlistSplit.deterministic.decisions) await processOne("decisions", candidate);
-				for (const candidate of shortlistSplit.deterministic.domain) await processOne("domain", candidate);
+				// Process deterministic candidates one-by-one with generation guard
+				// between each so stale runs stop before additional writes.
+				for (const candidate of shortlistSplit.deterministic.lessons) {
+					if (deps.shouldContinue?.() === false) { generationStopped = true; break; }
+					await processOne("lessons", candidate);
+				}
+				for (const candidate of shortlistSplit.deterministic.preferences) {
+					if (deps.shouldContinue?.() === false) { generationStopped = true; break; }
+					await processOne("preferences", candidate);
+				}
+				for (const candidate of shortlistSplit.deterministic.decisions) {
+					if (deps.shouldContinue?.() === false) { generationStopped = true; break; }
+					await processOne("decisions", candidate);
+				}
+				for (const candidate of shortlistSplit.deterministic.domain) {
+					if (deps.shouldContinue?.() === false) { generationStopped = true; break; }
+					await processOne("domain", candidate);
+				}
 			} catch (error) {
 				return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 			}
@@ -436,6 +447,9 @@ export async function runReconciliation(
 			// Batch and adjudicate. Failures park only the affected batch; they do
 			// not fail the whole run or roll back earlier per-candidate commits.
 			for (let offset = 0; offset < lessonCandidates.length; offset += batchSize) {
+				// Generation guard: stop processing if lifecycle generation changed.
+				if (deps.shouldContinue?.() === false) { generationStopped = true; break; }
+
 				const batchCandidates = lessonCandidates.slice(offset, offset + batchSize);
 				const batchShortlists = lessonShortlists.slice(offset, offset + batchSize);
 
@@ -487,11 +501,11 @@ export async function runReconciliation(
 						return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 					}
 
-					// Incremental sqlite.
+					// Incremental sqlite: upsert new AND changed records (supersede
+					// changes old target status; merge bumps reinforcement, etc.).
 					if (isSqliteLike(db)) {
-						const newRecords = diffNewRecords(projectMemory, nextMemory, "lessons");
-						const memDir = memoryPaths.projectMemoryDir!;
-						if (newRecords.lessons.length > 0) insertLessons(db, path.join(memDir, "lessons.md"), newRecords.lessons);
+						upsertChangedProjectMemoryToSqlite(db, memoryPaths.projectMemoryDir!, projectMemory, nextMemory);
+						incrementalWritesDone = true;
 					}
 
 					bypassedRefsApplied = true;
@@ -536,6 +550,11 @@ export async function runReconciliation(
 					const nextMemory = materializeReconciliation(projectMemory, chunkPreFilter, reconcileResult.plan, projectScope, nowIso);
 					try {
 						counts.writes = mergeWrites(counts.writes, writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory));
+						// Incremental sqlite for legacy model path so final rebuild is unnecessary.
+						if (isSqliteLike(db)) {
+							upsertChangedProjectMemoryToSqlite(db, memoryPaths.projectMemoryDir!, projectMemory, nextMemory);
+							incrementalWritesDone = true;
+						}
 					} catch (error) {
 						return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
 					}
@@ -547,7 +566,7 @@ export async function runReconciliation(
 					isFirstApply = false;
 
 					const elapsedMs = (deps.nowMs?.() ?? Date.now()) - startedAtMs;
-					if (elapsedMs >= budgetMs || deps.shouldContinue?.() === false) break;
+					if (elapsedMs >= budgetMs || deps.shouldContinue?.() === false) { generationStopped = true; break; }
 				}
 			}
 		} else {
@@ -557,6 +576,11 @@ export async function runReconciliation(
 				const nextMemory = materializeReconciliation(projectMemory, preFilter, plan, projectScope, nowIso);
 				try {
 					counts.writes = writeChangedProjectMemory(memoryPaths.projectMemoryDir, projectMemory, nextMemory);
+					// Incremental sqlite for bypassed-only path (reinforcement bumps, etc.).
+					if (isSqliteLike(db)) {
+						upsertChangedProjectMemoryToSqlite(db, memoryPaths.projectMemoryDir!, projectMemory, nextMemory);
+						incrementalWritesDone = true;
+					}
 					bypassedRefsApplied = true;
 				} catch (error) {
 					return { status: "failed", reason: "write_error", counts, llmCalled, indexRebuilt, error };
@@ -725,11 +749,11 @@ export async function runReconciliation(
 			return { status: "failed", reason: "delete_error", counts, llmCalled, indexRebuilt, error };
 		}
 
-		try {
-			indexRebuilt = rebuildIndexOrThrow(deps, db, memoryPaths);
-		} catch (error) {
-			return { status: "failed", reason: "index_error", counts, llmCalled, indexRebuilt, error };
-		}
+		// Candidate-processing paths use incremental sqlite writes only. Do not run
+		// a final whole-index rebuild here: no-op rebuild compatibility is limited
+		// to early-return paths with no valid staged work.
+		void incrementalWritesDone;
+		void generationStopped;
 
 		if (terminalFailure) {
 			return { status: "failed", reason: terminalFailure.reason, counts, llmCalled, indexRebuilt, error: terminalFailure.error };
@@ -1980,31 +2004,43 @@ export function buildDeterministicPlan(candidates: PreparedReconciliationCandida
 	return plan;
 }
 
-/** Find records that were added to nextMemory compared to prevMemory for a given category. */
+/** Returns records from `next` that are either new (not in `prev`) or changed.
+ *  Uses id-based matching and sameJson to detect changes across all categories. */
+function recordsToUpsert<T extends { id: string }>(prev: T[], next: T[]): T[] {
+	const prevMap = new Map(prev.map((r) => [r.id, r]));
+	const result: T[] = [];
+	for (const record of next) {
+		const prevRecord = prevMap.get(record.id);
+		if (!prevRecord || !sameJson(prevRecord, record)) {
+			result.push(record);
+		}
+	}
+	return result;
+}
+
+/** Returns true when the database handle exposes a .prepare method (real sqlite).
+ *  Stub objects in unit tests typically lack it and should skip incremental writes. */
 function isSqliteLike(db: SqliteDatabase): boolean {
 	return typeof (db as { prepare?: unknown }).prepare === "function";
 }
 
-function diffNewRecords(
-	prev: ProjectMemory,
-	next: ProjectMemory,
-	category: ReconciliationCategory,
-): { lessons: Lesson[]; preferences: Preference[]; decisions: Decision[]; domain: DomainFact[] } {
-	const prevIds = (() => {
-		switch (category) {
-			case "lessons": return new Set(prev.lessons.map((r) => r.id));
-			case "preferences": return new Set(prev.preferences.map((r) => r.id));
-			case "decisions": return new Set(prev.decisions.map((r) => r.id));
-			case "domain": return new Set(prev.domain.map((r) => r.id));
-		}
-	})();
+/** Write any new or changed records from `after` (vs `before`) into the sqlite index
+ *  using the existing INSERT OR REPLACE helpers.  Handles all four categories. */
+function upsertChangedProjectMemoryToSqlite(
+	db: SqliteDatabase,
+	memDir: string,
+	before: ProjectMemory,
+	after: ProjectMemory,
+): void {
+	const changedLessons = recordsToUpsert(before.lessons, after.lessons);
+	const changedPreferences = recordsToUpsert(before.preferences, after.preferences);
+	const changedDecisions = recordsToUpsert(before.decisions, after.decisions);
+	const changedDomain = recordsToUpsert(before.domain, after.domain);
 
-	return {
-		lessons: category === "lessons" ? next.lessons.filter((r) => !prevIds.has(r.id)) : [],
-		preferences: category === "preferences" ? next.preferences.filter((r) => !prevIds.has(r.id)) : [],
-		decisions: category === "decisions" ? next.decisions.filter((r) => !prevIds.has(r.id)) : [],
-		domain: category === "domain" ? next.domain.filter((r) => !prevIds.has(r.id)) : [],
-	};
+	if (changedLessons.length > 0) insertLessons(db, path.join(memDir, "lessons.md"), changedLessons);
+	if (changedPreferences.length > 0) insertPreferences(db, path.join(memDir, "preferences.md"), changedPreferences);
+	if (changedDecisions.length > 0) insertDecisions(db, path.join(memDir, "decisions.md"), changedDecisions);
+	if (changedDomain.length > 0) insertDomainFacts(db, path.join(memDir, "domain.md"), changedDomain);
 }
 
 export function preFilterMemoryCandidates(input: MemoryPreFilterInput): MemoryPreFilterResult {
