@@ -104,14 +104,22 @@ const validExtractionJson = JSON.stringify({
 	assert.strictEqual(extracted, null);
 }
 
-// Tool schemas are registered under the single custom tool name for both careful-model tasks.
+// Tool schemas are registered under the single custom tool name and use TypeBox-shaped JSON schema.
 {
 	const extractionTool = buildSubmitPlanTool(EXTRACTION_SYSTEM_PROMPT);
 	const reconciliationTool = buildSubmitPlanTool(RECONCILIATION_SYSTEM_PROMPT);
 	assert.strictEqual(extractionTool.name, SUBMIT_PLAN_TOOL_NAME);
 	assert.strictEqual(reconciliationTool.name, SUBMIT_PLAN_TOOL_NAME);
-	assert.match(JSON.stringify(extractionTool.parameters), /candidates/);
-	assert.match(JSON.stringify(reconciliationTool.parameters), /candidate_refs/);
+
+	const extractionSchema = JSON.stringify(extractionTool.parameters);
+	const reconciliationSchema = JSON.stringify(reconciliationTool.parameters);
+	assert.match(extractionSchema, /candidates/);
+	assert.match(reconciliationSchema, /candidate_refs/);
+	assert.doesNotMatch(extractionSchema, /__optional|__schema/);
+	assert.doesNotMatch(reconciliationSchema, /__optional|__schema/);
+	assert.deepStrictEqual((extractionTool.parameters as any).required, ["candidates"]);
+	assert.deepStrictEqual((reconciliationTool.parameters as any).required, ["lessons", "preferences", "decisions", "domain"]);
+	assert.ok(extractionSchema.includes("lesson_candidate_marker_ids"));
 }
 
 console.log("test_careful_model_extract passed!");
