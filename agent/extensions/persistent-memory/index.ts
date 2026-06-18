@@ -18,7 +18,7 @@ import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolv
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
-import { resolveAdjudicationModel, resolveExtractionModel } from "./model-resolution.js";
+import { readMemoryModelOverride, resolveAdjudicationModel, resolveExtractionModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
 import { sweepLessons, flagLowSignalLessons, detectContradictions } from "./consolidation/sweep.js";
 import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
 
@@ -363,7 +363,11 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await contradictionsCommand(ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions", "warning");
+			if (trimmed === "model" || trimmed.startsWith("model ")) {
+				await memoryModelCommand(trimmed.slice("model".length), ctx);
+				return;
+			}
+			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
 		},
 	});
 }
@@ -1047,6 +1051,64 @@ function formatWriteFlags(writes: { lessons: boolean; preferences: boolean; doma
 		.filter(([, didWrite]) => didWrite)
 		.map(([name]) => name);
 	return changed.length > 0 ? changed.join(", ") : "none";
+}
+
+function modelReference(model: any): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function resolveAvailableModelReference(reference: string | undefined, available: any[]): any | undefined {
+	if (!reference) return undefined;
+	const lowerRef = reference.toLowerCase();
+	const exact = available.find((model) => modelReference(model).toLowerCase() === lowerRef || String(model.id).toLowerCase() === lowerRef);
+	if (exact) return exact;
+	if (reference.includes("/")) {
+		const slashIdx = reference.indexOf("/");
+		const provider = reference.slice(0, slashIdx).toLowerCase();
+		const id = reference.slice(slashIdx + 1).toLowerCase();
+		return available.find((model) => String(model.provider).toLowerCase() === provider && String(model.id).toLowerCase() === id);
+	}
+	return available.find((model) => String(model.id).toLowerCase().includes(lowerRef) || String(model.name).toLowerCase().includes(lowerRef));
+}
+
+async function memoryModelCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+	const roleArg = parts[0];
+	const roles: MemoryModelRole[] = ["extraction", "adjudication"];
+	const role = roles.includes(roleArg as MemoryModelRole)
+		? roleArg as MemoryModelRole
+		: roleArg
+			? undefined
+			: roleFromLabel(await ctx.ui.select("Persistent memory model role", roles.map((item) => `${item} (current: ${readMemoryModelOverride(item) ?? "default"})`)));
+	if (!role) {
+		if (!roleArg) return;
+		return ctx.ui.notify(`Unknown memory model role: ${roleArg}.`, "warning");
+	}
+
+	const available = await Promise.resolve(ctx.modelRegistry?.getAvailable?.() ?? []);
+	if (available.length === 0) return ctx.ui.notify("No available models found.", "warning");
+
+	const requestedModel = parts[0] === role ? parts[1] : parts[0];
+	const selectedRef = requestedModel
+		? requestedModel
+		: await ctx.ui.select(
+			`Model for persistent memory ${role}`,
+			available.map((model) => modelReference(model)),
+		);
+	if (!selectedRef) return;
+	const selected = resolveAvailableModelReference(selectedRef, available);
+	if (!selected) return ctx.ui.notify(`Unknown available model${requestedModel ? `: ${requestedModel}` : ""}.`, "warning");
+
+	const reference = modelReference(selected);
+	writeMemoryModelOverride(role, reference);
+	ctx.ui.notify(`Persistent memory ${role} model: ${reference}`, "info");
+}
+
+function roleFromLabel(label: string | undefined): MemoryModelRole | undefined {
+	if (!label) return undefined;
+	if (label.startsWith("extraction")) return "extraction";
+	if (label.startsWith("adjudication")) return "adjudication";
+	return undefined;
 }
 
 async function memoryStatusCommand(ctx: ExtensionCommandContext): Promise<void> {
