@@ -10,7 +10,10 @@ import type {
 import type { ExtractionLogger } from "./extract.js";
 import { EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT } from "./prompts.js";
 
-const Type = await loadTypeBox();
+let Type = createTypeBoxFallback();
+void import("@mariozechner/pi-ai")
+	.then((module) => { Type = (module as any).Type; })
+	.catch(() => undefined);
 
 export const EXTRACTION_TIMEOUT_MS = 30_000;
 export const SUBMIT_PLAN_TOOL_NAME = "submit_plan";
@@ -112,19 +115,30 @@ export async function callCarefulModelOneShot(
 	} as never);
 
 	if (options.model) {
-		try {
-			const forcedToolResult = await callCarefulModelWithForcedSubmitPlanTool(systemPrompt, userPrompt, {
-				model: options.model,
-				modelRegistry,
-				thinkingLevel: options.thinkingLevel,
-				timeoutMs,
-			});
-			if (forcedToolResult.toolArgumentsJson) return forcedToolResult.toolArgumentsJson;
-			if (forcedToolResult.text.trim()) return forcedToolResult.text.trim();
-			logger.warn?.("[persistent-memory] careful model returned no submit_plan tool call; falling back to free-text session path.");
-		} catch (error) {
-			if (error instanceof CarefulModelTimeoutError) throw error;
-			logger.warn?.("[persistent-memory] forced submit_plan careful model call unavailable; falling back to free-text session path.");
+		const api = String((options.model as any).api ?? "");
+		const toolChoice = forcedToolChoiceForApi(api);
+		if (toolChoice) {
+			try {
+				const forcedToolResult = await callCarefulModelWithForcedSubmitPlanTool(systemPrompt, userPrompt, {
+					model: options.model,
+					modelRegistry,
+					thinkingLevel: options.thinkingLevel,
+					timeoutMs,
+					toolChoice,
+				});
+				if (forcedToolResult.stopReason === "error") {
+					logger.warn?.(`[persistent-memory] forced submit_plan careful model call failed: ${forcedToolResult.errorMessage ?? "provider returned stopReason=error"}; falling back to free-text session path.`);
+				} else {
+					if (forcedToolResult.toolArgumentsJson) return forcedToolResult.toolArgumentsJson;
+					if (forcedToolResult.text.trim()) return forcedToolResult.text.trim();
+					logger.warn?.("[persistent-memory] forced submit_plan careful model call returned no usable content; falling back to free-text session path.");
+				}
+			} catch (error) {
+				if (error instanceof CarefulModelTimeoutError) throw error;
+				logger.warn?.(`[persistent-memory] forced submit_plan careful model call unavailable: ${formatErrorMessage(error)}; falling back to free-text session path.`);
+			}
+		} else {
+			(logger as any).debug?.(`[persistent-memory] skipping forced submit_plan careful model call for api=${api || "unknown"}; falling back to free-text session path.`);
 		}
 	}
 
@@ -149,11 +163,14 @@ interface ForcedSubmitPlanCallOptions {
 	modelRegistry: ModelRegistryType;
 	thinkingLevel?: ThinkingLevel;
 	timeoutMs: number;
+	toolChoice: ForcedSubmitPlanToolChoice;
 }
 
 interface ForcedSubmitPlanCallResult {
 	toolArgumentsJson: string | null;
 	text: string;
+	stopReason?: string;
+	errorMessage?: string;
 }
 
 async function callCarefulModelWithForcedSubmitPlanTool(
@@ -178,11 +195,13 @@ async function callCarefulModelWithForcedSubmitPlanTool(
 			...(options.thinkingLevel ? { reasoningEffort: options.thinkingLevel, reasoning: options.thinkingLevel } : {}),
 			timeoutMs: options.timeoutMs,
 			signal: controller.signal,
-			toolChoice: { type: "function", function: { name: SUBMIT_PLAN_TOOL_NAME } },
+			toolChoice: options.toolChoice,
 		});
 		return {
 			toolArgumentsJson: extractSubmitPlanToolArguments(message),
 			text: extractAssistantMessageText(message),
+			stopReason: message.stopReason,
+			errorMessage: message.errorMessage,
 		};
 	} catch (error) {
 		if (controller.signal.aborted) throw new CarefulModelTimeoutError(options.timeoutMs);
@@ -345,29 +364,30 @@ function reconciliationSubmitPlanSchema() {
 	});
 }
 
-async function loadTypeBox(): Promise<any> {
-	try {
-		return (await import("@mariozechner/pi-ai") as any).Type;
-	} catch {
-		// ponytail: standalone extension tests lack pi package aliases. Keep TypeBox-shaped fallback; remove when test env links pi-ai.
-		return {
-			Object: (properties: Record<string, any>, options: Record<string, unknown> = {}) => {
-				const entries = Object.entries(properties);
-				return {
-					type: "object",
-					...(entries.some(([, value]) => !value?.__optional) ? { required: entries.filter(([, value]) => !value?.__optional).map(([key]) => key) } : {}),
-					properties: Object.fromEntries(entries.map(([key, value]) => [key, value?.__schema ?? value])),
-					...options,
-				};
-			},
-			Array: (items: unknown) => ({ type: "array", items }),
-			Union: (anyOf: unknown[]) => ({ anyOf }),
-			Literal: (value: string) => ({ type: "string", const: value }),
-			String: () => ({ type: "string" }),
-			Number: () => ({ type: "number" }),
-			Optional: (schema: unknown) => ({ __optional: true, __schema: schema }),
-		};
-	}
+function createTypeBoxFallback(): any {
+	// ponytail: standalone extension tests lack pi package aliases. Use TypeBox-shaped fallback until async pi-ai import resolves.
+	return {
+		Object: (properties: Record<string, any>, options: Record<string, unknown> = {}) => {
+			const entries = Object.entries(properties);
+			return {
+				type: "object",
+				...(entries.some(([, value]) => !value?.__optional) ? { required: entries.filter(([, value]) => !value?.__optional).map(([key]) => key) } : {}),
+				properties: Object.fromEntries(entries.map(([key, value]) => [key, value?.__schema ?? value])),
+				...options,
+			};
+		},
+		Array: (items: unknown) => ({ type: "array", items }),
+		Union: (anyOf: unknown[]) => ({ anyOf }),
+		Literal: (value: string) => ({ type: "string", const: value }),
+		String: () => ({ type: "string" }),
+		Number: () => ({ type: "number" }),
+		Optional: (schema: unknown) => ({ __optional: true, __schema: schema }),
+	};
+}
+
+function formatErrorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
 }
 
 export function extractSubmitPlanToolArguments(message: any): string | null {
