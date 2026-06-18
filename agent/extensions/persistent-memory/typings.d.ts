@@ -70,6 +70,7 @@ declare module "@mariozechner/pi-ai" {
 		provider: string;
 		name: string;
 	}
+	export const Type: any;
 	export function StringEnum(values: readonly string[], options?: any): any;
 }
 

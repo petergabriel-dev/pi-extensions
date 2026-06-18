@@ -10,6 +10,8 @@ import type {
 import type { ExtractionLogger } from "./extract.js";
 import { EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT } from "./prompts.js";
 
+const Type = await loadTypeBox();
+
 export const EXTRACTION_TIMEOUT_MS = 30_000;
 export const SUBMIT_PLAN_TOOL_NAME = "submit_plan";
 
@@ -279,102 +281,93 @@ export function buildSubmitPlanTool(systemPrompt: string): { name: string; descr
 function selectSubmitPlanSchema(systemPrompt: string) {
 	if (systemPrompt === EXTRACTION_SYSTEM_PROMPT) return extractionSubmitPlanSchema();
 	if (systemPrompt === RECONCILIATION_SYSTEM_PROMPT) return reconciliationSubmitPlanSchema();
-	return objectSchema({}, { additionalProperties: true });
+	return Type.Object({}, { additionalProperties: true });
 }
 
 function extractionSubmitPlanSchema() {
-	const evidence = objectSchema({
-		discussion_note_ids: optional(arraySchema(numberSchema())),
-		lesson_candidate_marker_ids: optional(arraySchema(stringSchema())),
+	const evidence = Type.Object({
+		discussion_note_ids: Type.Optional(Type.Array(Type.Number())),
+		lesson_candidate_marker_ids: Type.Optional(Type.Array(Type.String())),
 	});
-	const trigger = unionSchema([
-		objectSchema({ type: literalSchema("path"), value: stringSchema() }),
-		objectSchema({ type: literalSchema("filename"), value: stringSchema() }),
-		objectSchema({ type: literalSchema("topic"), value: stringSchema() }),
-		objectSchema({ type: literalSchema("tool"), value: stringSchema(), pattern: optional(stringSchema()) }),
-		objectSchema({ type: literalSchema("command"), pattern: stringSchema() }),
+	const trigger = Type.Union([
+		Type.Object({ type: Type.Literal("path"), value: Type.String() }),
+		Type.Object({ type: Type.Literal("filename"), value: Type.String() }),
+		Type.Object({ type: Type.Literal("topic"), value: Type.String() }),
+		Type.Object({ type: Type.Literal("tool"), value: Type.String(), pattern: Type.Optional(Type.String()) }),
+		Type.Object({ type: Type.Literal("command"), pattern: Type.String() }),
 	]);
-	return objectSchema({
-		candidates: objectSchema({
-			lessons: arraySchema(objectSchema({
-				summary: stringSchema(),
-				detail: stringSchema(),
-				triggers: arraySchema(trigger),
-				scope_suggestion: stringSchema(),
+	return Type.Object({
+		candidates: Type.Object({
+			lessons: Type.Array(Type.Object({
+				summary: Type.String(),
+				detail: Type.String(),
+				triggers: Type.Array(trigger),
+				scope_suggestion: Type.String(),
 				source_evidence: evidence,
 			})),
-			preferences: arraySchema(objectSchema({ text: stringSchema(), source_evidence: evidence })),
-			decisions: arraySchema(objectSchema({ summary: stringSchema(), detail: stringSchema(), source_evidence: evidence })),
-			domain: arraySchema(objectSchema({ summary: stringSchema(), detail: stringSchema(), source_evidence: evidence })),
+			preferences: Type.Array(Type.Object({ text: Type.String(), source_evidence: evidence })),
+			decisions: Type.Array(Type.Object({ summary: Type.String(), detail: Type.String(), source_evidence: evidence })),
+			domain: Type.Array(Type.Object({ summary: Type.String(), detail: Type.String(), source_evidence: evidence })),
 		}),
 	});
 }
 
 function reconciliationSubmitPlanSchema() {
-	const refs = arraySchema(stringSchema());
-	const trigger = unionSchema([
-		objectSchema({ type: literalSchema("path"), value: stringSchema() }),
-		objectSchema({ type: literalSchema("filename"), value: stringSchema() }),
-		objectSchema({ type: literalSchema("topic"), value: stringSchema() }),
-		objectSchema({ type: literalSchema("tool"), value: stringSchema(), pattern: optional(stringSchema()) }),
-		objectSchema({ type: literalSchema("command"), pattern: stringSchema() }),
+	const refs = Type.Array(Type.String());
+	const trigger = Type.Union([
+		Type.Object({ type: Type.Literal("path"), value: Type.String() }),
+		Type.Object({ type: Type.Literal("filename"), value: Type.String() }),
+		Type.Object({ type: Type.Literal("topic"), value: Type.String() }),
+		Type.Object({ type: Type.Literal("tool"), value: Type.String(), pattern: Type.Optional(Type.String()) }),
+		Type.Object({ type: Type.Literal("command"), pattern: Type.String() }),
 	]);
-	const lessonAction = unionSchema([
-		objectSchema({ action: literalSchema("add"), candidate_refs: refs, summary: stringSchema(), detail: stringSchema(), triggers: arraySchema(trigger) }),
-		objectSchema({ action: literalSchema("merge"), candidate_refs: refs, target_id: stringSchema(), summary: stringSchema(), detail: stringSchema(), triggers: arraySchema(trigger) }),
-		objectSchema({ action: literalSchema("supersede"), candidate_refs: refs, target_id: stringSchema(), summary: stringSchema(), detail: stringSchema(), triggers: arraySchema(trigger) }),
-		objectSchema({ action: literalSchema("discard"), candidate_refs: refs, reason: stringSchema() }),
+	const lessonAction = Type.Union([
+		Type.Object({ action: Type.Literal("add"), candidate_refs: refs, summary: Type.String(), detail: Type.String(), triggers: Type.Array(trigger) }),
+		Type.Object({ action: Type.Literal("merge"), candidate_refs: refs, target_id: Type.String(), summary: Type.String(), detail: Type.String(), triggers: Type.Array(trigger) }),
+		Type.Object({ action: Type.Literal("supersede"), candidate_refs: refs, target_id: Type.String(), summary: Type.String(), detail: Type.String(), triggers: Type.Array(trigger) }),
+		Type.Object({ action: Type.Literal("discard"), candidate_refs: refs, reason: Type.String() }),
 	]);
-	const preferenceAction = unionSchema([
-		objectSchema({ action: literalSchema("add"), candidate_refs: refs, text: stringSchema() }),
-		objectSchema({ action: literalSchema("merge"), candidate_refs: refs, target_id: stringSchema(), text: stringSchema() }),
-		objectSchema({ action: literalSchema("discard"), candidate_refs: refs, reason: stringSchema() }),
+	const preferenceAction = Type.Union([
+		Type.Object({ action: Type.Literal("add"), candidate_refs: refs, text: Type.String() }),
+		Type.Object({ action: Type.Literal("merge"), candidate_refs: refs, target_id: Type.String(), text: Type.String() }),
+		Type.Object({ action: Type.Literal("discard"), candidate_refs: refs, reason: Type.String() }),
 	]);
-	const summaryDetailAction = unionSchema([
-		objectSchema({ action: literalSchema("add"), candidate_refs: refs, summary: stringSchema(), detail: stringSchema() }),
-		objectSchema({ action: literalSchema("merge"), candidate_refs: refs, target_id: stringSchema(), summary: stringSchema(), detail: stringSchema() }),
-		objectSchema({ action: literalSchema("discard"), candidate_refs: refs, reason: stringSchema() }),
+	const summaryDetailAction = Type.Union([
+		Type.Object({ action: Type.Literal("add"), candidate_refs: refs, summary: Type.String(), detail: Type.String() }),
+		Type.Object({ action: Type.Literal("merge"), candidate_refs: refs, target_id: Type.String(), summary: Type.String(), detail: Type.String() }),
+		Type.Object({ action: Type.Literal("discard"), candidate_refs: refs, reason: Type.String() }),
 	]);
-	return objectSchema({
-		lessons: arraySchema(lessonAction),
-		preferences: arraySchema(preferenceAction),
-		decisions: arraySchema(summaryDetailAction),
-		domain: arraySchema(summaryDetailAction),
+	return Type.Object({
+		lessons: Type.Array(lessonAction),
+		preferences: Type.Array(preferenceAction),
+		decisions: Type.Array(summaryDetailAction),
+		domain: Type.Array(summaryDetailAction),
 	});
 }
 
-function objectSchema(properties: Record<string, any>, options: Record<string, unknown> = {}): Record<string, unknown> {
-	const required = Object.entries(properties)
-		.filter(([, value]) => !value?.[OPTIONAL_SCHEMA])
-		.map(([key]) => key);
-	const normalized = Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, value?.[OPTIONAL_SCHEMA] ?? value]));
-	return { type: "object", properties: normalized, required, additionalProperties: false, ...options };
-}
-
-const OPTIONAL_SCHEMA = Symbol("optional-schema");
-
-function optional(schema: Record<string, unknown>): Record<symbol, Record<string, unknown>> {
-	return { [OPTIONAL_SCHEMA]: schema };
-}
-
-function arraySchema(items: unknown): Record<string, unknown> {
-	return { type: "array", items };
-}
-
-function unionSchema(anyOf: unknown[]): Record<string, unknown> {
-	return { anyOf };
-}
-
-function stringSchema(): Record<string, unknown> {
-	return { type: "string" };
-}
-
-function numberSchema(): Record<string, unknown> {
-	return { type: "number" };
-}
-
-function literalSchema(value: string): Record<string, unknown> {
-	return { const: value };
+async function loadTypeBox(): Promise<any> {
+	try {
+		return (await import("@mariozechner/pi-ai") as any).Type;
+	} catch {
+		// ponytail: standalone extension tests lack pi package aliases. Keep TypeBox-shaped fallback; remove when test env links pi-ai.
+		return {
+			Object: (properties: Record<string, any>, options: Record<string, unknown> = {}) => {
+				const entries = Object.entries(properties);
+				return {
+					type: "object",
+					...(entries.some(([, value]) => !value?.__optional) ? { required: entries.filter(([, value]) => !value?.__optional).map(([key]) => key) } : {}),
+					properties: Object.fromEntries(entries.map(([key, value]) => [key, value?.__schema ?? value])),
+					...options,
+				};
+			},
+			Array: (items: unknown) => ({ type: "array", items }),
+			Union: (anyOf: unknown[]) => ({ anyOf }),
+			Literal: (value: string) => ({ type: "string", const: value }),
+			String: () => ({ type: "string" }),
+			Number: () => ({ type: "number" }),
+			Optional: (schema: unknown) => ({ __optional: true, __schema: schema }),
+		};
+	}
 }
 
 export function extractSubmitPlanToolArguments(message: any): string | null {
