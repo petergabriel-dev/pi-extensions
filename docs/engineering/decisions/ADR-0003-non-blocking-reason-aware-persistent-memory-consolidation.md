@@ -3,7 +3,7 @@ id: ADR-0003
 title: Non-Blocking Reason-Aware Persistent-Memory Consolidation
 status: Active
 date: 2026-05-30
-updated: 2026-06-10
+updated: 2026-06-18
 ---
 
 # ADR-0003: Non-Blocking Reason-Aware Persistent-Memory Consolidation
@@ -34,7 +34,7 @@ To resolve the tradeoff between persistent memory consistency and interactive se
 3. **Blocking Shutdown on Quit:** The shutdown handler blocks on extraction and reinforcement for the `"quit"` reason to prevent early process termination from cutting off file writes.
 4. **Generation-Guarded Index Swaps:** To mitigate teardown races when switching/forking sessions, a module-level `lifecycleGeneration` counter is incremented on every start and shutdown handler execution. The background task works on a separate database connection and only swaps it into the live global state if the generation token is unchanged upon completion.
 5. **Observability via Status Widget:** A non-blocking status indicator (`"Memory consolidating..."`) is shown using the UI setStatus widget while reconciliation is in flight, so a user recall issued before completion is explicable.
-6. **Forced Tool-Call Structured Output for Careful Models:** Extraction and reconciliation register a single custom `submit_plan` tool whose TypeBox-compatible schema mirrors the prompt JSON schema, and force that tool via the provider `toolChoice` option when a resolved careful model is available. The host reads the returned `ToolCall.arguments` as the model plan. If the provider/gateway does not return a tool call, or forced tool use is unavailable, the system falls back to the existing free-text JSON plus tolerant parse/salvage path. We do not use `response_format`/JSON mode because the opencode-go model path is through an OpenAI-completions-compatible adapter where tool calls are the compatible structured-output mechanism.
+6. **Capability-Gated Forced Tool-Call Structured Output for Careful Models:** Extraction and reconciliation register a single custom `submit_plan` tool whose TypeBox-compatible schema mirrors the prompt JSON schema. The lower-level pi-ai one-shot path forces that tool only when `model.api` supports forced tool choice: OpenAI-completions/Mistral use `{type:"function",function:{name}}`, Anthropic/Bedrock use `{type:"tool",name}`, and Google/Vertex use `"any"` with the single registered tool. Responses APIs (`openai-responses`, `azure-openai-responses`, `openai-codex-responses`) and unknown APIs skip the forced attempt and go straight to the existing free-text JSON plus tolerant parse/salvage path. Provider `stopReason === "error"` responses are logged with `errorMessage` before fallback.
 
 ## The Reason Matrix
 
@@ -51,13 +51,13 @@ To resolve the tradeoff between persistent memory consistency and interactive se
 - **Performance:** Bypassing model calls on `/reload` drops reload latency to the no-staging fast path (<50ms). Running reconciliation in the background on startup makes the session immediately interactive.
 - **Reliability:** Out-of-band markdown edits are safely reconciled on the next non-reload session start. Staging leftovers are dead-lettered within a single reconciliation run (T9 terminal consumption), so no candidate is carried across cycles unresolved.
 - **Safety:** Stale or closed database handle writes are prevented by the generation guard, discarding outdated background handles cleanly without crash; unresolved same-project candidates are terminalized under staging-consumption semantics rather than preserved across cycles.
-- **Structured-output reliability:** Tool-call arguments avoid dependence on free-form text placement for careful-model plans, while the fallback preserves backward compatibility for gateways that omit real `tool_calls`.
+- **Structured-output reliability:** Tool-call arguments avoid dependence on free-form text placement for careful-model plans on APIs that can force tools, while capability gating avoids wasted calls and warning noise on Responses APIs that cannot force `submit_plan`. The fallback preserves backward compatibility for gateways that omit real `tool_calls` or return provider errors.
 
 ## Alternatives Rejected
 
 - **Shutdown-Reconciliation:** Running reconciliation during session shutdown. Rejected because it increases shutdown latency significantly, delaying session switching, and fails to capture manual out-of-band markdown changes made while the agent was stopped.
 - **Hermes-style Model-Written Memory:** Allowing LLM models to directly edit markdown memory files. Rejected due to model hallucination risks and structure validation errors; our structured staging file and rule-based partial-batch system provide strict quality guarantees.
-- **`response_format` / JSON-mode Structured Output:** Rejected for this path because the target careful model is reached through an OpenAI-completions-compatible gateway where forced tool calls are the minimal portable structured-output mechanism. We keep prompt-level JSON instructions and tolerant parsing only as fallback behavior.
+- **`response_format` / JSON-mode Structured Output:** Rejected for this path because supported careful models are reached through mixed provider APIs and not all expose a portable JSON-mode option. Forcing tools is used where `model.api` supports it; Responses APIs are explicitly un-forceable for this path and rely on prompt-level JSON instructions plus tolerant parsing.
 
 ## Affects
 
@@ -73,7 +73,7 @@ Code:
 - [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L246-L329) (`session_shutdown` hook)
 - [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L391-L485) (`triggerBackgroundReconciliation` helper)
 - [lifecycle.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/lifecycle.ts) (extracted lifecycle logic)
-- [careful-model.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/careful-model.ts) (forced `submit_plan` tool-call careful-model path with free-text fallback)
+- [careful-model.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/careful-model.ts) (`forcedToolChoiceForApi`, TypeBox `submit_plan` schemas, provider-error logging, and free-text fallback)
 - [sweep.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/sweep.ts) (T11 archival + T12 low-signal flagging + contradiction detection)
 - [markdown.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/storage/markdown.ts) (T12 optional field parsing: `low_signal`, `contradiction_group`)
 - [types.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/types.ts) (T12 `LessonMeta` optional fields)
@@ -83,11 +83,11 @@ Code:
 - **Good:** Fast session starts and near-instant reload latency.
 - **Good:** Complete protection against closed-connection SQLite crashes during parallel transitions.
 - **Bad:** A recall tool invocation made immediately after session start might miss newly consolidated staging candidates until the background swap completes (reconciled by the `"Memory consolidating..."` status indicator).
-- **Neutral:** The pi-coding-agent session API exposes custom tools but not forced tool choice, so forced `submit_plan` uses the lower-level pi-ai completion API when a careful model has already been resolved; otherwise the isolated session free-text path remains the compatibility fallback.
+- **Neutral:** The pi-coding-agent session API exposes custom tools but not forced tool choice, so forced `submit_plan` uses the lower-level pi-ai completion API only for forcing-capable `model.api` values when a careful model has already been resolved; otherwise the isolated session free-text path remains the compatibility fallback.
 
 ## Probe Result
 
-A live one-shot `opencode-go/deepseek-v4-flash` gateway probe should be run from the host Pi runtime before relying on forced tool-call availability. The extension keeps conservative fallback behavior for gateways that omit tool calls or return invalid schema.
+A live one-shot `opencode-go/deepseek-v4-flash` gateway probe should be run from the host Pi runtime before relying on forced tool-call availability. `openai-codex/*` careful models use `openai-codex-responses`, which cannot force `submit_plan`; this is expected to skip directly to free-text. The extension keeps conservative fallback behavior for gateways that omit tool calls, return invalid schema, or surface provider errors.
 
 ## Read when
 
