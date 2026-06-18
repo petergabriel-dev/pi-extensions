@@ -72,3 +72,20 @@ Persistent memory is local-first markdown plus SQLite indexing under `<project>/
 7. **Run-log observability:** The bounded append-only run-log records run counts, per-candidate outcomes, and discard/dup-rate metrics. `/memory status` surfaces recent runs without using `setFooter`.
 8. **Offline sweep/review:** `/memory sweep` archives only unambiguously dead lessons by reversible status flag, flags low-signal lessons for review, and queues suspected contradiction groups without auto-resolving them.
 
+### Persistent-memory model resolution
+
+Persistent-memory uses two live model roles:
+
+- `extraction`: shutdown extraction (`resolveExtractionModel`, `EXTRACTION_MODEL_ENV`).
+- `adjudication`: reconciliation judgement/adjudication (`resolveAdjudicationModel`, selected through `resolveReconciliationAdjudicationModel`).
+
+Resolution is centralized in `agent/extensions/persistent-memory/model-resolution.ts` via `resolveModelWithDefault()`. Precedence:
+
+1. persisted override from `agent/settings.json` at `persistentMemory.models[role]`;
+2. env var (`PERSISTENT_MEMORY_EXTRACTION_MODEL`, `PERSISTENT_MEMORY_ADJUDICATION_MODEL`, or legacy `PERSISTENT_MEMORY_RECONCILIATION_MODEL` for reconciliation);
+3. pinned default (`DEFAULT_EXTRACTION_MODEL` / `DEFAULT_ADJUDICATION_MODEL`);
+4. model registry lookup plus `hasConfiguredAuth()`;
+5. `ctx.model` fallback with warning.
+
+Persisted override writes use read-merge-write helpers (`readMemoryModelOverride`, `writeMemoryModelOverride`) and only touch `persistentMemory.models`, preserving other `settings.json` keys such as `subagents`.
+

@@ -58,6 +58,16 @@ npm run typecheck
 
 ## Persistent-Memory Extension testing
 
+Model selection:
+
+```text
+/memory model
+/memory model extraction provider/model
+/memory model adjudication provider/model
+```
+
+`/memory model` opens TUI selects for the live roles (`extraction`, `adjudication`) and available authenticated models. Choices persist in `agent/settings.json` under `persistentMemory.models` and apply on the next extraction/reconciliation run without restart.
+
 To run typecheck and tests in the persistent-memory extension directory:
 
 ```bash
@@ -66,8 +76,10 @@ npm run typecheck
 npm test
 ```
 
-This runs the typechecker (`tsc --noEmit`) and executes the four standalone TS unit test suites under `test/` using `tsx`:
+This runs the typechecker (`tsc --noEmit`) and executes standalone TS unit test suites under `test/` using `tsx`, including:
 - `test_classifier.ts`: Tests reason-aware classification of session transitions.
 - `test_reason_matrix.ts`: Tests mapped lifecycle actions for different transition reasons.
 - `test_generation_swap.ts`: Tests background task lifecycle generation swap logic.
 - `test_firing_log.ts`: Tests firing log logging and preservation across reload transitions.
+- `test_resolve_careful_model.ts`: Tests pinned/env/fallback model resolution.
+- `test_model_override.ts`: Tests persisted per-role model override precedence, fallback, and settings merge behavior.
