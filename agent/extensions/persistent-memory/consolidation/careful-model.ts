@@ -13,6 +13,38 @@ import { EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT } from "./prompt
 export const EXTRACTION_TIMEOUT_MS = 30_000;
 export const SUBMIT_PLAN_TOOL_NAME = "submit_plan";
 
+export type KnownCarefulModelApi =
+	| "openai-completions"
+	| "mistral-conversations"
+	| "openai-responses"
+	| "azure-openai-responses"
+	| "openai-codex-responses"
+	| "anthropic-messages"
+	| "bedrock-converse-stream"
+	| "google-generative-ai"
+	| "google-vertex";
+
+export type ForcedSubmitPlanToolChoice =
+	| { type: "function"; function: { name: typeof SUBMIT_PLAN_TOOL_NAME } }
+	| { type: "tool"; name: typeof SUBMIT_PLAN_TOOL_NAME }
+	| "any";
+
+const FORCED_TOOL_CHOICE_BY_API: Record<KnownCarefulModelApi, ForcedSubmitPlanToolChoice | null> = {
+	"openai-completions": { type: "function", function: { name: SUBMIT_PLAN_TOOL_NAME } },
+	"mistral-conversations": { type: "function", function: { name: SUBMIT_PLAN_TOOL_NAME } },
+	"anthropic-messages": { type: "tool", name: SUBMIT_PLAN_TOOL_NAME },
+	"bedrock-converse-stream": { type: "tool", name: SUBMIT_PLAN_TOOL_NAME },
+	"google-generative-ai": "any",
+	"google-vertex": "any",
+	"openai-responses": null,
+	"azure-openai-responses": null,
+	"openai-codex-responses": null,
+};
+
+export function forcedToolChoiceForApi(api: string): ForcedSubmitPlanToolChoice | null {
+	return FORCED_TOOL_CHOICE_BY_API[api as KnownCarefulModelApi] ?? null;
+}
+
 export class CarefulModelTimeoutError extends Error {
 	constructor(timeoutMs: number) {
 		super(`Careful model call timed out after ${timeoutMs}ms.`);
