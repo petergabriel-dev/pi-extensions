@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
 import type { callCarefulModelOneShot } from "./consolidation/careful-model.js";
+import { runExtraction, type ExtractionRunResult } from "./consolidation/extract.js";
 import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
 import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
@@ -16,10 +17,15 @@ import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolv
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason } from "./lifecycle.js";
-import { readMemoryModelOverride, resolveAdjudicationModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
+import { readMemoryModelOverride, resolveAdjudicationModel, resolveExtractionModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
 import { sweepLessons, flagLowSignalLessons, detectContradictions } from "./consolidation/sweep.js";
 import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
 
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
+const EXTRACTION_TIMEOUT_ENV = "PERSISTENT_MEMORY_EXTRACTION_TIMEOUT_MS";
+const DEFAULT_EXTRACTION_THINKING_LEVEL: ThinkingLevel = "off";
+const EXTRACTION_THINKING_LEVEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_THINKING_LEVEL";
+const ALLOWED_EXTRACTION_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const DEFAULT_RECONCILIATION_TIMEOUT_MS = 180_000;
 const RECONCILIATION_TIMEOUT_ENV = "PERSISTENT_MEMORY_RECONCILIATION_TIMEOUT_MS";
 const DEFAULT_RECONCILIATION_THINKING_LEVEL: ThinkingLevel = "off";
@@ -34,6 +40,7 @@ const MEMORY_UI_KEY = "persistent-memory";
 const MEMORY_PANEL_CLEAR_MS = 5_000;
 
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
+const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
 export const ADJUDICATION_MODEL_ENV = "PERSISTENT_MEMORY_ADJUDICATION_MODEL";
 
 function resolveReconciliationAdjudicationModel(
@@ -44,6 +51,11 @@ function resolveReconciliationAdjudicationModel(
 	const legacyReconciliationOverride = process.env[RECONCILIATION_MODEL_ENV]?.trim();
 	const envName = adjudicationOverride ? ADJUDICATION_MODEL_ENV : legacyReconciliationOverride ? RECONCILIATION_MODEL_ENV : ADJUDICATION_MODEL_ENV;
 	return resolveAdjudicationModel(envName, ctx, logger);
+}
+
+interface ExtractionConfig {
+	timeoutMs: number;
+	thinkingLevel: ThinkingLevel;
 }
 
 interface ReconciliationConfig {
@@ -64,6 +76,7 @@ let pendingReminderLessons = new Map<string, Match["lesson"]>();
 
 let lifecycleGeneration = 0;
 let reconcileInFlight = false;
+let canonicalWriterInFlight = false;
 type CarefulModelImpl = typeof callCarefulModelOneShot;
 const defaultCallCarefulModelImpl: CarefulModelImpl = async (...args) => {
 	const module = await import("./consolidation/careful-model.js");
@@ -256,6 +269,10 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await reconcileMemoryCommand(ctx);
 				return;
 			}
+			if (trimmed === "consolidate") {
+				await consolidateMemoryCommand(ctx);
+				return;
+			}
 			if (trimmed === "firings") {
 				await listFirings(ctx);
 				return;
@@ -280,7 +297,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await memoryModelCommand(trimmed.slice("model".length), ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
+			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
 		},
 	});
 }
@@ -301,6 +318,23 @@ function formatError(error: unknown): string {
 			: String(error);
 	const compact = raw.replace(/\s+/g, " ").trim();
 	return compact.length > MAX_ERROR_DETAIL_CHARS ? `${compact.slice(0, MAX_ERROR_DETAIL_CHARS)}…` : compact;
+}
+
+function extractionConfig(): ExtractionConfig {
+	return {
+		timeoutMs: parsePositiveIntegerEnv(process.env[EXTRACTION_TIMEOUT_ENV], DEFAULT_EXTRACTION_TIMEOUT_MS),
+		thinkingLevel: parseExtractionThinkingLevel(process.env[EXTRACTION_THINKING_LEVEL_ENV]),
+	};
+}
+
+function parseExtractionThinkingLevel(raw: string | undefined): ThinkingLevel {
+	if (!raw) return DEFAULT_EXTRACTION_THINKING_LEVEL;
+	const normalized = raw.trim().toLowerCase();
+	return isAllowedExtractionThinkingLevel(normalized) ? normalized : DEFAULT_EXTRACTION_THINKING_LEVEL;
+}
+
+function isAllowedExtractionThinkingLevel(value: string): value is ThinkingLevel {
+	return ALLOWED_EXTRACTION_THINKING_LEVELS.includes(value as ThinkingLevel);
 }
 
 function parseReconciliationThinkingLevel(raw: string | undefined): ThinkingLevel {
@@ -721,6 +755,70 @@ function formatDisplayPath(filePath: string, cwd: string): string {
 	return filePath;
 }
 
+export async function consolidateMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!db || !memoryPaths) {
+		ctx.ui.notify(lastRebuildError ? `Memory not initialized: ${lastRebuildError}` : "Memory not initialized.", "error");
+		return;
+	}
+	if (!memoryPaths.projectMemoryDir) {
+		ctx.ui.notify("No project memory dir.", "warning");
+		return;
+	}
+	if (reconcileInFlight) {
+		ctx.ui.notify("Memory reconciliation already running; try again after it finishes.", "warning");
+		return;
+	}
+	if (typeof ctx.sessionManager?.getBranch !== "function") {
+		ctx.ui.notify("Memory consolidate requires sessionManager.getBranch(); current session branch unavailable.", "error");
+		return;
+	}
+	const releaseLock = acquireCanonicalWriterLock(memoryPaths);
+	if (!releaseLock) {
+		ctx.ui.notify("Memory canonical writer already running; try again after it finishes.", "warning");
+		return;
+	}
+
+	const runPaths = { ...memoryPaths };
+	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
+	const extraction = extractionConfig();
+	const extractionModel = resolveExtractionModel(EXTRACTION_MODEL_ENV, modelContext, console);
+	const sessionId = getSessionId(ctx as { sessionManager?: { getSessionId?: () => string } });
+	let extractionResult: ExtractionRunResult | null = null;
+	try {
+		extractionResult = await runExtraction(ctx as any, runPaths, sessionId, {
+			logger: console,
+			callCarefulModel: (systemPrompt, userPrompt) => callCarefulModelImpl(systemPrompt, userPrompt, {
+				cwd: modelContext.cwd ?? process.cwd(),
+				...(extractionModel ? { model: extractionModel as never } : {}),
+				thinkingLevel: extraction.thinkingLevel,
+				timeoutMs: extraction.timeoutMs,
+				logger: console,
+			}),
+		});
+		if (extractionResult.status === "failed") {
+			ctx.ui.notify(`Memory consolidation extraction failed (${extractionResult.reason}): ${formatError(extractionResult.error)}; staging preserved.`, "error");
+			return;
+		}
+
+		const hasStaging = listStagingFiles(runPaths.projectMemoryDir).length > 0;
+		if (!hasStaging) {
+			ctx.ui.notify(formatConsolidationNothing(extractionResult), "info");
+			return;
+		}
+
+		const reconcileResult = await runReconciliationForeground(ctx, runPaths, "manual");
+		if (reconcileResult.status === "failed") {
+			ctx.ui.notify(`Memory consolidation reconcile failed (${reconcileResult.reason}): ${formatError(reconcileResult.error)}; staging preserved.`, "error");
+			return;
+		}
+		ctx.ui.notify(formatConsolidationResult(extractionResult, reconcileResult), "info");
+	} catch (error) {
+		ctx.ui.notify(`Memory consolidation failed: ${formatError(error)}; staging preserved.`, "error");
+	} finally {
+		releaseLock();
+	}
+}
+
 export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
 	if (!db || !memoryPaths) {
 		ctx.ui.notify(lastRebuildError ? `Memory not initialized: ${lastRebuildError}` : "Memory not initialized.", "error");
@@ -734,15 +832,37 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 		ctx.ui.notify("Memory reconciliation already running; staging will be processed by the in-flight run.", "warning");
 		return;
 	}
+	const releaseLock = acquireCanonicalWriterLock(memoryPaths);
+	if (!releaseLock) {
+		ctx.ui.notify("Memory canonical writer already running; try again after it finishes.", "warning");
+		return;
+	}
 
-	const runPaths = { ...memoryPaths };
+	try {
+		const result = await runReconciliationForeground(ctx, { ...memoryPaths }, "manual");
+		if (result.status === "failed") {
+			ctx.ui.notify(`Memory reconciliation failed (${result.reason}): ${formatError(result.error)}; staging preserved.`, "error");
+			return;
+		}
+		ctx.ui.notify(formatReconciliationResult(result), "info");
+	} catch (error) {
+		ctx.ui.notify(`Memory reconciliation failed: ${formatError(error)}; staging preserved.`, "error");
+	} finally {
+		releaseLock();
+	}
+}
+
+async function runReconciliationForeground(
+	ctx: ExtensionCommandContext,
+	runPaths: MemoryPaths,
+	source: ReconcileRunSource,
+): Promise<ReconciliationRunResult> {
 	const startGen = lifecycleGeneration;
 	const startedAt = new Date();
 	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
 	const reconciliation = reconciliationConfig();
 	const chosenModel = resolveReconciliationAdjudicationModel(modelContext, console);
 	reconcileInFlight = true;
-
 	let ownDb: SqliteDatabase | null = null;
 	try {
 		ownDb = openIndex(indexPathForMemoryPaths(runPaths));
@@ -757,17 +877,15 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 					updateMemoryMeter(ctx.ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
 				}
 			},
-			callCarefulModel: (systemPrompt, userPrompt) => {
-				return callCarefulModelImpl(systemPrompt, userPrompt, {
-					cwd: modelContext.cwd ?? process.cwd(),
-					...(chosenModel ? { model: chosenModel as never } : {}),
-					thinkingLevel: reconciliation.thinkingLevel,
-					timeoutMs: reconciliationTimeoutMs(),
-					logger: console,
-				});
-			},
+			callCarefulModel: (systemPrompt, userPrompt) => callCarefulModelImpl(systemPrompt, userPrompt, {
+				cwd: modelContext.cwd ?? process.cwd(),
+				...(chosenModel ? { model: chosenModel as never } : {}),
+				thinkingLevel: reconciliation.thinkingLevel,
+				timeoutMs: reconciliationTimeoutMs(),
+				logger: console,
+			}),
 		});
-		recordReconcileRunIfUseful(runPaths, "manual", startedAt, result, chosenModel);
+		recordReconcileRunIfUseful(runPaths, source, startedAt, result, chosenModel);
 
 		// Keep this check and swap/discard block await-free. An await here would let a lifecycle
 		// event interleave and could publish a stale reconciliation index into a newer generation.
@@ -779,18 +897,12 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 			closeDatabaseQuietly(ownDb, "stale manual db");
 			ownDb = null;
 		}
-
-		if (result.status === "failed") {
-			lastRebuildError = result.reason === "index_error" ? formatError(result.error) : lastRebuildError;
-			ctx.ui.notify(`Memory reconciliation failed (${result.reason}): ${formatError(result.error)}; staging preserved.`, "error");
-			return;
-		}
-
-		lastRebuildError = null;
-		ctx.ui.notify(formatReconciliationResult(result), "info");
+		if (result.status === "failed" && result.reason === "index_error") lastRebuildError = formatError(result.error);
+		else if (result.status !== "failed") lastRebuildError = null;
+		return result;
 	} catch (error) {
-		recordThrownReconcileRun(runPaths, "manual", startedAt, chosenModel, error);
-		ctx.ui.notify(`Memory reconciliation failed: ${formatError(error)}; staging preserved.`, "error");
+		recordThrownReconcileRun(runPaths, source, startedAt, chosenModel, error);
+		throw error;
 	} finally {
 		reconcileInFlight = false;
 		if ((ctx as ExtensionCommandContext & { hasUI?: boolean }).hasUI) {
@@ -798,6 +910,54 @@ export async function reconcileMemoryCommand(ctx: ExtensionCommandContext): Prom
 		}
 		if (ownDb) closeDatabaseQuietly(ownDb, "manual reconcile db");
 	}
+}
+
+function acquireCanonicalWriterLock(paths: MemoryPaths): (() => void) | null {
+	if (!paths.projectMemoryDir || canonicalWriterInFlight) return null;
+	const lockPath = path.join(paths.projectMemoryDir, "canonical-writer.lock");
+	let fd: number;
+	try {
+		fd = fs.openSync(lockPath, "wx");
+		fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+	} catch {
+		return null;
+	}
+	canonicalWriterInFlight = true;
+	return () => {
+		canonicalWriterInFlight = false;
+		try { fs.closeSync(fd); } catch {}
+		try { fs.rmSync(lockPath, { force: true }); } catch {}
+	};
+}
+
+function getSessionId(ctx: { sessionManager?: { getSessionId?: () => string } }): string {
+	try {
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		if (sessionId) return sessionId;
+	} catch {
+		// Fall back below.
+	}
+	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`;
+}
+
+function formatConsolidationNothing(extraction: ExtractionRunResult): string {
+	if (extraction.status === "written") return `Memory consolidation extracted ${extraction.totalCandidates} candidate(s), but nothing remained to reconcile.`;
+	return "Memory consolidation skipped: nothing to consolidate.";
+}
+
+function formatConsolidationResult(
+	extraction: ExtractionRunResult,
+	reconcile: Exclude<ReconciliationRunResult, { status: "failed" }>,
+): string {
+	const extracted = extraction.status === "written" ? extraction.totalCandidates : 0;
+	const counts = reconcile.counts;
+	return [
+		`Memory consolidation ${reconcile.status}.`,
+		`Extracted: ${extracted} candidate(s).`,
+		`Added: ${formatTotals(counts.actions.add)}. Re-staged files: ${counts.stagingFiles.preserved}. Dead-lettered: ${formatTotals(counts.candidates.deadLettered)}.`,
+		`Staging: ${counts.stagingFiles.consumed}/${counts.stagingFiles.total} consumed, ${counts.stagingFiles.deadLettered} dead-lettered files.`,
+		`Writes: ${formatWriteFlags(counts.writes)}. Index rebuilt: ${reconcile.indexRebuilt ? "yes" : "no"}.`,
+	].join("\n");
 }
 
 function formatReconciliationResult(result: Exclude<Awaited<ReturnType<typeof runReconciliation>>, { status: "failed" }>): string {
