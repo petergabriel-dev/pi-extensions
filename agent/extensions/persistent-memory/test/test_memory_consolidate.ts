@@ -3,7 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import persistentMemory, { __resetCallCarefulModelImplForTest, setCallCarefulModelImplForTest } from "../index.js";
-import { parseLessonsFile } from "../storage/markdown.js";
+import { clearFiringLog, getSessionFiringLog, logFiring } from "../retrieval/firing-log.js";
+import { parseLessonsFile, serializeLessonsFile } from "../storage/markdown.js";
+import { openIndex, rebuildIndex } from "../storage/sqlite.js";
+import type { Lesson } from "../types.js";
 
 console.log("Running test_memory_consolidate...");
 
@@ -70,6 +73,61 @@ async function testConsolidateExtractsAndReconciles() {
 	}
 }
 
+function existingLesson(root: string): Lesson {
+	return {
+		id: "lsn_01",
+		summary: "Existing lesson",
+		detail: "Existing detail.",
+		meta: {
+			project_scope: path.basename(root),
+			status: "active",
+			session_level: false,
+			reinforcement_count: 0,
+			last_seen_at: null,
+			source_session: "s0",
+			created_at: "2026-01-01T00:00:00.000Z",
+			supersedes: null,
+			triggers: [{ type: "topic", value: "existing" }],
+		},
+	};
+}
+
+async function testConsolidateAppliesReinforcementAndClearsFirings() {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-consolidate-reinforce-"));
+	const notifications: string[] = [];
+	const mem = path.join(root, ".pi", "memory");
+	fs.mkdirSync(mem, { recursive: true });
+	fs.writeFileSync(path.join(mem, "lessons.md"), serializeLessonsFile([existingLesson(root)]), "utf8");
+	for (const name of ["preferences.md", "decisions.md", "domain.md"]) fs.writeFileSync(path.join(mem, name), "", "utf8");
+	const index = openIndex(path.join(mem, "index.db"));
+	rebuildIndex(index, { projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem });
+	index.close();
+	const branch = [{ type: "custom", customType: "discussion-notes", data: { schemaVersion: 1, added: [{ id: 1, type: "lesson", text: "Add another memory." }] } }];
+	setCallCarefulModelImplForTest(async () => JSON.stringify({
+		candidates: {
+			lessons: [{ summary: "Another lesson", detail: "Another detail.", scope_suggestion: path.basename(root), triggers: [{ type: "topic", value: "another" }], source_evidence: { discussion_note_ids: [1] } }],
+			preferences: [],
+			decisions: [],
+			domain: [],
+		},
+	}));
+	try {
+		const { ctx, memoryCommand } = await setupExtension(root, notifications, branch);
+		logFiring({ lesson_id: "lsn_01", trigger: { type: "topic", value: "existing" }, fired_at: new Date().toISOString(), context_summary: "test", tier: 1 });
+		await memoryCommand("consolidate", ctx);
+		const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
+		const reinforced = lessons.find((lesson) => lesson.id === "lsn_01");
+		assert.ok(reinforced);
+		assert.equal(reinforced.meta.reinforcement_count, 1, "fired lesson reinforced during consolidate");
+		assert.equal(getSessionFiringLog().length, 0, "firing log cleared after reinforcement");
+		assert.ok(notifications.some((message) => message.includes("Reinforcement: 1 reinforced")));
+	} finally {
+		__resetCallCarefulModelImplForTest();
+		clearFiringLog();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+}
+
 async function testConsolidateRequiresBranch() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-consolidate-nobranch-"));
 	const notifications: string[] = [];
@@ -98,6 +156,7 @@ async function testConsolidateLockFailsFast() {
 }
 
 await testConsolidateExtractsAndReconciles();
+await testConsolidateAppliesReinforcementAndClearsFirings();
 await testConsolidateRequiresBranch();
 await testConsolidateLockFailsFast();
 console.log("test_memory_consolidate passed!");

@@ -8,7 +8,8 @@ import { runExtraction, shouldSkipExtraction, type ExtractionRunResult } from ".
 import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
 import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter, repairStagingFile, writeStaging } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
-import { logFiring, logToolCall, type ToolCallObservation } from "./retrieval/firing-log.js";
+import { applyReinforcementUpdates, type ReinforcementResult } from "./reinforcement/tracker.js";
+import { clearFiringLog, logFiring, logToolCall, type ToolCallObservation } from "./retrieval/firing-log.js";
 import { formatTier1Block, formatTier2Block } from "./retrieval/inject.js";
 import { selectTier1 } from "./retrieval/tier1.js";
 import { matchTier2, type Match } from "./retrieval/tier2.js";
@@ -871,7 +872,8 @@ export async function consolidateMemoryCommand(ctx: ExtensionCommandContext): Pr
 			ctx.ui.notify(`Memory consolidation reconcile failed (${reconcileResult.reason}): ${formatError(reconcileResult.error)}; staging preserved.`, "error");
 			return;
 		}
-		ctx.ui.notify(formatConsolidationResult(extractionResult, reconcileResult), "info");
+		const reinforcement = applyConsolidationReinforcement(runPaths);
+		ctx.ui.notify(formatConsolidationResult(extractionResult, reconcileResult, reinforcement), reinforcement.rebuild_status === "failed" || reinforcement.write_errors.length > 0 ? "warning" : "info");
 	} catch (error) {
 		ctx.ui.notify(`Memory consolidation failed: ${formatError(error)}; staging preserved.`, "error");
 	} finally {
@@ -1005,9 +1007,19 @@ function formatConsolidationNothing(extraction: ExtractionRunResult): string {
 	return "Memory consolidation skipped: nothing to consolidate.";
 }
 
+function applyConsolidationReinforcement(paths: MemoryPaths): ReinforcementResult {
+	if (!db) {
+		return { reinforced: [], fired_without_effect: [], files_written: [], rebuild_status: "skipped", write_errors: [] };
+	}
+	const reinforcement = applyReinforcementUpdates(paths, db, { logger: console });
+	if (reinforcement.rebuild_status !== "failed" && reinforcement.write_errors.length === 0) clearFiringLog();
+	return reinforcement;
+}
+
 function formatConsolidationResult(
 	extraction: ExtractionRunResult,
 	reconcile: Exclude<ReconciliationRunResult, { status: "failed" }>,
+	reinforcement: ReinforcementResult,
 ): string {
 	const extracted = extraction.status === "written" ? extraction.totalCandidates : 0;
 	const counts = reconcile.counts;
@@ -1015,6 +1027,9 @@ function formatConsolidationResult(
 		`Memory consolidation ${reconcile.status}.`,
 		`Extracted: ${extracted} candidate(s).`,
 		`Added: ${formatTotals(counts.actions.add)}. Re-staged files: ${counts.stagingFiles.preserved}. Dead-lettered: ${formatTotals(counts.candidates.deadLettered)}.`,
+		`Reinforcement: ${reinforcement.reinforced.length} reinforced, ${reinforcement.fired_without_effect.length} fired-without-effect, writes=${reinforcement.files_written.length}, rebuild=${reinforcement.rebuild_status}.`,
+		...(reinforcement.write_errors.length > 0 ? [`Reinforcement write errors: ${reinforcement.write_errors.length}.`] : []),
+		...(reinforcement.rebuild_error ? [`Reinforcement rebuild error: ${reinforcement.rebuild_error}.`] : []),
 		`Staging: ${counts.stagingFiles.consumed}/${counts.stagingFiles.total} consumed, ${counts.stagingFiles.deadLettered} dead-lettered files.`,
 		`Writes: ${formatWriteFlags(counts.writes)}. Index rebuilt: ${reconcile.indexRebuilt ? "yes" : "no"}.`,
 	].join("\n");
