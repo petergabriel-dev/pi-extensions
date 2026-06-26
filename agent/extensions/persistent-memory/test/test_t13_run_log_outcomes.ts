@@ -79,13 +79,12 @@ async function testRunReconciliationOutcomeRows() {
 		assert.ok(result.candidateOutcomes);
 		assert.deepEqual(result.candidateOutcomes.map((row) => [row.ref, row.outcome]), [
 			["s1:lessons:1", "duplicate"],
-			["s1:lessons:2", "dead_lettered"],
 		]);
 		assert.equal(result.counts.candidate_outcomes.duplicate, 1);
-		assert.equal(result.counts.candidate_outcomes.dead_lettered, 1);
-		assert.equal(result.candidateMetrics?.total, 2);
+		assert.equal(result.counts.candidate_outcomes.dead_lettered, 0);
+		assert.equal(result.candidateMetrics?.total, 1);
 		assert.equal(result.candidateMetrics?.discardOrDuplicate, 1);
-		assert.equal(result.candidateMetrics?.discardDupRate, 0.5);
+		assert.equal(result.candidateMetrics?.discardDupRate, 1);
 	} finally {
 		db.close();
 		fs.rmSync(root, { recursive: true, force: true });

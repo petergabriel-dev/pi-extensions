@@ -543,12 +543,11 @@ async function testAdjudicationFailureAfterDeterministicAdd() {
     const original = lessons.find((l) => l.id === "lsn_01");
     assert.ok(original, "original lesson still on disk");
 
-    // T9: collision candidate dead-lettered (not re-staged).
-    assert.strictEqual(stagingCount(mem), 0, "staging empty (T9 terminal)");
-    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "collision candidate dead-lettered");
+    assert.strictEqual(stagingCount(mem), 1, "failed collision candidate re-staged");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 0, "under-cap collision candidate not dead-lettered");
     const staged = readStagedLessons(mem);
-    assert.strictEqual(staged.length, 0, "no staged lessons");
-    // T9: reconcile_attempts tracked in dead letter.
+    assert.strictEqual(staged.length, 1, "collision candidate staged for retry");
+    assert.strictEqual(staged[0].reconcile_attempts, 1, "reconcile_attempts incremented on retry");
     assert.strictEqual(result.status, "completed");
     // Deterministic work was NOT rolled back
     assert.strictEqual(lessons.length, 2, "only 2 lessons on disk (original + deterministic)");
@@ -584,12 +583,11 @@ async function testNoAdjudicationWithoutModel() {
       // callAdjudicationModel NOT provided
     });
 
-    // T9: collision candidate dead-lettered when no model available.
     assert.strictEqual(result.llmCalled, false);
     const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
     assert.strictEqual(lessons.length, 1, "only original lesson");
-    assert.strictEqual(stagingCount(mem), 0, "staging empty (T9 terminal)");
-    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "collision candidate dead-lettered");
+    assert.strictEqual(stagingCount(mem), 1, "collision candidate re-staged");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 0, "collision candidate not dead-lettered");
   } finally {
     try { db.close(); } catch {}
     fs.rmSync(root, { recursive: true, force: true });

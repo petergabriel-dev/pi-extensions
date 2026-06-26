@@ -345,7 +345,7 @@ async function testNoCollisionDomainDeterministicAdd() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: shortlist collision candidate NOT deterministically added (T9: dead-lettered when no model, terminal)
+// Test: shortlist collision candidate NOT deterministically added (re-staged when no model)
 // ---------------------------------------------------------------------------
 
 async function testCollisionCandidateStaysStagedWhenNoModel() {
@@ -388,14 +388,12 @@ Always use JWT tokens for API endpoints.
       callCarefulModel: undefined, // no model available
     });
 
-    // T9: collision candidate dead-lettered when no model to adjudicate.
     const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
     assert.strictEqual(lessons.length, 1, "Only the original lesson should exist");
     assert.strictEqual(lessons[0].id, "lsn_01");
 
-    // T9: candidate dead-lettered, not re-staged.
-    assert.strictEqual(stagingCount(mem), 0, "Collision candidate dead-lettered, staging empty");
-    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "Collision candidate dead-lettered");
+    assert.strictEqual(stagingCount(mem), 1, "Collision candidate re-staged");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 0, "Collision candidate not dead-lettered");
   } finally {
     try { db.close(); } catch {}
     fs.rmSync(root, { recursive: true, force: true });
@@ -613,7 +611,7 @@ async function main() {
   await testNoCollisionDomainDeterministicAdd();
   console.log("  ✓ no-collision domain deterministic add");
   await testCollisionCandidateStaysStagedWhenNoModel();
-  console.log("  ✓ collision candidate dead-lettered (no model, T9 terminal)");
+  console.log("  ✓ collision candidate re-staged (no model)");
   await testCrashBetweenCandidatesPreservesFirst();
   console.log("  ✓ crash between candidates preserves first");
   await testMultipleNoCollisionAllCategories();

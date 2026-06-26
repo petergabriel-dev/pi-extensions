@@ -317,18 +317,18 @@ async function testGenerationGuardStopsBetweenCandidates() {
     const counts = getIndexCounts(db);
     assert.strictEqual(counts.lessons, 1, "Sqlite has first lesson only");
 
-    // T9: second candidate dead-lettered (generation stopped, terminal).
-    assert.strictEqual(stagingCount(mem), 0, "Staging empty (T9 terminal)");
-    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "Second candidate dead-lettered");
     const staged = readStagedLessons(mem);
-    assert.strictEqual(staged.length, 0);
+    assert.strictEqual(stagingCount(mem), 1, "Staging preserved with unattempted candidate");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 0, "Second candidate not dead-lettered");
+    assert.strictEqual(staged.length, 1);
+    assert.strictEqual(staged[0].summary, "Lesson Beta");
 
     // No closed-connection: db is still usable
     const lessonsAfter = db.prepare("SELECT id FROM lessons").all() as { id: string }[];
     assert.strictEqual(lessonsAfter.length, 1, "Sqlite still queryable after generation guard stop");
 
     console.log("  ✓ continueCalls =", continueCalls);
-    console.log("  ✓ committed 1 lesson, 1 dead-lettered (T9 terminal)");
+    console.log("  ✓ committed 1 lesson, 1 re-staged");
   } finally {
     try { db.close(); } catch {}
     fs.rmSync(root, { recursive: true, force: true });
@@ -387,16 +387,15 @@ async function testGenerationGuardStopsBeforeAdjudicationBatch() {
     const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
     assert.strictEqual(lessons.length, 1, "Only original lesson");
 
-    // T9: collision candidate dead-lettered (generation guard stopped before adjudication).
-    assert.strictEqual(stagingCount(mem), 0, "Staging empty (T9 terminal)");
-    assert.strictEqual(listDeadLetterFiles(mem).length, 1, "Collision candidate dead-lettered");
+    assert.strictEqual(stagingCount(mem), 1, "Staging preserved with unattempted collision candidate");
+    assert.strictEqual(listDeadLetterFiles(mem).length, 0, "Collision candidate not dead-lettered");
 
     // Sqlite still queryable
     const sqliteCounts = getIndexCounts(db);
     assert.strictEqual(sqliteCounts.lessons, 1, "Sqlite unchanged");
 
     console.log("  ✓ adjudicationCalled =", adjudicationCalled);
-    console.log("  ✓ candidate dead-lettered, sqlite unchanged (T9 terminal)");
+    console.log("  ✓ candidate re-staged, sqlite unchanged");
   } finally {
     try { db.close(); } catch {}
     fs.rmSync(root, { recursive: true, force: true });

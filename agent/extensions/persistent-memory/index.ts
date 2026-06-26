@@ -1,15 +1,13 @@
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
 import type { callCarefulModelOneShot } from "./consolidation/careful-model.js";
-import { runExtraction } from "./consolidation/extract.js";
 import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
 import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
-import { applyReinforcementUpdates } from "./reinforcement/tracker.js";
-import { clearFiringLog, logFiring, logToolCall, type ToolCallObservation } from "./retrieval/firing-log.js";
+import { logFiring, logToolCall, type ToolCallObservation } from "./retrieval/firing-log.js";
 import { formatTier1Block, formatTier2Block } from "./retrieval/inject.js";
 import { selectTier1 } from "./retrieval/tier1.js";
 import { matchTier2, type Match } from "./retrieval/tier2.js";
@@ -17,16 +15,11 @@ import { initializeProjectMemory, type MemoryIgnoreResult, type MemoryInitResult
 import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolveMemoryIndexPath, resolveMemoryPaths } from "./storage/paths.js";
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
-import { classifyReason, shouldSwap, type ClassifiedReason, captureCtx } from "./lifecycle.js";
-import { readMemoryModelOverride, resolveAdjudicationModel, resolveExtractionModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
+import { classifyReason, shouldSwap, type ClassifiedReason } from "./lifecycle.js";
+import { readMemoryModelOverride, resolveAdjudicationModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
 import { sweepLessons, flagLowSignalLessons, detectContradictions } from "./consolidation/sweep.js";
 import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
 
-const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
-const EXTRACTION_TIMEOUT_ENV = "PERSISTENT_MEMORY_EXTRACTION_TIMEOUT_MS";
-const DEFAULT_EXTRACTION_THINKING_LEVEL: ThinkingLevel = "off";
-const EXTRACTION_THINKING_LEVEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_THINKING_LEVEL";
-const ALLOWED_EXTRACTION_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const DEFAULT_RECONCILIATION_TIMEOUT_MS = 180_000;
 const RECONCILIATION_TIMEOUT_ENV = "PERSISTENT_MEMORY_RECONCILIATION_TIMEOUT_MS";
 const DEFAULT_RECONCILIATION_THINKING_LEVEL: ThinkingLevel = "off";
@@ -41,7 +34,6 @@ const MEMORY_UI_KEY = "persistent-memory";
 const MEMORY_PANEL_CLEAR_MS = 5_000;
 
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
-const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
 export const ADJUDICATION_MODEL_ENV = "PERSISTENT_MEMORY_ADJUDICATION_MODEL";
 
 function resolveReconciliationAdjudicationModel(
@@ -52,11 +44,6 @@ function resolveReconciliationAdjudicationModel(
 	const legacyReconciliationOverride = process.env[RECONCILIATION_MODEL_ENV]?.trim();
 	const envName = adjudicationOverride ? ADJUDICATION_MODEL_ENV : legacyReconciliationOverride ? RECONCILIATION_MODEL_ENV : ADJUDICATION_MODEL_ENV;
 	return resolveAdjudicationModel(envName, ctx, logger);
-}
-
-interface ExtractionConfig {
-	timeoutMs: number;
-	thinkingLevel: ThinkingLevel;
 }
 
 interface ReconciliationConfig {
@@ -77,7 +64,6 @@ let pendingReminderLessons = new Map<string, Match["lesson"]>();
 
 let lifecycleGeneration = 0;
 let reconcileInFlight = false;
-let extractionInFlight = false;
 type CarefulModelImpl = typeof callCarefulModelOneShot;
 const defaultCallCarefulModelImpl: CarefulModelImpl = async (...args) => {
 	const module = await import("./consolidation/careful-model.js");
@@ -85,7 +71,6 @@ const defaultCallCarefulModelImpl: CarefulModelImpl = async (...args) => {
 };
 let callCarefulModelImpl: CarefulModelImpl = defaultCallCarefulModelImpl;
 let memoryPanelClearTimer: NodeJS.Timeout | null = null;
-let currentMemoryMeterCtx: ExtensionContext | undefined;
 
 export function setCallCarefulModelImplForTest(impl: CarefulModelImpl): void {
 	callCarefulModelImpl = impl;
@@ -112,9 +97,13 @@ export function __bumpPersistentMemoryGenerationForTest(): void {
 }
 
 export default function persistentMemory(pi: ExtensionAPI) {
-	void import("./retrieval/tier3.js").then(({ registerRecallTool }) => {
-		registerRecallTool(pi, () => db, currentProjectScope);
-	});
+	void import("./retrieval/tier3.js")
+		.then(({ registerRecallTool }) => {
+			registerRecallTool(pi, () => db, currentProjectScope);
+		})
+		.catch((error) => {
+			console.warn(`[persistent-memory] recall tool unavailable: ${formatError(error)}`);
+		});
 	registerMarkerHooks(pi);
 
 	pi.on("session_start", async (event, ctx) => {
@@ -141,7 +130,6 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				updateMemoryMeter(ctx.ui);
 			}
 
-			triggerBackgroundReconciliation(ctx, memoryPaths, lifecycleGeneration);
 		} catch (error) {
 			lastRebuildError = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`persistent-memory failed to initialize: ${lastRebuildError}`, "error");
@@ -235,88 +223,13 @@ export default function persistentMemory(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async (event, ctx) => {
+	pi.on("session_shutdown", async (event, _ctx) => {
 		lifecycleGeneration++;
-		const classified = classifyReason(event?.reason, "quit");
-		try {
-			if (memoryPaths?.projectMemoryDir && !classified.isReload) {
-				const sessionId = getSessionId(ctx);
-				const capturedCtx = captureCtx(ctx);
-				const extraction = extractionConfig();
-				const chosenModel = resolveExtractionModel(EXTRACTION_MODEL_ENV, capturedCtx as any, shutdownExtractionLogger);
-
-				const branchSnapshot = ctx.sessionManager?.getBranch
-					? JSON.parse(JSON.stringify(ctx.sessionManager.getBranch()))
-					: [];
-				const capturedPaths = { ...memoryPaths };
-
-				const runExtractionTask = async () => {
-					if (extractionInFlight) {
-						console.log("[persistent-memory] extraction already in flight; skipping background run.");
-						return;
-					}
-					extractionInFlight = true;
-					try {
-						const stubCtx = {
-							sessionManager: {
-								getBranch: () => branchSnapshot
-							}
-						};
-						await runExtraction(stubCtx, capturedPaths, sessionId, {
-							logger: shutdownExtractionLogger,
-							callCarefulModel: (systemPrompt, userPrompt) =>
-								callCarefulModelImpl(systemPrompt, userPrompt, {
-									cwd: capturedCtx.cwd,
-									...(chosenModel ? { model: chosenModel as never } : {}),
-									thinkingLevel: extraction.thinkingLevel,
-									timeoutMs: extraction.timeoutMs,
-									logger: shutdownExtractionLogger,
-								}),
-						});
-					} catch (err) {
-						console.error(`[persistent-memory] extraction failed: ${formatError(err)}`);
-					} finally {
-						extractionInFlight = false;
-					}
-				};
-
-				const isBackgroundReason = event?.reason === "new" || event?.reason === "resume" || event?.reason === "fork";
-				if (isBackgroundReason) {
-					setTimeout(() => {
-						void runExtractionTask();
-					}, 0);
-				} else {
-					await runExtractionTask();
-				}
-			}
-
-			if (memoryPaths && db && !classified.isReload) {
-				try {
-					const reinforcement = applyReinforcementUpdates(memoryPaths, db, { logger: console });
-					if (reinforcement.rebuild_status === "failed") {
-						lastRebuildError = reinforcement.rebuild_error ?? "SQLite rebuild failed after reinforcement.";
-						ctx.ui.notify(`persistent-memory reinforcement wrote markdown but index rebuild failed: ${lastRebuildError}`, "warning");
-					} else if (reinforcement.rebuild_status === "succeeded") {
-						lastRebuildError = null;
-					}
-					if (reinforcement.write_errors.length > 0) {
-						ctx.ui.notify(`persistent-memory reinforcement had ${reinforcement.write_errors.length} markdown write error(s).`, "warning");
-					}
-				} catch (error) {
-					const message = formatError(error);
-					console.warn(`[persistent-memory] reinforcement failed: ${message}`);
-					ctx.ui.notify(`persistent-memory reinforcement failed: ${message}`, "warning");
-				}
-			}
-		} finally {
-			clearPendingReminderLessons();
-			if (!classified.isReload) {
-				clearFiringLog();
-			}
-			db?.close();
-			db = null;
-			memoryPaths = null;
-		}
+		void classifyReason(event?.reason, "quit");
+		clearPendingReminderLessons();
+		db?.close();
+		db = null;
+		memoryPaths = null;
 	});
 
 	pi.registerCommand("memory", {
@@ -380,101 +293,6 @@ type MessageLike = {
 	timestamp?: number;
 };
 
-function triggerBackgroundReconciliation(
-	ctx: ExtensionContext & { cwd?: string; model?: unknown; modelRegistry?: any; thinkingLevel?: any },
-	paths: MemoryPaths,
-	startGen: number,
-): void {
-	if (reconcileInFlight) {
-		console.log("[persistent-memory] reconciliation already in flight; skipping background trigger.");
-		return;
-	}
-
-	const capturedCtx = captureCtx(ctx);
-	currentMemoryMeterCtx = ctx.hasUI ? ctx : undefined;
-
-	reconcileInFlight = true;
-	updateMemoryMeter(currentMemoryMeterCtx?.ui, { showPanel: true, panelTitle: "Memory reconciliation running" });
-
-	setTimeout(async () => {
-		let bgDb: SqliteDatabase | null = null;
-		const startedAt = new Date();
-		let chosenModel: string | null = null;
-		try {
-			if (!paths.projectMemoryDir) {
-				if (shouldSwap(startGen, lifecycleGeneration)) {
-					if (db) {
-						rebuildIndex(db, paths);
-					}
-				}
-				return;
-			}
-
-			const dbPath = indexPathForMemoryPaths(paths);
-			bgDb = openIndex(dbPath);
-
-			const reconciliation = reconciliationConfig();
-			chosenModel = resolveReconciliationAdjudicationModel(capturedCtx, console);
-			const result = await runReconciliation(paths, bgDb, {
-				rebuildOnNoop: true,
-				logger: console,
-				chunkSize: reconciliation.chunkSize,
-				wallClockBudgetMs: reconciliation.budgetMs,
-				shouldContinue: () => shouldSwap(startGen, lifecycleGeneration),
-				onChunkStart: (chunkIndex, totalChunks) => {
-					updateMemoryMeter(currentMemoryMeterCtx?.ui, { showPanel: true, panelTitle: `Memory reconciliation running (chunk ${chunkIndex}/${totalChunks})` });
-				},
-				callCarefulModel: (systemPrompt, userPrompt) => {
-					return callCarefulModelImpl(systemPrompt, userPrompt, {
-						cwd: capturedCtx.cwd,
-						...(chosenModel ? { model: chosenModel as never } : {}),
-						thinkingLevel: reconciliation.thinkingLevel,
-						timeoutMs: reconciliationTimeoutMs(),
-						logger: console,
-					});
-				},
-			});
-			recordReconcileRunIfUseful(paths, "background", startedAt, result, chosenModel);
-
-			if (!shouldSwap(startGen, lifecycleGeneration)) {
-				console.warn(`[persistent-memory] background reconciliation finished but generation changed (${startGen} -> ${lifecycleGeneration}); discarding background index.`);
-				if (bgDb) {
-					closeDatabaseQuietly(bgDb, "stale background db");
-				}
-				return;
-			}
-
-			if (result.status === "failed") {
-				console.warn(
-					`[persistent-memory] background reconciliation failed (${result.reason}): ${formatError(result.error)}; preserving staging and continuing.`,
-				);
-				if (!result.indexRebuilt && result.reason !== "index_error") {
-					try {
-						rebuildIndex(bgDb, paths);
-					} catch (rebuildError) {
-						console.warn(`[persistent-memory] fallback index rebuild failed after reconciliation failure: ${formatError(rebuildError)}`);
-					}
-				}
-			}
-
-			swapActiveMemory(paths, bgDb);
-			bgDb = null;
-		} catch (error) {
-			const message = formatError(error);
-			recordThrownReconcileRun(paths, "background", startedAt, chosenModel, error);
-			console.error(`[persistent-memory] background reconciliation threw: ${message}`);
-			currentMemoryMeterCtx?.ui.notify?.(`persistent-memory background reconciliation failed: ${message}`, "error");
-		} finally {
-			reconcileInFlight = false;
-			updateMemoryMeter(currentMemoryMeterCtx?.ui, { clearPanel: true });
-			currentMemoryMeterCtx = undefined;
-			if (bgDb) {
-				closeDatabaseQuietly(bgDb, "failed background db");
-			}
-		}
-	}, 0);
-}
-
 function formatError(error: unknown): string {
 	const raw = error instanceof Error
 		? `${error.name || "Error"}: ${error.message}`
@@ -483,33 +301,6 @@ function formatError(error: unknown): string {
 			: String(error);
 	const compact = raw.replace(/\s+/g, " ").trim();
 	return compact.length > MAX_ERROR_DETAIL_CHARS ? `${compact.slice(0, MAX_ERROR_DETAIL_CHARS)}…` : compact;
-}
-
-const shutdownExtractionLogger = {
-	info: (...args: unknown[]) => console.info(formatLogArgs(args)),
-	warn: (...args: unknown[]) => console.warn(formatLogArgs(args)),
-	error: (...args: unknown[]) => console.warn(formatLogArgs(args)),
-};
-
-function formatLogArgs(args: unknown[]): string {
-	return args.map((arg) => (arg instanceof Error ? formatError(arg) : String(arg))).join(" ");
-}
-
-function extractionConfig(): ExtractionConfig {
-	return {
-		timeoutMs: parsePositiveIntegerEnv(process.env[EXTRACTION_TIMEOUT_ENV], DEFAULT_EXTRACTION_TIMEOUT_MS),
-		thinkingLevel: parseExtractionThinkingLevel(process.env[EXTRACTION_THINKING_LEVEL_ENV]),
-	};
-}
-
-function parseExtractionThinkingLevel(raw: string | undefined): ThinkingLevel {
-	if (!raw) return DEFAULT_EXTRACTION_THINKING_LEVEL;
-	const normalized = raw.trim().toLowerCase();
-	return isAllowedExtractionThinkingLevel(normalized) ? normalized : DEFAULT_EXTRACTION_THINKING_LEVEL;
-}
-
-function isAllowedExtractionThinkingLevel(value: string): value is ThinkingLevel {
-	return ALLOWED_EXTRACTION_THINKING_LEVELS.includes(value as ThinkingLevel);
 }
 
 function parseReconciliationThinkingLevel(raw: string | undefined): ThinkingLevel {
@@ -629,16 +420,6 @@ function notifyHookError(ctx: { ui?: { notify?: (message: string, level: "error"
 	const message = error instanceof Error ? error.message : String(error);
 	console.warn(`[persistent-memory] ${hook} failed: ${message}`);
 	ctx.ui?.notify?.(`persistent-memory ${hook} failed: ${message}`, "error");
-}
-
-function getSessionId(ctx: { sessionManager?: { getSessionId?: () => string } }): string {
-	try {
-		const sessionId = ctx.sessionManager?.getSessionId?.();
-		if (sessionId) return sessionId;
-	} catch {
-		// Fall back below.
-	}
-	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`;
 }
 
 function queryAll<T>(sql: string): T[] {
@@ -1657,7 +1438,4 @@ export function setMemoryPathsForTest(val: any | null): void {
 }
 export function getReconcileInFlightForTest(): boolean {
 	return reconcileInFlight;
-}
-export function getExtractionInFlightForTest(): boolean {
-	return extractionInFlight;
 }
