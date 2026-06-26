@@ -6,7 +6,7 @@ import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regenerati
 import type { callCarefulModelOneShot } from "./consolidation/careful-model.js";
 import { runExtraction, type ExtractionRunResult } from "./consolidation/extract.js";
 import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
-import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter } from "./consolidation/staging.js";
+import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter, repairStagingFile, writeStaging } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
 import { logFiring, logToolCall, type ToolCallObservation } from "./retrieval/firing-log.js";
 import { formatTier1Block, formatTier2Block } from "./retrieval/inject.js";
@@ -20,6 +20,7 @@ import { classifyReason, shouldSwap, type ClassifiedReason } from "./lifecycle.j
 import { readMemoryModelOverride, resolveAdjudicationModel, resolveExtractionModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
 import { sweepLessons, flagLowSignalLessons, detectContradictions } from "./consolidation/sweep.js";
 import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
+import type { StagingFile } from "./types.js";
 
 const DEFAULT_EXTRACTION_TIMEOUT_MS = 180_000;
 const EXTRACTION_TIMEOUT_ENV = "PERSISTENT_MEMORY_EXTRACTION_TIMEOUT_MS";
@@ -281,6 +282,10 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await listDeadLetter(ctx);
 				return;
 			}
+			if (trimmed === "recover") {
+				await recoverMemoryCommand(ctx);
+				return;
+			}
 			if (trimmed === "sweep") {
 				await sweepMemoryCommand(ctx);
 				return;
@@ -297,7 +302,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await memoryModelCommand(trimmed.slice("model".length), ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
+			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory recover, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
 		},
 	});
 }
@@ -1117,6 +1122,101 @@ async function listStaging(ctx: ExtensionCommandContext): Promise<void> {
 	}
 
 	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+async function recoverMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!memoryPaths?.projectMemoryDir) {
+		ctx.ui.notify("No project memory dir.", "warning");
+		return;
+	}
+	const releaseLock = acquireCanonicalWriterLock(memoryPaths);
+	if (!releaseLock) {
+		ctx.ui.notify("Memory canonical writer already running; try again after it finishes.", "warning");
+		return;
+	}
+	try {
+		const result = recoverDeadLetters(memoryPaths);
+		ctx.ui.notify(
+			`Memory recover complete: ${result.requeued} re-queued, ${result.duplicates} duplicate(s) skipped, ${result.skipped} malformed left in deadletter.`,
+			result.skipped > 0 ? "warning" : "info",
+		);
+	} catch (error) {
+		ctx.ui.notify(`Memory recover failed: ${formatError(error)}; deadletter files preserved.`, "error");
+	} finally {
+		releaseLock();
+	}
+}
+
+function recoverDeadLetters(paths: MemoryPaths): { requeued: number; duplicates: number; skipped: number } {
+	if (!paths.projectMemoryDir) return { requeued: 0, duplicates: 0, skipped: 0 };
+	const groups = new Map<string, { staging: StagingFile; files: string[]; seen: Set<string>; requeued: number; duplicates: number }>();
+	let skipped = 0;
+	for (const filePath of listDeadLetterFiles(paths.projectMemoryDir)) {
+		const dead = readDeadLetter(filePath);
+		if (!dead || !isRecoverableCategory(dead.category)) { skipped += 1; continue; }
+		const sessionId = typeof dead.session_id === "string" && dead.session_id.trim() ? dead.session_id : "recovered";
+		const group = groups.get(sessionId) ?? newRecoverGroup(paths, sessionId, dead.produced_at);
+		groups.set(sessionId, group);
+		const candidate = { ...dead.candidate, reconcile_attempts: dead.attempts };
+		const key = `${dead.category}:${stableJson(candidate)}`;
+		if (group.seen.has(key)) {
+			group.duplicates += 1;
+			group.files.push(filePath);
+			continue;
+		}
+		(group.staging.candidates[dead.category] as unknown[]).push(candidate);
+		const repaired = repairStagingFile(group.staging);
+		if (!repaired) {
+			(group.staging.candidates[dead.category] as unknown[]).pop();
+			skipped += 1;
+			continue;
+		}
+		group.staging = repaired;
+		group.seen.add(key);
+		group.files.push(filePath);
+		group.requeued += 1;
+	}
+
+	let requeued = 0;
+	let duplicates = 0;
+	for (const group of groups.values()) {
+		if (group.files.length === 0) continue;
+		const repaired = repairStagingFile(group.staging);
+		if (!repaired) { skipped += group.files.length; continue; }
+		writeStaging(path.join(paths.projectMemoryDir, "staging", `${group.staging.session_id}.json`), repaired);
+		for (const filePath of group.files) fs.rmSync(filePath, { force: true });
+		requeued += group.requeued;
+		duplicates += group.duplicates;
+	}
+	return { requeued, duplicates, skipped };
+}
+
+function newRecoverGroup(paths: MemoryPaths, sessionId: string, producedAt: string): { staging: StagingFile; files: string[]; seen: Set<string>; requeued: number; duplicates: number } {
+	const existingPath = path.join(paths.projectMemoryDir!, "staging", `${sessionId}.json`);
+	const existing = readStaging(existingPath);
+	const staging: StagingFile = existing ?? {
+		schemaVersion: 1,
+		session_id: sessionId,
+		produced_at: producedAt || new Date().toISOString(),
+		project_root: paths.projectRoot ?? "",
+		candidates: { lessons: [], preferences: [], decisions: [], domain: [] },
+	};
+	const seen = new Set<string>();
+	for (const category of ["lessons", "preferences", "decisions", "domain"] as const) {
+		for (const candidate of staging.candidates[category]) seen.add(`${category}:${stableJson(candidate)}`);
+	}
+	return { staging, files: [], seen, requeued: 0, duplicates: 0 };
+}
+
+function isRecoverableCategory(category: unknown): category is keyof StagingFile["candidates"] {
+	return category === "lessons" || category === "preferences" || category === "decisions" || category === "domain";
+}
+
+function stableJson(value: unknown): string {
+	if (!value || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+	const record = value as Record<string, unknown>;
+	return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
 }
 
 async function listDeadLetter(ctx: ExtensionCommandContext): Promise<void> {
