@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runReconciliation } from "../consolidation/reconcile.js";
-import { listDeadLetterFiles, listStagingFiles, readDeadLetter, writeStaging } from "../consolidation/staging.js";
+import { listDeadLetterFiles, listStagingFiles, readDeadLetter, readStaging, writeStaging } from "../consolidation/staging.js";
 import { parseLessonsFile, parsePreferencesFile, parseDomainFile, serializeLessonsFile, serializePreferencesFile } from "../storage/markdown.js";
 import { openIndex } from "../storage/sqlite.js";
 import type { Lesson, StagingFile, Trigger } from "../types.js";
@@ -117,8 +117,7 @@ async function testAllResolvedFileConsumed() {
 }
 
 // ---------------------------------------------------------------------------
-// T9.2 — No staging file survives when NO candidates can be resolved
-//        (all dead-lettered, file counted as deadLettered).
+// T9.2 — Never-attempted candidates are preserved for a future run.
 // ---------------------------------------------------------------------------
 async function testNoResolvedFileDeadLettered() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-t9-2-"));
@@ -136,15 +135,12 @@ async function testNoResolvedFileDeadLettered() {
 
 		assert.equal(result.status, "completed");
 		assert.equal(result.counts.stagingFiles.consumed, 0, "no candidates resolved");
-		assert.equal(result.counts.stagingFiles.deadLettered, 1, "file dead-lettered as whole");
-		assert.equal(result.counts.stagingFiles.preserved, 0, "T9: never preserved");
-		assert.equal(listStagingFiles(mem).length, 0, "staging file deleted (terminal)");
-		const deadFiles = listDeadLetterFiles(mem);
-		assert.equal(deadFiles.length, 1, "candidate dead-lettered");
-		const dl = readDeadLetter(deadFiles[0]);
-		assert.ok(dl);
-		assert.equal(dl.category, "lessons");
-		assert.equal(dl.last_gate_reason, "not attempted (no model, budget exhausted, or generation stopped)");
+		assert.equal(result.counts.stagingFiles.deadLettered, 0, "no never-attempted dead letters");
+		assert.equal(result.counts.stagingFiles.preserved, 1, "file preserved with survivor");
+		const stagedFiles = listStagingFiles(mem);
+		assert.equal(stagedFiles.length, 1, "staging file survives");
+		assert.equal(readStaging(stagedFiles[0])?.candidates.lessons.length, 1, "candidate re-staged unchanged");
+		assert.equal(listDeadLetterFiles(mem).length, 0, "candidate not dead-lettered");
 	} finally {
 		db.close();
 		fs.rmSync(root, { recursive: true, force: true });
@@ -152,8 +148,7 @@ async function testNoResolvedFileDeadLettered() {
 }
 
 // ---------------------------------------------------------------------------
-// T9.3 — Mixed: some resolved, some dead-lettered. File consumed (had any
-//        resolved), all leftovers dead-lettered, nothing re-staged.
+// T9.3 — Mixed: resolved candidates are consumed; unresolved survivors stay staged.
 // ---------------------------------------------------------------------------
 async function testMixedResolvedAndDeadLettered() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-t9-3-"));
@@ -169,18 +164,20 @@ async function testMixedResolvedAndDeadLettered() {
 	);
 	try {
 		// No model → deterministic add succeeds for first candidate (no collision),
-		// second candidate (collision) is unattempted → dead-lettered.
+		// second candidate (collision) is unattempted → re-staged.
 		const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, db, {
 			rebuildIndex: () => undefined,
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
 		});
 
 		assert.equal(result.status, "completed");
-		assert.equal(result.counts.stagingFiles.consumed, 1, "file consumed (had resolved candidates)");
+		assert.equal(result.counts.stagingFiles.consumed, 0, "file rewritten with survivor");
 		assert.equal(result.counts.stagingFiles.deadLettered, 0, "file not counted as wholly dead-lettered");
-		assert.equal(result.counts.stagingFiles.preserved, 0, "T9: never preserved");
-		assert.equal(listStagingFiles(mem).length, 0, "no staging file survives");
-		assert.equal(listDeadLetterFiles(mem).length, 1, "unresolved candidate dead-lettered");
+		assert.equal(result.counts.stagingFiles.preserved, 1, "survivor preserved");
+		const stagedFiles = listStagingFiles(mem);
+		assert.equal(stagedFiles.length, 1, "staging file survives");
+		assert.equal(readStaging(stagedFiles[0])?.candidates.lessons.length, 1, "only unresolved candidate remains");
+		assert.equal(listDeadLetterFiles(mem).length, 0, "unresolved candidate not dead-lettered");
 		const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
 		assert.equal(lessons.length, 2, "1 existing + 1 committed");
 	} finally {
@@ -190,7 +187,7 @@ async function testMixedResolvedAndDeadLettered() {
 }
 
 // ---------------------------------------------------------------------------
-// T9.4 — Unattempted candidates (generation stopped) are dead-lettered with
+// T9.4 — Unattempted candidates (generation stopped) are re-staged with
 //        attempts unchanged.
 // ---------------------------------------------------------------------------
 async function testGenerationStoppedCandidatesDeadLettered() {
@@ -213,16 +210,12 @@ async function testGenerationStoppedCandidatesDeadLettered() {
 		});
 
 		assert.equal(result.status, "completed");
-		assert.equal(listStagingFiles(mem).length, 0, "staging file deleted");
-		const deadFiles = listDeadLetterFiles(mem);
-		assert.equal(deadFiles.length, 2, "two unattempted candidates dead-lettered");
-		// Both were never attempted, attempts should stay unchanged.
-		const dl0 = readDeadLetter(deadFiles[0]);
-		const dl1 = readDeadLetter(deadFiles[1]);
-		assert.ok(dl0);
-		assert.ok(dl1);
-		const attempts = [dl0.attempts, dl1.attempts].sort();
-		assert.deepEqual(attempts, [2, 3], "attempts unchanged for unattempted candidates");
+		const stagedFiles = listStagingFiles(mem);
+		assert.equal(stagedFiles.length, 1, "staging file survives");
+		const staged = readStaging(stagedFiles[0])?.candidates.lessons ?? [];
+		assert.equal(staged.length, 2, "two unattempted candidates re-staged");
+		assert.deepEqual(staged.map((candidate) => candidate.reconcile_attempts).sort(), [2, 3], "attempts unchanged for unattempted candidates");
+		assert.equal(listDeadLetterFiles(mem).length, 0, "no transient dead letters");
 	} finally {
 		db.close();
 		fs.rmSync(root, { recursive: true, force: true });
@@ -261,8 +254,7 @@ async function testMultiCategoryAllTerminal() {
 }
 
 // ---------------------------------------------------------------------------
-// T9.6 — Attempted-but-unresolved candidates have attempts incremented before
-//        dead-lettering.
+// T9.6 — Attempted-but-unresolved candidates retry under cap.
 // ---------------------------------------------------------------------------
 async function testAttemptedUnresolvedIncrements() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-t9-6-"));
@@ -279,13 +271,40 @@ async function testAttemptedUnresolvedIncrements() {
 		});
 
 		assert.equal(result.status, "completed");
-		assert.equal(listStagingFiles(mem).length, 0, "staging file deleted");
+		const stagedFiles = listStagingFiles(mem);
+		assert.equal(stagedFiles.length, 1, "staging file survives under cap");
+		const staged = readStaging(stagedFiles[0])?.candidates.lessons ?? [];
+		assert.equal(staged.length, 1);
+		assert.equal(staged[0].reconcile_attempts, 2, "attempts incremented from 1 -> 2");
+		assert.equal(listDeadLetterFiles(mem).length, 0, "under-cap candidate not dead-lettered");
+	} finally {
+		db.close();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+}
+
+async function testAttemptedUnresolvedDeadLettersAtCap() {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-t9-6-cap-"));
+	const { mem, db } = setupMemory(root,
+		[existingLesson("lsn_01", "Collision", "Original detail.")],
+		{ lessons: [lessonCandidate("Collision", "Different detail for collision.", 2)] },
+	);
+	try {
+		const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, db, {
+			rebuildIndex: () => undefined,
+			adjudicationBatchSize: 1,
+			callAdjudicationModel: async () => { throw new Error("adjudication failure"); },
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		});
+
+		assert.equal(result.status, "completed");
+		assert.equal(listStagingFiles(mem).length, 0, "at-cap candidate leaves staging");
 		const deadFiles = listDeadLetterFiles(mem);
-		assert.equal(deadFiles.length, 1);
-		const dl = readDeadLetter(deadFiles[0]);
-		assert.ok(dl);
-		assert.equal(dl.attempts, 2, "attempts incremented from 1 -> 2");
-		assert.equal(dl.last_gate_reason, "validation rejection (T9: no cross-cycle preservation)");
+		assert.equal(deadFiles.length, 1, "at-cap candidate dead-lettered");
+		const deadLetter = readDeadLetter(deadFiles[0]);
+		assert.ok(deadLetter);
+		assert.equal(deadLetter.attempts, 3, "attempts incremented to cap");
+		assert.match(deadLetter.last_gate_reason, /retry cap 3 reached/);
 	} finally {
 		db.close();
 		fs.rmSync(root, { recursive: true, force: true });
@@ -338,6 +357,7 @@ async function main() {
 	await testGenerationStoppedCandidatesDeadLettered();
 	await testMultiCategoryAllTerminal();
 	await testAttemptedUnresolvedIncrements();
+	await testAttemptedUnresolvedDeadLettersAtCap();
 	await testWrongProjectTerminal();
 	console.log("test_t9_staging_consumption passed!");
 }

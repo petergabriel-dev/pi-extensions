@@ -100,21 +100,20 @@ async function testMixedBatchFailureIsolation() {
 		assert.equal(oldAuth.meta.status, "superseded", "old auth lesson superseded");
 		assert.ok(lessons.some((lesson) => lesson.meta.status === "active" && lesson.meta.supersedes === "lsn_01"), "new superseding auth lesson committed");
 
-		// T9: failed candidate dead-lettered immediately, not re-staged.
 		const staged = stagedLessons(mem);
-		assert.equal(staged.length, 0, "T9: no leftovers survive in staging");
-		assert.equal(listDeadLetterFiles(mem).length, 1, "failed candidate dead-lettered");
+		assert.equal(staged.length, 1, "under-cap failed candidate re-staged");
+		assert.equal(staged[0].reconcile_attempts, 1, "attempts incremented on attempted unresolved candidate");
+		assert.equal(listDeadLetterFiles(mem).length, 0, "under-cap failed candidate not dead-lettered");
 	} finally {
 		db.close();
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 }
 
-async function testSingleFailedCandidateDeadLettersImmediately() {
-	// T9: all leftovers dead-lettered immediately; the max-attempts env var is a no-op.
+async function testSingleFailedCandidateDeadLettersAtCap() {
 	const { root, mem, db } = setup(
 		[existingLesson("lsn_01", "Build failure", "Build fails when cache is stale.")],
-		[lessonCandidate("Build failure timeout", "Build fails when remote cache times out.", 1)],
+		[lessonCandidate("Build failure timeout", "Build fails when remote cache times out.", 2)],
 	);
 	try {
 		const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, db, {
@@ -125,8 +124,8 @@ async function testSingleFailedCandidateDeadLettersImmediately() {
 		});
 
 		assert.equal(result.status, "completed");
-		assert.equal(stagedLessons(mem).length, 0, "T9: staging file deleted (terminal)");
-		assert.equal(listDeadLetterFiles(mem).length, 1, "failed candidate dead-lettered");
+		assert.equal(stagedLessons(mem).length, 0, "at-cap failed candidate leaves staging");
+		assert.equal(listDeadLetterFiles(mem).length, 1, "at-cap failed candidate dead-lettered");
 		const lessons = parseLessonsFile(path.join(mem, "lessons.md"));
 		assert.equal(lessons.length, 1, "existing committed records remain untouched");
 		assert.equal(lessons[0].id, "lsn_01");
@@ -138,7 +137,7 @@ async function testSingleFailedCandidateDeadLettersImmediately() {
 
 async function main() {
 	await testMixedBatchFailureIsolation();
-	await testSingleFailedCandidateDeadLettersImmediately();
+	await testSingleFailedCandidateDeadLettersAtCap();
 	console.log("test_per_candidate_reconcile passed!");
 }
 
