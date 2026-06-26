@@ -8,6 +8,8 @@ updated: 2026-06-18
 
 # ADR-0003: Non-Blocking Reason-Aware Persistent-Memory Consolidation
 
+> Amended by [ADR-0013](ADR-0013-manual-single-writer-persistent-memory-consolidation.md). Persistent-memory canonical writes are now manual-only: lifecycle hooks no longer run start-time reconciliation or shutdown extraction/reinforcement.
+
 ## T12 Sweep Home — Low-Signal Flagging + Contradiction Detection
 
 As of 2026-06-10, the offline sweep (`/memory sweep`) runs three non-destructive phases:

@@ -1,7 +1,7 @@
 ---
 id: ADR-0011
 title: Per-Candidate Persistent-Memory Reconciliation
-status: Active
+status: Superseded
 date: 2026-06-10
 updated: 2026-06-10
 supersedes:
@@ -10,6 +10,8 @@ supersedes:
 ---
 
 # ADR-0011: Per-Candidate Persistent-Memory Reconciliation
+
+> Superseded by [ADR-0013](ADR-0013-manual-single-writer-persistent-memory-consolidation.md). ADR-0013 keeps per-candidate monotonic commits and bounded observability, but replaces terminal staging consumption with manual single-writer consolidation, re-staging of never-attempted candidates, retry-cap deadlettering, manual recovery, and reinforcement inside `/memory consolidate`.
 
 ## Decision
 

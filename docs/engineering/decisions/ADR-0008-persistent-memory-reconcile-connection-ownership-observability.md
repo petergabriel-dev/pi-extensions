@@ -8,6 +8,8 @@ updated: 2026-06-10
 
 # ADR-0008: Persistent-memory reconcile connection ownership and observability
 
+> Amended by [ADR-0013](ADR-0013-manual-single-writer-persistent-memory-consolidation.md). Connection ownership and single-writer locking now apply to all manual canonical memory writers (`/memory consolidate`, `/memory reconcile`, `/memory recover`), and reinforcement no longer runs during shutdown.
+
 ## Decision
 
 - Manual `/memory reconcile` owns a dedicated SQLite connection for the full run instead of using the module-level active `db`.
@@ -45,7 +47,7 @@ Code:
 - Good: lifecycle db closes can no longer invalidate an in-flight manual reconcile connection.
 - Good: users can inspect staging depth, in-flight state, recent reconcile outcomes, and failure reasons.
 - Good: the generated SQLite index remains a replaceable cache; stale run indexes are discarded while markdown/staging remain source of truth.
-- Risk: reinforcement during shutdown is still outside `reconcileInFlight` and can interleave with manual reconcile markdown writes; documented as a trap and left for a separate change.
+- Good: ADR-0013 removes shutdown reinforcement and widens single-writer protection to all manual canonical memory writers.
 
 ## Read when
 
