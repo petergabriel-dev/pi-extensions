@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
 import type { callCarefulModelOneShot } from "./consolidation/careful-model.js";
-import { runExtraction, type ExtractionRunResult } from "./consolidation/extract.js";
+import { runExtraction, shouldSkipExtraction, type ExtractionRunResult } from "./consolidation/extract.js";
 import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
 import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter, repairStagingFile, writeStaging } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
@@ -85,6 +85,9 @@ const defaultCallCarefulModelImpl: CarefulModelImpl = async (...args) => {
 };
 let callCarefulModelImpl: CarefulModelImpl = defaultCallCarefulModelImpl;
 let memoryPanelClearTimer: NodeJS.Timeout | null = null;
+let latestSessionCtx: (ExtensionCommandContext & { hasUI?: boolean; sessionManager?: { getBranch?: () => unknown[] } }) | null = null;
+let workflowMode: string | null = null;
+let consolidateReminderSnoozed = false;
 
 export function setCallCarefulModelImplForTest(impl: CarefulModelImpl): void {
 	callCarefulModelImpl = impl;
@@ -119,9 +122,12 @@ export default function persistentMemory(pi: ExtensionAPI) {
 			console.warn(`[persistent-memory] recall tool unavailable: ${formatError(error)}`);
 		});
 	registerMarkerHooks(pi);
+	registerConsolidateReminder(pi);
 
 	pi.on("session_start", async (event, ctx) => {
 		try {
+			latestSessionCtx = ctx as typeof latestSessionCtx;
+			consolidateReminderSnoozed = false;
 			clearPendingReminderLessons();
 			memoryPaths = resolveMemoryPaths(ctx.cwd ?? process.cwd());
 			ensureMemoryDirs(memoryPaths);
@@ -240,6 +246,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (event, _ctx) => {
 		lifecycleGeneration++;
 		void classifyReason(event?.reason, "quit");
+		latestSessionCtx = null;
 		clearPendingReminderLessons();
 		db?.close();
 		db = null;
@@ -314,6 +321,54 @@ type MessageLike = {
 	display?: boolean;
 	timestamp?: number;
 };
+
+function registerConsolidateReminder(pi: ExtensionAPI): void {
+	const events = (pi as ExtensionAPI & { events?: { on?: (name: string, handler: (data: unknown) => unknown) => void; emit?: (name: string, data?: unknown) => void } }).events;
+	if (!events?.on) return;
+	events.on("workflow-modes:state", (data: unknown) => {
+		const mode = modeFromEvent(data);
+		if (mode) workflowMode = mode;
+	});
+	events.on("workflow-modes:changed", (data: unknown) => {
+		const nextMode = modeFromEvent(data);
+		if (!nextMode) return;
+		const previousMode = workflowMode;
+		workflowMode = nextMode;
+		if (!isWorkMode(previousMode) || isWorkMode(nextMode)) return;
+		void maybeShowConsolidateReminder();
+	});
+	events.emit?.("workflow-modes:get");
+}
+
+function modeFromEvent(data: unknown): string | null {
+	if (!data || typeof data !== "object") return null;
+	const mode = (data as { mode?: unknown }).mode;
+	return typeof mode === "string" ? mode : null;
+}
+
+function isWorkMode(mode: string | null | undefined): boolean {
+	return mode === "discuss" || mode === "plan" || mode === "build";
+}
+
+async function maybeShowConsolidateReminder(): Promise<void> {
+	if (consolidateReminderSnoozed) return;
+	const ctx = latestSessionCtx;
+	if (!ctx?.hasUI || typeof ctx.sessionManager?.getBranch !== "function") return;
+	let branch: unknown[];
+	try {
+		branch = ctx.sessionManager.getBranch();
+	} catch {
+		return;
+	}
+	if (shouldSkipExtraction(branch as never)) return;
+	consolidateReminderSnoozed = true;
+	const ok = await ctx.ui.confirm(
+		"Memory consolidation suggested",
+		"You have unconsolidated work. Run /memory consolidate?",
+	);
+	if (ok) ctx.ui.notify("Run /memory consolidate to update persistent memory.", "info");
+	else ctx.ui.notify("Memory consolidate reminder snoozed for this session.", "info");
+}
 
 function formatError(error: unknown): string {
 	const raw = error instanceof Error
