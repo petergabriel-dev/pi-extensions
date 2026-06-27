@@ -4,9 +4,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
 import type { callCarefulModelOneShot } from "./consolidation/careful-model.js";
-import { runExtraction, shouldSkipExtraction, type ExtractionRunResult } from "./consolidation/extract.js";
-import { runReconciliation, type ReconciliationRunResult } from "./consolidation/reconcile.js";
-import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter, repairStagingFile, writeStaging } from "./consolidation/staging.js";
+import { normalizeExtractionResult, runExtraction, shouldSkipExtraction, type ExtractionRunResult } from "./consolidation/extract.js";
+import { runReconciliation, type CandidateOutcomes, type ReconciliationRunResult } from "./consolidation/reconcile.js";
+import { listStagingFiles, readStaging, listDeadLetterFiles, readDeadLetter, repairStagingFile, stagingPath, writeStaging } from "./consolidation/staging.js";
 import { registerMarkerHooks } from "./reinforcement/markers.js";
 import { applyReinforcementUpdates, type ReinforcementResult } from "./reinforcement/tracker.js";
 import { clearFiringLog, logFiring, logToolCall, type ToolCallObservation } from "./retrieval/firing-log.js";
@@ -39,6 +39,38 @@ const RECONCILIATION_BUDGET_ENV = "PERSISTENT_MEMORY_RECONCILIATION_BUDGET_MS";
 const MAX_ERROR_DETAIL_CHARS = 500;
 const MEMORY_UI_KEY = "persistent-memory";
 const MEMORY_PANEL_CLEAR_MS = 5_000;
+const SAVE_TO_MEMORY_TOOL_NAME = "save_to_memory";
+
+const SaveToMemoryParams = {
+	type: "object",
+	additionalProperties: false,
+	required: ["candidates"],
+	properties: {
+		session_id: { type: "string", description: "Optional stable session id for this save batch." },
+		candidates: {
+			type: "object",
+			additionalProperties: false,
+			required: ["lessons", "preferences", "decisions", "domain"],
+			properties: {
+				lessons: { type: "array", items: { type: "object", additionalProperties: true } },
+				preferences: { type: "array", items: { type: "object", additionalProperties: true } },
+				decisions: { type: "array", items: { type: "object", additionalProperties: true } },
+				domain: { type: "array", items: { type: "object", additionalProperties: true } },
+			},
+		},
+	},
+} as any;
+
+type SaveToMemoryParams = { session_id?: string; candidates?: unknown };
+
+type SaveToMemoryDetails = {
+	ok: boolean;
+	status: "completed" | "skipped" | "rejected" | "failed";
+	message: string;
+	stagingFile?: string;
+	outcomes?: CandidateOutcomes;
+	candidateOutcomes?: Array<{ ref: string; category: string; outcome: string; reason?: string }>;
+};
 
 export type MemoryMenuAction = "init" | "consolidate" | "recover" | "inspect";
 type MemoryInspectAction = "status" | "staging" | "list" | "firings" | "deadletter" | "reconcile" | "sweep" | "lowsignal" | "contradictions";
@@ -167,6 +199,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 		});
 	registerMarkerHooks(pi);
 	registerConsolidateReminder(pi);
+	registerSaveToMemoryTool(pi);
 
 	pi.on("session_start", async (event, ctx) => {
 		try {
@@ -997,6 +1030,84 @@ function formatDisplayPath(filePath: string, cwd: string): string {
 	const relative = path.relative(cwd, filePath);
 	if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return relative;
 	return filePath;
+}
+
+function registerSaveToMemoryTool(pi: ExtensionAPI): void {
+	if (typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool !== "function") return;
+	pi.registerTool({
+		name: SAVE_TO_MEMORY_TOOL_NAME,
+		label: "Save to Memory",
+		description: "Deterministically save memory candidates from the current chat. Pass only high-confidence candidates. This tool validates candidates, writes staging, then runs persistent-memory reconciliation under the canonical single-writer lock; the agent never writes memory files directly.",
+		promptSnippet: "Use save_to_memory to persist durable lessons, preferences, decisions, and domain facts from chat when asked to consolidate memory.",
+		promptGuidelines: [
+			"When consolidating memory from chat, call save_to_memory with only durable high-confidence candidates.",
+			"Do not write persistent-memory files directly; save_to_memory performs deterministic validation, staging, reconciliation, indexing, and outcome reporting.",
+		],
+		parameters: SaveToMemoryParams,
+		async execute(toolCallId, params: SaveToMemoryParams, _signal, onUpdate, ctx) {
+			return saveToMemory(toolCallId, params, onUpdate, ctx as ExtensionCommandContext);
+		},
+		renderCall(_args) {
+			return { render: () => ["save_to_memory"], invalidate() {} };
+		},
+		renderResult(result) {
+			const details = result.details as SaveToMemoryDetails | undefined;
+			const fallback = result.content[0]?.type === "text" ? result.content[0].text : "save_to_memory complete";
+			const text = details?.outcomes ? `memory ${details.status}: ${formatOutcomeMap(details.outcomes)}` : (details?.message ?? fallback);
+			return { render: () => [text], invalidate() {} };
+		},
+	});
+}
+
+async function saveToMemory(
+	toolCallId: string,
+	params: SaveToMemoryParams,
+	onUpdate: ((result: { content: Array<{ type: "text"; text: string }>; details: SaveToMemoryDetails }) => void) | undefined,
+	ctx: ExtensionCommandContext,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: SaveToMemoryDetails }> {
+	if (!db || !memoryPaths?.projectMemoryDir) return saveToMemoryResult({ ok: false, status: "failed", message: lastRebuildError ? `Memory not initialized: ${lastRebuildError}` : "Memory not initialized." });
+	const candidates = normalizeExtractionResult({ candidates: params.candidates });
+	if (!candidates) return saveToMemoryResult({ ok: false, status: "rejected", message: "Rejected malformed memory candidates; nothing was written." });
+	if (countStagingCandidates(candidates) === 0) return saveToMemoryResult({ ok: true, status: "skipped", message: "No memory candidates supplied." });
+	if (reconcileInFlight) return saveToMemoryResult({ ok: false, status: "failed", message: "Memory reconciliation already running; try again after it finishes." });
+	const releaseLock = acquireCanonicalWriterLock(memoryPaths);
+	if (!releaseLock) return saveToMemoryResult({ ok: false, status: "failed", message: "Memory canonical writer already running; try again after it finishes." });
+
+	const runPaths = { ...memoryPaths };
+	const sessionId = sanitizeSessionId(params.session_id) || `save-${sanitizeSessionId(toolCallId) || Date.now().toString(36)}`;
+	const filePath = stagingPath(runPaths.projectMemoryDir, sessionId);
+	try {
+		emitSaveUpdate(onUpdate, { ok: true, status: "skipped", message: "Writing validated candidates to staging.", stagingFile: filePath });
+		writeStaging(filePath, { schemaVersion: 1, session_id: sessionId, produced_at: new Date().toISOString(), project_root: runPaths.projectRoot ?? "", candidates });
+		emitSaveUpdate(onUpdate, { ok: true, status: "skipped", message: "Reconciling staged memory candidates.", stagingFile: filePath });
+		const result = await runReconciliationForeground(ctx, runPaths, "manual");
+		if (result.status === "failed") return saveToMemoryResult({ ok: false, status: "failed", message: `Memory reconcile failed (${result.reason}): ${formatError(result.error)}`, stagingFile: filePath, outcomes: result.counts.candidate_outcomes, candidateOutcomes: result.candidateOutcomes });
+		return saveToMemoryResult({ ok: true, status: result.status, message: formatReconciliationResult(result), stagingFile: filePath, outcomes: result.counts.candidate_outcomes, candidateOutcomes: result.candidateOutcomes });
+	} catch (error) {
+		return saveToMemoryResult({ ok: false, status: "failed", message: `save_to_memory failed: ${formatError(error)}`, stagingFile: filePath });
+	} finally {
+		releaseLock();
+	}
+}
+
+function saveToMemoryResult(details: SaveToMemoryDetails): { content: Array<{ type: "text"; text: string }>; details: SaveToMemoryDetails } {
+	return { content: [{ type: "text", text: details.message }], details };
+}
+
+function emitSaveUpdate(onUpdate: ((result: { content: Array<{ type: "text"; text: string }>; details: SaveToMemoryDetails }) => void) | undefined, details: SaveToMemoryDetails): void {
+	onUpdate?.(saveToMemoryResult(details));
+}
+
+function countStagingCandidates(candidates: StagingFile["candidates"]): number {
+	return candidates.lessons.length + candidates.preferences.length + candidates.decisions.length + candidates.domain.length;
+}
+
+function sanitizeSessionId(value: unknown): string {
+	return typeof value === "string" ? value.trim().replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 80) : "";
+}
+
+function formatOutcomeMap(outcomes: CandidateOutcomes): string {
+	return Object.entries(outcomes).map(([name, count]) => `${name}=${count}`).join(", ");
 }
 
 export async function consolidateMemoryCommand(ctx: ExtensionCommandContext): Promise<void> {
