@@ -42,6 +42,13 @@ const MEMORY_UI_KEY = "persistent-memory";
 const MEMORY_PANEL_CLEAR_MS = 5_000;
 
 export type MemoryMenuAction = "init" | "consolidate" | "recover" | "inspect";
+type MemoryInspectAction = "status" | "staging" | "list" | "firings" | "deadletter" | "reconcile" | "sweep" | "lowsignal" | "contradictions" | "model";
+
+type MemoryOverlayItem<T extends string> = {
+	value: T;
+	label: string;
+	description: string;
+};
 
 export interface MemoryMenuRow {
 	value: MemoryMenuAction;
@@ -404,23 +411,61 @@ async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
 			continue;
 		}
 		if (choice === "inspect") {
-			ctx.ui.notify("Inspect menu coming next. For now use /memory status, /memory staging, or /memory list.", "info");
+			const action = await selectMemoryInspectOverlay(ctx);
+			if (action) await dispatchMemoryInspectAction(action, ctx);
 			return;
 		}
 	}
 }
 
 async function selectMemoryMenuOverlay(ctx: ExtensionCommandContext, model: MemoryMenuModel): Promise<MemoryMenuAction | null> {
-	const items = model.rows.map((row) => ({
+	const items: MemoryOverlayItem<MemoryMenuAction>[] = model.rows.map((row) => ({
 		value: row.value,
 		label: `${row.label}${row.recommended ? "  ★ recommended" : ""}`,
 		description: row.description,
 	}));
 	const inspectIndex = model.rows.findIndex((row) => row.value === "inspect");
-	const initialIndex = inspectIndex >= 0 ? inspectIndex : 0;
+	return selectMemoryOverlay(ctx, "Persistent Memory", items, inspectIndex >= 0 ? inspectIndex : 0);
+}
 
-	const result = await ctx.ui.custom((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: (value: MemoryMenuAction | null) => void) => {
-		let selected = initialIndex;
+const MEMORY_INSPECT_ITEMS: MemoryOverlayItem<MemoryInspectAction>[] = [
+	{ value: "status", label: "Status", description: "Show staging count, reconciliation state, recent runs" },
+	{ value: "staging", label: "Staging", description: "List staged memory files" },
+	{ value: "list", label: "List", description: "List canonical memory" },
+	{ value: "firings", label: "Firings", description: "Show recent fired-without-effect events" },
+	{ value: "deadletter", label: "Deadletter", description: "List dead-lettered candidates" },
+	{ value: "reconcile", label: "Reconcile", description: "Process staged candidates without extracting current session" },
+	{ value: "sweep", label: "Sweep", description: "Archive stale/superseded lessons and refresh flags" },
+	{ value: "lowsignal", label: "Low signal", description: "Inspect low-signal lessons" },
+	{ value: "contradictions", label: "Contradictions", description: "Inspect suspected contradictions" },
+	{ value: "model", label: "Model", description: "View or set extraction/adjudication model overrides" },
+];
+
+async function selectMemoryInspectOverlay(ctx: ExtensionCommandContext): Promise<MemoryInspectAction | null> {
+	return selectMemoryOverlay(ctx, "Memory Inspect / Advanced", MEMORY_INSPECT_ITEMS, 0);
+}
+
+async function dispatchMemoryInspectAction(action: MemoryInspectAction, ctx: ExtensionCommandContext): Promise<void> {
+	if (action === "status") return memoryStatusCommand(ctx);
+	if (action === "staging") return listStaging(ctx);
+	if (action === "list") return listMemory(ctx);
+	if (action === "firings") return listFirings(ctx);
+	if (action === "deadletter") return listDeadLetter(ctx);
+	if (action === "reconcile") return reconcileMemoryCommand(ctx);
+	if (action === "sweep") return sweepMemoryCommand(ctx);
+	if (action === "lowsignal") return lowSignalCommand(ctx);
+	if (action === "contradictions") return contradictionsCommand(ctx);
+	if (action === "model") return memoryModelCommand("", ctx);
+}
+
+async function selectMemoryOverlay<T extends string>(
+	ctx: ExtensionCommandContext,
+	title: string,
+	items: MemoryOverlayItem<T>[],
+	initialIndex: number,
+): Promise<T | null> {
+	const result = await ctx.ui.custom((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: (value: T | null) => void) => {
+		let selected = Math.max(0, Math.min(initialIndex, items.length - 1));
 		const accent = (text: string) => theme.fg?.("accent", text) ?? text;
 		const muted = (text: string) => theme.fg?.("muted", text) ?? text;
 		const dim = (text: string) => theme.fg?.("dim", text) ?? text;
@@ -431,7 +476,7 @@ async function selectMemoryMenuOverlay(ctx: ExtensionCommandContext, model: Memo
 				const inner = Math.max(44, Math.min(78, width - 4));
 				const border = accent(`┌${"─".repeat(inner + 2)}┐`);
 				const bottom = accent(`└${"─".repeat(inner + 2)}┘`);
-				const lines = [border, menuLine(accent(bold("Persistent Memory")), inner)];
+				const lines = [border, menuLine(accent(bold(title)), inner)];
 				for (let index = 0; index < items.length; index++) {
 					const item = items[index]!;
 					const cursor = index === selected ? "›" : " ";
@@ -452,7 +497,7 @@ async function selectMemoryMenuOverlay(ctx: ExtensionCommandContext, model: Memo
 			},
 		};
 	}, { overlay: true, overlayOptions: { width: "60%", minWidth: 46, maxHeight: "70%", margin: 2, anchor: "center" } });
-	return result as MemoryMenuAction | null;
+	return result as T | null;
 }
 
 function menuLine(text: string, width: number): string {
