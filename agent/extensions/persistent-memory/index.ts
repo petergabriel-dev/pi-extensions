@@ -18,7 +18,6 @@ import { ensureMemoryDirs, type MemoryPaths, projectScopeFromMemoryPaths, resolv
 import { getIndexCounts, openIndex, rebuildIndex, type RebuildCounts, type SqliteDatabase } from "./storage/sqlite.js";
 import { readRecentReconcileRuns, recordReconcileRun, type ReconcileRunSource } from "./storage/run-log.js";
 import { classifyReason, shouldSwap, type ClassifiedReason } from "./lifecycle.js";
-import { readMemoryModelOverride, resolveAdjudicationModel, resolveExtractionModel, writeMemoryModelOverride, type MemoryModelRole } from "./model-resolution.js";
 import { sweepLessons, flagLowSignalLessons, detectContradictions } from "./consolidation/sweep.js";
 import { parseLessonsFile, rewriteLessonsFile } from "./storage/markdown.js";
 import type { StagingFile } from "./types.js";
@@ -42,7 +41,7 @@ const MEMORY_UI_KEY = "persistent-memory";
 const MEMORY_PANEL_CLEAR_MS = 5_000;
 
 export type MemoryMenuAction = "init" | "consolidate" | "recover" | "inspect";
-type MemoryInspectAction = "status" | "staging" | "list" | "firings" | "deadletter" | "reconcile" | "sweep" | "lowsignal" | "contradictions" | "model";
+type MemoryInspectAction = "status" | "staging" | "list" | "firings" | "deadletter" | "reconcile" | "sweep" | "lowsignal" | "contradictions";
 
 type MemoryOverlayItem<T extends string> = {
 	value: T;
@@ -93,24 +92,10 @@ export function computeMemoryMenuModel(input: MemoryMenuModelInput): MemoryMenuM
 			count: input.deadLetterCount,
 			recommended: recommended === "recover",
 		},
-		{ value: "inspect", label: "Inspect / advanced", description: "Status, staging, list, reconcile, sweep, model" },
+		{ value: "inspect", label: "Inspect / advanced", description: "Status, staging, list, reconcile, sweep" },
 	];
 
 	return { rows, recommended };
-}
-
-const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
-const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
-export const ADJUDICATION_MODEL_ENV = "PERSISTENT_MEMORY_ADJUDICATION_MODEL";
-
-function resolveReconciliationAdjudicationModel(
-	ctx: { modelRegistry?: any; model?: any },
-	logger: { warn: (...args: unknown[]) => void; info?: (...args: unknown[]) => void },
-): any {
-	const adjudicationOverride = process.env[ADJUDICATION_MODEL_ENV]?.trim();
-	const legacyReconciliationOverride = process.env[RECONCILIATION_MODEL_ENV]?.trim();
-	const envName = adjudicationOverride ? ADJUDICATION_MODEL_ENV : legacyReconciliationOverride ? RECONCILIATION_MODEL_ENV : ADJUDICATION_MODEL_ENV;
-	return resolveAdjudicationModel(envName, ctx, logger);
 }
 
 interface ExtractionConfig {
@@ -368,17 +353,13 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await contradictionsCommand(ctx);
 				return;
 			}
-			if (trimmed === "model" || trimmed.startsWith("model ")) {
-				await memoryModelCommand(trimmed.slice("model".length), ctx);
-				return;
-			}
 			notifyMemoryUsage(ctx);
 		},
 	});
 }
 
 function notifyMemoryUsage(ctx: ExtensionCommandContext): void {
-	ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory recover, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
+	ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory recover, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions", "warning");
 }
 
 async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
@@ -438,7 +419,6 @@ const MEMORY_INSPECT_ITEMS: MemoryOverlayItem<MemoryInspectAction>[] = [
 	{ value: "sweep", label: "Sweep", description: "Archive stale/superseded lessons and refresh flags" },
 	{ value: "lowsignal", label: "Low signal", description: "Inspect low-signal lessons" },
 	{ value: "contradictions", label: "Contradictions", description: "Inspect suspected contradictions" },
-	{ value: "model", label: "Model", description: "View or set extraction/adjudication model overrides" },
 ];
 
 async function selectMemoryInspectOverlay(ctx: ExtensionCommandContext): Promise<MemoryInspectAction | null> {
@@ -455,7 +435,6 @@ async function dispatchMemoryInspectAction(action: MemoryInspectAction, ctx: Ext
 	if (action === "sweep") return sweepMemoryCommand(ctx);
 	if (action === "lowsignal") return lowSignalCommand(ctx);
 	if (action === "contradictions") return contradictionsCommand(ctx);
-	if (action === "model") return memoryModelCommand("", ctx);
 }
 
 async function selectMemoryOverlay<T extends string>(
@@ -873,6 +852,11 @@ function formatModelForRunLog(model: unknown): string | null {
 	return typeof record.provider === "string" ? `${record.provider}/${id}` : id;
 }
 
+function requireMemoryModel(ctx: { model?: unknown }): unknown {
+	if (ctx.model) return ctx.model;
+	throw new Error("Persistent memory requires an active session model (ctx.model); no extraction/adjudication fallback model is configured.");
+}
+
 export function updateMemoryMeter(
 	ui: ExtensionAPI["ui"],
 	options: { showPanel?: boolean; clearPanel?: boolean; clearAfterMs?: number; panelTitle?: string } = {},
@@ -1041,15 +1025,15 @@ export async function consolidateMemoryCommand(ctx: ExtensionCommandContext): Pr
 	const runPaths = { ...memoryPaths };
 	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
 	const extraction = extractionConfig();
-	const extractionModel = resolveExtractionModel(EXTRACTION_MODEL_ENV, modelContext, console);
 	const sessionId = getSessionId(ctx as { sessionManager?: { getSessionId?: () => string } });
 	let extractionResult: ExtractionRunResult | null = null;
 	try {
+		const sessionModel = requireMemoryModel(modelContext);
 		extractionResult = await runExtraction(ctx as any, runPaths, sessionId, {
 			logger: console,
 			callCarefulModel: (systemPrompt, userPrompt) => callCarefulModelImpl(systemPrompt, userPrompt, {
 				cwd: modelContext.cwd ?? process.cwd(),
-				...(extractionModel ? { model: extractionModel as never } : {}),
+				model: sessionModel as never,
 				thinkingLevel: extraction.thinkingLevel,
 				timeoutMs: extraction.timeoutMs,
 				logger: console,
@@ -1122,7 +1106,7 @@ async function runReconciliationForeground(
 	const startedAt = new Date();
 	const modelContext = ctx as ExtensionCommandContext & { cwd?: string; model?: unknown; thinkingLevel?: unknown };
 	const reconciliation = reconciliationConfig();
-	const chosenModel = resolveReconciliationAdjudicationModel(modelContext, console);
+	const chosenModel = requireMemoryModel(modelContext);
 	reconcileInFlight = true;
 	let ownDb: SqliteDatabase | null = null;
 	try {
@@ -1140,7 +1124,7 @@ async function runReconciliationForeground(
 			},
 			callCarefulModel: (systemPrompt, userPrompt) => callCarefulModelImpl(systemPrompt, userPrompt, {
 				cwd: modelContext.cwd ?? process.cwd(),
-				...(chosenModel ? { model: chosenModel as never } : {}),
+				model: chosenModel as never,
 				thinkingLevel: reconciliation.thinkingLevel,
 				timeoutMs: reconciliationTimeoutMs(),
 				logger: console,
@@ -1266,64 +1250,6 @@ function formatWriteFlags(writes: { lessons: boolean; preferences: boolean; doma
 		.filter(([, didWrite]) => didWrite)
 		.map(([name]) => name);
 	return changed.length > 0 ? changed.join(", ") : "none";
-}
-
-function modelReference(model: any): string {
-	return `${model.provider}/${model.id}`;
-}
-
-function resolveAvailableModelReference(reference: string | undefined, available: any[]): any | undefined {
-	if (!reference) return undefined;
-	const lowerRef = reference.toLowerCase();
-	const exact = available.find((model) => modelReference(model).toLowerCase() === lowerRef || String(model.id).toLowerCase() === lowerRef);
-	if (exact) return exact;
-	if (reference.includes("/")) {
-		const slashIdx = reference.indexOf("/");
-		const provider = reference.slice(0, slashIdx).toLowerCase();
-		const id = reference.slice(slashIdx + 1).toLowerCase();
-		return available.find((model) => String(model.provider).toLowerCase() === provider && String(model.id).toLowerCase() === id);
-	}
-	return available.find((model) => String(model.id).toLowerCase().includes(lowerRef) || String(model.name).toLowerCase().includes(lowerRef));
-}
-
-async function memoryModelCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
-	const parts = args.trim().split(/\s+/).filter(Boolean);
-	const roleArg = parts[0];
-	const roles: MemoryModelRole[] = ["extraction", "adjudication"];
-	const role = roles.includes(roleArg as MemoryModelRole)
-		? roleArg as MemoryModelRole
-		: roleArg
-			? undefined
-			: roleFromLabel(await ctx.ui.select("Persistent memory model role", roles.map((item) => `${item} (current: ${readMemoryModelOverride(item) ?? "default"})`)));
-	if (!role) {
-		if (!roleArg) return;
-		return ctx.ui.notify(`Unknown memory model role: ${roleArg}.`, "warning");
-	}
-
-	const available = await Promise.resolve(ctx.modelRegistry?.getAvailable?.() ?? []);
-	if (available.length === 0) return ctx.ui.notify("No available models found.", "warning");
-
-	const requestedModel = parts[0] === role ? parts[1] : parts[0];
-	const selectedRef = requestedModel
-		? requestedModel
-		: await ctx.ui.select(
-			`Model for persistent memory ${role}`,
-			available.map((model) => modelReference(model)),
-		);
-	if (!selectedRef) return;
-	const selected = resolveAvailableModelReference(selectedRef, available);
-	if (!selected) return ctx.ui.notify(`Unknown available model${requestedModel ? `: ${requestedModel}` : ""}.`, "warning");
-
-	const reference = modelReference(selected);
-	writeMemoryModelOverride(role, reference);
-	ctx.ui.notify(`Persistent memory ${role} model: ${reference}`, "info");
-}
-
-function roleFromLabel(label: string | undefined): MemoryModelRole | undefined {
-	if (!label) return undefined;
-	if (label.startsWith("extraction")) return "extraction";
-	if (label.startsWith("adjudication")) return "adjudication";
-	return undefined;
 }
 
 async function memoryStatusCommand(ctx: ExtensionCommandContext): Promise<void> {

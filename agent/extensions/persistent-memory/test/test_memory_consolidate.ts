@@ -10,6 +10,8 @@ import type { Lesson } from "../types.js";
 
 console.log("Running test_memory_consolidate...");
 
+const sessionModel = { provider: "session", id: "test-model", name: "Test Model" };
+
 function makeCtx(root: string, notifications: string[], branch: unknown[]) {
 	return {
 		cwd: root,
@@ -23,6 +25,7 @@ function makeCtx(root: string, notifications: string[], branch: unknown[]) {
 			getSessionId: () => "s1",
 			getBranch: () => branch,
 		},
+		model: sessionModel,
 		modelRegistry: { getAvailable: () => [], getAll: () => [], hasConfiguredAuth: () => false },
 	} as any;
 }
@@ -50,14 +53,17 @@ async function testConsolidateExtractsAndReconciles() {
 		customType: "discussion-notes",
 		data: { schemaVersion: 1, added: [{ id: 1, type: "lesson", text: "Use /healthz for health checks." }] },
 	}];
-	setCallCarefulModelImplForTest(async () => JSON.stringify({
-		candidates: {
-			lessons: [{ summary: "Health endpoint", detail: "Use /healthz for health checks.", scope_suggestion: path.basename(root), triggers: [{ type: "topic", value: "health" }], source_evidence: { discussion_note_ids: [1] } }],
-			preferences: [],
-			decisions: [],
-			domain: [],
-		},
-	}));
+	setCallCarefulModelImplForTest(async (_system, _user, options) => {
+		assert.strictEqual((options as { model?: unknown }).model, sessionModel);
+		return JSON.stringify({
+			candidates: {
+				lessons: [{ summary: "Health endpoint", detail: "Use /healthz for health checks.", scope_suggestion: path.basename(root), triggers: [{ type: "topic", value: "health" }], source_evidence: { discussion_note_ids: [1] } }],
+				preferences: [],
+				decisions: [],
+				domain: [],
+			},
+		});
+	});
 	try {
 		const { ctx, memoryCommand } = await setupExtension(root, notifications, branch);
 		await memoryCommand("consolidate", ctx);
@@ -128,6 +134,25 @@ async function testConsolidateAppliesReinforcementAndClearsFirings() {
 	}
 }
 
+async function testConsolidateRequiresSessionModel() {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-consolidate-nomodel-"));
+	const notifications: string[] = [];
+	const branch = [{
+		type: "custom",
+		customType: "discussion-notes",
+		data: { schemaVersion: 1, added: [{ id: 1, type: "lesson", text: "Use session model." }] },
+	}];
+	try {
+		const { ctx, memoryCommand } = await setupExtension(root, notifications, branch);
+		delete ctx.model;
+		await memoryCommand("consolidate", ctx);
+		assert.ok(notifications.some((message) => message.includes("requires an active session model")));
+		assert.equal(fs.existsSync(path.join(root, ".pi", "memory", "canonical-writer.lock")), false, "lock released");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+}
+
 async function testConsolidateRequiresBranch() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-consolidate-nobranch-"));
 	const notifications: string[] = [];
@@ -157,6 +182,7 @@ async function testConsolidateLockFailsFast() {
 
 await testConsolidateExtractsAndReconciles();
 await testConsolidateAppliesReinforcementAndClearsFirings();
+await testConsolidateRequiresSessionModel();
 await testConsolidateRequiresBranch();
 await testConsolidateLockFailsFast();
 console.log("test_memory_consolidate passed!");
