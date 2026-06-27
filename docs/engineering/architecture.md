@@ -66,31 +66,23 @@ Persistent memory is local-first markdown plus SQLite indexing under `<project>/
 Manual commands own canonical mutation:
 
 1. **Session lifecycle:** `session_start` resolves memory paths, opens `index.db`, schedules codebase-map regeneration, and updates the memory meter. `session_shutdown` closes the active db and clears in-memory pending reminders only. There is no automatic extraction, reconciliation, reinforcement, or firing-log clear on start/shutdown.
-2. **Manual consolidation:** `/memory consolidate` verifies the current session branch is available, runs extraction for the active session into `staging/`, runs foreground reconciliation, then applies reinforcement from accumulated firing telemetry. It holds the `canonical-writer.lock` for the whole job and reports extraction, add/re-stage/dead-letter, write, index, and reinforcement counts.
-3. **Manual reconcile:** `/memory reconcile` processes existing staging in the foreground using its own SQLite connection and the same canonical-writer lock. It is useful when staging already exists or after `/memory recover`.
-4. **Manual recover:** `/memory recover` reads `deadletter/*.json`, groups recoverable candidates by `session_id`, validates reconstructed staging through `repairStagingFile`, writes valid candidates back to `staging/`, and deletes each deadletter only after successful staging write. Malformed deadletters stay in place and are reported.
-5. **Validate-at-write extraction:** Extraction parses careful-model output, sanitizes each candidate before staging, drops malformed individual candidates, and derives lesson triggers deterministically when missing/empty. Malformed candidates should not enter `staging/`.
-6. **Per-candidate reconciliation:** `runReconciliation` prepares refs, pre-filters exact duplicates, shortlists same-scope lexical collisions, deterministically adds empty-shortlist candidates with zero model calls, and adjudicates lesson collisions through a bounded verdict contract (`distinct`, `duplicate`, `supersedes`, `merge`).
-7. **Re-stage with retry cap:** Successfully committed candidates leave staging. Never-attempted candidates remain staged unchanged. Attempted unresolved candidates increment `reconcile_attempts` and remain staged while under retry cap 3; at/over cap they move to `deadletter/` with reason. Wrong-project files are left for their owner.
-8. **Deterministic state transitions:** Code owns ids, timestamps, scopes, refs, trigger preservation/derivation, reinforcement counts, status flags, and supersede pointers. Models do not emit structural fields. Supersede/merge are reversible status/pointer transitions and records are never deleted.
-9. **Incremental SQLite writes:** Reconcile owns a dedicated SQLite connection. After each successful candidate/batch markdown commit, changed records are upserted into that connection; candidate-processing paths do not perform a final whole-index rebuild-and-swap. Generation guards prevent stale owned connections from replacing the active handle.
-10. **Run-log observability:** The bounded append-only run-log records run counts, per-candidate outcomes, and discard/dup-rate metrics. `/memory status` surfaces recent runs without using `setFooter`.
-11. **Offline sweep/review:** `/memory sweep` archives only unambiguously dead lessons by reversible status flag, flags low-signal lessons for review, and queues suspected contradiction groups without auto-resolving them.
+2. **Modal agent-driven save:** Selecting Consolidate in the `/memory` modal sends a normal agent turn directive. The agent should extract durable candidates from chat and call `save_to_memory` exactly once. `save_to_memory` validates candidates, writes staging, and runs foreground reconciliation under the canonical-writer lock. If the turn ends without that tool call, the user gets one nudge pointing to deterministic `/memory consolidate`.
+3. **Typed manual consolidation:** `/memory consolidate` remains direct and deterministic: it verifies the current session branch is available, runs extraction for the active session into `staging/`, runs foreground reconciliation, then applies reinforcement from accumulated firing telemetry. It holds the `canonical-writer.lock` for the whole job and reports extraction, add/re-stage/dead-letter, write, index, and reinforcement counts.
+4. **Manual reconcile:** `/memory reconcile` processes existing staging in the foreground using its own SQLite connection and the same canonical-writer lock. It is useful when staging already exists or after `/memory recover`.
+5. **Manual recover:** `/memory recover` reads `deadletter/*.json`, groups recoverable candidates by `session_id`, validates reconstructed staging through `repairStagingFile`, writes valid candidates back to `staging/`, and deletes each deadletter only after successful staging write. Malformed deadletters stay in place and are reported.
+6. **Validate-at-write extraction:** Extraction parses careful-model output, sanitizes each candidate before staging, drops malformed individual candidates, and derives lesson triggers deterministically when missing/empty. Malformed candidates should not enter `staging/`.
+7. **Per-candidate reconciliation:** `runReconciliation` prepares refs, pre-filters exact duplicates, shortlists same-scope lexical collisions, deterministically adds empty-shortlist candidates with zero model calls, and adjudicates lesson collisions through a bounded verdict contract (`distinct`, `duplicate`, `supersedes`, `merge`).
+8. **Re-stage with retry cap:** Successfully committed candidates leave staging. Never-attempted candidates remain staged unchanged. Attempted unresolved candidates increment `reconcile_attempts` and remain staged while under retry cap 3; at/over cap they move to `deadletter/` with reason. Wrong-project files are left for their owner.
+9. **Deterministic state transitions:** Code owns ids, timestamps, scopes, refs, trigger preservation/derivation, reinforcement counts, status flags, and supersede pointers. Models do not emit structural fields. Supersede/merge are reversible status/pointer transitions and records are never deleted.
+10. **Incremental SQLite writes:** Reconcile owns a dedicated SQLite connection. After each successful candidate/batch markdown commit, changed records are upserted into that connection; candidate-processing paths do not perform a final whole-index rebuild-and-swap. Generation guards prevent stale owned connections from replacing the active handle.
+11. **Run-log observability:** The bounded append-only run-log records run counts, per-candidate outcomes, and discard/dup-rate metrics. `/memory status` surfaces recent runs without using `setFooter`.
+12. **Offline sweep/review:** `/memory sweep` archives only unambiguously dead lessons by reversible status flag, flags low-signal lessons for review, and queues suspected contradiction groups without auto-resolving them.
 
-### Persistent-memory model resolution
+### Persistent-memory model use
 
-Persistent-memory uses two live model roles:
+Persistent-memory model calls inherit the active session model from `ctx.model`:
 
-- `extraction`: manual `/memory consolidate` extraction (`resolveExtractionModel`, `EXTRACTION_MODEL_ENV`).
-- `adjudication`: reconciliation judgement/adjudication (`resolveAdjudicationModel`, selected through `resolveReconciliationAdjudicationModel`).
-
-Resolution is centralized in `agent/extensions/persistent-memory/model-resolution.ts` via `resolveModelWithDefault()`. Precedence:
-
-1. persisted override from `agent/settings.json` at `persistentMemory.models[role]`;
-2. env var (`PERSISTENT_MEMORY_EXTRACTION_MODEL`, `PERSISTENT_MEMORY_ADJUDICATION_MODEL`, or legacy `PERSISTENT_MEMORY_RECONCILIATION_MODEL` for reconciliation);
-3. pinned default (`DEFAULT_EXTRACTION_MODEL` / `DEFAULT_ADJUDICATION_MODEL`);
-4. model registry lookup plus `hasConfiguredAuth()`;
-5. `ctx.model` fallback with warning.
-
-Persisted override writes use read-merge-write helpers (`readMemoryModelOverride`, `writeMemoryModelOverride`) and only touch `persistentMemory.models`, preserving other `settings.json` keys such as `subagents`.
+- `/memory consolidate` extraction passes `ctx.model` to the careful model call.
+- `/memory reconcile` and `save_to_memory` reconciliation pass `ctx.model` to adjudication/reconciliation model calls.
+- There is no `/memory model`, persisted override, model env var, pinned default, or fallback model. Missing `ctx.model` is a clear failure at the model-call boundary.
 

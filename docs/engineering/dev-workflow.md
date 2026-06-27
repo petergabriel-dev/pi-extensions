@@ -66,15 +66,9 @@ Workflow menu:
 
 Bare `/memory` opens the state-aware memory menu in interactive Pi sessions. It shows live staging/deadletter counts, marks one recommended next step when work exists, and offers Consolidate, Recover, and Inspect / advanced. Typed subcommands still work unchanged (`/memory list`, `/memory status`, `/memory consolidate`, `/memory recover`, etc.). Non-interactive command contexts fall back to the typed usage notice.
 
-Model selection:
+Model use:
 
-```text
-/memory model
-/memory model extraction provider/model
-/memory model adjudication provider/model
-```
-
-`/memory model` opens TUI selects for the live roles (`extraction`, `adjudication`) and available authenticated models. Choices persist in `agent/settings.json` under `persistentMemory.models` and apply on the next extraction/reconciliation run without restart.
+Persistent-memory model calls inherit the active session model from `ctx.model`. There is no `/memory model` picker, persisted model override, env override, pinned default, or fallback model.
 
 To run typecheck and tests in the persistent-memory extension directory:
 
@@ -89,5 +83,5 @@ This runs the typechecker (`tsc --noEmit`) and executes standalone TS unit test 
 - `test_reason_matrix.ts`: Tests mapped lifecycle actions for different transition reasons.
 - `test_generation_swap.ts`: Tests background task lifecycle generation swap logic.
 - `test_firing_log.ts`: Tests firing log logging and preservation across reload transitions.
-- `test_resolve_careful_model.ts`: Tests pinned/env/fallback model resolution.
-- `test_model_override.ts`: Tests persisted per-role model override precedence, fallback, and settings merge behavior.
+- `test_memory_consolidate.ts`: Tests typed consolidation, session-model use, lock release, branch requirement, and reinforcement.
+- `test_save_to_memory_tool.ts`: Tests deterministic agent-driven save staging, reconciliation outcomes, and malformed-input rejection.

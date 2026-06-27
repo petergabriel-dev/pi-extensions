@@ -43,7 +43,9 @@
 
 ## Persistent-Memory Manual Write Pipeline
 
-- **Single-writer canonical store:** Only foreground manual commands (`/memory consolidate`, `/memory reconcile`, `/memory recover`, and explicit review commands such as `/memory sweep`) may mutate canonical memory markdown or consume staging. `session_start` and `session_shutdown` must not run extraction, reconciliation, reinforcement, staging consumption, or firing-log clear.
+- **Single-writer canonical store:** Only foreground manual commands (`/memory consolidate`, `/memory reconcile`, `/memory recover`, explicit review commands such as `/memory sweep`, and the `save_to_memory` tool) may mutate canonical memory markdown or consume staging. `session_start` and `session_shutdown` must not run extraction, reconciliation, reinforcement, staging consumption, or firing-log clear.
+- **Agent-driven saves never hand-write memory:** Modal-triggered agent turns may propose candidates only through `save_to_memory`. The agent must not write `lessons.md`, `preferences.md`, `decisions.md`, `domain.md`, `index.db`, or staging files directly.
+- **Reconcile/apply stay deterministic:** `save_to_memory` must validate/normalize candidates to the staging schema before writing, then run the existing foreground reconciliation pipeline under `canonical-writer.lock`. Host code owns ids, timestamps, status/supersede fields, index writes, run logs, retry caps, and deadletter behavior.
 - Lifecycle hooks may open/close `index.db`, refresh derived caches, inject retrieved memory, append telemetry, and update UI. They must not write `lessons.md`, `preferences.md`, `decisions.md`, `domain.md`, or delete/rewrite same-project staging.
 - `/memory consolidate` must verify `ctx.sessionManager.getBranch()` exists, extract the current session into staging, run foreground reconciliation, apply reinforcement after successful reconcile, then clear firing telemetry only after reinforcement succeeds.
 - `/memory reconcile`, `/memory consolidate`, and `/memory recover` must share the canonical-writer lock and fail fast when another canonical writer is active.
