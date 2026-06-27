@@ -39,6 +39,8 @@
 - **Bridge-captured lesson candidates need triggers.** Lesson candidates with empty/missing triggers are structurally invalid unless write-path derivation or loader repair fills them.
 - **normalizeExtractionResult strips unknown fields.** Candidate properties not explicitly normalized are dropped during read/rewrite cycles. Preserve `reconcile_attempts` in every `normalize*Candidate` path.
 - **Manual canonical writers must share one lock.** `/memory consolidate`, `/memory reconcile`, and `/memory recover` all mutate staging/canonical memory and must fail fast under `canonical-writer.lock` instead of interleaving.
+- **Bare `/memory` must not default to Consolidate.** Consolidate can run the careful model, so the menu cursor starts on a neutral row (Inspect / advanced), not Consolidate, even when Consolidate is marked recommended.
+- **Non-interactive `/memory` has no menu.** When `ctx.hasUI` is false, bare `/memory` must show typed usage instead of trying to render an overlay.
 - **Recover must delete deadletters only after staging write.** If validation or write fails, leave the deadletter file in place and report it. Never drop malformed deadletters silently.
 - **Consolidate needs the live branch.** `/memory consolidate` depends on `ctx.sessionManager.getBranch()`. If that API is unavailable, fail before extraction instead of staging an empty or stale snapshot.
 - **Firing telemetry spans sessions.** Do not clear `firings.jsonl`/session firing state on shutdown. Clear only after `/memory consolidate` successfully applies reinforcement.

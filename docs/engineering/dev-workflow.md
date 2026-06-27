@@ -58,6 +58,14 @@ npm run typecheck
 
 ## Persistent-Memory Extension testing
 
+Workflow menu:
+
+```text
+/memory
+```
+
+Bare `/memory` opens the state-aware memory menu in interactive Pi sessions. It shows live staging/deadletter counts, marks one recommended next step when work exists, and offers Consolidate, Recover, and Inspect / advanced. Typed subcommands still work unchanged (`/memory list`, `/memory status`, `/memory consolidate`, `/memory recover`, etc.). Non-interactive command contexts fall back to the typed usage notice.
+
 Model selection:
 
 ```text
