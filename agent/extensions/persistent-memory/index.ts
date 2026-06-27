@@ -41,6 +41,57 @@ const MAX_ERROR_DETAIL_CHARS = 500;
 const MEMORY_UI_KEY = "persistent-memory";
 const MEMORY_PANEL_CLEAR_MS = 5_000;
 
+export type MemoryMenuAction = "init" | "consolidate" | "recover" | "inspect";
+
+export interface MemoryMenuRow {
+	value: MemoryMenuAction;
+	label: string;
+	description: string;
+	recommended?: boolean;
+	count?: number;
+}
+
+export interface MemoryMenuModelInput {
+	initialized: boolean;
+	stagingCount: number;
+	deadLetterCount: number;
+}
+
+export interface MemoryMenuModel {
+	rows: MemoryMenuRow[];
+	recommended: MemoryMenuAction | null;
+}
+
+export function computeMemoryMenuModel(input: MemoryMenuModelInput): MemoryMenuModel {
+	if (!input.initialized) {
+		return {
+			rows: [{ value: "init", label: "Initialize memory", description: "Create project memory files" }],
+			recommended: null,
+		};
+	}
+
+	const recommended: MemoryMenuAction | null = input.stagingCount > 0 ? "consolidate" : input.deadLetterCount > 0 ? "recover" : null;
+	const rows: MemoryMenuRow[] = [
+		{
+			value: "consolidate",
+			label: `Consolidate${input.stagingCount > 0 ? ` (${input.stagingCount})` : ""}`,
+			description: "Extract/reconcile staged memory candidates",
+			count: input.stagingCount,
+			recommended: recommended === "consolidate",
+		},
+		{
+			value: "recover",
+			label: `Recover${input.deadLetterCount > 0 ? ` (${input.deadLetterCount})` : ""}`,
+			description: "Retry dead-lettered memory candidates",
+			count: input.deadLetterCount,
+			recommended: recommended === "recover",
+		},
+		{ value: "inspect", label: "Inspect / advanced", description: "Status, staging, list, reconcile, sweep, model" },
+	];
+
+	return { rows, recommended };
+}
+
 const RECONCILIATION_MODEL_ENV = "PERSISTENT_MEMORY_RECONCILIATION_MODEL";
 const EXTRACTION_MODEL_ENV = "PERSISTENT_MEMORY_EXTRACTION_MODEL";
 export const ADJUDICATION_MODEL_ENV = "PERSISTENT_MEMORY_ADJUDICATION_MODEL";
@@ -751,6 +802,14 @@ function formatMemoryPanelLines(title: string): string[] {
 function safeStagingCount(paths: MemoryPaths): number {
 	try {
 		return paths.projectMemoryDir ? listStagingFiles(paths.projectMemoryDir).length : 0;
+	} catch {
+		return 0;
+	}
+}
+
+export function safeDeadLetterCount(paths: MemoryPaths): number {
+	try {
+		return paths.projectMemoryDir ? listDeadLetterFiles(paths.projectMemoryDir).length : 0;
 	} catch {
 		return 0;
 	}
