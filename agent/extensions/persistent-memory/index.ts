@@ -309,7 +309,11 @@ export default function persistentMemory(pi: ExtensionAPI) {
 		description: "Inspect persistent memory",
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
-			if (trimmed === "" || trimmed === "list") {
+			if (trimmed === "") {
+				await showMemoryMenu(ctx);
+				return;
+			}
+			if (trimmed === "list") {
 				await listMemory(ctx);
 				return;
 			}
@@ -361,9 +365,100 @@ export default function persistentMemory(pi: ExtensionAPI) {
 				await memoryModelCommand(trimmed.slice("model".length), ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory recover, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
+			notifyMemoryUsage(ctx);
 		},
 	});
+}
+
+function notifyMemoryUsage(ctx: ExtensionCommandContext): void {
+	ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory recover, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions, /memory model [extraction|adjudication] [provider/model]", "warning");
+}
+
+async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
+	if (!(ctx as ExtensionCommandContext & { hasUI?: boolean }).hasUI) {
+		notifyMemoryUsage(ctx);
+		return;
+	}
+
+	while (true) {
+		const paths = memoryPaths;
+		const initialized = Boolean(db && paths?.projectMemoryDir);
+		const model = computeMemoryMenuModel({
+			initialized,
+			stagingCount: paths ? safeStagingCount(paths) : 0,
+			deadLetterCount: paths ? safeDeadLetterCount(paths) : 0,
+		});
+		const choice = await selectMemoryMenuOverlay(ctx, model);
+		if (!choice) return;
+
+		if (choice === "init") {
+			await initMemoryCommand(ctx);
+			continue;
+		}
+		if (choice === "consolidate") {
+			await consolidateMemoryCommand(ctx);
+			continue;
+		}
+		if (choice === "recover") {
+			await recoverMemoryCommand(ctx);
+			continue;
+		}
+		if (choice === "inspect") {
+			ctx.ui.notify("Inspect menu coming next. For now use /memory status, /memory staging, or /memory list.", "info");
+			return;
+		}
+	}
+}
+
+async function selectMemoryMenuOverlay(ctx: ExtensionCommandContext, model: MemoryMenuModel): Promise<MemoryMenuAction | null> {
+	const items = model.rows.map((row) => ({
+		value: row.value,
+		label: `${row.label}${row.recommended ? "  ★ recommended" : ""}`,
+		description: row.description,
+	}));
+	const inspectIndex = model.rows.findIndex((row) => row.value === "inspect");
+	const initialIndex = inspectIndex >= 0 ? inspectIndex : 0;
+
+	const result = await ctx.ui.custom((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: (value: MemoryMenuAction | null) => void) => {
+		let selected = initialIndex;
+		const accent = (text: string) => theme.fg?.("accent", text) ?? text;
+		const muted = (text: string) => theme.fg?.("muted", text) ?? text;
+		const dim = (text: string) => theme.fg?.("dim", text) ?? text;
+		const bold = (text: string) => theme.bold?.(text) ?? text;
+
+		return {
+			render(width: number) {
+				const inner = Math.max(44, Math.min(78, width - 4));
+				const border = accent(`┌${"─".repeat(inner + 2)}┐`);
+				const bottom = accent(`└${"─".repeat(inner + 2)}┘`);
+				const lines = [border, menuLine(accent(bold("Persistent Memory")), inner)];
+				for (let index = 0; index < items.length; index++) {
+					const item = items[index]!;
+					const cursor = index === selected ? "›" : " ";
+					const label = index === selected ? accent(item.label) : item.label;
+					lines.push(menuLine(`${cursor} ${label}`, inner));
+					lines.push(menuLine(`  ${muted(item.description)}`, inner));
+				}
+				lines.push(menuLine(dim("↑↓ navigate • enter select • esc cancel"), inner), bottom);
+				return lines;
+			},
+			invalidate() {},
+			handleInput(data: string) {
+				if (data === "\u001b") return done(null);
+				if (data === "\r" || data === "\n") return done(items[selected]?.value ?? null);
+				if (data === "\u001b[A") selected = Math.max(0, selected - 1);
+				if (data === "\u001b[B") selected = Math.min(items.length - 1, selected + 1);
+				tui.requestRender();
+			},
+		};
+	}, { overlay: true, overlayOptions: { width: "60%", minWidth: 46, maxHeight: "70%", margin: 2, anchor: "center" } });
+	return result as MemoryMenuAction | null;
+}
+
+function menuLine(text: string, width: number): string {
+	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
+	const clipped = plain.length > width ? `${plain.slice(0, Math.max(0, width - 1))}…` : plain;
+	return `│ ${clipped}${" ".repeat(Math.max(0, width - clipped.length))} │`;
 }
 
 type MessageLike = {
