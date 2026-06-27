@@ -25,6 +25,9 @@ declare module "@mariozechner/pi-coding-agent" {
 
 	export type ExtensionContext = any;
 	export type ToolResultEvent = any;
+	export class DynamicBorder {
+		constructor(...args: any[]);
+	}
 	export const DEFAULT_MAX_BYTES: any;
 	export const DEFAULT_MAX_LINES: any;
 	export function formatSize(bytes: number): string;
@@ -61,6 +64,29 @@ declare module "@mariozechner/pi-coding-agent" {
 		static create(...args: any[]): any;
 		getAll(): any[];
 		hasConfiguredAuth(model: any): boolean;
+	}
+}
+
+declare module "@mariozechner/pi-tui" {
+	export interface SelectItem {
+		value: string;
+		label: string;
+		description?: string;
+	}
+	export class Container {
+		addChild(...args: any[]): void;
+		render(width: number): string[];
+		invalidate(): void;
+	}
+	export class SelectList {
+		onSelect?: (item: SelectItem) => void;
+		onCancel?: () => void;
+		constructor(...args: any[]);
+		setSelectedIndex(index: number): void;
+		handleInput(data: string): void;
+	}
+	export class Text {
+		constructor(...args: any[]);
 	}
 }
 

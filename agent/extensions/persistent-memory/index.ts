@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { SelectItem } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadCodebaseMap, scheduleRegeneration } from "./codebase-map/regeneration.js";
@@ -538,46 +539,48 @@ async function selectMemoryOverlay<T extends string>(
 	items: MemoryOverlayItem<T>[],
 	initialIndex: number,
 ): Promise<T | null> {
-	const result = await ctx.ui.custom((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: (value: T | null) => void) => {
-		let selected = Math.max(0, Math.min(initialIndex, items.length - 1));
-		const accent = (text: string) => theme.fg?.("accent", text) ?? text;
-		const muted = (text: string) => theme.fg?.("muted", text) ?? text;
-		const dim = (text: string) => theme.fg?.("dim", text) ?? text;
-		const bold = (text: string) => theme.bold?.(text) ?? text;
+	const [{ DynamicBorder }, { Container, SelectList, Text }] = await Promise.all([
+		import("@mariozechner/pi-coding-agent"),
+		import("@mariozechner/pi-tui"),
+	]);
+	const result = await ctx.ui.custom((tui, theme, _kb, done) => {
+		const container = new Container();
+		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+
+		const selectItems: SelectItem[] = items.map((item) => ({
+			value: item.value,
+			label: item.label,
+			description: item.description,
+		}));
+		const selectList = new SelectList(selectItems, Math.min(items.length, 10), {
+			selectedPrefix: (text) => theme.fg("accent", text),
+			selectedText: (text) => theme.fg("accent", text),
+			description: (text) => theme.fg("muted", text),
+			scrollInfo: (text) => theme.fg("dim", text),
+			noMatch: (text) => theme.fg("warning", text),
+		});
+		selectList.setSelectedIndex(Math.max(0, Math.min(initialIndex, selectItems.length - 1)));
+		selectList.onSelect = (item) => done(item.value as T);
+		selectList.onCancel = () => done(null);
+		container.addChild(selectList);
+		container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
+		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
 		return {
 			render(width: number) {
-				const inner = Math.max(44, Math.min(78, width - 4));
-				const border = accent(`┌${"─".repeat(inner + 2)}┐`);
-				const bottom = accent(`└${"─".repeat(inner + 2)}┘`);
-				const lines = [border, menuLine(accent(bold(title)), inner)];
-				for (let index = 0; index < items.length; index++) {
-					const item = items[index]!;
-					const cursor = index === selected ? "›" : " ";
-					const label = index === selected ? accent(item.label) : item.label;
-					lines.push(menuLine(`${cursor} ${label}`, inner));
-					lines.push(menuLine(`  ${muted(item.description)}`, inner));
-				}
-				lines.push(menuLine(dim("↑↓ navigate • enter select • esc cancel"), inner), bottom);
-				return lines;
+				return container.render(width);
 			},
-			invalidate() {},
+			invalidate() {
+				container.invalidate();
+			},
 			handleInput(data: string) {
-				if (data === "\u001b") return done(null);
-				if (data === "\r" || data === "\n") return done(items[selected]?.value ?? null);
-				if (data === "\u001b[A") selected = Math.max(0, selected - 1);
-				if (data === "\u001b[B") selected = Math.min(items.length - 1, selected + 1);
+				selectList.handleInput(data);
 				tui.requestRender();
 			},
 		};
 	}, { overlay: true, overlayOptions: { width: "60%", minWidth: 46, maxHeight: "70%", margin: 2, anchor: "center" } });
 	return result as T | null;
-}
-
-function menuLine(text: string, width: number): string {
-	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
-	const clipped = plain.length > width ? `${plain.slice(0, Math.max(0, width - 1))}…` : plain;
-	return `│ ${clipped}${" ".repeat(Math.max(0, width - clipped.length))} │`;
 }
 
 type MessageLike = {
