@@ -164,6 +164,7 @@ let memoryPanelClearTimer: NodeJS.Timeout | null = null;
 let latestSessionCtx: (ExtensionCommandContext & { hasUI?: boolean; sessionManager?: { getBranch?: () => unknown[] } }) | null = null;
 let workflowMode: string | null = null;
 let consolidateReminderSnoozed = false;
+let pendingModalSaveTurn: { toolCalled: boolean; nudged: boolean } | null = null;
 
 export function setCallCarefulModelImplForTest(impl: CarefulModelImpl): void {
 	callCarefulModelImpl = impl;
@@ -187,6 +188,14 @@ export function __setPersistentMemoryStateForTest(state: {
 
 export function __bumpPersistentMemoryGenerationForTest(): void {
 	lifecycleGeneration++;
+}
+
+export function __beginModalSaveTurnForTest(): void {
+	beginModalSaveTurn();
+}
+
+export function __pendingModalSaveTurnForTest(): { toolCalled: boolean; nudged: boolean } | null {
+	return pendingModalSaveTurn ? { ...pendingModalSaveTurn } : null;
 }
 
 export default function persistentMemory(pi: ExtensionAPI) {
@@ -294,6 +303,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		try {
+			observeModalSaveToolCall(event.toolName);
 			if (!db || !memoryPaths) return;
 			const bashCommand = event.toolName === "bash" ? String((event.input as { command?: unknown })?.command ?? "") : undefined;
 			const matches = matchTier2(db, currentProjectScope(), {
@@ -320,10 +330,19 @@ export default function persistentMemory(pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("turn_end", async (_event, ctx) => {
+		maybeNudgeMissedModalSaveTurn(ctx as ExtensionCommandContext);
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		maybeNudgeMissedModalSaveTurn(ctx as ExtensionCommandContext);
+	});
+
 	pi.on("session_shutdown", async (event, _ctx) => {
 		lifecycleGeneration++;
 		void classifyReason(event?.reason, "quit");
 		latestSessionCtx = null;
+		pendingModalSaveTurn = null;
 		clearPendingReminderLessons();
 		db?.close();
 		db = null;
@@ -438,7 +457,30 @@ async function routeMemoryConsolidateThroughAgentTurn(ctx: ExtensionCommandConte
 		ctx.ui.notify("Memory menu cannot start an agent save turn in this context. Use /memory consolidate.", "error");
 		return;
 	}
-	await sendUserMessage(buildMemoryConsolidateDirective());
+	beginModalSaveTurn();
+	try {
+		await sendUserMessage(buildMemoryConsolidateDirective());
+	} catch (error) {
+		pendingModalSaveTurn = null;
+		ctx.ui.notify(`Memory menu failed to start save turn: ${formatError(error)}. Use /memory consolidate.`, "error");
+	}
+}
+
+function beginModalSaveTurn(): void {
+	pendingModalSaveTurn = { toolCalled: false, nudged: false };
+}
+
+function observeModalSaveToolCall(toolName: string): void {
+	if (pendingModalSaveTurn && toolName === SAVE_TO_MEMORY_TOOL_NAME) pendingModalSaveTurn.toolCalled = true;
+}
+
+function maybeNudgeMissedModalSaveTurn(ctx: ExtensionCommandContext): void {
+	const pending = pendingModalSaveTurn;
+	if (!pending) return;
+	pendingModalSaveTurn = null;
+	if (pending.toolCalled || pending.nudged) return;
+	pending.nudged = true;
+	ctx.ui.notify("Memory save turn ended without save_to_memory. Nothing was written. Use /memory consolidate to run the deterministic fallback.", "warning");
 }
 
 export function buildMemoryConsolidateDirective(): string {

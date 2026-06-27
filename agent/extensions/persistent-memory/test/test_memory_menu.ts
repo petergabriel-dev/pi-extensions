@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { buildMemoryConsolidateDirective, computeMemoryMenuModel } from "../index.js";
+import persistentMemory, { __beginModalSaveTurnForTest, __pendingModalSaveTurnForTest, buildMemoryConsolidateDirective, computeMemoryMenuModel } from "../index.js";
 
 console.log("Running test_memory_menu...");
 
@@ -43,9 +43,48 @@ function testConsolidateDirectiveRequiresToolCall() {
 	assert.match(directive, /\/memory consolidate/);
 }
 
+async function testMissedModalSaveTurnNudgesOnce() {
+	const { handlers, notifications } = setupExtensionHarness();
+	__beginModalSaveTurnForTest();
+	await emit(handlers, "turn_end", {}, { ui: { notify: (message: string) => notifications.push(message) } });
+	await emit(handlers, "agent_end", {}, { ui: { notify: (message: string) => notifications.push(message) } });
+	assert.equal(notifications.filter((message) => message.includes("without save_to_memory")).length, 1);
+	assert.equal(__pendingModalSaveTurnForTest(), null);
+}
+
+async function testModalSaveToolCallSuppressesNudge() {
+	const { handlers, notifications } = setupExtensionHarness();
+	__beginModalSaveTurnForTest();
+	await emit(handlers, "tool_call", { toolName: "save_to_memory", input: {}, toolCallId: "t1" }, { ui: { notify: (message: string) => notifications.push(message) } });
+	assert.equal(__pendingModalSaveTurnForTest()?.toolCalled, true);
+	await emit(handlers, "turn_end", {}, { ui: { notify: (message: string) => notifications.push(message) } });
+	assert.equal(notifications.filter((message) => message.includes("without save_to_memory")).length, 0);
+	assert.equal(__pendingModalSaveTurnForTest(), null);
+}
+
+function setupExtensionHarness() {
+	const handlers = new Map<string, Function[]>();
+	const notifications: string[] = [];
+	persistentMemory({
+		on: (name: string, handler: Function) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+		registerCommand: () => undefined,
+		registerTool: () => undefined,
+		appendEntry: () => undefined,
+		events: { on: () => undefined },
+		ui: {},
+	} as any);
+	return { handlers, notifications };
+}
+
+async function emit(handlers: Map<string, Function[]>, name: string, event: unknown, ctx: unknown) {
+	for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+}
+
 testStagingRecommendedFirst();
 testDeadLetterRecommendedWhenNoStaging();
 testNoRecommendationWhenNoWork();
 testUninitializedInitOnly();
 testConsolidateDirectiveRequiresToolCall();
+await testMissedModalSaveTurnNudgesOnce();
+await testModalSaveToolCallSuppressesNudge();
 console.log("test_memory_menu passed!");
