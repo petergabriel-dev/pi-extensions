@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { computeMemoryMenuModel } from "../index.js";
+import { buildMemoryConsolidateDirective, computeMemoryMenuModel } from "../index.js";
 
 console.log("Running test_memory_menu...");
 
@@ -35,8 +35,17 @@ function testUninitializedInitOnly() {
 	assert.deepEqual(recommendedValues(model), []);
 }
 
+function testConsolidateDirectiveRequiresToolCall() {
+	const directive = buildMemoryConsolidateDirective();
+	assert.match(directive, /save_to_memory tool exactly once/);
+	assert.match(directive, /lessons: \[\], preferences: \[\], decisions: \[\], domain: \[\]/);
+	assert.match(directive, /Do not edit memory files directly/);
+	assert.match(directive, /\/memory consolidate/);
+}
+
 testStagingRecommendedFirst();
 testDeadLetterRecommendedWhenNoStaging();
 testNoRecommendationWhenNoWork();
 testUninitializedInitOnly();
+testConsolidateDirectiveRequiresToolCall();
 console.log("test_memory_menu passed!");

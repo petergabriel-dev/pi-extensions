@@ -417,8 +417,8 @@ async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
 			continue;
 		}
 		if (choice === "consolidate") {
-			await consolidateMemoryCommand(ctx);
-			continue;
+			await routeMemoryConsolidateThroughAgentTurn(ctx);
+			return;
 		}
 		if (choice === "recover") {
 			await recoverMemoryCommand(ctx);
@@ -430,6 +430,26 @@ async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
 			return;
 		}
 	}
+}
+
+async function routeMemoryConsolidateThroughAgentTurn(ctx: ExtensionCommandContext): Promise<void> {
+	const sendUserMessage = (ctx as ExtensionCommandContext & { sendUserMessage?: (content: string) => Promise<void> }).sendUserMessage;
+	if (typeof sendUserMessage !== "function") {
+		ctx.ui.notify("Memory menu cannot start an agent save turn in this context. Use /memory consolidate.", "error");
+		return;
+	}
+	await sendUserMessage(buildMemoryConsolidateDirective());
+}
+
+export function buildMemoryConsolidateDirective(): string {
+	return [
+		"Persistent memory save requested from the /memory menu.",
+		"Review the current conversation and extract only durable, high-confidence memory candidates worth preserving.",
+		"You MUST call the save_to_memory tool exactly once. Do not edit memory files directly and do not run /memory consolidate.",
+		"Pass candidates with this shape: { lessons: [], preferences: [], decisions: [], domain: [] }.",
+		"Use empty arrays when nothing is worth saving so the transcript records a no-op save.",
+		"After the tool returns, briefly summarize what was added, updated, superseded, discarded, parked, or skipped.",
+	].join("\n");
 }
 
 async function selectMemoryMenuOverlay(ctx: ExtensionCommandContext, model: MemoryMenuModel): Promise<MemoryMenuAction | null> {
