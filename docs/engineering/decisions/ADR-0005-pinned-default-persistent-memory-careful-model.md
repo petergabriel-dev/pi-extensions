@@ -1,12 +1,15 @@
 ---
 id: ADR-0005
 title: Pinned Default Persistent-Memory Model Resolution
-status: Active
+status: Superseded
 date: 2026-06-02
-updated: 2026-06-18
+updated: 2026-06-27
+superseded_by: ADR-0014
 ---
 
 # ADR-0005: Pinned Default Persistent-Memory Model Resolution
+
+Superseded by [ADR-0014: Persistent Memory Inherits Session Model](ADR-0014-persistent-memory-inherits-session-model.md). This record is retained for historical context.
 
 ## Decision
 
@@ -57,6 +60,10 @@ Code:
 - Changing default providers/models or model-registry auth behavior.
 - Adding or changing model roles (extraction vs adjudication).
 - Changing `/memory model` behavior or `settings.json` persistence shape.
+
+## Superseded by
+
+- ADR-0014
 
 ## Supersedes
 
