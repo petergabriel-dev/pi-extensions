@@ -98,20 +98,16 @@ test("validate_tags valid and invalid", async ({ projectRoot }) => {
 	assert(bad.response.result.invalid.length >= 2, "invalid tag details missing");
 });
 
-test("capture writes note/staging and duplicate id is stable", async ({ projectRoot }) => {
+test("capture writes note/widget and duplicate id is stable", async ({ projectRoot }) => {
 	const id = crypto.randomUUID();
 	const text = `Core protocol capture ${id}`;
 	const first = await sendRequest(projectRoot, "capture", { claudeSessionId: `core-${id}`, context: "core protocol", notes: [{ type: "implementation", text }] }, id);
 	assert(first.response.ok, `capture failed: ${JSON.stringify(first.response)}`);
 	assert(first.response.result.widgetUpdated === true, "capture did not report widget update");
-	const staging = first.response.result.stagingFile;
-	assert(exists(staging), "staging file missing");
-	const before = fs.readFileSync(staging, "utf8");
-	assert(before.includes(id) && before.includes(text), "staging missing request/text");
+	assert(first.response.result.stagingFile === undefined, "capture should not write staging");
 	fs.unlinkSync(first.responsePath);
 	const second = await sendRequest(projectRoot, "capture", { claudeSessionId: `core-${id}`, notes: [{ type: "implementation", text: "DUPLICATE SHOULD NOT APPLY" }] }, id);
 	assert(JSON.stringify(second.response) === JSON.stringify(first.response), "duplicate capture response changed");
-	assert(fs.readFileSync(staging, "utf8") === before, "duplicate capture changed staging");
 });
 
 test("save_plan is visible through recall duplicate response stable", async ({ projectRoot }) => {

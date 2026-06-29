@@ -5,13 +5,7 @@ import type { FSWatcher } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { BUILD_PROMPT, DISCUSS_PROMPT, getWorkflowPolicySnapshot, PLAN_PROMPT, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
-import { deriveLessonTriggers, readStaging, stagingPath, writeStaging } from "../persistent-memory/consolidation/staging.js";
-import { formatTier1Block, formatTier2Block } from "../persistent-memory/retrieval/inject.js";
-import { selectTier1 } from "../persistent-memory/retrieval/tier1.js";
-import { matchTier2 } from "../persistent-memory/retrieval/tier2.js";
-import { projectScopeFromMemoryPaths, resolveMemoryIndexPath, resolveMemoryPaths } from "../persistent-memory/storage/paths.js";
-import { openIndex } from "../persistent-memory/storage/sqlite.js";
-import type { StagingFile } from "../persistent-memory/types.js";
+import { formatPersonalMemoryBlock, readPersonalMemory, resolvePersonalMemoryPath } from "../personal-memory/index.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "capture", "validate_tags", "save_plan"]);
@@ -209,8 +203,8 @@ function sessionIdFromContext(ctx: ExtensionContext): string | null {
 	}
 }
 
-function bridgePaths(projectMemoryDir: string): BridgePaths {
-	const root = path.join(projectMemoryDir, "bridge");
+function bridgePaths(projectRoot: string): BridgePaths {
+	const root = path.join(projectRoot, ".pi", "memory", "bridge");
 	return {
 		root,
 		requests: path.join(root, "requests"),
@@ -390,6 +384,16 @@ function existsSync(filePath: string): boolean {
 	try { fs.accessSync(filePath); return true; } catch { return false; }
 }
 
+function findProjectRoot(cwd: string): string | null {
+	let dir = path.resolve(cwd);
+	while (true) {
+		if (existsSync(path.join(dir, ".pi"))) return dir;
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
 function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: string }> {
 	const docsRoot = path.join(projectRoot, "docs", "engineering");
 	const docs: Array<{ path: string; text: string }> = [];
@@ -449,71 +453,6 @@ function normalizeCapturePayload(payload: Record<string, unknown>): CapturePaylo
 		...(typeof payload.claudeSessionId === "string" && payload.claudeSessionId.trim() ? { claudeSessionId: payload.claudeSessionId.trim() } : {}),
 		...(typeof payload.context === "string" && payload.context.trim() ? { context: payload.context.trim() } : {}),
 	};
-}
-
-function sessionIdForStaging(_ctx: ExtensionContext, payload: CapturePayload): string {
-	return payload.claudeSessionId ? `claude-code-${payload.claudeSessionId}` : `claude-code-${bridgeSessionId}`;
-}
-
-function emptyStaging(sessionId: string, projectRoot: string): StagingFile {
-	return {
-		schemaVersion: 1,
-		session_id: sessionId,
-		produced_at: new Date().toISOString(),
-		project_root: projectRoot,
-		candidates: {
-			lessons: [],
-			preferences: [],
-			decisions: [],
-			domain: [],
-		},
-	};
-}
-
-function appendCaptureToStaging(projectMemoryDir: string, projectRoot: string, ctx: ExtensionContext, payload: CapturePayload, request: BridgeRequest, result: AddResult): string {
-	const sessionId = sessionIdForStaging(ctx, payload);
-	const filePath = stagingPath(projectMemoryDir, sessionId);
-	const staging = readStaging(filePath) ?? emptyStaging(sessionId, projectRoot);
-	staging.produced_at = new Date().toISOString();
-	staging.project_root = projectRoot;
-	const evidence = {
-		discussion_note_ids: result.added.map((note) => note.id),
-		source: "claude-code",
-		request_id: request.id,
-		bridge_session_id: bridgeSessionId,
-		...(payload.claudeSessionId ? { claude_session_id: payload.claudeSessionId } : {}),
-		...(payload.context ? { context: payload.context } : {}),
-	};
-	const scopeSuggestion = projectRoot.startsWith(".") ? projectRoot.slice(1) : path.basename(projectRoot);
-	const triggerContext = {
-		...(payload.context ? { topic: payload.context } : {}),
-		project_root: projectRoot,
-	};
-	for (const note of result.added) {
-		if (note.type === "lesson") {
-			staging.candidates.lessons.push({
-				summary: note.text.slice(0, 96),
-				detail: note.text,
-				triggers: deriveLessonTriggers(note.text, triggerContext, scopeSuggestion),
-				scope_suggestion: scopeSuggestion,
-				source_evidence: evidence,
-			});
-		} else if (note.type === "preference") {
-			staging.candidates.preferences.push({ text: note.text, source_evidence: evidence });
-		} else if (note.type === "decision") {
-			staging.candidates.decisions.push({ summary: note.text.slice(0, 96), detail: note.text, source_evidence: evidence });
-		} else if (note.type === "requirement" || note.type === "constraint") {
-			staging.candidates.domain.push({ summary: note.text.slice(0, 96), detail: note.text, source_evidence: evidence });
-		} else {
-			staging.candidates.domain.push({
-				summary: note.text.slice(0, 96),
-				detail: `[${note.type}] ${note.text}`,
-				source_evidence: evidence,
-			});
-		}
-	}
-	writeStaging(filePath, staging);
-	return filePath;
 }
 
 function normalizeValidateTagsPayload(payload: Record<string, unknown>): ValidateTagsPayload {
@@ -612,59 +551,44 @@ function requestWorkflowState(pi: ExtensionAPI): Promise<Record<string, unknown>
 async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
 	const payload = normalizeRecallPayload(request.payload);
 	const cwd = activeProjectRoot ?? process.cwd();
-	const memoryPaths = resolveMemoryPaths(cwd);
-	if (!memoryPaths.projectRoot || !memoryPaths.projectMemoryDir) {
-		return errorResponse(request.id, "not_pi_project", "Pi bridge recall requires an existing Pi project with .pi memory.");
+	const projectRoot = findProjectRoot(cwd);
+	if (!projectRoot) {
+		return errorResponse(request.id, "not_pi_project", "Pi bridge recall requires an existing Pi project with a .pi directory.");
 	}
 
-	const db = openIndex(resolveMemoryIndexPath(memoryPaths));
-	try {
-		const projectScope = projectScopeFromMemoryPaths(memoryPaths);
-		const tier1 = selectTier1(db, projectScope);
-		const tier2Matches = payload.query?.trim()
-			? matchTier2(db, projectScope, { user_message_text: payload.query })
-			: [];
-		const tier2Lessons = tier2Matches.map((match) => match.lesson);
-		const memoryBlocks = [formatTier1Block(tier1.lessons), formatTier2Block(tier2Lessons)].filter((block) => block.trim().length > 0);
-		const workflowState = await requestWorkflowState(pi);
-		const workflowPlan = typeof workflowState?.plan === "string" ? workflowState.plan : undefined;
-		const savedPlan = workflowPlan
-			? {
-				planId: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.planId : null,
-				planText: workflowPlan,
-				savedAt: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.savedAt : null,
-			}
-			: latestSavedPlan;
-		return {
-			id: request.id,
-			ok: true,
-			result: {
-				requestId: request.id,
-				projectRoot: memoryPaths.projectRoot,
-				projectScope,
-				query: payload.query ?? "",
-				memory: {
-					tier1: {
-						count: tier1.lessons.length,
-						budgetUsed: tier1.budget_used,
-						truncated: tier1.truncated,
-						block: formatTier1Block(tier1.lessons),
-					},
-					tier2: {
-						count: tier2Lessons.length,
-						matches: tier2Matches.map((match) => ({ lessonId: match.lesson.id, trigger: match.matched_trigger })),
-						block: formatTier2Block(tier2Lessons),
-					},
-					blocks: memoryBlocks,
+	const memoryPath = await resolvePersonalMemoryPath();
+	const personalMemory = await readPersonalMemory(memoryPath);
+	const personalBlock = personalMemory ? formatPersonalMemoryBlock(personalMemory) : "";
+	const memoryBlocks = personalBlock ? [personalBlock] : [];
+	const workflowState = await requestWorkflowState(pi);
+	const workflowPlan = typeof workflowState?.plan === "string" ? workflowState.plan : undefined;
+	const savedPlan = workflowPlan
+		? {
+			planId: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.planId : null,
+			planText: workflowPlan,
+			savedAt: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.savedAt : null,
+		}
+		: latestSavedPlan;
+	return {
+		id: request.id,
+		ok: true,
+		result: {
+			requestId: request.id,
+			projectRoot,
+			query: payload.query ?? "",
+			memory: {
+				personal: {
+					path: memoryPath,
+					loaded: Boolean(personalMemory),
+					block: personalBlock,
 				},
-				docs: readEngineeringDocs(memoryPaths.projectRoot),
-				prompts: promptContextForMode(payload.mode),
-				savedPlan: latestSavedPlan,
+				blocks: memoryBlocks,
 			},
-		};
-	} finally {
-		db.close();
-	}
+			docs: readEngineeringDocs(projectRoot),
+			prompts: promptContextForMode(payload.mode),
+			savedPlan,
+		},
+	};
 }
 
 function requestDiscussionNotesAdd(pi: ExtensionAPI, requestId: string, payload: CapturePayload): Promise<AddResult> {
@@ -703,13 +627,12 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	} catch (error) {
 		return errorResponse(request.id, "invalid_capture", error instanceof Error ? error.message : String(error));
 	}
-	const memoryPaths = resolveMemoryPaths(activeProjectRoot ?? ctx.cwd ?? process.cwd());
-	if (!memoryPaths.projectRoot || !memoryPaths.projectMemoryDir) {
-		return errorResponse(request.id, "not_pi_project", "Pi bridge capture requires an existing Pi project with .pi memory.");
+	const projectRoot = findProjectRoot(activeProjectRoot ?? ctx.cwd ?? process.cwd());
+	if (!projectRoot) {
+		return errorResponse(request.id, "not_pi_project", "Pi bridge capture requires an existing Pi project with a .pi directory.");
 	}
 	try {
 		const addResult = await requestDiscussionNotesAdd(pi, request.id, payload);
-		const stagingFile = appendCaptureToStaging(memoryPaths.projectMemoryDir, memoryPaths.projectRoot, ctx, payload, request, addResult);
 		return {
 			id: request.id,
 			ok: true,
@@ -719,10 +642,9 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 				noteId: addResult.added[0]?.id ?? null,
 				added: addResult.added.length,
 				skipped: addResult.skipped,
-				stagingFile,
 				widgetUpdated: true,
 				source: "claude-code",
-				projectRoot: memoryPaths.projectRoot,
+				projectRoot,
 				...(payload.claudeSessionId ? { claudeSessionId: payload.claudeSessionId } : {}),
 			},
 		};
@@ -866,17 +788,17 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		stopActiveBridge();
 		passiveReason = null;
-		const memoryPaths = resolveMemoryPaths(ctx.cwd ?? process.cwd());
-		if (!memoryPaths.projectRoot || !memoryPaths.projectMemoryDir) {
+		const projectRoot = findProjectRoot(ctx.cwd ?? process.cwd());
+		if (!projectRoot) {
 			ctx.ui.setStatus(EXTENSION_ID, undefined);
 			return;
 		}
 
-		const paths = bridgePaths(memoryPaths.projectMemoryDir);
+		const paths = bridgePaths(projectRoot);
 		ensureBridgeDirs(paths);
 		const piSessionId = sessionIdFromContext(ctx);
-		const claim = claimSessionLock(paths, memoryPaths.projectRoot, piSessionId);
-		if (!claim.active) {
+		const claim = claimSessionLock(paths, projectRoot, piSessionId);
+		if (claim.active === false) {
 			passiveReason = claim.reason;
 			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 			ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
@@ -884,8 +806,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		}
 
 		activePaths = paths;
-		activeProjectRoot = memoryPaths.projectRoot;
-		writePolicy(paths, memoryPaths.projectRoot);
+		activeProjectRoot = projectRoot;
+		writePolicy(paths, projectRoot);
 		startWatcher(pi, paths, ctx);
 		heartbeatTimer = setInterval(() => {
 			if (!activePaths || !activeProjectRoot) return;
