@@ -1,12 +1,15 @@
 ---
 id: ADR-0008
 title: Persistent-memory reconcile connection ownership and observability
-status: Active
+status: Superseded
 date: 2026-06-03
 updated: 2026-06-10
+superseded_by: ADR-0016
 ---
 
 # ADR-0008: Persistent-memory reconcile connection ownership and observability
+
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
 
 > Amended by [ADR-0013](ADR-0013-manual-single-writer-persistent-memory-consolidation.md). Connection ownership and single-writer locking now apply to all manual canonical memory writers (`/memory consolidate`, `/memory reconcile`, `/memory recover`), and reinforcement no longer runs during shutdown.
 

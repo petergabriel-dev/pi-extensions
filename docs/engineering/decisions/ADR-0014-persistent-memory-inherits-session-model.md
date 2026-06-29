@@ -1,7 +1,7 @@
 ---
 id: ADR-0014
 title: Persistent Memory Inherits Session Model
-status: Active
+status: Superseded
 date: 2026-06-27
 decision: Persistent-memory extraction and reconciliation use the active session model from `ctx.model`; there is no picker, persisted override, env override, pinned default, or fallback model.
 why: Memory consolidation is manual/on-demand and should match the agent turn that requested it; removed model-resolution surface was extra state, drift, and failure behavior.
@@ -9,9 +9,12 @@ affects: persistent-memory model calls, /memory consolidate, /memory reconcile, 
 consequences: Memory quality/cost follows current chat model; missing `ctx.model` fails clearly instead of silently falling back.
 readWhen: changing persistent-memory model calls, save_to_memory, /memory consolidate/reconcile, model selection, settings persistence, or ADR-0005 history
 supersedes: ADR-0005
+superseded_by: ADR-0016
 ---
 
 # ADR-0014: Persistent Memory Inherits Session Model
+
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
 
 ## Decision
 

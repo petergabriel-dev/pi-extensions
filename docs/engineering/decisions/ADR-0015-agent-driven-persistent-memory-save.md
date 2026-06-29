@@ -1,7 +1,7 @@
 ---
 id: ADR-0015
 title: Agent-Driven Persistent-Memory Save Turn
-status: Active
+status: Superseded
 date: 2026-06-27
 decision: The `/memory` modal Consolidate action starts a normal agent turn that should call `save_to_memory`; the tool validates candidates, writes staging, and runs deterministic foreground reconciliation under the single-writer lock. Missed tool calls get a best-effort nudge to `/memory consolidate`.
 why: Saves should be visible in chat while preserving deterministic memory writes and avoiding silent data loss when extension APIs cannot force a main-agent tool call.
@@ -9,9 +9,12 @@ affects: /memory menu, save_to_memory, persistent-memory staging/reconcile, moda
 consequences: Agent extraction is best-effort and visible; actual writes remain deterministic; users retain `/memory consolidate` as fallback.
 readWhen: changing `/memory` modal Consolidate, save_to_memory, persistent-memory write invariants, missed-tool nudges, or ADR-0013 manual consolidation flow
 supersedes: none
+superseded_by: ADR-0016
 ---
 
 # ADR-0015: Agent-Driven Persistent-Memory Save Turn
+
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
 
 ## Decision
 

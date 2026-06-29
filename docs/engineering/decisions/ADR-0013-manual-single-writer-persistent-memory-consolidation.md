@@ -1,7 +1,7 @@
 ---
 id: ADR-0013
 title: Manual Single-Writer Persistent-Memory Consolidation
-status: Active
+status: Superseded
 date: 2026-06-26
 decision: Persistent-memory canonical writes are manual single-writer jobs; never-attempted candidates re-stage; reinforcement runs inside /memory consolidate.
 why: Prior automatic terminal behavior produced mostly attempts:0 deadletters and about 47% historical candidate loss.
@@ -9,9 +9,12 @@ affects: persistent-memory lifecycle, reconcile staging cleanup, /memory consoli
 consequences: Lifecycle no longer updates memory automatically; users run /memory consolidate; transient candidates are preserved until genuinely attempted or retry-capped.
 readWhen: changing persistent-memory lifecycle hooks, /memory consolidate/recover/reconcile, staging cleanup, dead-letter recovery, reinforcement, or mode-transition reminders
 supersedes: ADR-0011
+superseded_by: ADR-0016
 ---
 
 # ADR-0013: Manual Single-Writer Persistent-Memory Consolidation
+
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
 
 ## Decision
 

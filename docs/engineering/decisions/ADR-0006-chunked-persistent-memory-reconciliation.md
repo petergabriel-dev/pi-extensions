@@ -3,10 +3,12 @@ id: ADR-0006
 title: Chunked Persistent-Memory Reconciliation
 status: Superseded
 date: 2026-06-02
-superseded_by: ADR-0011
+superseded_by: ADR-0016
 ---
 
 # ADR-0006: Chunked Persistent-Memory Reconciliation
+
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
 
 > Superseded by [ADR-0011](ADR-0011-per-candidate-persistent-memory-reconciliation.md). ADR-0011 keeps bounded work and generation-guard goals but replaces cross-cycle re-staging with per-candidate commits, terminal staging consumption, and incremental SQLite writes.
 

@@ -1,12 +1,15 @@
 ---
 id: ADR-0009
 title: Bridge staging validity and malformed quarantine
-status: Active
+status: Superseded
 date: 2026-06-03
 updated: 2026-06-10
+superseded_by: ADR-0016
 ---
 
 # ADR-0009: Bridge staging validity and malformed quarantine
+
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
 
 ## Decision
 
