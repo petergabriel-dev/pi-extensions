@@ -23,6 +23,20 @@ export interface ExtractionDeps {
 	logger?: ExtractionLogger;
 }
 
+const MAX_RAW_MODEL_RESPONSE_CHARS = 2_000;
+
+export class RawModelResponseError extends Error {
+	constructor(message: string, readonly rawModelResponse: string) {
+		super(message);
+		this.name = "RawModelResponseError";
+	}
+}
+
+export function truncatedRawModelResponse(raw: string): string {
+	const compact = raw.replace(/\s+/g, " ").trim();
+	return compact.length > MAX_RAW_MODEL_RESPONSE_CHARS ? `${compact.slice(0, MAX_RAW_MODEL_RESPONSE_CHARS)}…` : compact;
+}
+
 export type ExtractionRunResult =
 	| { status: "skipped"; reason: "no_project" | "no_high_value_content" | "no_candidates" }
 	| { status: "written"; filePath: string; totalCandidates: number }
@@ -87,8 +101,9 @@ export async function runExtraction(
 		// candidates reach the staging queue.
 		const sanitized = sanitizeExtractionResult(parsed, logger);
 		if (!sanitized) {
-			logger.error?.("[persistent-memory] extraction produced invalid schema; not writing staging.");
-			return { status: "failed", reason: "invalid_schema" };
+			const error = new RawModelResponseError("extraction produced invalid schema", truncatedRawModelResponse(rawResponse));
+			logger.error?.("[persistent-memory] extraction produced invalid schema; not writing staging.", error);
+			return { status: "failed", reason: "invalid_schema", error };
 		}
 		const candidates = sanitized;
 
@@ -168,12 +183,8 @@ export function sanitizeExtractionResult(
 	result: unknown,
 	logger?: { warn?: (...args: unknown[]) => void },
 ): ExtractionCandidates | null {
-	const root = asRecord(result);
-	const candidates = asRecord(root.candidates);
-	if (!Array.isArray(candidates.lessons)) return null;
-	if (!Array.isArray(candidates.preferences)) return null;
-	if (!Array.isArray(candidates.decisions)) return null;
-	if (!Array.isArray(candidates.domain)) return null;
+	const candidates = extractionCandidateEnvelope(result);
+	if (!candidates) return null;
 
 	const lessons = sanitizeArray(candidates.lessons, sanitizeLessonCandidate, logger, "lesson");
 	const preferences = sanitizeArray(candidates.preferences, normalizePreferenceCandidate, logger, "preference");
@@ -181,6 +192,24 @@ export function sanitizeExtractionResult(
 	const domain = sanitizeArray(candidates.domain, normalizeDomainCandidate, logger, "domain");
 
 	return { lessons, preferences, decisions, domain };
+}
+
+function extractionCandidateEnvelope(result: unknown): { lessons: unknown[]; preferences: unknown[]; decisions: unknown[]; domain: unknown[] } | null {
+	const root = asRecord(result);
+	const categoryKeys = ["lessons", "preferences", "decisions", "domain"];
+	const hasFlattenedEnvelope = categoryKeys.some((key) => key in root);
+	if (root.candidates === undefined && !hasFlattenedEnvelope) return null;
+	if (root.candidates !== undefined && (!root.candidates || typeof root.candidates !== "object" || Array.isArray(root.candidates))) return null;
+	const candidates = root.candidates === undefined ? root : asRecord(root.candidates);
+	for (const key of categoryKeys) {
+		if (candidates[key] !== undefined && !Array.isArray(candidates[key])) return null;
+	}
+	return {
+		lessons: Array.isArray(candidates.lessons) ? candidates.lessons : [],
+		preferences: Array.isArray(candidates.preferences) ? candidates.preferences : [],
+		decisions: Array.isArray(candidates.decisions) ? candidates.decisions : [],
+		domain: Array.isArray(candidates.domain) ? candidates.domain : [],
+	};
 }
 
 function sanitizeArray<T>(
@@ -227,12 +256,8 @@ function sanitizeLessonCandidate(raw: unknown): LessonCandidate | null {
 }
 
 export function normalizeExtractionResult(result: unknown): ExtractionCandidates | null {
-	const root = asRecord(result);
-	const candidates = asRecord(root.candidates);
-	if (!Array.isArray(candidates.lessons)) return null;
-	if (!Array.isArray(candidates.preferences)) return null;
-	if (!Array.isArray(candidates.decisions)) return null;
-	if (!Array.isArray(candidates.domain)) return null;
+	const candidates = extractionCandidateEnvelope(result);
+	if (!candidates) return null;
 
 	const lessons = normalizeArray(candidates.lessons, normalizeLessonCandidate);
 	const preferences = normalizeArray(candidates.preferences, normalizePreferenceCandidate);

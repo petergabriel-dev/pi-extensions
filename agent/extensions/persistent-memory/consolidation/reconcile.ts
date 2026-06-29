@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { normalizeExtractionResult, parseModelJson } from "./extract.js";
+import { normalizeExtractionResult, parseModelJson, RawModelResponseError, truncatedRawModelResponse } from "./extract.js";
 import { buildReconciliationUserPrompt, RECONCILIATION_SYSTEM_PROMPT } from "./prompts.js";
 import { deleteStaging, listStagingFiles, repairStagingFile, writeStaging, writeDeadLetter, type DeadLetteredCandidate } from "./staging.js";
 import {
@@ -788,6 +788,7 @@ async function reconcileCandidateSet(
 
 	let normalized = normalizeReconciliationResponse(parsed, existing, candidatesSubset);
 	let bestParsed = parsed;
+	let bestRawResponse = rawResponse;
 	let bestError = normalized instanceof ReconciliationValidationError ? normalized : undefined;
 
 	if (normalized instanceof ReconciliationValidationError) {
@@ -810,6 +811,7 @@ Please correct these errors and output the complete and valid JSON matching the 
 			if (normalizedRepair instanceof ReconciliationValidationError) {
 				logger.warn?.(`[persistent-memory] reconciliation repair model also returned invalid actions (${normalizedRepair.message}); proceeding to partial reconciliation.`);
 				bestParsed = parsedRepair;
+				bestRawResponse = rawRepairResponse;
 				bestError = normalizedRepair;
 			} else {
 				normalized = normalizedRepair;
@@ -824,8 +826,9 @@ Please correct these errors and output the complete and valid JSON matching the 
 		const plan = partial.plan;
 		const totalActions = plan.lessons.length + plan.preferences.length + plan.decisions.length + plan.domain.length;
 		if (totalActions === 0) {
-			logger.warn?.("[persistent-memory] reconciliation model response is entirely invalid; re-staging validation-rejected candidates.");
-			return { status: "failed", reason: "invalid_model_response", plan, appliedRefs: partial.appliedRefs, attemptedRefs, modelErrored: false, error: bestError, bestError };
+			const error = new RawModelResponseError(bestError?.message ?? "reconciliation model response is entirely invalid", truncatedRawModelResponse(bestRawResponse));
+			logger.warn?.("[persistent-memory] reconciliation model response is entirely invalid; re-staging validation-rejected candidates.", error);
+			return { status: "failed", reason: "invalid_model_response", plan, appliedRefs: partial.appliedRefs, attemptedRefs, modelErrored: false, error, bestError };
 		}
 		return { status: "completed", plan, appliedRefs: partial.appliedRefs, attemptedRefs, modelErrored: false, bestError };
 	}

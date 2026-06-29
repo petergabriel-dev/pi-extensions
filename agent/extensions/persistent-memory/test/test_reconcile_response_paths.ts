@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { extractLastAssistantText, extractSubmitPlanToolArguments, SUBMIT_PLAN_TOOL_NAME } from "../consolidation/careful-model.js";
+import { RawModelResponseError } from "../consolidation/extract.js";
 import { runReconciliation } from "../consolidation/reconcile.js";
 import { writeStaging } from "../consolidation/staging.js";
 import { parseDomainFile } from "../storage/markdown.js";
@@ -101,10 +102,26 @@ async function testTolerantParsePreventsParseErrorForRepairableReconciliationJso
 	assert.equal(fact.detail, "line one\nline two");
 }
 
+async function testInvalidReconciliationCarriesRawModelOutput() {
+	const { root, mem } = setup();
+	const raw = JSON.stringify({ lessons: [], preferences: [], decisions: [], domain: [], extra: "x".repeat(3000) });
+	const result = await runReconciliation({ projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, {} as any, {
+		chunkSize: 1,
+		rebuildIndex: () => undefined,
+		callCarefulModel: async () => raw,
+	});
+	if (result.status !== "failed") throw new Error(`expected failed reconciliation, got ${result.status}`);
+	assert.equal(result.reason, "invalid_model_response");
+	assert.ok(result.error instanceof RawModelResponseError);
+	assert.match(result.error.rawModelResponse, /extra/);
+	assert.ok(result.error.rawModelResponse.length < raw.length);
+}
+
 async function main() {
 	await testForcedSubmitPlanToolArgumentsFeedReconciliation();
 	await testThinkingOnlyAssistantTextCanFeedReconciliation();
 	await testTolerantParsePreventsParseErrorForRepairableReconciliationJson();
+	await testInvalidReconciliationCarriesRawModelOutput();
 	console.log("test_reconcile_response_paths passed!");
 }
 

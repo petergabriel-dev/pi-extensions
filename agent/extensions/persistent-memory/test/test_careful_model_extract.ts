@@ -1,6 +1,9 @@
 import assert from "node:assert";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildSubmitPlanTool, extractLastAssistantText, extractSubmitPlanToolArguments, SUBMIT_PLAN_TOOL_NAME } from "../consolidation/careful-model.js";
-import { parseModelJson, validateExtractionResult } from "../consolidation/extract.js";
+import { RawModelResponseError, parseModelJson, runExtraction, validateExtractionResult } from "../consolidation/extract.js";
 import { EXTRACTION_SYSTEM_PROMPT, RECONCILIATION_SYSTEM_PROMPT } from "../consolidation/prompts.js";
 
 console.log("Running test_careful_model_extract...");
@@ -102,6 +105,27 @@ const validExtractionJson = JSON.stringify({
 		content: [{ type: "text", text: validExtractionJson }],
 	} as never);
 	assert.strictEqual(extracted, null);
+}
+
+// Invalid extraction schema carries truncated raw model output for diagnostics.
+{
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pm-extract-raw-"));
+	const mem = path.join(root, ".pi", "memory");
+	fs.mkdirSync(path.join(mem, "staging"), { recursive: true });
+	const raw = JSON.stringify({ nope: "x".repeat(3000) });
+	const result = await runExtraction({
+		sessionManager: {
+			getBranch: () => [{ type: "custom", customType: "discussion-notes", data: { schemaVersion: 1, notes: [{ type: "preference" }] } }],
+		},
+	}, { projectRoot: root, projectMemoryDir: mem, globalMemoryDir: mem }, "s1", {
+		callCarefulModel: async () => raw,
+		logger: {},
+	});
+	if (result.status !== "failed") throw new Error(`expected failed extraction, got ${result.status}`);
+	assert.equal(result.reason, "invalid_schema");
+	assert.ok(result.error instanceof RawModelResponseError);
+	assert.match(result.error.rawModelResponse, /nope/);
+	assert.ok(result.error.rawModelResponse.length < raw.length);
 }
 
 // Tool schemas are registered under the single custom tool name and use TypeBox-shaped JSON schema.
