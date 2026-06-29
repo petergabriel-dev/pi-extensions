@@ -355,7 +355,7 @@ export default function persistentMemory(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 			if (trimmed === "") {
-				await showMemoryMenu(ctx);
+				await showMemoryMenu(pi, ctx);
 				return;
 			}
 			if (trimmed === "list") {
@@ -415,7 +415,7 @@ function notifyMemoryUsage(ctx: ExtensionCommandContext): void {
 	ctx.ui.notify("Usage: /memory, /memory list, /memory init, /memory staging, /memory status, /memory reconcile, /memory consolidate, /memory recover, /memory firings, /memory deadletter, /memory sweep, /memory lowsignal, /memory contradictions", "warning");
 }
 
-async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
+async function showMemoryMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	if (!(ctx as ExtensionCommandContext & { hasUI?: boolean }).hasUI) {
 		notifyMemoryUsage(ctx);
 		return;
@@ -437,7 +437,7 @@ async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
 			continue;
 		}
 		if (choice === "consolidate") {
-			await routeMemoryConsolidateThroughAgentTurn(ctx);
+			await routeMemoryConsolidateThroughAgentTurn(pi, ctx);
 			return;
 		}
 		if (choice === "recover") {
@@ -452,15 +452,16 @@ async function showMemoryMenu(ctx: ExtensionCommandContext): Promise<void> {
 	}
 }
 
-async function routeMemoryConsolidateThroughAgentTurn(ctx: ExtensionCommandContext): Promise<void> {
-	const sendUserMessage = (ctx as ExtensionCommandContext & { sendUserMessage?: (content: string) => Promise<void> }).sendUserMessage;
-	if (typeof sendUserMessage !== "function") {
-		ctx.ui.notify("Memory menu cannot start an agent save turn in this context. Use /memory consolidate.", "error");
-		return;
-	}
+export async function __routeMemoryConsolidateThroughAgentTurnForTest(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+	await routeMemoryConsolidateThroughAgentTurn(pi, ctx);
+}
+
+async function routeMemoryConsolidateThroughAgentTurn(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	beginModalSaveTurn();
 	try {
-		await sendUserMessage(buildMemoryConsolidateDirective());
+		const options = typeof ctx.isIdle === "function" && !ctx.isIdle() ? { deliverAs: "followUp" as const } : undefined;
+		if (options) await Promise.resolve(pi.sendUserMessage(buildMemoryConsolidateDirective(), options));
+		else await Promise.resolve(pi.sendUserMessage(buildMemoryConsolidateDirective()));
 	} catch (error) {
 		pendingModalSaveTurn = null;
 		ctx.ui.notify(`Memory menu failed to start save turn: ${formatError(error)}. Use /memory consolidate.`, "error");

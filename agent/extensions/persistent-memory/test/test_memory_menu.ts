@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import persistentMemory, { __beginModalSaveTurnForTest, __pendingModalSaveTurnForTest, buildMemoryConsolidateDirective, computeMemoryMenuModel } from "../index.js";
+import persistentMemory, { __beginModalSaveTurnForTest, __pendingModalSaveTurnForTest, __routeMemoryConsolidateThroughAgentTurnForTest, buildMemoryConsolidateDirective, computeMemoryMenuModel } from "../index.js";
 
 console.log("Running test_memory_menu...");
 
@@ -62,6 +62,35 @@ async function testModalSaveToolCallSuppressesNudge() {
 	assert.equal(__pendingModalSaveTurnForTest(), null);
 }
 
+async function testModalConsolidateUsesPiSendUserMessage() {
+	const sent: Array<{ content: string; options?: unknown }> = [];
+	await __routeMemoryConsolidateThroughAgentTurnForTest({
+		sendUserMessage: (content: string, options?: unknown) => sent.push({ content, options }),
+	} as any, { isIdle: () => true, ui: { notify: () => undefined } } as any);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0]!.content, /Persistent memory save requested/);
+	assert.equal(sent[0]!.options, undefined);
+	assert.deepEqual(__pendingModalSaveTurnForTest(), { toolCalled: false, nudged: false });
+}
+
+async function testModalConsolidateQueuesFollowUpWhenBusy() {
+	const sent: Array<{ content: string; options?: unknown }> = [];
+	await __routeMemoryConsolidateThroughAgentTurnForTest({
+		sendUserMessage: (content: string, options?: unknown) => sent.push({ content, options }),
+	} as any, { isIdle: () => false, ui: { notify: () => undefined } } as any);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(sent[0]!.options, { deliverAs: "followUp" });
+}
+
+async function testModalConsolidateFailureClearsPendingTurn() {
+	const notifications: string[] = [];
+	await __routeMemoryConsolidateThroughAgentTurnForTest({
+		sendUserMessage: () => { throw new Error("boom"); },
+	} as any, { isIdle: () => true, ui: { notify: (message: string) => notifications.push(message) } } as any);
+	assert.equal(__pendingModalSaveTurnForTest(), null);
+	assert.equal(notifications.filter((message) => message.includes("failed to start save turn")).length, 1);
+}
+
 function setupExtensionHarness() {
 	const handlers = new Map<string, Function[]>();
 	const notifications: string[] = [];
@@ -87,4 +116,7 @@ testUninitializedInitOnly();
 testConsolidateDirectiveRequiresToolCall();
 await testMissedModalSaveTurnNudgesOnce();
 await testModalSaveToolCallSuppressesNudge();
+await testModalConsolidateUsesPiSendUserMessage();
+await testModalConsolidateQueuesFollowUpWhenBusy();
+await testModalConsolidateFailureClearsPendingTurn();
 console.log("test_memory_menu passed!");

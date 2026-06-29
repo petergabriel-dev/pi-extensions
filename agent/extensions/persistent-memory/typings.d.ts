@@ -15,6 +15,7 @@ declare module "@mariozechner/pi-coding-agent" {
 			confirm(title: string, message: string): Promise<boolean>;
 			[key: string]: any;
 		};
+		sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void | Promise<void>;
 	}
 
 	export interface ExtensionCommandContext {
