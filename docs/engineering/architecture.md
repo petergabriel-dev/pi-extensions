@@ -1,24 +1,22 @@
-# Architecture
-
 ## Pi ↔ Claude Code bridge
 
-Claude Code is a read-only planning surface for existing Pi projects. Pi remains source of truth for memory, docs validation, discussion notes, and build handoff.
+Claude Code is a read-only planning surface for existing Pi projects. Pi remains source of truth for engineering docs validation, discussion notes, personal memory recall, workflow prompts, saved-plan handoff, and build execution.
 
 Flow:
 
 1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active interactive session.
-2. Bridge resolves project memory from nearest `.pi/` marker via Pi memory path logic.
-3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json`.
+2. Bridge resolves the project root from the nearest `.pi/` marker.
+3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json` for IPC and liveness.
 4. Claude Code MCP client `agent/claude-bridge-client/pi-bridge-mcp.js` writes UUID request JSON files and polls matching responses for up to 2s.
 5. Pi bridge handles `recall`, `capture`, `validate_tags`, and `save_plan` by reusing Pi-side extension functions.
-6. Bridge recall responses include `prompts.discussPrompt`, `prompts.planPrompt`, and `prompts.buildPrompt` sourced from workflow-modes constants; Claude commands treat those strings as authoritative mode behavior instead of duplicating them.
+6. Bridge recall responses include engineering docs, `~/.pi/memory.md` personal memory, workflow-mode prompts, and saved-plan context.
 7. Claude Code never imports Pi internals; only the Pi bridge extension imports sibling Pi extension code.
 
 Core boundaries:
 
-- **Pi bridge extension:** Pi-coupled layer. Reuses workflow-modes, discussion-notes, persistent-memory, and engineering-docs code.
+- **Pi bridge extension:** Pi-coupled layer. Reuses workflow-modes, discussion-notes, engineering-docs, and personal-memory code.
 - **Claude MCP client:** Thin file-protocol client. Node stdlib only; no Pi imports.
-- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools and `dangerouslyDisableSandbox`. On macOS with `/usr/bin/sandbox-exec`, Bash is allowed only by rewriting the command through a Seatbelt sandbox. If that sandbox is unavailable, Bash denies closed rather than using an unsandboxed regex allowlist.
+- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools and `dangerouslyDisableSandbox`. On macOS with `/usr/bin/sandbox-exec`, Bash is allowed only by rewriting the command through a Seatbelt sandbox. If that sandbox is unavailable, Bash denies closed.
 
 Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 
@@ -28,7 +26,9 @@ Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 - `policy.json`: fresh Bash/read-only policy snapshot sourced from Pi workflow-modes exports
 - `session.json`: active bridge session lock + heartbeat
 
-`capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension updates its own `currentPlan`, appends `workflow-plan`, and returns `workflow-modes:save-plan-result`.
+`capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. It does not stage memory candidates. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension updates its own `currentPlan`, appends `workflow-plan`, and returns `workflow-modes:save-plan-result`.
+
+`recall_memory` returns project docs and personal memory instead of retired private indexes. Project truth comes from `docs/engineering/`; cross-repo personal preferences/traps come from `~/.pi/memory.md` through `agent/extensions/personal-memory/index.ts`. See ADR-0016.
 
 ## Workflow modes read-only Bash sandbox
 
@@ -59,30 +59,21 @@ Concurrency is managed by `agent/extensions/subagents/concurrency.ts`: a configu
 
 Subagent timeouts are idle-based with an absolute backstop. `agent/extensions/subagents/timeout.ts` provides a host-import-free watchdog with `touch()` resetting only the idle timer and `maxTotalMs` remaining absolute (timeout.ts:28-83). `runSubagent()` touches the watchdog on every child `AgentSessionEvent`, so streaming `message_update` events and tool lifecycle events keep an active child alive while silence past `idleTimeoutMs` aborts as `failureKind: "idle"` (spawn.ts:349-362, spawn.ts:384-400). `maxTotalMs` aborts continuously active runaway children as `failureKind: "max_total"`; timeout failures preserve partial output and include `partialWork` (spawn.ts:60-73, spawn.ts:430-440). `spawn_explorer`, nested explorer, `spawn_worker`, and `subagents_debug_run_agent` resolve `idleTimeoutMs`/`maxTotalMs` from per-call params, then `subagents` settings, then defaults; deprecated `timeoutMs` maps to idle timeout (index.ts:63-66, index.ts:461-466, index.ts:551-560, index.ts:675-684, index.ts:755-764, index.ts:925-933).
 
-## Persistent-Memory Write Pipeline
+## Memory architecture
 
-Persistent memory is local-first markdown plus SQLite indexing under `<project>/.pi/memory/`. Canonical memory writes are manual and single-writer: lifecycle hooks may open/read `index.db`, refresh derived caches, inject retrieved memory, and append in-memory/telemetry observations, but they do not mutate `lessons.md`, `preferences.md`, `decisions.md`, `domain.md`, or consume staging.
+Project memory now lives in engineering docs under `docs/engineering/`:
 
-Manual commands own canonical mutation:
+- `architecture.md` for system shape and component boundaries.
+- `dev-workflow.md` for how to operate and verify the system.
+- `conventions.md`, `invariants.md`, and `traps.md` for rules and known failure modes.
+- `decisions/ADR-*.md` for decisions and superseded history.
 
-1. **Session lifecycle:** `session_start` resolves memory paths, opens `index.db`, schedules codebase-map regeneration, and updates the memory meter. `session_shutdown` closes the active db and clears in-memory pending reminders only. There is no automatic extraction, reconciliation, reinforcement, or firing-log clear on start/shutdown.
-2. **Modal agent-driven save:** Selecting Consolidate in the `/memory` modal sends a normal agent turn directive. The agent should extract durable candidates from chat and call `save_to_memory` exactly once. `save_to_memory` validates candidates, writes staging, and runs foreground reconciliation under the canonical-writer lock. If the turn ends without that tool call, the user gets one nudge pointing to deterministic `/memory consolidate`.
-3. **Typed manual consolidation:** `/memory consolidate` remains direct and deterministic: it verifies the current session branch is available, runs extraction for the active session into `staging/`, runs foreground reconciliation, then applies reinforcement from accumulated firing telemetry. It holds the `canonical-writer.lock` for the whole job and reports extraction, add/re-stage/dead-letter, write, index, and reinforcement counts.
-4. **Manual reconcile:** `/memory reconcile` processes existing staging in the foreground using its own SQLite connection and the same canonical-writer lock. It is useful when staging already exists or after `/memory recover`.
-5. **Manual recover:** `/memory recover` reads `deadletter/*.json`, groups recoverable candidates by `session_id`, validates reconstructed staging through `repairStagingFile`, writes valid candidates back to `staging/`, and deletes each deadletter only after successful staging write. Malformed deadletters stay in place and are reported.
-6. **Validate-at-write extraction:** Extraction parses careful-model output, sanitizes each candidate before staging, drops malformed individual candidates, and derives lesson triggers deterministically when missing/empty. Malformed candidates should not enter `staging/`.
-7. **Per-candidate reconciliation:** `runReconciliation` prepares refs, pre-filters exact duplicates, shortlists same-scope lexical collisions, deterministically adds empty-shortlist candidates with zero model calls, and adjudicates lesson collisions through a bounded verdict contract (`distinct`, `duplicate`, `supersedes`, `merge`).
-8. **Re-stage with retry cap:** Successfully committed candidates leave staging. Never-attempted candidates remain staged unchanged. Attempted unresolved candidates increment `reconcile_attempts` and remain staged while under retry cap 3; at/over cap they move to `deadletter/` with reason. Wrong-project files are left for their owner.
-9. **Deterministic state transitions:** Code owns ids, timestamps, scopes, refs, trigger preservation/derivation, reinforcement counts, status flags, and supersede pointers. Models do not emit structural fields. Supersede/merge are reversible status/pointer transitions and records are never deleted.
-10. **Incremental SQLite writes:** Reconcile owns a dedicated SQLite connection. After each successful candidate/batch markdown commit, changed records are upserted into that connection; candidate-processing paths do not perform a final whole-index rebuild-and-swap. Generation guards prevent stale owned connections from replacing the active handle.
-11. **Run-log observability:** The bounded append-only run-log records run counts, per-candidate outcomes, and discard/dup-rate metrics. `/memory status` surfaces recent runs without using `setFooter`.
-12. **Offline sweep/review:** `/memory sweep` archives only unambiguously dead lessons by reversible status flag, flags low-signal lessons for review, and queues suspected contradiction groups without auto-resolving them.
+Cross-repo personal memory is one small user-global file: `~/.pi/memory.md`. `agent/extensions/personal-memory/index.ts` owns it:
 
-### Persistent-memory model use
+1. `/remember <text>` validates a small text snippet and appends a dated bullet to `~/.pi/memory.md`.
+2. `before_agent_start` reads the whole file, skips absent/empty files, and appends the block to the system prompt.
+3. The optional `remember` tool is best-effort and intended only when the user explicitly asks to remember a small durable personal preference or lesson.
 
-Persistent-memory model calls inherit the active session model from `ctx.model`:
+There is no automatic model extraction or reconciliation pipeline. Reliability comes from host file append/read for personal memory and explicit docs edits for project truth. The personal file is fully injected, so it must stay small and user-pruned.
 
-- `/memory consolidate` extraction passes `ctx.model` to the careful model call.
-- `/memory reconcile` and `save_to_memory` reconciliation pass `ctx.model` to adjudication/reconciliation model calls.
-- There is no `/memory model`, persisted override, model env var, pinned default, or fallback model. Missing `ctx.model` is a clear failure at the model-call boundary.
-
+Claude bridge recall combines the two sources: engineering docs plus the personal-memory block. Bridge capture updates live discussion notes only; it does not write project memory or personal memory. See ADR-0016.

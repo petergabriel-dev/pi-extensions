@@ -2,7 +2,7 @@
 
 | ADR | Status | Summary | Read when |
 |---|---|---|---|
-| [ADR-0001](ADR-0001-pi-claude-bridge-boundary.md) | Active | Pi is source of truth; Claude Code is a thin read-only bridge client requiring live Pi and fail-loud behavior. | changing bridge protocol, Claude commands, memory/docs capture, read-only hooks, or workflow plan handoff |
+| [ADR-0001](ADR-0001-pi-claude-bridge-boundary.md) | Active | Pi is source of truth; Claude Code is a thin read-only bridge client for Notes, engineering docs, personal memory, workflow prompts, and plan handoff. | changing bridge protocol, Claude commands, capture/recall behavior, read-only hooks, or workflow plan handoff |
 | [ADR-0002](ADR-0002-reliable-persistent-memory-reconciliation.md) | Superseded | Superseded by ADR-0016; historical partial-batch persistent-memory reconciliation design. | reading historical persistent-memory reconciliation behavior |
 | [ADR-0003](ADR-0003-non-blocking-reason-aware-persistent-memory-consolidation.md) | Superseded | Superseded by ADR-0016; historical lifecycle, sweep, and careful-model structured-output behavior. | reading historical persistent-memory lifecycle behavior |
 | [ADR-0004](ADR-0004-pi-subagents.md) | Active | Pi subagents use persisted in-process child sessions, structured-return-only parent context, a parent-enforced worker Build gate, bounded main→worker→explorer graph, and concurrency lanes with ownership guards. | modifying subagent spawning, worker/explorer tools, workflow gates, concurrency, nested delegation, or child session persistence |

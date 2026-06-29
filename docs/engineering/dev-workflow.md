@@ -35,7 +35,7 @@ Real acceptance checks:
 - Pi `/plan view` shows bridge-saved plan.
 - Pi `/mode build` keeps saved plan available.
 - Claude Code `Edit` and `git commit` are denied in `.pi` projects.
-- Claude Code read-only Bash such as `rg` is allowed only with fresh bridge policy.
+- Claude Code read-only Bash such as `rg` is allowed only through the sandbox hook; if sandboxing is unavailable, Bash denies closed.
 - On macOS with `/usr/bin/sandbox-exec`, Claude Code allowed Bash is rewritten through the read-only sandbox hook; inspect hook output with `--include-hook-events` or direct hook smoke tests when debugging.
 
 No-commit note: this `~/.pi` workspace may not be a Git repo. Build checkpoints can be explicit no-commit checkpoints when approved by the user.
@@ -56,32 +56,27 @@ npm run typecheck
 - fallback policy allow/deny behavior;
 - behavioral sandbox contract when a real launcher is available, otherwise a no-launcher skip path.
 
-## Persistent-Memory Extension testing
+## Personal-memory Extension testing
 
-Workflow menu:
+Personal memory command:
 
 ```text
-/memory
+/remember <small durable personal preference or lesson>
 ```
 
-Bare `/memory` opens the state-aware memory menu in interactive Pi sessions. It shows live staging/deadletter counts, marks one recommended next step when work exists, and offers Consolidate, Recover, and Inspect / advanced. Typed subcommands still work unchanged (`/memory list`, `/memory status`, `/memory consolidate`, `/memory recover`, etc.). Non-interactive command contexts fall back to the typed usage notice.
+`/remember` appends a dated bullet to `~/.pi/memory.md`. That file is loaded in full on the next agent turn by `agent/extensions/personal-memory/index.ts`, so keep it small and do not put project-specific facts there.
 
-Model use:
-
-Persistent-memory model calls inherit the active session model from `ctx.model`. There is no `/memory model` picker, persisted model override, env override, pinned default, or fallback model.
-
-To run typecheck and tests in the persistent-memory extension directory:
+To run typecheck and tests:
 
 ```bash
-cd agent/extensions/persistent-memory
+cd agent/extensions/personal-memory
 npm run typecheck
 npm test
 ```
 
-This runs the typechecker (`tsc --noEmit`) and executes standalone TS unit test suites under `test/` using `tsx`, including:
-- `test_classifier.ts`: Tests reason-aware classification of session transitions.
-- `test_reason_matrix.ts`: Tests mapped lifecycle actions for different transition reasons.
-- `test_generation_swap.ts`: Tests background task lifecycle generation swap logic.
-- `test_firing_log.ts`: Tests firing log logging and preservation across reload transitions.
-- `test_memory_consolidate.ts`: Tests typed consolidation, session-model use, lock release, branch requirement, and reinforcement.
-- `test_save_to_memory_tool.ts`: Tests deterministic agent-driven save staging, reconciliation outcomes, and malformed-input rejection.
+Manual verification:
+
+1. Run `/remember test-fact` in Pi.
+2. Confirm `~/.pi/memory.md` contains the dated bullet.
+3. Start a new Pi session in another project.
+4. Confirm the memory block appears in agent context.

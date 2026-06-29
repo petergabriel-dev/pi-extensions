@@ -13,7 +13,7 @@
 - Claude Code Bash in `.pi` projects must deny `dangerouslyDisableSandbox`; sandbox bypass flags are not allowed in read-only bridge mode.
 - When `sandbox-exec` is available, Claude Code Bash must be wrapped through `hookSpecificOutput.updatedInput.command` and allowed only through that Seatbelt sandbox.
 - When `sandbox-exec` is unavailable, Claude Code Bash in `.pi` projects must deny closed; there is no unsandboxed allowlist fallback.
-- Bridge requests are idempotent by UUID. Replayed request IDs return the processed response and must not duplicate notes, staging candidates, or saved plans.
+- Bridge requests are idempotent by UUID. Replayed request IDs return the processed response and must not duplicate notes or saved plans.
 - v1 supports one active Pi bridge session per project. A second active watcher must become passive/refuse rather than process the same request stream.
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
@@ -41,25 +41,12 @@
 - Legacy subagent `timeoutMs` is a backward-compatible alias for idle timeout. Effective timeout resolution must be per-call `idleTimeoutMs`, else per-call `timeoutMs`, else `subagents.idleTimeoutMs`, else default; `maxTotalMs` resolves per-call, then settings, then default (agent/extensions/subagents/spawn.ts:312-315, agent/extensions/subagents/index.ts:461-466).
 - Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `partialWork` is true once any child tool execution has started (agent/extensions/subagents/spawn.ts:60-73, agent/extensions/subagents/spawn.ts:430-440).
 
-## Persistent-Memory Manual Write Pipeline
+## Memory architecture
 
-- **Single-writer canonical store:** Only foreground manual commands (`/memory consolidate`, `/memory reconcile`, `/memory recover`, explicit review commands such as `/memory sweep`, and the `save_to_memory` tool) may mutate canonical memory markdown or consume staging. `session_start` and `session_shutdown` must not run extraction, reconciliation, reinforcement, staging consumption, or firing-log clear.
-- **Agent-driven saves never hand-write memory:** Modal-triggered agent turns may propose candidates only through `save_to_memory`. The agent must not write `lessons.md`, `preferences.md`, `decisions.md`, `domain.md`, `index.db`, or staging files directly.
-- **Reconcile/apply stay deterministic:** `save_to_memory` must validate/normalize candidates to the staging schema before writing, then run the existing foreground reconciliation pipeline under `canonical-writer.lock`. Host code owns ids, timestamps, status/supersede fields, index writes, run logs, retry caps, and deadletter behavior.
-- Lifecycle hooks may open/close `index.db`, refresh derived caches, inject retrieved memory, append telemetry, and update UI. They must not write `lessons.md`, `preferences.md`, `decisions.md`, `domain.md`, or delete/rewrite same-project staging.
-- `/memory consolidate` must verify `ctx.sessionManager.getBranch()` exists, extract the current session into staging, run foreground reconciliation, apply reinforcement after successful reconcile, then clear firing telemetry only after reinforcement succeeds.
-- `/memory reconcile`, `/memory consolidate`, and `/memory recover` must share the canonical-writer lock and fail fast when another canonical writer is active.
-- `/memory recover` must either re-queue each valid deadletter candidate into valid staging or report it and leave the deadletter file in place. It must not duplicate candidates already present in staging.
-- Reconciliation uses per-candidate monotonic acceptance: successful candidates are applied immediately to markdown files and incrementally upserted into SQLite.
-- Reconciliation runs through `runReconciliation` in `agent/extensions/persistent-memory/consolidation/reconcile.ts`; empty-shortlist candidates must take the deterministic zero-model ADD path before any model adjudication.
-- Lesson collision adjudication uses only the bounded verdict contract (`distinct`, `duplicate`, `supersedes`, `merge`). Host code fills all structural fields; model output must not provide ids, timestamps, refs, status flags, or supersede pointers.
-- **Never-attempted means re-stage:** Budget-skipped, generation-stopped, no-model, and model-error candidates that were not genuinely attempted must remain in staging unchanged. They must not be dead-lettered and must not get `reconcile_attempts` bumped.
-- **Attempted-under-cap means retry:** Attempted-but-unresolved candidates increment `reconcile_attempts` and remain staged while below retry cap 3. Attempted candidates at/over cap are dead-lettered with reason.
-- Structurally malformed staging files are bounded: the loader must attempt in-process repair first, rewrite and process repairable files as valid, and move still-malformed files to `deadletter/` with preserved candidate/original content before deleting them from `staging/`. Wrong-project staging remains preserved for its owner.
-- **T10 Validate-at-Write Extraction:** Each extracted candidate must be structurally validated before staging write (`sanitizeExtractionResult`). Malformed individual candidates are dropped with warnings; lessons missing/empty triggers derive triggers through `deriveLessonTriggers` without an extra model call.
-- **T11 Reversible Offline Sweep:** `/memory sweep` may archive only unambiguously dead lesson records by flipping `meta.status` to `archived`; it must never delete records.
-- The attempt counter travels on the candidate object (`reconcile_attempts`), never keyed by temporary candidate refs. Refs are positional diagnostics and run-log/deadletter evidence only.
-- Manual reconciliation owns its SQLite connection, records bounded run-log metrics, and publishes its owned connection only through an await-free generation-guarded swap/discard block.
-- Per-candidate run-log metrics must include outcome rows (`add`, `duplicate`, `supersede`, `merge`, `discard`, `parked`, `dead_lettered`) and discard/dup-rate metrics. `/memory status` must surface those metrics without using `setFooter`.
-- `reinforcement_count` remains load-bearing for tier ranking/retrieval and low-signal detection. Reinforcement updates to markdown/index occur only inside `/memory consolidate`; firing telemetry spans sessions until a successful consolidate clears it.
-- The mode-transition reminder is non-writing. It may inspect current branch content with `shouldSkipExtraction` and notify once per session when leaving discuss/plan/build, but it must not stage, reconcile, recover, or reinforce memory.
+- Project truth belongs in `docs/engineering/` and ADRs, not in private agent-only stores.
+- Cross-repo personal memory lives only in `~/.pi/memory.md` and must stay small because it is injected in full.
+- `/remember <text>` appends a dated bullet to `~/.pi/memory.md`; it must not modify engineering docs.
+- `before_agent_start` may inject `~/.pi/memory.md` only when the file exists and is non-empty.
+- `capture_note` updates live discussion notes and the Notes widget only; it must not write project docs or personal memory.
+- `recall_memory` returns engineering docs plus personal memory. It must not depend on deleted memory indexes or model retrieval.
+- Project facts and decisions discovered during implementation should be captured in engineering docs tasks/ADRs, not `/remember`.
