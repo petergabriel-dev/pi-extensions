@@ -1,0 +1,12 @@
+{
+  "name": "pi-personal-memory",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "npx --yes tsx test/test_personal_memory.ts",
+    "typecheck": "npx --yes --package typescript --package @types/node tsc --noEmit"
+  }
+}
