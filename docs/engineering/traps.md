@@ -27,8 +27,10 @@
 
 ## Memory architecture
 
-- **Do not put project truth in `/remember`.** `/remember` is user-global and fully injected. Project facts, architecture, conventions, invariants, traps, and decisions belong under `docs/engineering/`.
-- **Personal memory can bloat context.** `~/.pi/memory.md` loads in full. Keep it short and user-pruned; migrate project-specific facts into docs instead.
+- **Do not put project truth in `/remember` or `save_memory`.** Personal memory is user-global. Project facts, architecture, conventions, invariants, traps, and decisions belong under `docs/engineering/`.
+- **Personal memory index can still bloat context.** `~/.pi/memory/MEMORY.md` loads by default. Keep names/descriptions concise; migrate project-specific facts into docs instead.
+- **Full personal entries require explicit fetch.** Default recall/injection includes only the index. Use `recall_memory_entry(slug)` / bridge `recall_entry` when an indexed entry is relevant.
 - **Bridge capture is not memory capture.** `capture_note` updates live discussion notes/Notes widget only. It does not write engineering docs or personal memory.
 - **Model-obedience memory capture failed E2E.** Do not reintroduce a design where reliable capture depends on a model choosing to call a tool.
+- **Running Pi can have stale bridge code.** After bridge handler changes, live protocol tests can still fail with old request-type lists until Pi bridge reloads.
 - **Overlay key handling belongs to TUI primitives.** Do not compare raw input bytes like `data === "\u001b"` or `"\u001b[A"` in `ctx.ui.custom` overlays; Pi may not deliver those exact strings. Delegate to `SelectList.handleInput` or use framework key helpers such as `matchesKey`.

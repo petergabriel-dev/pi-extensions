@@ -8,8 +8,8 @@ Flow:
 2. Bridge resolves the project root from the nearest `.pi/` marker.
 3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json` for IPC and liveness.
 4. Claude Code MCP client `agent/claude-bridge-client/pi-bridge-mcp.js` writes UUID request JSON files and polls matching responses for up to 2s.
-5. Pi bridge handles `recall`, `capture`, `validate_tags`, and `save_plan` by reusing Pi-side extension functions.
-6. Bridge recall responses include engineering docs, `~/.pi/memory.md` personal memory, workflow-mode prompts, and saved-plan context.
+5. Pi bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, and `save_plan` by reusing Pi-side extension functions.
+6. Bridge recall responses include engineering docs, indexed personal memory from `~/.pi/memory/MEMORY.md`, workflow-mode prompts, and saved-plan context.
 7. Claude Code never imports Pi internals; only the Pi bridge extension imports sibling Pi extension code.
 
 Core boundaries:
@@ -28,7 +28,7 @@ Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 
 `capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. It does not stage memory candidates. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension updates its own `currentPlan`, appends `workflow-plan`, and returns `workflow-modes:save-plan-result`.
 
-`recall_memory` returns project docs and personal memory instead of retired private indexes. Project truth comes from `docs/engineering/`; cross-repo personal preferences/traps come from `~/.pi/memory.md` through `agent/extensions/personal-memory/index.ts`. See ADR-0016.
+`recall_memory` returns project docs and a compact personal-memory index instead of retired private indexes. Project truth comes from `docs/engineering/`; cross-repo personal preferences/traps live under `~/.pi/memory/` through `agent/extensions/personal-memory/store.ts` and are fetched on demand by slug. See ADR-0016 and ADR-0017.
 
 ## Workflow modes read-only Bash sandbox
 
@@ -68,12 +68,15 @@ Project memory now lives in engineering docs under `docs/engineering/`:
 - `conventions.md`, `invariants.md`, and `traps.md` for rules and known failure modes.
 - `decisions/ADR-*.md` for decisions and superseded history.
 
-Cross-repo personal memory is one small user-global file: `~/.pi/memory.md`. `agent/extensions/personal-memory/index.ts` owns it:
+Cross-repo personal memory is a user-global markdown store under `~/.pi/memory/`. `agent/extensions/personal-memory/store.ts` owns the indexed store and `agent/extensions/personal-memory/index.ts` wires it into Pi:
 
-1. `/remember <text>` validates a small text snippet and appends a dated bullet to `~/.pi/memory.md`.
-2. `before_agent_start` reads the whole file, skips absent/empty files, and appends the block to the system prompt.
-3. The optional `remember` tool is best-effort and intended only when the user explicitly asks to remember a small durable personal preference or lesson.
+1. Entries are slugged markdown files with frontmatter and body text.
+2. `MEMORY.md` is a generated index of entry names, descriptions, and links.
+3. `/remember <text>` validates a small text snippet, saves or overwrites a slug entry, and rebuilds `MEMORY.md`.
+4. `before_agent_start` injects only the compact index block when present; full entry bodies stay out of default prompt context.
+5. `recall_memory_entry(slug)` fetches one full entry when the injected index shows it is relevant.
+6. Legacy `~/.pi/memory.md` migrates once into `~/.pi/memory/`, then moves to `memory.md.bak`.
 
-There is no automatic model extraction or reconciliation pipeline. Reliability comes from host file append/read for personal memory and explicit docs edits for project truth. The personal file is fully injected, so it must stay small and user-pruned.
+There is no automatic model extraction or reconciliation pipeline. Reliability comes from host file writes/reads for personal memory and explicit docs edits for project truth. The personal index is injected by default; full entries require explicit fetch.
 
-Claude bridge recall combines the two sources: engineering docs plus the personal-memory block. Bridge capture updates live discussion notes only; it does not write project memory or personal memory. See ADR-0016.
+Claude bridge recall combines the two sources: engineering docs plus the personal-memory index. Bridge `recall_entry` fetches one personal entry, `save_memory` writes one personal entry, and `capture` updates live discussion notes only. See ADR-0016 and ADR-0017.

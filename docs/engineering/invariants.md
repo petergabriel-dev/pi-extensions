@@ -44,9 +44,11 @@
 ## Memory architecture
 
 - Project truth belongs in `docs/engineering/` and ADRs, not in private agent-only stores.
-- Cross-repo personal memory lives only in `~/.pi/memory.md` and must stay small because it is injected in full.
-- `/remember <text>` appends a dated bullet to `~/.pi/memory.md`; it must not modify engineering docs.
-- `before_agent_start` may inject `~/.pi/memory.md` only when the file exists and is non-empty.
+- Cross-repo personal memory lives only under `~/.pi/memory/` as slugged markdown entries plus generated `MEMORY.md`; legacy `~/.pi/memory.md` is migration input only.
+- `/remember <text>` writes through the indexed store and rebuilds `MEMORY.md`; it must not modify engineering docs.
+- `before_agent_start` may inject only the personal-memory index, not full entry bodies.
 - `capture_note` updates live discussion notes and the Notes widget only; it must not write project docs or personal memory.
-- `recall_memory` returns engineering docs plus personal memory. It must not depend on deleted memory indexes or model retrieval.
-- Project facts and decisions discovered during implementation should be captured in engineering docs tasks/ADRs, not `/remember`.
+- `recall_memory` returns engineering docs plus the personal-memory index. It must not depend on deleted memory indexes, model retrieval, or full personal-memory body injection.
+- `recall_memory_entry` / bridge `recall_entry` must validate slug input and fetch only one entry from `~/.pi/memory/`.
+- `save_memory` must write one slug entry through `writeMemoryFact` and regenerate `MEMORY.md`.
+- Project facts and decisions discovered during implementation should be captured in engineering docs tasks/ADRs, not `/remember` or `save_memory`.
