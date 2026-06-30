@@ -40,6 +40,13 @@ function runHook(input, cwd, env = {}) {
 	if (out.status !== 0) throw new Error(out.stderr || `hook exit ${out.status}`);
 	return JSON.parse(out.stdout || "{}");
 }
+function runMcp(messages, cwd) {
+	const mcp = path.resolve(__dirname, "pi-bridge-mcp.js");
+	const input = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
+	const out = cp.spawnSync("node", [mcp], { input, cwd, encoding: "utf8" });
+	if (out.status !== 0) throw new Error(out.stderr || `mcp exit ${out.status}`);
+	return out.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
 function denied(result) { return result.hookSpecificOutput?.permissionDecision === "deny"; }
 function updatedInput(result) { return result.hookSpecificOutput?.updatedInput; }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
@@ -130,6 +137,26 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	fs.unlinkSync(first.responsePath);
 	const second = await sendRequest(projectRoot, "save_plan", { planText: "DIFFERENT", confirmed: true }, id);
 	assert(JSON.stringify(second.response) === JSON.stringify(first.response), "duplicate save response changed");
+});
+
+test("MCP exposes and dispatches memory entry tools", async ({ projectRoot }) => {
+	freshTarget(projectRoot);
+	const id = crypto.randomUUID();
+	const name = `Core MCP memory ${id}`;
+	const responses = runMcp([
+		{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+		{ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "save_memory", arguments: { name, description: "Saved through MCP", type: "reference", body: `MCP body ${id}`, cwd: projectRoot } } },
+		{ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "recall_memory_entry", arguments: { slug: `core-mcp-memory-${id}`, cwd: projectRoot } } },
+	], projectRoot);
+	const listed = responses.find((response) => response.id === 1)?.result?.tools?.map((tool) => tool.name) || [];
+	assert(listed.includes("recall_memory_entry"), "recall_memory_entry missing from tools/list");
+	assert(listed.includes("save_memory"), "save_memory missing from tools/list");
+	const saved = responses.find((response) => response.id === 2);
+	assert(!saved.error, `save_memory MCP error: ${JSON.stringify(saved)}`);
+	assert(saved.result.structuredContent.result.slug === `core-mcp-memory-${id}`, "save_memory slug mismatch");
+	const recalled = responses.find((response) => response.id === 3);
+	assert(!recalled.error, `recall_memory_entry MCP error: ${JSON.stringify(recalled)}`);
+	assert(recalled.result.structuredContent.result.entry.includes(`MCP body ${id}`), "recall_memory_entry body missing");
 });
 
 test("MCP client fails loudly when bridge down", async () => {
