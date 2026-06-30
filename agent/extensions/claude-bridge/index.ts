@@ -5,10 +5,10 @@ import type { FSWatcher } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { BUILD_PROMPT, DISCUSS_PROMPT, getWorkflowPolicySnapshot, PLAN_PROMPT, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
-import { formatPersonalMemoryBlock, readPersonalMemory, resolvePersonalMemoryPath } from "../personal-memory/index.js";
+import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 
 const EXTENSION_ID = "claude-bridge";
-const REQUEST_TYPES = new Set(["recall", "capture", "validate_tags", "save_plan"]);
+const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LOCK_TTL_MS = 5_000;
 const HEARTBEAT_MS = 2_000; // 2s; Pi lock TTL is 5s, so 2s gives 2.5x headroom.
@@ -90,6 +90,17 @@ interface SavePlanPayload {
 	planText: string;
 	planId?: string;
 	confirmed?: boolean;
+}
+
+interface RecallEntryPayload {
+	slug: string;
+}
+
+interface SaveMemoryPayload {
+	name?: string;
+	description?: string;
+	type?: string;
+	body: string;
 }
 
 interface PendingEventResult {
@@ -470,6 +481,21 @@ function normalizeSavePlanPayload(payload: Record<string, unknown>): SavePlanPay
 	};
 }
 
+function normalizeRecallEntryPayload(payload: Record<string, unknown>): RecallEntryPayload {
+	if (typeof payload.slug !== "string" || payload.slug.trim().length === 0) throw new Error("recall_entry requires slug string.");
+	return { slug: payload.slug.trim() };
+}
+
+function normalizeSaveMemoryPayload(payload: Record<string, unknown>): SaveMemoryPayload {
+	if (typeof payload.body !== "string" || payload.body.trim().length === 0) throw new Error("save_memory requires non-empty body string.");
+	return {
+		...(typeof payload.name === "string" && payload.name.trim() ? { name: payload.name.trim() } : {}),
+		...(typeof payload.description === "string" && payload.description.trim() ? { description: payload.description.trim() } : {}),
+		...(typeof payload.type === "string" && payload.type.trim() ? { type: payload.type.trim() } : {}),
+		body: payload.body,
+	};
+}
+
 function handleValidateTags(request: BridgeRequest): BridgeResponse {
 	try {
 		const payload = normalizeValidateTagsPayload(request.payload);
@@ -556,9 +582,10 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 		return errorResponse(request.id, "not_pi_project", "Pi bridge recall requires an existing Pi project with a .pi directory.");
 	}
 
-	const memoryPath = await resolvePersonalMemoryPath();
-	const personalMemory = await readPersonalMemory(memoryPath);
-	const personalBlock = personalMemory ? formatPersonalMemoryBlock(personalMemory) : "";
+	const memoryDir = await resolveMemoryDir();
+	await migrateFlatFile(memoryDir);
+	const personalIndex = await readMemoryIndex(memoryDir);
+	const personalBlock = formatMemoryIndexBlock(personalIndex) ?? "";
 	const memoryBlocks = personalBlock ? [personalBlock] : [];
 	const workflowState = await requestWorkflowState(pi);
 	const workflowPlan = typeof workflowState?.plan === "string" ? workflowState.plan : undefined;
@@ -578,8 +605,8 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 			query: payload.query ?? "",
 			memory: {
 				personal: {
-					path: memoryPath,
-					loaded: Boolean(personalMemory),
+					path: path.join(memoryDir, "MEMORY.md"),
+					loaded: Boolean(personalIndex),
 					block: personalBlock,
 				},
 				blocks: memoryBlocks,
@@ -589,6 +616,49 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 			savedPlan,
 		},
 	};
+}
+
+async function handleRecallEntry(request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeRecallEntryPayload(request.payload);
+		const memoryDir = await resolveMemoryDir();
+		await migrateFlatFile(memoryDir);
+		const entry = await readMemoryEntry(memoryDir, payload.slug);
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				slug: payload.slug,
+				path: path.join(memoryDir, `${payload.slug}.md`),
+				loaded: Boolean(entry),
+				entry: entry ?? null,
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "recall_entry_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleSaveMemory(request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeSaveMemoryPayload(request.payload);
+		const memoryDir = await resolveMemoryDir();
+		await migrateFlatFile(memoryDir);
+		const result = await writeMemoryFact(payload, memoryDir);
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				slug: result.slug,
+				path: result.path,
+				indexPath: path.join(memoryDir, "MEMORY.md"),
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "save_memory_failed", error instanceof Error ? error.message : String(error));
+	}
 }
 
 function requestDiscussionNotesAdd(pi: ExtensionAPI, requestId: string, payload: CapturePayload): Promise<AddResult> {
@@ -655,6 +725,8 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 
 async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
 	if (request.type === "recall") return handleRecall(pi, request);
+	if (request.type === "recall_entry") return handleRecallEntry(request);
+	if (request.type === "save_memory") return handleSaveMemory(request);
 	if (request.type === "capture") return handleCapture(pi, ctx, request);
 	if (request.type === "validate_tags") return handleValidateTags(request);
 	if (request.type === "save_plan") return handleSavePlan(pi, ctx, request);
