@@ -87,7 +87,8 @@ export function formatMemoryIndexBlock(index: string | null): string | null {
 }
 
 export async function migrateFlatFile(memoryDir: string, legacyMemoryPath = path.join(path.dirname(memoryDir), LEGACY_MEMORY_FILE)): Promise<{ migrated: number; skipped: boolean }> {
-	if (await exists(memoryDir)) return { migrated: 0, skipped: true };
+	const backupPath = path.join(path.dirname(legacyMemoryPath), LEGACY_BACKUP_FILE);
+	if (await exists(backupPath)) return { migrated: 0, skipped: true };
 	let raw: string;
 	try {
 		raw = await fs.readFile(legacyMemoryPath, "utf8");
@@ -102,7 +103,7 @@ export async function migrateFlatFile(memoryDir: string, legacyMemoryPath = path
 		await writeMemoryFact({ name: titleFromBody(body), description: body, type: "user", body }, memoryDir);
 	}
 	await rebuildIndex(memoryDir);
-	await fs.rename(legacyMemoryPath, path.join(path.dirname(legacyMemoryPath), LEGACY_BACKUP_FILE));
+	await fs.rename(legacyMemoryPath, backupPath);
 	return { migrated: lines.length, skipped: false };
 }
 
@@ -150,7 +151,7 @@ function firstLine(value: string): string {
 	return value.split("\n")[0]?.replace(/\s+/g, " ").trim() || "Personal memory";
 }
 
-function titleFromBody(value: string): string {
+export function titleFromBody(value: string): string {
 	return firstLine(value).replace(/^\d{4}-\d{2}-\d{2}\s+—\s+/, "").slice(0, 80) || "Personal memory";
 }
 
@@ -165,23 +166,26 @@ async function readStoredFacts(memoryDir: string): Promise<StoredFact[]> {
 	const facts: StoredFact[] = [];
 	for (const fileName of names.filter((name) => name.endsWith(".md") && name !== INDEX_FILE).sort()) {
 		const raw = await fs.readFile(path.join(memoryDir, fileName), "utf8");
-		facts.push({ ...parseFact(raw), fileName });
+		const fact = parseFact(raw);
+		if (fact) facts.push({ ...fact, fileName });
 	}
 	return facts.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function parseFact(raw: string): NormalizedFact {
+function parseFact(raw: string): NormalizedFact | null {
 	const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-	if (!match) {
-		const body = raw.trim();
-		return normalizeFact({ body, name: titleFromBody(body), description: firstLine(body), type: "user" });
-	}
+	if (!match) return null;
 	const frontmatter = match[1];
 	const body = match[2].trim();
 	const name = frontmatter.match(/^name:\s*(.*)$/m)?.[1]?.trim();
 	const description = frontmatter.match(/^description:\s*(.*)$/m)?.[1]?.trim();
 	const type = frontmatter.match(/^\s{2}type:\s*(.*)$/m)?.[1]?.trim();
-	return normalizeFact({ name, description, type, body });
+	if (!name || !description || !type || !VALID_TYPES.has(type)) return null;
+	try {
+		return normalizeFact({ name, description, type, body });
+	} catch {
+		return null;
+	}
 }
 
 function serializeFact(fact: NormalizedFact): string {

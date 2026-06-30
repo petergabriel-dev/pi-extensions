@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "./store.js";
+import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, titleFromBody, writeMemoryFact } from "./store.js";
 
 const MEMORY_FILE = "memory.md";
 const MAX_REMEMBER_CHARS = 2_000;
@@ -134,7 +134,7 @@ export function normalizeRememberText(value: unknown): string | null {
 }
 
 async function writeRememberText(text: string, memoryDir: string): Promise<{ slug: string; path: string; index: string }> {
-	return writeMemoryFact({ name: text, description: text, type: "user", body: text }, memoryDir);
+	return writeMemoryFact({ name: titleFromBody(text), description: text, type: "user", body: text }, memoryDir);
 }
 
 async function filePrefix(memoryPath: string): Promise<string> {
