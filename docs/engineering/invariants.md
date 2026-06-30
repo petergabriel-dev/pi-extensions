@@ -45,6 +45,8 @@
 
 - Project truth belongs in `docs/engineering/` and ADRs, not in private agent-only stores.
 - Cross-repo personal memory lives only under `~/.pi/memory/` as slugged markdown entries plus generated `MEMORY.md`; legacy `~/.pi/memory.md` is migration input only.
+- Only files with conforming `---` frontmatter (`name`, `description`, `metadata.type`) are indexed as personal-memory facts; non-conforming legacy files are ignored and preserved.
+- Legacy flat-file migration completion is signalled by renaming `~/.pi/memory.md` to `~/.pi/memory.md.bak`; a pre-existing `~/.pi/memory/` directory must not block migration.
 - `/remember <text>` writes through the indexed store and rebuilds `MEMORY.md`; it must not modify engineering docs.
 - `before_agent_start` may inject only the personal-memory index, not full entry bodies.
 - `capture_note` updates live discussion notes and the Notes widget only; it must not write project docs or personal memory.

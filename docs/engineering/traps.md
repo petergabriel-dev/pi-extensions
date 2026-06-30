@@ -29,6 +29,7 @@
 
 - **Do not put project truth in `/remember` or `save_memory`.** Personal memory is user-global. Project facts, architecture, conventions, invariants, traps, and decisions belong under `docs/engineering/`.
 - **Personal memory index can still bloat context.** `~/.pi/memory/MEMORY.md` loads by default. Keep names/descriptions concise; migrate project-specific facts into docs instead.
+- **Legacy `~/.pi/memory/` can contain retired persistent-memory files.** A pre-existing directory must not block `~/.pi/memory.md` migration, and files without conforming frontmatter must stay out of `MEMORY.md` without being bulk-deleted.
 - **Full personal entries require explicit fetch.** Default recall/injection includes only the index. Use `recall_memory_entry(slug)` / bridge `recall_entry` when an indexed entry is relevant.
 - **Bridge capture is not memory capture.** `capture_note` updates live discussion notes/Notes widget only. It does not write engineering docs or personal memory.
 - **Model-obedience memory capture failed E2E.** Do not reintroduce a design where reliable capture depends on a model choosing to call a tool.

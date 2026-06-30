@@ -3,9 +3,9 @@ id: ADR-0017
 title: Indexed user-global personal memory
 status: Active
 date: 2026-06-30
-decision: User-global personal memory is a markdown directory with an index plus fetch-on-demand entries, not one fully injected flat file.
+decision: User-global personal memory is a frontmatter-conforming markdown directory with an index plus fetch-on-demand entries; legacy flat-file migration completes only when memory.md is renamed to memory.md.bak.
 why: The flat ~/.pi/memory.md file grew into full-prompt injection and made personal memory harder to prune, fetch selectively, or share through the bridge safely.
-affects: agent/extensions/personal-memory, agent/extensions/claude-bridge, agent/claude-bridge-client/pi-bridge-mcp.js, ~/.pi/memory/
+affects: agent/extensions/personal-memory/store.ts, agent/extensions/personal-memory/index.ts, agent/extensions/personal-memory/test/test_personal_memory.ts, agent/extensions/claude-bridge, agent/claude-bridge-client/pi-bridge-mcp.js, ~/.pi/memory/, ~/.pi/memory.md
 consequences: Agents see a compact memory index by default; full entries require explicit recall_memory_entry; saving rewrites one slug entry and regenerates MEMORY.md.
 readWhen: changing personal-memory storage, recall_memory, recall_memory_entry, save_memory, /remember, or legacy ~/.pi/memory.md migration
 supersedes: ADR-0016 personal-memory flat-file storage detail
@@ -19,7 +19,10 @@ supersedes: ADR-0016 personal-memory flat-file storage detail
 - Startup prompt injection includes only the compact `MEMORY.md` index, not full entry bodies.
 - Full entry bodies are fetched on demand with `recall_memory_entry(slug)` / bridge `recall_entry`.
 - Saves use `writeMemoryFact` / bridge `save_memory` / MCP `save_memory` to write one slug file and rebuild the index.
-- Legacy `~/.pi/memory.md` migrates once into indexed entries, then moves to `memory.md.bak`.
+- Legacy `~/.pi/memory.md` migrates once into indexed entries, then moves to `memory.md.bak`; that backup rename is the migration completion signal.
+- A pre-existing `~/.pi/memory/` directory does not skip migration.
+- Index rebuild includes only markdown entries with conforming `---` frontmatter containing `name`, `description`, and `metadata.type`.
+- Non-conforming legacy files under `~/.pi/memory/` are ignored and preserved in place.
 
 ## Why
 
@@ -38,8 +41,9 @@ Docs:
 
 Code:
 
-- `agent/extensions/personal-memory/store.ts`
-- `agent/extensions/personal-memory/index.ts`
+- `agent/extensions/personal-memory/store.ts` (`migrateFlatFile`, `readStoredFacts`, `parseFact`, `titleFromBody`)
+- `agent/extensions/personal-memory/index.ts` (`writeRememberText`)
+- `agent/extensions/personal-memory/test/test_personal_memory.ts`
 - `agent/extensions/claude-bridge/index.ts`
 - `agent/claude-bridge-client/pi-bridge-mcp.js`
 - `~/.pi/memory/`
@@ -53,6 +57,8 @@ Code:
 - Good: users can manage memory as plain markdown files.
 - Risk: duplicate or stale facts can still happen when agents save a new slug instead of updating the right existing entry.
 - Risk: migration depends on parsing old flat-file bullet entries; unusual legacy formatting may need manual cleanup.
+- Guardrail: retired persistent-memory files under `~/.pi/memory/` are not deleted or indexed unless they use conforming fact frontmatter.
+- Guardrail: migration idempotency keys off `~/.pi/memory.md.bak`, not `~/.pi/memory/` existence.
 
 ## Read when
 
