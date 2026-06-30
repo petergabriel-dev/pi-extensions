@@ -2,20 +2,27 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "./store.js";
 
 const MEMORY_FILE = "memory.md";
 const MAX_REMEMBER_CHARS = 2_000;
 
+type ToolResult = { content: Array<{ type: "text"; text: string }> };
+
 export default function personalMemory(pi: ExtensionAPI) {
+	const memoryDirPromise = resolveMemoryDir();
+	const migrationPromise = memoryDirPromise.then((memoryDir) => migrateFlatFile(memoryDir));
+
 	pi.on("before_agent_start", async (event: { systemPrompt: string }) => {
-		const memoryPath = await resolvePersonalMemoryPath();
-		const memory = await readPersonalMemory(memoryPath);
-		if (!memory) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${formatPersonalMemoryBlock(memory)}` };
+		const memoryDir = await memoryDirPromise;
+		await migrationPromise;
+		const block = formatMemoryIndexBlock(await readMemoryIndex(memoryDir));
+		if (!block) return;
+		return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
 	});
 
 	pi.registerCommand("remember", {
-		description: "Append a small user-global personal memory to ~/.pi/memory.md",
+		description: "Save a small user-global personal memory to ~/.pi/memory/",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const text = normalizeRememberText(args);
 			if (!text) {
@@ -23,39 +30,65 @@ export default function personalMemory(pi: ExtensionAPI) {
 				return;
 			}
 			if (text.length > MAX_REMEMBER_CHARS) {
-				ctx.ui.notify(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep ~/.pi/memory.md small.`, "warning");
+				ctx.ui.notify(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep personal memory small.`, "warning");
 				return;
 			}
-			const memoryPath = await resolvePersonalMemoryPath();
-			await appendPersonalMemory(memoryPath, text);
-			ctx.ui.notify(`Remembered in ${memoryPath}`, "success");
+			await migrationPromise;
+			const result = await writeRememberText(text, await memoryDirPromise);
+			ctx.ui.notify(`Remembered in ${result.path}`, "success");
 		},
 	});
 
 	pi.registerTool?.({
 		name: "remember",
 		label: "Remember",
-		description: "Best-effort append of a short user-global personal memory to ~/.pi/memory.md.",
-		promptSnippet: "Append a short user-global personal memory when explicitly asked to remember something.",
+		description: "Best-effort save of short user-global personal memory to ~/.pi/memory/.",
+		promptSnippet: "Silently save durable user-global personal memory when useful. Prefer updating an existing slug over duplicating stale facts. Do not ask confirmation.",
 		promptGuidelines: [
-			"Use remember only when the user explicitly asks to remember a small durable personal preference or lesson.",
+			"Use remember for durable user preferences or lessons that should persist across sessions.",
 			"Do not use remember for project facts; those belong in engineering docs.",
+			"Keep entries small; update existing slug when possible instead of duplicating.",
 		],
 		parameters: {
 			type: "object",
 			additionalProperties: false,
 			required: ["text"],
 			properties: {
-				text: { type: "string", description: "Small durable personal memory to append." },
+				text: { type: "string", description: "Small durable personal memory to save." },
 			},
 		},
 		async execute(_toolCallId: string, params: { text?: unknown }) {
 			const text = normalizeRememberText(params.text);
 			if (!text) return toolText("No memory text supplied.");
-			if (text.length > MAX_REMEMBER_CHARS) return toolText(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep ~/.pi/memory.md small.`);
-			const memoryPath = await resolvePersonalMemoryPath();
-			await appendPersonalMemory(memoryPath, text);
-			return toolText(`Remembered in ${memoryPath}`);
+			if (text.length > MAX_REMEMBER_CHARS) return toolText(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep personal memory small.`);
+			await migrationPromise;
+			const result = await writeRememberText(text, await memoryDirPromise);
+			return toolText(`Remembered in ${result.path}`);
+		},
+	});
+
+	pi.registerTool?.({
+		name: "recall_memory_entry",
+		label: "Recall memory entry",
+		description: "Fetch one user-global personal memory entry by slug from ~/.pi/memory/.",
+		promptSnippet: "Use recall_memory_entry(slug) when the personal memory index has a relevant slug and full details are needed.",
+		promptGuidelines: [
+			"Fetch by slug from the injected personal memory index.",
+			"Do not guess file paths; pass only the slug without .md.",
+		],
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			required: ["slug"],
+			properties: {
+				slug: { type: "string", description: "Memory slug, without .md." },
+			},
+		},
+		async execute(_toolCallId: string, params: { slug?: unknown }) {
+			if (typeof params.slug !== "string" || !params.slug.trim()) return toolText("No memory slug supplied.");
+			await migrationPromise;
+			const entry = await readMemoryEntry(await memoryDirPromise, params.slug);
+			return toolText(entry ?? `No memory entry found for slug: ${params.slug}`);
 		},
 	});
 }
@@ -100,6 +133,10 @@ export function normalizeRememberText(value: unknown): string | null {
 	return normalized.length > 0 ? normalized : null;
 }
 
+async function writeRememberText(text: string, memoryDir: string): Promise<{ slug: string; path: string; index: string }> {
+	return writeMemoryFact({ name: text, description: text, type: "user", body: text }, memoryDir);
+}
+
 async function filePrefix(memoryPath: string): Promise<string> {
 	try {
 		const stat = await fs.stat(memoryPath);
@@ -130,6 +167,6 @@ async function resolveAgentDir(): Promise<string> {
 	return path.join(os.homedir(), ".pi", "agent");
 }
 
-function toolText(text: string) {
+function toolText(text: string): ToolResult {
 	return { content: [{ type: "text", text }] };
 }
