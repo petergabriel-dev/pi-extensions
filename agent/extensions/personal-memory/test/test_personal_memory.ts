@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } from "../index.js";
+import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, rebuildIndex, resolveMemoryDir, slugify, validateSlug, writeMemoryFact } from "../store.js";
 
 console.log("Running test_personal_memory...");
 
@@ -35,6 +36,66 @@ console.log("Running test_personal_memory...");
 	assert.match(block, /# User-global personal memory/);
 	assert.match(block, /~\/\.pi\/memory\.md/);
 	assert.match(block, /test fact/);
+}
+
+{
+	const memoryDir = await resolveMemoryDir(path.join(os.tmpdir(), "pi-agent-dir", "agent"));
+	assert.equal(memoryDir, path.join(os.tmpdir(), "pi-agent-dir", "memory"));
+}
+
+{
+	assert.equal(slugify("  Prefer tiny MEMORY!  "), "prefer-tiny-memory");
+	assert.equal(validateSlug("prefer-tiny-memory"), "prefer-tiny-memory");
+	assert.throws(() => validateSlug("../secret"), /invalid memory slug/);
+}
+
+{
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-store-"));
+	const result = await writeMemoryFact({
+		name: "Prefer tiny memory",
+		description: "Keep memory small",
+		type: "nope",
+		body: "Use short durable personal facts.",
+	}, dir);
+	assert.equal(result.slug, "prefer-tiny-memory");
+	const entry = await readMemoryEntry(dir, "prefer-tiny-memory");
+	assert.ok(entry);
+	assert.match(entry, /name: Prefer tiny memory/);
+	assert.match(entry, /type: user/);
+	assert.match(entry, /Use short durable personal facts\./);
+	const index = await readMemoryIndex(dir);
+	assert.ok(index);
+	assert.match(index, /\[Prefer tiny memory\]\(prefer-tiny-memory\.md\) — Keep memory small/);
+	await assert.rejects(() => writeMemoryFact({ body: "" }, dir), /memory body is required/);
+	await assert.rejects(() => readMemoryEntry(dir, "../secret"), /invalid memory slug/);
+}
+
+{
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-rebuild-"));
+	await writeMemoryFact({ name: "Z fact", description: "Last", type: "project", body: "Z body" }, dir);
+	await writeMemoryFact({ name: "A fact", description: "First", type: "reference", body: "A body" }, dir);
+	const index = await rebuildIndex(dir);
+	assert.match(index, /\[A fact\]\(a-fact\.md\) — First[\s\S]*\[Z fact\]\(z-fact\.md\) — Last/);
+	const block = formatMemoryIndexBlock(index);
+	assert.ok(block);
+	assert.match(block, /personal memory index/i);
+	assert.doesNotMatch(block, /A body/);
+}
+
+{
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-migrate-"));
+	const memoryDir = path.join(root, "memory");
+	const legacy = path.join(root, "memory.md");
+	const fixture = Array.from({ length: 13 }, (_, i) => `- 2026-06-${String(i + 1).padStart(2, "0")} — fact ${i + 1}`).join("\n");
+	await fs.writeFile(legacy, `# Personal memory\n\n${fixture}\n`, "utf8");
+	const migrated = await migrateFlatFile(memoryDir, legacy);
+	assert.deepEqual(migrated, { migrated: 13, skipped: false });
+	assert.equal(await readMemoryEntry(memoryDir, "fact-1") !== null, true);
+	assert.equal((await fs.readdir(memoryDir)).filter((name) => name.endsWith(".md") && name !== "MEMORY.md").length, 13);
+	assert.equal(await readMemoryIndex(memoryDir).then((index) => index?.split("\n").filter((line) => line.startsWith("- [")).length), 13);
+	assert.equal(await fs.readFile(path.join(root, "memory.md.bak"), "utf8"), `# Personal memory\n\n${fixture}\n`);
+	const skipped = await migrateFlatFile(memoryDir, legacy);
+	assert.deepEqual(skipped, { migrated: 0, skipped: true });
 }
 
 console.log("test_personal_memory passed!");
