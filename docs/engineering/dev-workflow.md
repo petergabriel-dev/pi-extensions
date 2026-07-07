@@ -42,7 +42,7 @@ No-commit note: this `~/.pi` workspace may not be a Git repo. Build checkpoints 
 
 ## Engineering docs extension workflow
 
-`/docs init` creates managed docs plus root `AGENTS.md` and `CLAUDE.md` spokes. Spokes are repaired by `/docs check` only when writes are allowed (Build/Off). Use `/docs check --check` for validation-only runs; it reports missing marker blocks and dead spoke doc links without writing.
+`/docs init` creates managed docs plus root `AGENTS.md` and `CLAUDE.md` spokes. `/docs` and `/docs status` show spoke health. Spokes are repaired by `/docs check` only when writes are allowed (Build/Off). Use `/docs check --check` for validation-only runs; it reports missing marker blocks and dead spoke doc links without writing.
 
 Spoke verification during development:
 

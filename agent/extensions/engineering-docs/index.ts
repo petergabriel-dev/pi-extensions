@@ -9,7 +9,7 @@ import {
 	DOCS_AREA_TAGS,
 } from "./constants.js";
 import { getMode, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
-import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, validatePlanDocsTags, manifestExists } from "./filesystem.js";
+import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, validatePlanDocsTags, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
 
@@ -43,6 +43,20 @@ function statusColor(theme: any, status: string): string {
 	}
 }
 
+function spokeHealthLabel(spokes: SpokeCheckResult[]): string {
+	const broken = spokes.filter((spoke) => !spoke.healthy).length;
+	return broken === 0 ? `OK (${spokes.length})` : `${broken}/${spokes.length} issue(s)`;
+}
+
+function spokeIssueSummary(spoke: SpokeCheckResult): string {
+	return [
+		!spoke.exists ? "missing" : "",
+		!spoke.hasBlock ? "missing block" : "",
+		spoke.hasBlock && !spoke.bodyMatches ? "stale/broken block" : "",
+		spoke.deadLinks.length > 0 ? `dead links: ${spoke.deadLinks.join(", ")}` : "",
+	].filter(Boolean).join("; ") || "OK";
+}
+
 // ── Dashboard ──
 
 async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -50,7 +64,7 @@ async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 		// Non-interactive: print status
 		const cwd = ctx.cwd;
 		const check = await checkDocs(cwd);
-		ctx.ui.notify(`Docs: ${check.status}. Manifest: ${check.manifest ? "present" : "missing"}. Missing: ${check.missingDocs.length}. ADRs: ${check.adrFiles.length}.`, "info");
+		ctx.ui.notify(`Docs: ${check.status}. Manifest: ${check.manifest ? "present" : "missing"}. Missing: ${check.missingDocs.length}. ADRs: ${check.adrFiles.length}. Spokes: ${spokeHealthLabel(check.spokes)}.`, "info");
 		return;
 	}
 
@@ -65,6 +79,7 @@ async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 	// Status section
 	items.push({ value: "__status__", label: `Status: ${check.status}`, description: writeOk ? "Writes allowed" : "Read-only mode" });
 	items.push({ value: "__mode__", label: `Workflow: ${modeLabel}`, description: writeOk ? "Build/Off — write actions enabled" : (getModeLabel() === "Unknown" ? "Unknown mode — writes disabled" : "Discuss/Plan — write actions disabled") });
+	items.push({ value: "__spokes__", label: `Spokes: ${spokeHealthLabel(check.spokes)}`, description: check.spokes.map((spoke) => `${spoke.path}: ${spokeIssueSummary(spoke)}`).join(" • ") });
 
 	if (check.adrFiles.length > 0) {
 		items.push({ value: "__adrs__", label: `ADRs: ${check.adrFiles.length}`, description: check.staleIndex ? "Index stale — needs update" : "Index up to date" });
@@ -100,7 +115,7 @@ async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		container.addChild(new Text(theme.fg("accent", theme.bold("Engineering Docs")), 1, 0));
-		container.addChild(new Text(theme.fg("dim", `Mode: ${modeLabel} • Docs: ${statusColor(theme, check.status)}`), 1, 0));
+		container.addChild(new Text(theme.fg("dim", `Mode: ${modeLabel} • Docs: ${statusColor(theme, check.status)} • Spokes: ${spokeHealthLabel(check.spokes)}`), 1, 0));
 		container.addChild(new Text("", 0, 0));
 
 		const list = new SelectList(items, Math.min(items.length, 12), {
@@ -123,7 +138,7 @@ async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 		};
 	}, { overlay: true, overlayOptions: { width: "60%", minWidth: 42, maxHeight: "70%", margin: 2, anchor: "center" } });
 
-	if (!choice || choice === "__status__" || choice === "__mode__" || choice === "__adrs__" || choice === "__sep__" || choice === "__readonly__") return;
+	if (!choice || choice === "__status__" || choice === "__mode__" || choice === "__spokes__" || choice === "__adrs__" || choice === "__sep__" || choice === "__readonly__") return;
 
 	if (choice === "init") {
 		await handleInit(pi, ctx);
@@ -304,7 +319,8 @@ async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
 		`**Workflow mode:** ${modeLabel} (${isWriteAllowed() ? "writes allowed" : "read-only"})`,
 		`**ADRs:** ${check.adrFiles.length} file(s)`,
 		`**Index:** ${check.staleIndex ? "stale" : "up to date"}`,
-		`**Spokes:** ${check.spokes.every((spoke) => spoke.healthy) ? "OK" : "issues"}`,
+		`**Spokes:** ${spokeHealthLabel(check.spokes)}`,
+		...check.spokes.map((spoke) => `  ${spoke.path}: ${spokeIssueSummary(spoke)}`),
 		`**Missing:** ${check.missingDocs.length > 0 ? check.missingDocs.join(", ") : "none"}`,
 	];
 
