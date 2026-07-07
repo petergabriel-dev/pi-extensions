@@ -41,6 +41,12 @@
 - Legacy subagent `timeoutMs` is a backward-compatible alias for idle timeout. Effective timeout resolution must be per-call `idleTimeoutMs`, else per-call `timeoutMs`, else `subagents.idleTimeoutMs`, else default; `maxTotalMs` resolves per-call, then settings, then default (agent/extensions/subagents/spawn.ts:312-315, agent/extensions/subagents/index.ts:461-466).
 - Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `partialWork` is true once any child tool execution has started (agent/extensions/subagents/spawn.ts:60-73, agent/extensions/subagents/spawn.ts:430-440).
 
+## Engineering docs extension
+
+- Root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) must never overwrite content outside the managed `pi-docs` marker block.
+- Spoke bodies must remain pure pointers to canonical `docs/engineering/` paths; do not add generated project facts or summaries to spokes.
+- Spoke generation and repair must be idempotent: reruns must not duplicate marker blocks or change bytes when content is already current.
+
 ## Memory architecture
 
 - Project truth belongs in `docs/engineering/` and ADRs, not in private agent-only stores.

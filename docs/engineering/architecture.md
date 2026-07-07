@@ -61,7 +61,7 @@ Subagent timeouts are idle-based with an absolute backstop. `agent/extensions/su
 
 ## Engineering docs extension
 
-`agent/extensions/engineering-docs/` owns managed project docs under `docs/engineering/`. `/docs init` scaffolds canonical docs, writes `docs/engineering/manifest.json`, regenerates the decisions index, and emits root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) through a non-destructive `pi-docs` marker block. The spokes are pure pointers to canonical docs; the manifest `generated` list tracks the decisions index plus spoke files.
+`agent/extensions/engineering-docs/` owns managed project docs under `docs/engineering/`. `/docs init` scaffolds canonical docs, writes `docs/engineering/manifest.json`, regenerates the decisions index, and emits root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) through a non-destructive `pi-docs` marker block. The spokes are pure pointers to canonical docs; the manifest `generated` list tracks the decisions index plus spoke files. `/docs check` validates spoke marker blocks and linked doc paths, then repairs missing/stale blocks only when writes are allowed.
 
 ## Memory architecture
 

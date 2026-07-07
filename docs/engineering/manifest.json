@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "engineering-docs",
+  "managedBy": "pi-docs-extension",
+  "entrypoint": "docs/engineering/README.md",
+  "canonicalDocs": [
+    "docs/engineering/README.md",
+    "docs/engineering/architecture.md",
+    "docs/engineering/dev-workflow.md",
+    "docs/engineering/conventions.md",
+    "docs/engineering/invariants.md",
+    "docs/engineering/traps.md"
+  ],
+  "generated": [
+    "docs/engineering/decisions/README.md",
+    "AGENTS.md",
+    "CLAUDE.md"
+  ]
+}
