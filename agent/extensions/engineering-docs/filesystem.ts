@@ -262,6 +262,15 @@ export async function initDocs(cwd: string): Promise<InitResult> {
 
 export type DocStatus = "managed" | "unmanaged-partial" | "missing";
 
+export interface SpokeCheckResult {
+	path: string;
+	exists: boolean;
+	hasBlock: boolean;
+	bodyMatches: boolean;
+	deadLinks: string[];
+	healthy: boolean;
+}
+
 export interface DocsCheckResult {
 	status: DocStatus;
 	manifest: DocsManifest | null;
@@ -269,9 +278,59 @@ export interface DocsCheckResult {
 	existingDocs: string[];
 	staleIndex: boolean;
 	adrFiles: string[];
+	spokes: SpokeCheckResult[];
+	spokesRepaired: string[];
 }
 
-export async function checkDocs(cwd: string): Promise<DocsCheckResult> {
+export interface CheckDocsOptions {
+	repairSpokes?: boolean;
+}
+
+const SPOKE_LINKS = [
+	`${DOCS_DIR}/invariants.md`,
+	`${DOCS_DIR}/conventions.md`,
+	DOCS_DIR,
+] as const;
+
+export async function checkSpokes(cwd: string): Promise<SpokeCheckResult[]> {
+	const body = generateSpokeBody();
+	const deadLinks: string[] = [];
+	for (const link of SPOKE_LINKS) {
+		try {
+			await stat(join(cwd, link));
+		} catch {
+			deadLinks.push(link);
+		}
+	}
+
+	const results: SpokeCheckResult[] = [];
+	for (const spoke of SPOKE_FILES) {
+		let content = "";
+		let exists = true;
+		try {
+			content = await readFile(join(cwd, spoke), "utf-8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			exists = false;
+		}
+
+		const start = exists ? content.indexOf(SPOKE_MARKER_START) : -1;
+		const end = start === -1 ? -1 : content.indexOf(SPOKE_MARKER_END, start + SPOKE_MARKER_START.length);
+		const hasBlock = start !== -1 && end !== -1;
+		const bodyMatches = hasBlock && mergeSpokeContent(content) === content;
+		results.push({
+			path: spoke,
+			exists,
+			hasBlock,
+			bodyMatches,
+			deadLinks: [...deadLinks],
+			healthy: exists && hasBlock && bodyMatches && deadLinks.length === 0,
+		});
+	}
+	return results;
+}
+
+export async function checkDocs(cwd: string, options: CheckDocsOptions = {}): Promise<DocsCheckResult> {
 	const manifest = await readManifest(cwd);
 	const root = docsRoot(cwd);
 	const missingDocs: string[] = [];
@@ -334,6 +393,14 @@ export async function checkDocs(cwd: string): Promise<DocsCheckResult> {
 		staleIndex = adrFiles.length > 0;
 	}
 
+	let spokes = await checkSpokes(cwd);
+	let spokesRepaired: string[] = [];
+	if (options.repairSpokes && spokes.some((spoke) => !spoke.healthy)) {
+		const repaired = await writeSpokes(cwd);
+		spokesRepaired = repaired.written;
+		spokes = await checkSpokes(cwd);
+	}
+
 	// Determine status
 	let status: DocStatus;
 	if (manifest && missingDocs.length === 0) {
@@ -344,7 +411,7 @@ export async function checkDocs(cwd: string): Promise<DocsCheckResult> {
 		status = "missing";
 	}
 
-	return { status, manifest, missingDocs, existingDocs, staleIndex, adrFiles };
+	return { status, manifest, missingDocs, existingDocs, staleIndex, adrFiles, spokes, spokesRepaired };
 }
 
 // ── Decision index generation ──
@@ -549,8 +616,8 @@ export interface EnhancedCheckResult extends DocsCheckResult {
 	tagValidations: DocsTagValidation[];
 }
 
-export async function enhancedCheckDocs(cwd: string, planText?: string): Promise<EnhancedCheckResult> {
-	const baseCheck = await checkDocs(cwd);
+export async function enhancedCheckDocs(cwd: string, planText?: string, options: CheckDocsOptions = {}): Promise<EnhancedCheckResult> {
+	const baseCheck = await checkDocs(cwd, options);
 	const adrValidations = await validateAllADRs(cwd);
 	const tagValidations = planText ? validatePlanDocsTags(planText) : [];
 

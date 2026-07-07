@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateSpokeBody, initDocs, mergeSpokeContent, writeSpokes } from "../filesystem.ts";
+import { checkDocs, generateSpokeBody, initDocs, mergeSpokeContent, writeSpokes } from "../filesystem.ts";
 
 const body = generateSpokeBody();
 
@@ -63,3 +63,18 @@ const afterRerun = await Promise.all([
 assert.deepEqual(afterRerun, beforeRerun, "init rerun leaves spokes and manifest byte-identical");
 assert.ok(rerunResult.skipped.includes("AGENTS.md"), "rerun reports unchanged AGENTS.md");
 assert.ok(rerunResult.skipped.includes("CLAUDE.md"), "rerun reports unchanged CLAUDE.md");
+
+await writeFile(join(initRoot, "AGENTS.md"), "# user content\n", "utf8");
+const checkOnly = await checkDocs(initRoot);
+assert.equal(checkOnly.spokes.find((spoke) => spoke.path === "AGENTS.md")?.hasBlock, false, "check detects missing spoke block");
+assert.equal(await readFile(join(initRoot, "AGENTS.md"), "utf8"), "# user content\n", "check without repair does not write");
+
+const repaired = await checkDocs(initRoot, { repairSpokes: true });
+assert.deepEqual(repaired.spokesRepaired, ["AGENTS.md"], "repair reports rewritten spoke");
+assert.ok(repaired.spokes.every((spoke) => spoke.healthy), "repair makes spokes healthy");
+assert.ok((await readFile(join(initRoot, "AGENTS.md"), "utf8")).startsWith("# user content\n\n"), "repair preserves user content");
+
+await rename(join(initRoot, "docs/engineering/invariants.md"), join(initRoot, "docs/engineering/invariants.md.bak"));
+const deadLinkCheck = await checkDocs(initRoot, { repairSpokes: true });
+assert.ok(deadLinkCheck.spokes.every((spoke) => spoke.deadLinks.includes("docs/engineering/invariants.md")), "check detects dead spoke doc link");
+assert.equal(deadLinkCheck.spokesRepaired.length, 0, "dead link alone is not repaired by rewriting spokes");
