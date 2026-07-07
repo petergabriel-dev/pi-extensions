@@ -3,7 +3,7 @@ import { cp, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateSpokeBody, mergeSpokeContent, writeSpokes } from "../filesystem.ts";
+import { generateSpokeBody, initDocs, mergeSpokeContent, writeSpokes } from "../filesystem.ts";
 
 const body = generateSpokeBody();
 
@@ -39,3 +39,27 @@ const second = await writeSpokes(root);
 assert.equal(await readFile(join(root, "AGENTS.md"), "utf8"), afterAgents, "AGENTS.md second run no-op");
 assert.equal(await readFile(join(root, "CLAUDE.md"), "utf8"), body, "CLAUDE.md second run no-op");
 assert.deepEqual(second, { written: [], unchanged: ["AGENTS.md", "CLAUDE.md"] });
+
+const initRoot = await mkdtemp(join(tmpdir(), "docs-init-spokes-"));
+const initResult = await initDocs(initRoot);
+assert.equal(await readFile(join(initRoot, "AGENTS.md"), "utf8"), body, "init creates AGENTS.md spoke");
+assert.equal(await readFile(join(initRoot, "CLAUDE.md"), "utf8"), body, "init creates CLAUDE.md spoke");
+assert.ok(initResult.manifest.generated.includes("AGENTS.md"), "manifest lists AGENTS.md spoke");
+assert.ok(initResult.manifest.generated.includes("CLAUDE.md"), "manifest lists CLAUDE.md spoke");
+assert.ok(initResult.created.includes("AGENTS.md"), "init reports AGENTS.md as written");
+assert.ok(initResult.created.includes("CLAUDE.md"), "init reports CLAUDE.md as written");
+
+const beforeRerun = await Promise.all([
+	readFile(join(initRoot, "AGENTS.md"), "utf8"),
+	readFile(join(initRoot, "CLAUDE.md"), "utf8"),
+	readFile(join(initRoot, "docs/engineering/manifest.json"), "utf8"),
+]);
+const rerunResult = await initDocs(initRoot);
+const afterRerun = await Promise.all([
+	readFile(join(initRoot, "AGENTS.md"), "utf8"),
+	readFile(join(initRoot, "CLAUDE.md"), "utf8"),
+	readFile(join(initRoot, "docs/engineering/manifest.json"), "utf8"),
+]);
+assert.deepEqual(afterRerun, beforeRerun, "init rerun leaves spokes and manifest byte-identical");
+assert.ok(rerunResult.skipped.includes("AGENTS.md"), "rerun reports unchanged AGENTS.md");
+assert.ok(rerunResult.skipped.includes("CLAUDE.md"), "rerun reports unchanged CLAUDE.md");

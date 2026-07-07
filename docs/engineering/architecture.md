@@ -59,6 +59,10 @@ Concurrency is managed by `agent/extensions/subagents/concurrency.ts`: a configu
 
 Subagent timeouts are idle-based with an absolute backstop. `agent/extensions/subagents/timeout.ts` provides a host-import-free watchdog with `touch()` resetting only the idle timer and `maxTotalMs` remaining absolute (timeout.ts:28-83). `runSubagent()` touches the watchdog on every child `AgentSessionEvent`, so streaming `message_update` events and tool lifecycle events keep an active child alive while silence past `idleTimeoutMs` aborts as `failureKind: "idle"` (spawn.ts:349-362, spawn.ts:384-400). `maxTotalMs` aborts continuously active runaway children as `failureKind: "max_total"`; timeout failures preserve partial output and include `partialWork` (spawn.ts:60-73, spawn.ts:430-440). `spawn_explorer`, nested explorer, `spawn_worker`, and `subagents_debug_run_agent` resolve `idleTimeoutMs`/`maxTotalMs` from per-call params, then `subagents` settings, then defaults; deprecated `timeoutMs` maps to idle timeout (index.ts:63-66, index.ts:461-466, index.ts:551-560, index.ts:675-684, index.ts:755-764, index.ts:925-933).
 
+## Engineering docs extension
+
+`agent/extensions/engineering-docs/` owns managed project docs under `docs/engineering/`. `/docs init` scaffolds canonical docs, writes `docs/engineering/manifest.json`, regenerates the decisions index, and emits root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) through a non-destructive `pi-docs` marker block. The spokes are pure pointers to canonical docs; the manifest `generated` list tracks the decisions index plus spoke files.
+
 ## Memory architecture
 
 Project memory now lives in engineering docs under `docs/engineering/`:

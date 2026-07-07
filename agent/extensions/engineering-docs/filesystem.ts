@@ -239,6 +239,10 @@ export async function initDocs(cwd: string): Promise<InitResult> {
 		created.push(relative(cwd, indexPath));
 	}
 
+	const spokes = await writeSpokes(cwd);
+	created.push(...spokes.written);
+	skipped.push(...spokes.unchanged);
+
 	// Manifest
 	const manifest: DocsManifest = {
 		version: MANIFEST_VERSION,
@@ -246,7 +250,7 @@ export async function initDocs(cwd: string): Promise<InitResult> {
 		managedBy: MANAGED_BY,
 		entrypoint: `${DOCS_DIR}/README.md`,
 		canonicalDocs: CANONICAL_DOCS.map((d) => `${DOCS_DIR}/${d}`),
-		generated: [`${DOCS_DIR}/${DECISIONS_DIR}/${DECISIONS_INDEX}`],
+		generated: [`${DOCS_DIR}/${DECISIONS_DIR}/${DECISIONS_INDEX}`, ...SPOKE_FILES],
 	};
 	await writeManifest(cwd, manifest);
 	created.push(relative(cwd, manifestPath(cwd)));
