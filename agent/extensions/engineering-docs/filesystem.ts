@@ -12,6 +12,7 @@ import {
 	CANONICAL_DOCS,
 	ADR_TEMPLATE,
 	DOCS_AREA_TAGS,
+	SPOKE_FILES,
 	SPOKE_MARKER_START,
 	SPOKE_MARKER_END,
 	type DocsManifest,
@@ -134,6 +135,55 @@ Before writing code, read:
 Full docs (architecture, ADRs, traps): docs/engineering/
 ${SPOKE_MARKER_END}
 `;
+}
+
+export interface WriteSpokesResult {
+	written: string[];
+	unchanged: string[];
+}
+
+export function mergeSpokeContent(existing: string | null, body = generateSpokeBody()): string {
+	if (existing === null) return body;
+
+	const start = existing.indexOf(SPOKE_MARKER_START);
+	const end = existing.indexOf(SPOKE_MARKER_END, start + SPOKE_MARKER_START.length);
+	if (start !== -1 && end !== -1) {
+		let afterEnd = end + SPOKE_MARKER_END.length;
+		if (existing.slice(afterEnd, afterEnd + 2) === "\r\n") afterEnd += 2;
+		else if (existing[afterEnd] === "\n") afterEnd += 1;
+		return existing.slice(0, start) + body + existing.slice(afterEnd);
+	}
+
+	if (existing.length === 0) return body;
+	if (existing.endsWith("\n\n")) return existing + body;
+	if (existing.endsWith("\n")) return existing + "\n" + body;
+	return existing + "\n\n" + body;
+}
+
+export async function writeSpokes(cwd: string): Promise<WriteSpokesResult> {
+	const written: string[] = [];
+	const unchanged: string[] = [];
+
+	for (const spoke of SPOKE_FILES) {
+		const filePath = join(cwd, spoke);
+		let existing: string | null = null;
+		try {
+			existing = await readFile(filePath, "utf-8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+
+		const next = mergeSpokeContent(existing);
+		if (next === existing) {
+			unchanged.push(spoke);
+			continue;
+		}
+
+		await writeFile(filePath, next, "utf-8");
+		written.push(spoke);
+	}
+
+	return { written, unchanged };
 }
 
 export async function initDocs(cwd: string): Promise<InitResult> {

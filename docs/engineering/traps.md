@@ -1,5 +1,9 @@
 # Traps
 
+## Engineering docs
+
+- **Root agent entrypoint spokes are shared user files.** `AGENTS.md` and `CLAUDE.md` may contain hand-written content. Engineering-docs generation must update only the `pi-docs` marker block and must preserve bytes outside that block.
+
 ## Pi ↔ Claude Code bridge
 
 - **Idle widget redraw is load-bearing.** The bridge depends on Pi `ctx.ui.setWidget` updating while Pi is idle. This was manually verified with `idle-widget-spike.ts`; if it regresses, live capture acceptance fails.
