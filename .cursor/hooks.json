@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "node agent/cursor-bridge-client/cursor-readonly-hook.js",
+        "failClosed": true
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "node agent/cursor-bridge-client/cursor-readonly-hook.js",
+        "failClosed": true
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "node agent/cursor-bridge-client/cursor-readonly-hook.js",
+        "failClosed": true
+      }
+    ]
+  }
+}
