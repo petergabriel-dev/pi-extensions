@@ -2,13 +2,15 @@
 
 ## Pi ↔ Claude Code bridge
 
-- Claude Code side must have zero Pi internal imports. `agent/claude-bridge-client/*` uses Node stdlib/file IPC only.
+- Client-side bridge code must have zero Pi internal imports. `agent/claude-bridge-client/*` and `agent/cursor-bridge-client/*` use Node stdlib/file IPC or hook input only.
 - Pi bridge extension is the only Pi-coupled bridge layer and must reuse/export real sibling extension functions instead of copying logic.
 - `capture_note` success requires active Pi bridge response and `widgetUpdated:true`; no silent queue or later replay is considered success.
 - `capture_note` must be applied by the live `discussion-notes` extension instance through the event bus; the bridge must not import/render private discussion-notes state.
 - Bridge tools fail loudly if Pi bridge is down or stale. No direct memory-file fallback is allowed.
 - `.pi` marker presence is the only condition for Claude Code read-only enforcement.
 - Claude Code mutation tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) are always denied in `.pi` projects.
+- Cursor client-side file writes in `.pi` projects must be blocked or reverted by project hooks; native edit reverts must restore exact pre-edit bytes and fail loud.
+- Cursor must not introduce a client-side Pi-state write path; Pi state changes still go only through live bridge requests.
 - Claude Code Bash in `.pi` projects must not depend on bridge `policy.json` freshness, `planBashAllow`, or any Pi round-trip for allow/deny decisions.
 - Claude Code Bash in `.pi` projects must deny `dangerouslyDisableSandbox`; sandbox bypass flags are not allowed in read-only bridge mode.
 - When `sandbox-exec` is available, Claude Code Bash must be wrapped through `hookSpecificOutput.updatedInput.command` and allowed only through that Seatbelt sandbox.
@@ -17,6 +19,7 @@
 - v1 supports one active Pi bridge session per project. A second active watcher must become passive/refuse rather than process the same request stream.
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
+- Bridge capture protocol primary field is `sessionId`; `claudeSessionId` remains a deprecated alias and must keep working for existing Claude Code callers.
 
 ## Workflow modes read-only Bash
 

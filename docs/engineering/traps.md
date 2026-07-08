@@ -16,6 +16,9 @@
 - **Hook failures should deny closed.** The read-only hook intentionally denies invalid hook input and denies Bash when macOS `sandbox-exec` is unavailable; sandboxed Bash no longer depends on fresh bridge policy.
 - **Claude bridge structural Bash wrapping depends on `updatedInput`.** PreToolUse hooks can rewrite tool input. If that support changes, Claude bridge must deny Bash rather than fall back to regex policy enforcement.
 - **Sandbox bypass flags must be denied explicitly.** Claude Code Bash `dangerouslyDisableSandbox` would undermine structural read-only; the Pi bridge hook rejects it before sandbox wrapping.
+- **Cursor native edits have a revert window.** Cursor has no pre-edit deny hook in v1; `afterFileEdit` restores pre-edit bytes and fails loud after the write lands. This preserves Pi-state boundaries but still creates a brief on-disk mutation window.
+- **Cursor shell classification is conservative, not complete.** `beforeShellExecution` denies obvious writers, allows known read-only discovery, and asks on ambiguous commands. Exotic write paths can require new deny patterns after real-Cursor acceptance.
+- **Only the active bridge owner processes protocol changes.** A newly opened Pi session may not own the bridge if an older Pi process is still heartbeating; stop the old owner before verifying changed bridge behavior.
 
 ## Pi subagents
 

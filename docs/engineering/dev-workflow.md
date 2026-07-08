@@ -40,6 +40,37 @@ Real acceptance checks:
 
 No-commit note: this `~/.pi` workspace may not be a Git repo. Build checkpoints can be explicit no-commit checkpoints when approved by the user.
 
+## Pi ↔ Cursor bridge workflow
+
+Use this flow for Cursor parity checks in existing Pi projects:
+
+1. Start/focus Pi in the project first and confirm `Claude bridge: active`.
+2. Open the same project in Cursor ≥1.7.
+3. Confirm project templates exist:
+   - `.cursor/mcp.json` registers `pi-claude-bridge` with `node agent/claude-bridge-client/pi-bridge-mcp.js`.
+   - `.cursor/hooks.json` enables `beforeShellExecution`, `beforeMCPExecution`, and `afterFileEdit` with `failClosed: true`.
+   - `.cursor/commands/discuss.md` and `.cursor/commands/plan.md` use bridge recall/capture/save workflows.
+4. Use Cursor commands for discuss/plan only; Pi `/mode build` owns mutations.
+5. Cursor commands must pass `conversation_id` as bridge `sessionId` when available.
+
+Cursor acceptance checklist:
+
+- `recall_memory` succeeds through `pi-claude-bridge`.
+- `capture_note` with `sessionId` updates Pi Notes widget live.
+- `save_plan` succeeds and Pi `/plan view` sees the plan.
+- Read-only shell discovery such as `rg`, `ls`, `find`, and `cat` is allowed.
+- Shell write such as `echo x > f` is denied or asks before execution.
+- A mutating non-bridge MCP call is denied.
+- A native Cursor file edit is reverted to exact pre-edit bytes and shows a visible failure message.
+
+Hook unit checks:
+
+```bash
+node agent/cursor-bridge-client/test-cursor-readonly-hook.js
+python3 -m json.tool .cursor/hooks.json >/dev/null
+python3 -m json.tool .cursor/mcp.json >/dev/null
+```
+
 ## Engineering docs extension workflow
 
 `/docs init` creates managed docs plus root `AGENTS.md` and `CLAUDE.md` spokes. `/docs` and `/docs status` show spoke health. Spokes are repaired by `/docs check` only when writes are allowed (Build/Off). Use `/docs check --check` for validation-only runs; it reports missing marker blocks and dead spoke doc links without writing.

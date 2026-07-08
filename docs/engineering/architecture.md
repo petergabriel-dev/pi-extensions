@@ -1,22 +1,23 @@
-## Pi ↔ Claude Code bridge
+## Pi ↔ multi-harness bridge
 
-Claude Code is a read-only planning surface for existing Pi projects. Pi remains source of truth for engineering docs validation, discussion notes, personal memory recall, workflow prompts, saved-plan handoff, and build execution.
+Claude Code and Cursor are read-only planning surfaces for existing Pi projects. Pi remains source of truth for engineering docs validation, discussion notes, personal memory recall, workflow prompts, saved-plan handoff, and build execution.
 
 Flow:
 
 1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active interactive session.
 2. Bridge resolves the project root from the nearest `.pi/` marker.
 3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json` for IPC and liveness.
-4. Claude Code MCP client `agent/claude-bridge-client/pi-bridge-mcp.js` writes UUID request JSON files and polls matching responses for up to 2s.
+4. Harness clients use `agent/claude-bridge-client/pi-bridge-mcp.js` to write UUID request JSON files and poll matching responses for up to 2s. Cursor registers the same client through `.cursor/mcp.json`.
 5. Pi bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, and `save_plan` by reusing Pi-side extension functions.
 6. Bridge recall responses include engineering docs, indexed personal memory from `~/.pi/memory/MEMORY.md`, workflow-mode prompts, and saved-plan context.
-7. Claude Code never imports Pi internals; only the Pi bridge extension imports sibling Pi extension code.
+7. Client-side bridge code never imports Pi internals; only the Pi bridge extension imports sibling Pi extension code.
 
 Core boundaries:
 
 - **Pi bridge extension:** Pi-coupled layer. Reuses workflow-modes, discussion-notes, engineering-docs, and personal-memory code.
-- **Claude MCP client:** Thin file-protocol client. Node stdlib only; no Pi imports.
+- **MCP bridge client:** Thin file-protocol client. Node stdlib only; no Pi imports. It is shared by Claude Code and Cursor.
 - **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools and `dangerouslyDisableSandbox`. On macOS with `/usr/bin/sandbox-exec`, Bash is allowed only by rewriting the command through a Seatbelt sandbox. If that sandbox is unavailable, Bash denies closed.
+- **Cursor hooks:** Project-committed `.cursor/hooks.json` wires `agent/cursor-bridge-client/cursor-readonly-hook.js` for `beforeShellExecution`, `beforeMCPExecution`, and `afterFileEdit`. Shell writes deny, ambiguous shell asks, mutating non-bridge MCP calls deny, and native file edits are reverted from pre-edit bytes with a visible failure message.
 
 Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 
@@ -26,7 +27,7 @@ Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
 - `policy.json`: fresh Bash/read-only policy snapshot sourced from Pi workflow-modes exports
 - `session.json`: active bridge session lock + heartbeat
 
-`capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. It does not stage memory candidates. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension updates its own `currentPlan`, appends `workflow-plan`, and returns `workflow-modes:save-plan-result`.
+`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; if both are present, `sessionId` wins. `capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. It does not stage memory candidates. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension updates its own `currentPlan`, appends `workflow-plan`, and returns `workflow-modes:save-plan-result`.
 
 `recall_memory` returns project docs and a compact personal-memory index instead of retired private indexes. Project truth comes from `docs/engineering/`; cross-repo personal preferences/traps live under `~/.pi/memory/` through `agent/extensions/personal-memory/store.ts` and are fetched on demand by slug. See ADR-0016 and ADR-0017.
 

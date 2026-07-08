@@ -79,7 +79,12 @@ Code:
 - changing Claude Code `/discuss` or `/plan` commands
 - changing bridge request/response protocol
 - changing Claude Code read-only hooks
+- changing Cursor bridge hooks/templates or multi-harness clients
 - changing workflow-modes plan save/build handoff
+
+## Extended by
+
+- ADR-0019
 
 ## Supersedes
 
