@@ -709,6 +709,7 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	}
 	try {
 		const addResult = await requestDiscussionNotesAdd(pi, request.id, payload);
+		const sessionId = payload.sessionId ?? payload.claudeSessionId;
 		return {
 			id: request.id,
 			ok: true,
@@ -721,7 +722,7 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 				widgetUpdated: true,
 				source: "claude-code",
 				projectRoot,
-				...(payload.sessionId ? { sessionId: payload.sessionId, claudeSessionId: payload.sessionId } : {}),
+				...(sessionId ? { sessionId, claudeSessionId: sessionId } : {}),
 			},
 		};
 	} catch (error) {
