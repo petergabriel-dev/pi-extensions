@@ -111,10 +111,24 @@ test("capture writes note/widget and duplicate id is stable", async ({ projectRo
 	const first = await sendRequest(projectRoot, "capture", { claudeSessionId: `core-${id}`, context: "core protocol", notes: [{ type: "implementation", text }] }, id);
 	assert(first.response.ok, `capture failed: ${JSON.stringify(first.response)}`);
 	assert(first.response.result.widgetUpdated === true, "capture did not report widget update");
+	assert(first.response.result.sessionId === `core-${id}`, "legacy claudeSessionId did not populate sessionId");
+	assert(first.response.result.claudeSessionId === `core-${id}`, "legacy claudeSessionId alias missing");
 	assert(first.response.result.stagingFile === undefined, "capture should not write staging");
 	fs.unlinkSync(first.responsePath);
 	const second = await sendRequest(projectRoot, "capture", { claudeSessionId: `core-${id}`, notes: [{ type: "implementation", text: "DUPLICATE SHOULD NOT APPLY" }] }, id);
 	assert(JSON.stringify(second.response) === JSON.stringify(first.response), "duplicate capture response changed");
+});
+
+test("capture accepts sessionId primary and lets it win over legacy alias", async ({ projectRoot }) => {
+	const id = crypto.randomUUID();
+	const first = await sendRequest(projectRoot, "capture", {
+		sessionId: `session-${id}`,
+		claudeSessionId: `legacy-${id}`,
+		notes: [{ type: "implementation", text: `Core protocol sessionId capture ${id}` }],
+	});
+	assert(first.response.ok, `sessionId capture failed: ${JSON.stringify(first.response)}`);
+	assert(first.response.result.sessionId === `session-${id}`, "sessionId did not win over claudeSessionId");
+	assert(first.response.result.claudeSessionId === `session-${id}`, "claudeSessionId alias did not mirror sessionId");
 });
 
 test("save_plan is visible through recall duplicate response stable", async ({ projectRoot }) => {

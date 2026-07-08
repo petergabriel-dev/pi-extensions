@@ -78,6 +78,7 @@ interface CaptureNoteInput {
 
 interface CapturePayload {
 	notes: CaptureNoteInput[];
+	sessionId?: string;
 	claudeSessionId?: string;
 	context?: string;
 }
@@ -459,9 +460,14 @@ function normalizeCapturePayload(payload: Record<string, unknown>): CapturePaylo
 	});
 	if (notes.length === 0) throw new Error("Capture request requires at least one note.");
 	if (notes.length > 10) throw new Error("Capture request supports at most 10 notes.");
+	const sessionId = typeof payload.sessionId === "string" && payload.sessionId.trim()
+		? payload.sessionId.trim()
+		: typeof payload.claudeSessionId === "string" && payload.claudeSessionId.trim()
+			? payload.claudeSessionId.trim()
+			: undefined;
 	return {
 		notes,
-		...(typeof payload.claudeSessionId === "string" && payload.claudeSessionId.trim() ? { claudeSessionId: payload.claudeSessionId.trim() } : {}),
+		...(sessionId ? { sessionId, claudeSessionId: sessionId } : {}),
 		...(typeof payload.context === "string" && payload.context.trim() ? { context: payload.context.trim() } : {}),
 	};
 }
@@ -715,7 +721,7 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 				widgetUpdated: true,
 				source: "claude-code",
 				projectRoot,
-				...(payload.claudeSessionId ? { claudeSessionId: payload.claudeSessionId } : {}),
+				...(payload.sessionId ? { sessionId: payload.sessionId, claudeSessionId: payload.sessionId } : {}),
 			},
 		};
 	} catch (error) {

@@ -204,7 +204,8 @@ const tools = [
 					minItems: 1,
 					maxItems: 10
 				},
-				claudeSessionId: { type: "string" },
+				sessionId: { type: "string" },
+				claudeSessionId: { type: "string", description: "Deprecated alias for sessionId." },
 				context: { type: "string" },
 				cwd: { type: "string" }
 			},
@@ -237,7 +238,7 @@ async function callTool(name, args) {
 	if (name === "recall_memory") return toolResult(name, await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd }));
 	if (name === "recall_memory_entry") return toolResult(name, await bridgeRequest("recall_entry", { slug: args.slug }, { cwd }));
 	if (name === "save_memory") return toolResult(name, await bridgeRequest("save_memory", { name: args.name, description: args.description, type: args.type, body: args.body }, { cwd }));
-	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd }));
+	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, sessionId: args.sessionId, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd }));
 	if (name === "validate_docs_tags") return toolResult(name, await bridgeRequest("validate_tags", { planText: args.planText }, { cwd }));
 	if (name === "save_plan") return toolResult(name, await bridgeRequest("save_plan", { planText: args.planText, planId: args.planId, confirmed: args.confirmed === true }, { cwd }));
 	throw new Error(`Unknown tool: ${name}`);
