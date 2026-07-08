@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "pi-claude-bridge": {
+      "command": "node",
+      "args": [
+        "agent/claude-bridge-client/pi-bridge-mcp.js"
+      ]
+    }
+  }
+}
