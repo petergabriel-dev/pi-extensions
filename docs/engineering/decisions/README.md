@@ -2,22 +2,23 @@
 
 | ADR | Status | Summary | Read when |
 |---|---|---|---|
-| [ADR-0001](ADR-0001-pi-claude-bridge-boundary.md) | Active | Pi is source of truth; Claude Code is a thin read-only bridge client for Notes, engineering docs, personal memory, workflow prompts, and plan handoff. | changing bridge protocol, Claude commands, capture/recall behavior, read-only hooks, or workflow plan handoff |
-| [ADR-0002](ADR-0002-reliable-persistent-memory-reconciliation.md) | Superseded | Superseded by ADR-0016; historical partial-batch persistent-memory reconciliation design. | reading historical persistent-memory reconciliation behavior |
-| [ADR-0003](ADR-0003-non-blocking-reason-aware-persistent-memory-consolidation.md) | Superseded | Superseded by ADR-0016; historical lifecycle, sweep, and careful-model structured-output behavior. | reading historical persistent-memory lifecycle behavior |
-| [ADR-0004](ADR-0004-pi-subagents.md) | Active | Pi subagents use persisted in-process child sessions, structured-return-only parent context, a parent-enforced worker Build gate, bounded main→worker→explorer graph, and concurrency lanes with ownership guards. | modifying subagent spawning, worker/explorer tools, workflow gates, concurrency, nested delegation, or child session persistence |
-| [ADR-0005](ADR-0005-pinned-default-persistent-memory-careful-model.md) | Superseded | Superseded by ADR-0016; historical pinned/default persistent-memory model resolution. | reading historical persistent-memory model selection behavior |
-| [ADR-0006](ADR-0006-chunked-persistent-memory-reconciliation.md) | Superseded | Superseded by ADR-0016; historical chunked model reconciliation with sequential apply/re-read and generation guards. | reading historical chunked reconciliation behavior |
-| [ADR-0007](ADR-0007-workflow-modes-subagent-delegation.md) | Active | Workflow modes use prompt-only delegation guidance: Discuss/Plan route explorer work by threshold, and Build uses sequential one-worker-per-substantial-saved-task orchestration while parent gates remain authoritative. | changing workflow-mode prompts, subagent tool contracts, worker-orchestration guidance, or saved-plan delegation behavior |
-| [ADR-0008](ADR-0008-persistent-memory-reconcile-connection-ownership-observability.md) | Superseded | Superseded by ADR-0016; historical SQLite connection ownership, single-flight, and run-log observability behavior. | reading historical persistent-memory SQLite/reconcile observability behavior |
-| [ADR-0009](ADR-0009-bridge-staging-validity-malformed-quarantine.md) | Superseded | Superseded by ADR-0016; historical bridge staging validity and malformed quarantine behavior. | reading historical bridge staging behavior |
-| [ADR-0010](ADR-0010-subagent-idle-timeout.md) | Active | Subagent timeout behavior uses an idle watchdog reset by child events plus an absolute max-total backstop, with structured failure metadata. | changing subagent timeout semantics, subagent tool schemas/settings, or failed subagent result handling |
-| [ADR-0011](ADR-0011-per-candidate-persistent-memory-reconciliation.md) | Superseded | Superseded by ADR-0016; historical per-candidate reconciliation pipeline. | reading historical per-candidate persistent-memory behavior |
-| [ADR-0012](ADR-0012-per-mode-ponytail-lazy-senior-dev-reflex.md) | Active | Workflow-modes prompt constants are the single source for the ponytail lazy-senior-dev reflex, with bridge-served prompts carrying it to Claude commands without duplicated ruleset text. | changing workflow-mode prompts, bridge prompt payloads, Claude discuss/plan commands, Build worker delegation text, or ponytail/debt-ledger behavior |
-| [ADR-0013](ADR-0013-manual-single-writer-persistent-memory-consolidation.md) | Superseded | Superseded by ADR-0016; historical manual single-writer persistent-memory consolidation design. | reading historical /memory consolidate, recover, reconcile, staging cleanup, or reinforcement behavior |
-| [ADR-0014](ADR-0014-persistent-memory-inherits-session-model.md) | Superseded | Superseded by ADR-0016; historical session-model inheritance for persistent-memory model calls. | reading historical persistent-memory model-call behavior |
-| [ADR-0015](ADR-0015-agent-driven-persistent-memory-save.md) | Superseded | Superseded by ADR-0016; historical agent-driven save_to_memory turn design. | reading historical /memory modal or save_to_memory behavior |
-| [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md) | Active | Memory now equals engineering docs for project truth plus small user-global personal memory; persistent-memory extraction/reconcile is retired. | changing memory capture or recall, bridge recall/capture behavior, personal memory injection, engineering-docs memory boundaries, or reading persistent-memory history |
-| [ADR-0017](ADR-0017-indexed-personal-memory.md) | Active | User-global personal memory is indexed under `~/.pi/memory/`; default recall injects only `MEMORY.md`, with full entries fetched or saved explicitly. | changing personal-memory storage, recall_memory, recall_memory_entry, save_memory, /remember, or legacy ~/.pi/memory.md migration |
-| [ADR-0018](ADR-0018-engineering-docs-root-spokes.md) | Active | Engineering-docs emits root AGENTS.md and CLAUDE.md as pure pointer spokes through a non-destructive pi-docs marker-block merge. | changing engineering-docs init/check, manifest.generated, AGENTS.md/CLAUDE.md generation, or marker-block merge behavior |
-| [ADR-0019](ADR-0019-multi-harness-bridge-cursor-parity.md) | Active | Pi bridge is multi-harness: Claude Code and Cursor share the live MCP bridge, Cursor adds project read-only hooks/templates, and `sessionId` replaces Claude-specific session naming with alias compatibility. | changing bridge protocol fields, adding client harnesses, changing Cursor hooks/templates, read-only enforcement, or ADR-0001 boundaries |
+| ADR-0001 | Active | Pi Claude Code bridge boundary |  |
+| ADR-0002 | Superseded | Reliable Persistent-Memory Reconciliation |  |
+| ADR-0003 | Superseded | Non-Blocking Reason-Aware Persistent-Memory Consolidation |  |
+| ADR-0004 | Active | Pi Subagents |  |
+| ADR-0005 | Superseded | Pinned Default Persistent-Memory Model Resolution |  |
+| ADR-0006 | Superseded | Chunked Persistent-Memory Reconciliation |  |
+| ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
+| ADR-0008 | Superseded | Persistent-memory reconcile connection ownership and observability |  |
+| ADR-0009 | Superseded | Bridge staging validity and malformed quarantine |  |
+| ADR-0010-subagent-idle-timeout | Unknown | ADR-0010-subagent-idle-timeout.md |  |
+| ADR-0011 | Superseded | Per-Candidate Persistent-Memory Reconciliation |  |
+| ADR-0012 | Active | Per-mode ponytail lazy-senior-dev reflex |  |
+| ADR-0013 | Superseded | Manual Single-Writer Persistent-Memory Consolidation | changing persistent-memory lifecycle hooks, /memory consolidate/recover/reconcile, staging cleanup, dead-letter recovery, reinforcement, or mode-transition reminders |
+| ADR-0014 | Superseded | Persistent Memory Inherits Session Model | changing persistent-memory model calls, save_to_memory, /memory consolidate/reconcile, model selection, settings persistence, or ADR-0005 history |
+| ADR-0015 | Superseded | Agent-Driven Persistent-Memory Save Turn | changing `/memory` modal Consolidate, save_to_memory, persistent-memory write invariants, missed-tool nudges, or ADR-0013 manual consolidation flow |
+| ADR-0016 | Active | Memory = engineering-docs plus user-global personal memory | changing memory capture or recall, bridge recall/capture behavior, personal memory injection, engineering-docs memory boundaries, or reading persistent-memory history |
+| ADR-0017 | Active | Indexed user-global personal memory | changing personal-memory storage, recall_memory, recall_memory_entry, save_memory, /remember, or legacy ~/.pi/memory.md migration |
+| ADR-0018 | Active | Engineering docs root spokes | changing engineering-docs init/check, manifest.generated, AGENTS.md/CLAUDE.md generation, or marker-block merge behavior |
+| ADR-0019 | Active | Multi-harness bridge and Cursor parity | changing bridge protocol fields, adding new harness clients, changing Cursor hooks/templates, changing read-only enforcement, or extending ADR-0001 bridge boundaries |
+| ADR-0020 | Active | Durable workflow plan store |  |
