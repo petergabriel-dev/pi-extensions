@@ -1,8 +1,10 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@mariozechner/pi-tui";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
 import { wrapCommand } from "./sandbox.js";
+import { clearPlan as clearStoredPlan, readPlan, writePlan } from "./plan-store.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build";
 export type PlanEvent = "set" | "clear";
@@ -35,6 +37,8 @@ const MODE_LABELS: Record<Mode, string> = {
 
 let currentMode: Mode = "off";
 let currentPlan: string | undefined;
+let currentPlanId: string | undefined;
+let currentPlanSavedAt: string | undefined;
 let latestContext: ExtensionContext | null = null;
 
 function normalizeMode(raw: string): Mode | undefined {
@@ -79,9 +83,12 @@ function getLastAssistantText(ctx: ExtensionContext): string | undefined {
 	return undefined;
 }
 
-function reconstructFromBranch(ctx: ExtensionContext): void {
+async function reconstructFromBranch(ctx: ExtensionContext): Promise<void> {
 	currentMode = "off";
 	currentPlan = undefined;
+	currentPlanId = undefined;
+	currentPlanSavedAt = undefined;
+	let legacyPlan: { plan: string; at?: number } | undefined;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		const e = entry as { type?: string; customType?: string; data?: unknown };
 		if (e.type !== "custom") continue;
@@ -89,10 +96,24 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 			const mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
 			if (mode) currentMode = mode;
 		} else if (e.customType === PLAN_ENTRY) {
-			const data = e.data as { event?: unknown; plan?: unknown } | undefined;
-			if (data?.event === "clear") currentPlan = undefined;
-			if (data?.event === "set" && typeof data.plan === "string") currentPlan = data.plan;
+			const data = e.data as { event?: unknown; plan?: unknown; at?: unknown } | undefined;
+			if (data?.event === "clear") legacyPlan = undefined;
+			if (data?.event === "set" && typeof data.plan === "string") {
+				legacyPlan = { plan: data.plan, ...(typeof data.at === "number" && Number.isFinite(data.at) ? { at: data.at } : {}) };
+			}
 		}
+	}
+	const stored = await readPlan({ cwd: ctx.cwd ?? process.cwd() });
+	if (stored) {
+		currentPlan = stored.plan;
+		currentPlanId = stored.planId;
+		currentPlanSavedAt = stored.savedAt;
+	} else if (legacyPlan) {
+		const savedAt = legacyPlan.at ? new Date(legacyPlan.at).toISOString() : new Date().toISOString();
+		const adopted = await writePlan(legacyPlan.plan, { cwd: ctx.cwd ?? process.cwd(), planId: randomUUID(), savedAt });
+		currentPlan = adopted.plan;
+		currentPlanId = adopted.planId;
+		currentPlanSavedAt = adopted.savedAt;
 	}
 	updateStatus(ctx);
 }
@@ -199,12 +220,19 @@ async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
 	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", margin: 2, anchor: "center" } });
 }
 
-export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionContext, text: string): Promise<{ event: "set"; plan: string; at: number }> {
-	currentPlan = text;
-	const entry = { event: "set" satisfies PlanEvent, plan: text, at: Date.now() };
-	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
+export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionContext, text: string, metadata: { planId?: string; savedAt?: string } = {}): Promise<{ event: "set"; plan: string; at: number; planId: string; savedAt: string }> {
+	const stored = await writePlan(text, {
+		cwd: ctx.cwd ?? process.cwd(),
+		planId: metadata.planId ?? randomUUID(),
+		...(metadata.savedAt ? { savedAt: metadata.savedAt } : {}),
+	});
+	currentPlan = stored.plan;
+	currentPlanId = stored.planId;
+	currentPlanSavedAt = stored.savedAt;
+	const entry = { event: "set" satisfies PlanEvent, plan: stored.plan, planId: stored.planId, savedAt: stored.savedAt, at: Date.parse(stored.savedAt) };
+	void Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry)).catch(() => undefined);
 	updateStatus(ctx);
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
+	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: true });
 	return entry;
 }
 
@@ -223,11 +251,14 @@ async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 	if (!currentPlan) return ctx.ui.notify("No saved plan for this branch.", "info");
 	const ok = await ctx.ui.confirm("Clear plan?", "Clear the saved plan for this branch?");
 	if (!ok) return;
+	await clearStoredPlan({ cwd: ctx.cwd ?? process.cwd() });
 	currentPlan = undefined;
-	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, at: Date.now() }));
+	currentPlanId = undefined;
+	currentPlanSavedAt = undefined;
+	void Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, at: Date.now() })).catch(() => undefined);
 	updateStatus(ctx);
 	ctx.ui.notify("Cleared saved plan.", "success");
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
+	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: false });
 }
 
 async function choosePlanAction(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -336,8 +367,8 @@ export default function (pi: ExtensionAPI) {
 		if (!plan || plan.trim().length === 0) return emitResult({ ok: false, error: "workflow-modes save-plan plan is required" });
 		if (!latestContext) return emitResult({ ok: false, error: "workflow-modes has no active context" });
 		try {
-			const entry = await setSavedWorkflowPlan(pi, latestContext, plan);
-			emitResult({ ok: true, savedAt: new Date(entry.at).toISOString(), chars: plan.length });
+			const entry = await setSavedWorkflowPlan(pi, latestContext, plan, { planId });
+			emitResult({ ok: true, planId: entry.planId, savedAt: entry.savedAt, chars: plan.length });
 		} catch (error) {
 			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
 		}
@@ -349,19 +380,19 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit("workflow-modes:state", {
 			mode: currentMode,
 			hasPlan: currentPlan !== undefined,
-			...(currentPlan ? { plan: currentPlan } : {}),
+			...(currentPlan ? { plan: currentPlan, planId: currentPlanId, savedAt: currentPlanSavedAt } : {}),
 		});
 	});
 
 	// Re-emit state on session restore so late-loaded extensions can sync
 	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
-		reconstructFromBranch(ctx);
+		await reconstructFromBranch(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		latestContext = ctx;
-		reconstructFromBranch(ctx);
+		await reconstructFromBranch(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 
