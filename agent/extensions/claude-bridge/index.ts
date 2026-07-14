@@ -119,7 +119,6 @@ let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
 const pendingSavePlans = new Map<string, PendingEventResult>();
 const pendingDiscussionNotes = new Map<string, PendingEventResult>();
-let latestSavedPlan: { planId: string; planText: string; savedAt: string } | null = null;
 
 const SCAN_COALESCE_MS = 50; // coalesce rapid watcher events into one scan per window.
 let scanScheduled = false;
@@ -547,7 +546,6 @@ async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request:
 		}
 		const planId = typeof result.planId === "string" ? result.planId : payload.planId ?? request.id;
 		const savedAt = typeof result.savedAt === "string" ? result.savedAt : new Date().toISOString();
-		latestSavedPlan = { planId, planText: payload.planText, savedAt };
 		return {
 			id: request.id,
 			ok: true,
@@ -588,20 +586,23 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 		return errorResponse(request.id, "not_pi_project", "Pi bridge recall requires an existing Pi project with a .pi directory.");
 	}
 
+	const workflowState = await requestWorkflowState(pi);
+	if (!workflowState) {
+		return errorResponse(request.id, "workflow_state_unavailable", "Pi bridge recall requires live workflow-modes state.");
+	}
+	const workflowPlan = typeof workflowState.plan === "string" ? workflowState.plan : undefined;
+	const savedPlan = workflowPlan
+		? {
+			planId: typeof workflowState.planId === "string" ? workflowState.planId : null,
+			planText: workflowPlan,
+			savedAt: typeof workflowState.savedAt === "string" ? workflowState.savedAt : null,
+		}
+		: null;
 	const memoryDir = await resolveMemoryDir();
 	await migrateFlatFile(memoryDir);
 	const personalIndex = await readMemoryIndex(memoryDir);
 	const personalBlock = formatMemoryIndexBlock(personalIndex) ?? "";
 	const memoryBlocks = personalBlock ? [personalBlock] : [];
-	const workflowState = await requestWorkflowState(pi);
-	const workflowPlan = typeof workflowState?.plan === "string" ? workflowState.plan : undefined;
-	const savedPlan = workflowPlan
-		? {
-			planId: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.planId : null,
-			planText: workflowPlan,
-			savedAt: latestSavedPlan?.planText === workflowPlan ? latestSavedPlan.savedAt : null,
-		}
-		: latestSavedPlan;
 	return {
 		id: request.id,
 		ok: true,
