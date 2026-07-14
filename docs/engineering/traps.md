@@ -8,6 +8,7 @@
 
 - **Idle widget redraw is load-bearing.** The bridge depends on Pi `ctx.ui.setWidget` updating while Pi is idle. This was manually verified with `idle-widget-spike.ts`; if it regresses, live capture acceptance fails.
 - **Do not trust imported extension module state for live handoff.** `save_plan` initially returned OK but `/plan view` showed no plan because the bridge updated an imported workflow module instance. `capture` later overwrote the Notes widget with `Notes: 1` because the bridge imported `discussion-notes` and rendered a private notes array. Use event bus handoff so live extensions own state.
+- **Pi session entries are not durable saved-plan storage.** Pi core `appendEntry` can report success while `_persist` silently skips a session write (for example, no session file or no assistant message). `workflow-modes` therefore writes `plan-store.ts`'s project+branch file before changing live state; bridge recall must query that live state, never retain a plan cache.
 - **Claude models may skip tool checkpoints.** A direct `/discuss` smoke once answered without capture. Polite, task-natural prompts worked; coercive “MUST call tool” phrasing was refused as prompt injection. Acceptance must audit transcript vs Pi notes.
 - **Docs validator sees bracketed examples.** Literal `[DOCS:*]` or `[DOCS]` in plan boilerplate can be treated as tags and rejected. Avoid bracketed wildcard examples in generated plan text.
 - **fs.watch can miss request creates.** Bridge uses `fs.watch` plus a polling scan fallback because a smoke test missed a request event.
