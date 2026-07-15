@@ -20,8 +20,16 @@
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
 - Saved plans belong only to selected Pi session ancestry. `workflow-modes` must append a `workflow-plan` save/clear entry before changing live state, reconstruct from `getBranch()` on session start/tree navigation, and never read or write repository- or Git-branch-scoped plan files.
 - Bridge recall must obtain saved-plan state only from live `workflow-modes`; no bridge cache or direct plan-file fallback is allowed.
+- Bridge workflow prompts must use `workflow-modes` prompt composition with live `cavemanEnabled`; bridge clients must not copy Caveman text or import Pi code.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
 - Bridge capture protocol primary field is `sessionId`; `claudeSessionId` remains a deprecated alias and must keep working for existing Claude Code callers.
+
+## Workflow modes Caveman composition
+
+- `workflow-modes` is the sole Caveman owner. The standalone `caveman-mode` extension must not exist or register a second `/caveman` command.
+- Caveman preference is selected-session-branch state using the stable `caveman-mode-state` custom entry. No explicit entry means ON; latest valid ancestral entry wins.
+- Discuss, Plan, and Build compose their workflow prompt with Caveman when enabled and the explicit normal-style override when disabled.
+- Off must inject neither Caveman nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
 
 ## Workflow modes read-only Bash
 

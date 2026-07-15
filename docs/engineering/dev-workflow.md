@@ -13,12 +13,13 @@ Use this flow for existing Pi projects:
    - `capture_note`
    - `validate_docs_tags`
    - `save_plan`
-6. Switch to Pi `/mode build` to implement saved plans.
+6. Bridge recall inherits Pi's live `/caveman` preference in its Discuss, Plan, and Build prompts; new branches default ON.
+7. Switch to Pi `/mode build` to implement saved plans.
 
 Verification commands used during bridge development:
 
 ```bash
-node agent/claude-bridge-client/test-core-protocol.js /Users/petergabrielrlopez
+node agent/claude-bridge-client/test-core-protocol.js /Users/petergabrielrlopez/.pi
 claude mcp list
 ```
 
@@ -31,6 +32,8 @@ pi-claude-bridge: node /Users/petergabrielrlopez/.pi/agent/claude-bridge-client/
 Real acceptance checks:
 
 - Claude Code `/discuss` records a decision through `capture_note`; Pi Notes widget updates live.
+- Bridge recall reports `cavemanEnabled: true` by default and includes `CAVEMAN MODE ACTIVE.` in Discuss, Plan, and Build prompts.
+- `/caveman off` replaces Caveman style with the normal-style override in active modes; `/mode off` injects neither style while retaining the preference.
 - Claude Code `/plan` recalls memory, validates docs tags, asks for save confirmation, and calls `save_plan`.
 - Pi `/plan view` shows bridge-saved plan.
 - Pi `/mode build` keeps saved plan available on the selected session branch.
@@ -99,7 +102,9 @@ npm run typecheck
 
 - generated sandbox wrapper/profile strings;
 - fallback policy allow/deny behavior;
-- behavioral sandbox contract when a real launcher is available, otherwise a no-launcher skip path.
+- behavioral sandbox contract when a real launcher is available, otherwise a no-launcher skip path;
+- session-branch plan restoration;
+- Caveman default/restore behavior, mode prompt composition, Off suppression, and 10,000-entry reconstruction.
 
 ## CCC Search Extension testing
 
