@@ -81,12 +81,14 @@ python3 -m json.tool .cursor/mcp.json >/dev/null
 
 `/docs init` creates managed docs plus root `AGENTS.md` and `CLAUDE.md` spokes. `/docs` and `/docs status` show spoke health. Spokes are repaired by `/docs check` only when writes are allowed (Build/Off). Use `/docs check --check` for validation-only runs; it reports missing marker blocks and dead spoke doc links without writing.
 
-Spoke verification during development:
+Engineering-docs extension verification during development:
 
 ```bash
 cd agent/extensions/engineering-docs
-npx --yes tsx test/test_spokes.ts
+npm test
 ```
+
+This runs tag-validator and root-spoke regression suites.
 
 ## Workflow-Modes Extension testing
 

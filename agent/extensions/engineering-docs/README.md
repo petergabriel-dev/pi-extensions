@@ -264,7 +264,7 @@ If workflow-modes is not loaded, the docs extension defaults to unknown mode (wr
 
 ## Agent Tool
 
-The extension registers `docs_validate_tags` for validating `[DOCS:*]` and `[ADR:*]` tags in plan text. This can be called by the agent to check plan task tags before implementation.
+The extension registers `docs_validate_tags` for validating `[DOCS:*]` and `[ADR:*]` tags in plan text. Results distinguish plans with no tags, plans where all recognized tags are valid, and plans containing invalid tags with actionable errors.
 
 ## File Layout
 
