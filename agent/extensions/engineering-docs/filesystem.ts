@@ -12,6 +12,7 @@ import {
 	CANONICAL_DOCS,
 	ADR_TEMPLATE,
 	DOCS_AREA_TAGS,
+	ADR_ACTION_TAGS,
 	SPOKE_FILES,
 	SPOKE_MARKER_START,
 	SPOKE_MARKER_END,
@@ -581,32 +582,56 @@ export function validateDocsTag(tag: string): DocsTagValidation {
 
 export function validatePlanDocsTags(planText: string): DocsTagValidation[] {
 	const results: DocsTagValidation[] = [];
+	const tagRegex = /\[(DOCS|ADR)(?::([^\]]+))?\]/g;
 
-	// Find all [DOCS:...] tags
-	const docsTagRegex = /\[DOCS:[^\]]+\]/g;
-	const matches = planText.match(docsTagRegex) ?? [];
+	for (const line of planText.split("\n")) {
+		const lineResults: DocsTagValidation[] = [];
+		let hasValidAdrAction = false;
 
-	for (const match of matches) {
-		const validation = validateDocsTag(match);
-		if (!validation.valid) {
-			results.push(validation);
+		for (const match of line.matchAll(tagRegex)) {
+			const [tag, kind, value] = match;
+			if (kind === "DOCS") {
+				lineResults.push(validateDocsTag(tag));
+				continue;
+			}
+
+			if (!value) {
+				lineResults.push({ tag, valid: false, error: `Bare [ADR] tag is invalid. Specify action: ${ADR_ACTION_TAGS.map(action => `[ADR:${action}]`).join(", ")}` });
+			} else if (ADR_ACTION_TAGS.includes(value as any)) {
+				hasValidAdrAction = true;
+				lineResults.push({ tag, valid: true });
+			} else {
+				lineResults.push({ tag, valid: false, error: `Unknown ADR action: ${value}. Valid actions: ${ADR_ACTION_TAGS.join(", ")}` });
+			}
 		}
-	}
 
-	// Check if bare [DOCS] exists (without area)
-	if (/\[DOCS\](?!:)/.test(planText)) {
-		results.push({ tag: "[DOCS]", valid: false, error: "Bare [DOCS] tag without area. Specify: [DOCS:architecture], [DOCS:decisions], etc." });
-	}
-
-	// Check that [DOCS:decisions] has accompanying [ADR:*] tag on the same line
-	const lines = planText.split("\n");
-	for (const line of lines) {
-		if (/\[DOCS:decisions\]/.test(line) && !/\[ADR:(new|update|supersede)\]/.test(line)) {
-			results.push({ tag: "[DOCS:decisions]", valid: false, error: "[DOCS:decisions] must be accompanied by [ADR:new], [ADR:update], or [ADR:supersede]" });
+		if (!hasValidAdrAction) {
+			for (const result of lineResults) {
+				if (result.tag === "[DOCS:decisions]" && result.valid) {
+					result.valid = false;
+					result.error = "[DOCS:decisions] must be accompanied by [ADR:new], [ADR:update], or [ADR:supersede]";
+				}
+			}
 		}
+
+		results.push(...lineResults);
 	}
 
 	return results;
+}
+
+export function formatPlanDocsTagValidation(planText: string): string {
+	const validations = validatePlanDocsTags(planText);
+	if (validations.length === 0) {
+		return "No docs tags found in plan text.";
+	}
+
+	const invalidTags = validations.filter(validation => !validation.valid);
+	if (invalidTags.length > 0) {
+		return `Invalid docs tags found:\n${invalidTags.map(validation => `- ${validation.tag}: ${validation.error}`).join("\n")}`;
+	}
+
+	return `All ${validations.length} docs tags valid: ${validations.map(validation => validation.tag).join(", ")}`;
 }
 
 // ── Enhanced check with ADR validation ──

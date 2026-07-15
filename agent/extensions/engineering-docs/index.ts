@@ -9,7 +9,7 @@ import {
 	DOCS_AREA_TAGS,
 } from "./constants.js";
 import { getMode, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
-import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, validatePlanDocsTags, manifestExists, type SpokeCheckResult } from "./filesystem.js";
+import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
 
@@ -475,18 +475,7 @@ export default function (pi: ExtensionAPI) {
 			planText: Type.String({ description: "The plan text containing [DOCS:*] and [ADR:*] tags to validate" }),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			const validations = validatePlanDocsTags(params.planText);
-			if (validations.length === 0) {
-				return { content: [{ type: "text", text: "No docs tags found in plan text." }] };
-			}
-			const invalidTags = validations.filter(v => !v.valid);
-			if (invalidTags.length === 0) {
-				const validCount = validations.length;
-				const validTags = validations.map(v => v.tag).join(", ");
-				return { content: [{ type: "text", text: `All ${validCount} docs tags valid: ${validTags}` }] };
-			}
-			const lines = invalidTags.map(v => `- ${v.tag}: ${v.error}`);
-			return { content: [{ type: "text", text: `Invalid docs tags found:\n${lines.join("\n")}` }] };
+			return { content: [{ type: "text", text: formatPlanDocsTagValidation(params.planText) }] };
 		},
 	});
 
