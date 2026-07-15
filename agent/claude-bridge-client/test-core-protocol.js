@@ -94,7 +94,10 @@ test("recall returns memory/prompts shape", async ({ projectRoot }) => {
 	const { response } = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
 	assert(response.ok === true, `recall failed: ${JSON.stringify(response)}`);
 	assert(response.result?.memory, "recall missing memory");
-	assert(response.result?.prompts?.planPrompt, "recall missing plan prompt");
+	assert(response.result?.prompts?.cavemanEnabled === true, "recall must default Caveman ON");
+	for (const field of ["discussPrompt", "planPrompt", "buildPrompt"]) {
+		assert(response.result?.prompts?.[field]?.includes("CAVEMAN MODE ACTIVE."), `${field} missing Caveman prompt`);
+	}
 });
 
 test("validate_tags valid and invalid", async ({ projectRoot }) => {

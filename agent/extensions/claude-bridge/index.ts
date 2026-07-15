@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { BUILD_PROMPT, DISCUSS_PROMPT, getWorkflowPolicySnapshot, PLAN_PROMPT, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
+import { composeWorkflowPrompt, getWorkflowPolicySnapshot, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 
@@ -427,12 +427,13 @@ function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: s
 	return docs;
 }
 
-function promptContextForMode(mode: RecallPayload["mode"]): Record<string, unknown> {
+function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boolean): Record<string, unknown> {
 	return {
 		mode: mode ?? "plan",
-		discussPrompt: DISCUSS_PROMPT,
-		planPrompt: PLAN_PROMPT,
-		buildPrompt: BUILD_PROMPT,
+		cavemanEnabled,
+		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
+		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
+		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
 		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
 	};
@@ -590,6 +591,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 	if (!workflowState) {
 		return errorResponse(request.id, "workflow_state_unavailable", "Pi bridge recall requires live workflow-modes state.");
 	}
+	const cavemanEnabled = workflowState.cavemanEnabled !== false;
 	const workflowPlan = typeof workflowState.plan === "string" ? workflowState.plan : undefined;
 	const savedPlan = workflowPlan
 		? {
@@ -619,7 +621,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 				blocks: memoryBlocks,
 			},
 			docs: readEngineeringDocs(projectRoot),
-			prompts: promptContextForMode(payload.mode),
+			prompts: promptContextForMode(payload.mode, cavemanEnabled),
 			savedPlan,
 		},
 	};
