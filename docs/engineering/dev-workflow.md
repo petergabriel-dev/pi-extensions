@@ -101,6 +101,24 @@ npm run typecheck
 - fallback policy allow/deny behavior;
 - behavioral sandbox contract when a real launcher is available, otherwise a no-launcher skip path.
 
+## CCC Search Extension testing
+
+Run focused checks:
+
+```bash
+cd agent/extensions/ccc-search
+npm test
+npm run typecheck
+npm audit --omit=dev
+```
+
+Acceptance after changing extension or guidance:
+
+1. Run `/reload` so current Pi process registers fresh tool metadata.
+2. In Build mode, call `ccc_search` against initialized project and confirm results.
+3. Switch to Plan mode and repeat; search must succeed without `daemon.log` sandbox permission failure.
+4. Confirm uninitialized-project response directs initialization to Build mode. Run `ccc init` or `ccc index` only in Build mode.
+
 ## Personal-memory Extension testing
 
 Personal memory command:

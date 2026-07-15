@@ -47,6 +47,12 @@ Supported launcher paths:
 
 The Pi bridge still writes `policy.json` snapshots for clients and compatibility, but Claude bridge read-only Bash no longer depends on policy freshness or `planBashAllow` gating. Its Node-stdlib PreToolUse hook returns `hookSpecificOutput.updatedInput` so macOS Claude Code Bash calls under `.pi` projects are wrapped in `sandbox-exec` whenever available. Missing, stale, or expired bridge policy does not block sandboxed Bash; absence of `sandbox-exec` blocks Bash entirely.
 
+## CCC semantic search boundary
+
+`agent/extensions/ccc-search/index.ts` registers `ccc_search` as the semantic discovery path in every workflow mode. The tool invokes fixed `ccc search` argv through Node `execFile`; query text and filters never enter a shell. Its schema and runtime checks bound query, language filters, project-relative path glob, pagination, timeout, and output. Abort signals terminate the child process.
+
+This narrow tool sits outside generic Plan/Discuss Bash sandboxing because CCC search uses its daemon under `~/.cocoindex_code/`, may refresh ignored index artifacts under project `.cocoindex_code/`, and may contact its configured embedding provider. The tool exposes search plus optional refresh only. It never initializes projects or exposes daemon/reset commands; initialization and index management remain explicit Build-mode CLI operations.
+
 ## Pi subagents
 
 Pi subagents live in `agent/extensions/subagents/` and run as persisted in-process child `AgentSession`s created from extension tool execution. The parent exposes `spawn_explorer` and `spawn_worker`; both call `runSubagent()` in `agent/extensions/subagents/spawn.ts`, which creates a fresh `SessionManager.create(ctx.cwd)`, disables child extension/theme/skill/context-file discovery, and captures only the final structured return for the parent.

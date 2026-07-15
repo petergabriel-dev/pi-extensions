@@ -4,6 +4,11 @@
 
 - **Root agent entrypoint spokes are shared user files.** `AGENTS.md` and `CLAUDE.md` may contain hand-written content. Engineering-docs generation must update only the `pi-docs` marker block and must preserve bytes outside that block.
 
+## Workflow modes and CCC
+
+- **`ccc search` is not filesystem-read-only.** CCC may start a daemon, write `~/.cocoindex_code/daemon.log` and index artifacts, and contact an embedding provider. Running it through Plan/Discuss Bash fails under structural sandboxing with `PermissionError` on `daemon.log`. Use dedicated `ccc_search`; do not add broad home-write or network exceptions to generic Bash sandbox.
+- **Reload before live tool acceptance.** Running Pi keeps old extension registration after source edits. Run `/reload` before inspecting `ccc_search` metadata or testing Plan/Build behavior.
+
 ## Pi ↔ Claude Code bridge
 
 - **Idle widget redraw is load-bearing.** The bridge depends on Pi `ctx.ui.setWidget` updating while Pi is idle. This was manually verified with `idle-widget-spike.ts`; if it regresses, live capture acceptance fails.
