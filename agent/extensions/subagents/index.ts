@@ -498,7 +498,7 @@ function subagentFailureMessage(result: SubagentRunResult): string {
 	return "error" in result ? result.error : "unknown subagent failure";
 }
 
-function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number) {
+export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number) {
 	return defineTool<typeof SpawnExplorerParams, unknown>({
 		name: SPAWN_EXPLORER_TOOL_NAME,
 		label: "Spawn Explorer",
