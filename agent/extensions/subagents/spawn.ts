@@ -15,9 +15,7 @@ import {
 import type { AgentConfig, AgentRole } from "./agents.ts";
 import type { ProgressHandle } from "./progress.ts";
 import { createSubagentWatchdog, type SubagentTimeoutKind, type SubagentWatchdog } from "./timeout.ts";
-
-export const DEFAULT_IDLE_TIMEOUT_MS = 240_000;
-export const DEFAULT_MAX_TOTAL_MS = 1_200_000;
+import type { SubagentTimeoutPolicy } from "./timeout-policy.ts";
 const MAX_RETURN_BYTES = 50 * 1024;
 
 export interface ExplorerParsedResult {
@@ -81,10 +79,7 @@ export interface RunSubagentOptions {
 	task: string;
 	ctx: ExtensionContext;
 	signal?: AbortSignal;
-	/** @deprecated Use idleTimeoutMs. Legacy timeoutMs maps to the idle timeout. */
-	timeoutMs?: number;
-	idleTimeoutMs?: number;
-	maxTotalMs?: number;
+	timeoutPolicy: SubagentTimeoutPolicy;
 	modelOverride?: Model<any>;
 	customTools?: ToolDefinition[];
 	progress?: ProgressHandle;
@@ -311,8 +306,7 @@ function errorMessageForFailure(error: unknown): string {
 
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentRunResult> {
 	const role = inferRole(options.agent, options.role);
-	const idleTimeoutMs = options.idleTimeoutMs ?? options.timeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-	const maxTotalMs = options.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS;
+	const { idleTimeoutMs, maxTotalMs } = options.timeoutPolicy;
 	const eventCounts: Record<string, number> = {};
 	const toolCalls: SubagentToolCallSummary[] = [];
 	let childSession: Session | undefined;

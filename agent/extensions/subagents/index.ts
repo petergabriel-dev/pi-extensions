@@ -17,7 +17,8 @@ import { Type, type Static } from "typebox";
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
 import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
 import { getProgressSnapshot, startSubagentProgress } from "./progress.ts";
-import { DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_TOTAL_MS, runSubagent, type ExplorerParsedResult, type SubagentRunResult, type WorkerParsedResult } from "./spawn.ts";
+import { runSubagent, type ExplorerParsedResult, type SubagentRunResult, type WorkerParsedResult } from "./spawn.ts";
+import { resolveSubagentTimeoutPolicy, type SubagentTimeoutPolicy, type SubagentTimeoutSettings } from "./timeout-policy.ts";
 
 const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
 const SPAWN_WORKER_TOOL_NAME = "spawn_worker";
@@ -60,12 +61,6 @@ const DebugListParams = Type.Object({
 
 type DebugListParams = Static<typeof DebugListParams>;
 
-const SubagentTimeoutParams = {
-	timeoutMs: Type.Optional(Type.Number({ description: "Deprecated alias for idleTimeoutMs, in milliseconds.", minimum: 1000 })),
-	idleTimeoutMs: Type.Optional(Type.Number({ description: "Idle timeout in milliseconds; resets on every child event.", minimum: 5000, maximum: 1800000 })),
-	maxTotalMs: Type.Optional(Type.Number({ description: "Absolute maximum child runtime in milliseconds.", minimum: 60000, maximum: 7200000 })),
-};
-
 const DebugRunParams = Type.Object({
 	agent: StringEnum(["explorer", "worker"] as const, { description: "Agent role to run." }),
 	task: Type.String({ description: "Task string to send to the child subagent." }),
@@ -81,7 +76,6 @@ const DebugRunParams = Type.Object({
 			default: false,
 		}),
 	),
-	...SubagentTimeoutParams,
 });
 
 type DebugRunParams = Static<typeof DebugRunParams>;
@@ -121,7 +115,6 @@ const SpawnExplorerParams = Type.Object({
 			default: "user",
 		}),
 	),
-	...SubagentTimeoutParams,
 });
 
 type SpawnExplorerParams = Static<typeof SpawnExplorerParams>;
@@ -140,7 +133,6 @@ const SpawnWorkerParams = Type.Object({
 			default: "user",
 		}),
 	),
-	...SubagentTimeoutParams,
 	fileOwnership: Type.Optional(
 		Type.Array(Type.String(), {
 			description: "Paths or globs this worker is expected to modify. Parallel overlapping ownership is refused.",
@@ -159,12 +151,10 @@ interface WorkflowModeQueryResult {
 	error?: string;
 }
 
-interface SubagentsSettings {
+interface SubagentsSettings extends SubagentTimeoutSettings {
 	concurrencyCap?: number;
 	explorerLaneCap?: number;
 	models?: Partial<Record<AgentRole, string>>;
-	idleTimeoutMs?: number;
-	maxTotalMs?: number;
 }
 
 const READ_ONLY_EXPLORER_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -458,12 +448,8 @@ function configuredModel(role: AgentRole, ctx: ExtensionContext): Model<any> | u
 	return resolveModelReference(readSubagentsSettings().models?.[role], ctx);
 }
 
-function resolveSubagentTimeouts(params: { timeoutMs?: number; idleTimeoutMs?: number; maxTotalMs?: number }): { idleTimeoutMs: number; maxTotalMs: number } {
-	const settings = readSubagentsSettings();
-	return {
-		idleTimeoutMs: params.idleTimeoutMs ?? params.timeoutMs ?? settings.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
-		maxTotalMs: params.maxTotalMs ?? settings.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS,
-	};
+function resolveSubagentTimeouts(): SubagentTimeoutPolicy {
+	return resolveSubagentTimeoutPolicy(readSubagentsSettings());
 }
 
 function isWorkflowMode(value: unknown): value is WorkflowMode {
@@ -549,15 +535,14 @@ function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: Abo
 				signal ?? parentSignal,
 				async (slot) => {
 					const progress = startSubagentProgress(parentCtx, "explorer", { depth });
-					const timeouts = resolveSubagentTimeouts(params);
+					const timeoutPolicy = resolveSubagentTimeouts();
 					const result = await runSubagent({
 						agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
 						role: "explorer",
 						task: params.task,
 						ctx: parentCtx,
 						signal: signal ?? parentSignal,
-						idleTimeoutMs: timeouts.idleTimeoutMs,
-						maxTotalMs: timeouts.maxTotalMs,
+						timeoutPolicy,
 						modelOverride: configuredModel("explorer", parentCtx),
 						progress,
 					});
@@ -673,15 +658,14 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 
 			return withSubagentSlot("explorer", ctx.cwd, signal, async (slot) => {
 				const progress = startSubagentProgress(ctx, "explorer");
-				const timeouts = resolveSubagentTimeouts(params);
+				const timeoutPolicy = resolveSubagentTimeouts();
 				const result = await runSubagent({
 					agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
 					role: "explorer",
 					task: params.task,
 					ctx,
 					signal,
-					idleTimeoutMs: timeouts.idleTimeoutMs,
-					maxTotalMs: timeouts.maxTotalMs,
+					timeoutPolicy,
 					modelOverride: configuredModel("explorer", ctx),
 					progress,
 				});
@@ -753,15 +737,14 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 				withSubagentSlot("worker", ctx.cwd, signal, async (slot) => {
 					const workerTools = [...new Set([...(agent.tools ?? []), SPAWN_EXPLORER_TOOL_NAME])];
 					const progress = startSubagentProgress(ctx, "worker");
-					const timeouts = resolveSubagentTimeouts(params);
+					const timeoutPolicy = resolveSubagentTimeouts();
 					const result = await runSubagent({
 						agent: { ...agent, tools: workerTools },
 						role: "worker",
 						task: params.task,
 						ctx,
 						signal,
-						idleTimeoutMs: timeouts.idleTimeoutMs,
-						maxTotalMs: timeouts.maxTotalMs,
+						timeoutPolicy,
 						modelOverride: configuredModel("worker", ctx),
 						customTools: [createNestedExplorerTool(ctx, signal, 1)],
 						progress,
@@ -922,15 +905,14 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const timeouts = resolveSubagentTimeouts(params);
+			const timeoutPolicy = resolveSubagentTimeouts();
 			const result = await runSubagent({
 				agent,
 				role: params.agent as AgentRole,
 				task: params.task,
 				ctx,
 				signal,
-				idleTimeoutMs: timeouts.idleTimeoutMs,
-				maxTotalMs: timeouts.maxTotalMs,
+				timeoutPolicy,
 				modelOverride: params.useCurrentModel ? ctx.model : undefined,
 			});
 			return {
