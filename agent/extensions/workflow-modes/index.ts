@@ -3,8 +3,8 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@mariozechner/pi-tui";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
+import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
-import { clearPlan as clearStoredPlan, readPlan, writePlan } from "./plan-store.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build";
 export type PlanEvent = "set" | "clear";
@@ -83,38 +83,19 @@ function getLastAssistantText(ctx: ExtensionContext): string | undefined {
 	return undefined;
 }
 
-async function reconstructFromBranch(ctx: ExtensionContext): Promise<void> {
+function reconstructFromBranch(ctx: ExtensionContext): void {
 	currentMode = "off";
-	currentPlan = undefined;
-	currentPlanId = undefined;
-	currentPlanSavedAt = undefined;
-	let legacyPlan: { plan: string; at?: number } | undefined;
-	for (const entry of ctx.sessionManager.getBranch()) {
+	const branch = ctx.sessionManager.getBranch();
+	for (const entry of branch) {
 		const e = entry as { type?: string; customType?: string; data?: unknown };
-		if (e.type !== "custom") continue;
-		if (e.customType === MODE_ENTRY) {
-			const mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
-			if (mode) currentMode = mode;
-		} else if (e.customType === PLAN_ENTRY) {
-			const data = e.data as { event?: unknown; plan?: unknown; at?: unknown } | undefined;
-			if (data?.event === "clear") legacyPlan = undefined;
-			if (data?.event === "set" && typeof data.plan === "string") {
-				legacyPlan = { plan: data.plan, ...(typeof data.at === "number" && Number.isFinite(data.at) ? { at: data.at } : {}) };
-			}
-		}
+		if (e.type !== "custom" || e.customType !== MODE_ENTRY) continue;
+		const mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
+		if (mode) currentMode = mode;
 	}
-	const stored = await readPlan({ cwd: ctx.cwd ?? process.cwd() });
-	if (stored) {
-		currentPlan = stored.plan;
-		currentPlanId = stored.planId;
-		currentPlanSavedAt = stored.savedAt;
-	} else if (legacyPlan) {
-		const savedAt = legacyPlan.at ? new Date(legacyPlan.at).toISOString() : new Date().toISOString();
-		const adopted = await writePlan(legacyPlan.plan, { cwd: ctx.cwd ?? process.cwd(), planId: randomUUID(), savedAt });
-		currentPlan = adopted.plan;
-		currentPlanId = adopted.planId;
-		currentPlanSavedAt = adopted.savedAt;
-	}
+	const plan = resolveSavedPlanState(branch, PLAN_ENTRY);
+	currentPlan = plan?.plan;
+	currentPlanId = plan?.planId;
+	currentPlanSavedAt = plan?.savedAt;
 	updateStatus(ctx);
 }
 
@@ -221,16 +202,16 @@ async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
 }
 
 export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionContext, text: string, metadata: { planId?: string; savedAt?: string } = {}): Promise<{ event: "set"; plan: string; at: number; planId: string; savedAt: string }> {
-	const stored = await writePlan(text, {
-		cwd: ctx.cwd ?? process.cwd(),
-		planId: metadata.planId ?? randomUUID(),
-		...(metadata.savedAt ? { savedAt: metadata.savedAt } : {}),
-	});
-	currentPlan = stored.plan;
-	currentPlanId = stored.planId;
-	currentPlanSavedAt = stored.savedAt;
-	const entry = { event: "set" satisfies PlanEvent, plan: stored.plan, planId: stored.planId, savedAt: stored.savedAt, at: Date.parse(stored.savedAt) };
-	void Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry)).catch(() => undefined);
+	if (typeof text !== "string" || text.trim().length === 0) throw new Error("plan text is required");
+	const planId = metadata.planId ?? randomUUID();
+	if (typeof planId !== "string" || planId.trim().length === 0) throw new Error("planId is required");
+	const savedAt = metadata.savedAt ?? new Date().toISOString();
+	if (Number.isNaN(Date.parse(savedAt))) throw new Error("savedAt must be an ISO date");
+	const entry = { event: "set" satisfies PlanEvent, plan: text, planId, savedAt, at: Date.parse(savedAt) };
+	pi.appendEntry(PLAN_ENTRY, entry);
+	currentPlan = text;
+	currentPlanId = planId;
+	currentPlanSavedAt = savedAt;
 	updateStatus(ctx);
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: true });
 	return entry;
@@ -251,11 +232,10 @@ async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 	if (!currentPlan) return ctx.ui.notify("No saved plan for this branch.", "info");
 	const ok = await ctx.ui.confirm("Clear plan?", "Clear the saved plan for this branch?");
 	if (!ok) return;
-	await clearStoredPlan({ cwd: ctx.cwd ?? process.cwd() });
+	pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, at: Date.now() });
 	currentPlan = undefined;
 	currentPlanId = undefined;
 	currentPlanSavedAt = undefined;
-	void Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, at: Date.now() })).catch(() => undefined);
 	updateStatus(ctx);
 	ctx.ui.notify("Cleared saved plan.", "success");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: false });
@@ -387,12 +367,12 @@ export default function (pi: ExtensionAPI) {
 	// Re-emit state on session restore so late-loaded extensions can sync
 	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
-		await reconstructFromBranch(ctx);
+		reconstructFromBranch(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		latestContext = ctx;
-		await reconstructFromBranch(ctx);
+		reconstructFromBranch(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 
