@@ -51,7 +51,7 @@
 - Progress widget updates must be keyed by `subagents-progress`, throttled to 250 ms, and cleared when all runs finish.
 - Subagent idle timeout must measure time since the last child event, not time since spawn. `runSubagent()` must call `watchdog.touch()` for every child `AgentSessionEvent`, so `message_update` streaming and tool lifecycle activity cannot trip idle timeout while active (agent/extensions/subagents/spawn.ts:349-362).
 - Subagent `maxTotalMs` is an absolute backstop and must not be reset by child events. The watchdog arms it once and only resets the idle timer from `touch()` (agent/extensions/subagents/timeout.ts:61-68).
-- Legacy subagent `timeoutMs` is a backward-compatible alias for idle timeout. Effective timeout resolution must be per-call `idleTimeoutMs`, else per-call `timeoutMs`, else `subagents.idleTimeoutMs`, else default; `maxTotalMs` resolves per-call, then settings, then default (agent/extensions/subagents/spawn.ts:312-315, agent/extensions/subagents/index.ts:461-466).
+- Role-agent timeouts are global-only: explorer, nested explorer, worker, and debug-run resolve the same validated `subagents` policy. Public role-agent schemas expose no `timeoutMs`, `idleTimeoutMs`, or `maxTotalMs`; invalid, out-of-range, or inverted settings fall back together to 600,000ms idle / 1,200,000ms max-total (agent/extensions/subagents/timeout-policy.ts, agent/extensions/subagents/index.ts).
 - Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `partialWork` is true once any child tool execution has started (agent/extensions/subagents/spawn.ts:60-73, agent/extensions/subagents/spawn.ts:430-440).
 
 ## Engineering docs extension

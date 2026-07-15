@@ -11,7 +11,7 @@
 | ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
 | ADR-0008 | Superseded | Persistent-memory reconcile connection ownership and observability |  |
 | ADR-0009 | Superseded | Bridge staging validity and malformed quarantine |  |
-| ADR-0010-subagent-idle-timeout | Unknown | ADR-0010-subagent-idle-timeout.md |  |
+| ADR-0010 | Active | Global subagent idle timeout with max-total backstop | Changing subagent timeout policy, role-agent schemas, or timeout debugging |
 | ADR-0011 | Superseded | Per-Candidate Persistent-Memory Reconciliation |  |
 | ADR-0012 | Active | Per-mode ponytail lazy-senior-dev reflex |  |
 | ADR-0013 | Superseded | Manual Single-Writer Persistent-Memory Consolidation | changing persistent-memory lifecycle hooks, /memory consolidate/recover/reconcile, staging cleanup, dead-letter recovery, reinforcement, or mode-transition reminders |

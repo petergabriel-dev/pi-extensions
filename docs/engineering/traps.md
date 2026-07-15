@@ -35,7 +35,7 @@
 - **Widget keys must not clobber other extensions.** Use the dedicated `subagents-progress` widget key; do not reuse discussion-notes or TPS footer widget/status keys.
 - **Faux-provider verification order matters.** For nested worker→explorer smokes, faux responses must match the parent worker call, nested explorer call, explorer final answer, then worker final answer.
 - **Agent scope in smokes must match file placement.** A project-scoped test agent must live under `<cwd>/.pi/agents`; placing it in a temp user agent dir while passing `agentScope: "project"` makes discovery return no agents.
-- **Idle timeout still fires for silent tools.** The subagent watchdog resets idle on child events, not on hidden process activity. A tool that legitimately runs with no child events longer than `idleTimeoutMs` can be aborted even though it is doing work; tune `subagents.idleTimeoutMs` or pass per-call `idleTimeoutMs` for those jobs.
+- **Idle timeout still fires for silent provider waits or tools.** The subagent watchdog resets idle on child events, not hidden work. A role agent can be aborted after the global 10-minute idle threshold despite ongoing silent work; tune only global `subagents.idleTimeoutMs`, never a per-call override.
 - **Current-process extension tools may be stale after local edits.** The already-running Pi process can keep old extension code loaded. Verify changed subagent tool behavior in a fresh `pi -p --no-extensions -e agent/extensions/subagents/index.ts ...` subprocess when checking new timeout fields or structured failure details.
 
 ## Memory architecture
