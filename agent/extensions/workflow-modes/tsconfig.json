@@ -10,6 +10,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["sandbox.ts", "policy.ts", "plan-state.ts", "test/**/*.ts"],
+  "include": ["sandbox.ts", "policy.ts", "plan-state.ts", "caveman.ts", "test/**/*.ts"],
   "exclude": ["node_modules"]
 }

@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@m
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@mariozechner/pi-tui";
+import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
@@ -14,6 +15,7 @@ export const PLAN_ENTRY = "workflow-plan";
 export const STATUS_KEY = "workflow-modes";
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
+export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
 
 export interface WorkflowPolicySnapshot {
@@ -36,6 +38,7 @@ const MODE_LABELS: Record<Mode, string> = {
 };
 
 let currentMode: Mode = "off";
+let cavemanEnabled = true;
 let currentPlan: string | undefined;
 let currentPlanId: string | undefined;
 let currentPlanSavedAt: string | undefined;
@@ -92,6 +95,7 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 		const mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
 		if (mode) currentMode = mode;
 	}
+	cavemanEnabled = resolveCavemanEnabled(branch);
 	const plan = resolveSavedPlanState(branch, PLAN_ENTRY);
 	currentPlan = plan?.plan;
 	currentPlanId = plan?.planId;
@@ -100,7 +104,8 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 }
 
 function updateStatus(ctx: ExtensionContext): void {
-	ctx.ui.setStatus(STATUS_KEY, `Mode: ${MODE_LABELS[currentMode]} Saved Plan: ${currentPlan ? "ON" : "OFF"}`);
+	const cavemanStatus = `${cavemanEnabled ? "ON" : "OFF"}${currentMode === "off" ? " (inactive)" : ""}`;
+	ctx.ui.setStatus(STATUS_KEY, `Mode: ${MODE_LABELS[currentMode]} Saved Plan: ${currentPlan ? "ON" : "OFF"} Caveman: ${cavemanStatus}`);
 }
 
 async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Promise<void> {
@@ -334,6 +339,10 @@ Required post-task report format:
 - On failure/block: Task blocked, Reason, Verification, Commit status, Next action needed, then ask how to proceed.
 `;
 
+export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string): string | undefined {
+	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT }, savedPlan);
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.events.on("workflow-modes:save-plan", async (data: unknown) => {
 		const request = data && typeof data === "object" ? data as { requestId?: unknown; plan?: unknown; planId?: unknown } : {};
@@ -359,6 +368,7 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on("workflow-modes:get", () => {
 		pi.events.emit("workflow-modes:state", {
 			mode: currentMode,
+			cavemanEnabled,
 			hasPlan: currentPlan !== undefined,
 			...(currentPlan ? { plan: currentPlan, planId: currentPlanId, savedAt: currentPlanSavedAt } : {}),
 		});
@@ -377,9 +387,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		if (currentMode === "off") return;
-		let extra = currentMode === "discuss" ? DISCUSS_PROMPT : currentMode === "plan" ? PLAN_PROMPT : BUILD_PROMPT;
-		if (currentMode === "build" && currentPlan) extra += `\n\nSaved session plan to use when relevant:\n${currentPlan}`;
+		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan);
+		if (!extra) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${extra}` };
 	});
 
@@ -415,6 +424,20 @@ export default function (pi: ExtensionAPI) {
 				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "discuss" ? "pwd, ls, find, rg, grep, ccc search" : "discovery plus tests/builds/checks"}. Mutating commands require /mode build.`,
 			};
 		}
+	});
+
+	pi.registerCommand("caveman", {
+		description: "Toggle Caveman mode for active workflow modes",
+		handler: async (args, ctx) => {
+			const value = args.trim().toLowerCase();
+			if (value && value !== "on" && value !== "off") {
+				return ctx.ui.notify("Unknown Caveman state. Use on or off.", "warning");
+			}
+			cavemanEnabled = value ? value === "on" : !cavemanEnabled;
+			pi.appendEntry(CAVEMAN_ENTRY, { enabled: cavemanEnabled });
+			updateStatus(ctx);
+			ctx.ui.notify(`Caveman: ${cavemanEnabled ? "ON" : "OFF"}${currentMode === "off" ? " (inactive)" : ""}.`, "info");
+		},
 	});
 
 	pi.registerCommand("mode", {
