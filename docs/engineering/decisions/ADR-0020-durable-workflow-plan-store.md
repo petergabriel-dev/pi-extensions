@@ -1,7 +1,7 @@
 ---
 id: ADR-0020
 title: Durable workflow plan store
-status: Active
+status: Superseded
 date: 2026-07-14
 ---
 
@@ -45,6 +45,10 @@ Code:
 - changing workflow saved-plan persistence, loading, or clear behavior
 - changing bridge `save_plan`, `recall`, or live workflow-state events
 - changing plan scoping or session-persistence assumptions
+
+## Superseded by
+
+- ADR-0021
 
 ## Supersedes
 

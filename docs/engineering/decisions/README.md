@@ -21,4 +21,5 @@
 | ADR-0017 | Active | Indexed user-global personal memory | changing personal-memory storage, recall_memory, recall_memory_entry, save_memory, /remember, or legacy ~/.pi/memory.md migration |
 | ADR-0018 | Active | Engineering docs root spokes | changing engineering-docs init/check, manifest.generated, AGENTS.md/CLAUDE.md generation, or marker-block merge behavior |
 | ADR-0019 | Active | Multi-harness bridge and Cursor parity | changing bridge protocol fields, adding new harness clients, changing Cursor hooks/templates, changing read-only enforcement, or extending ADR-0001 bridge boundaries |
-| ADR-0020 | Active | Durable workflow plan store |  |
+| ADR-0020 | Superseded | Durable workflow plan store |  |
+| ADR-0021 | Active | Session-branch workflow plans |  |

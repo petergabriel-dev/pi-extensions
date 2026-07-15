@@ -18,7 +18,7 @@
 - Bridge requests are idempotent by UUID. Replayed request IDs return the processed response and must not duplicate notes or saved plans.
 - v1 supports one active Pi bridge session per project. A second active watcher must become passive/refuse rather than process the same request stream.
 - `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
-- Saved-plan durability must not depend on Pi session persistence: `workflow-modes` writes its project+git-branch plan file before updating live state; `workflow-plan` entries are audit only.
+- Saved plans belong only to selected Pi session ancestry. `workflow-modes` must append a `workflow-plan` save/clear entry before changing live state, reconstruct from `getBranch()` on session start/tree navigation, and never read or write repository- or Git-branch-scoped plan files.
 - Bridge recall must obtain saved-plan state only from live `workflow-modes`; no bridge cache or direct plan-file fallback is allowed.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
 - Bridge capture protocol primary field is `sessionId`; `claudeSessionId` remains a deprecated alias and must keep working for existing Claude Code callers.

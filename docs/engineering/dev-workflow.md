@@ -33,7 +33,10 @@ Real acceptance checks:
 - Claude Code `/discuss` records a decision through `capture_note`; Pi Notes widget updates live.
 - Claude Code `/plan` recalls memory, validates docs tags, asks for save confirmation, and calls `save_plan`.
 - Pi `/plan view` shows bridge-saved plan.
-- Pi `/mode build` keeps saved plan available.
+- Pi `/mode build` keeps saved plan available on the selected session branch.
+- A new Pi session starts without a plan; reopening the same persisted session restores its selected branch state.
+- Forking after a save inherits the plan; forking or navigating from before that save does not.
+- Navigating across save and clear points updates `/plan view`, status, bridge recall, and Build prompt injection immediately.
 - Claude Code `Edit` and `git commit` are denied in `.pi` projects.
 - Claude Code read-only Bash such as `rg` is allowed only through the sandbox hook; if sandboxing is unavailable, Bash denies closed.
 - On macOS with `/usr/bin/sandbox-exec`, Claude Code allowed Bash is rewritten through the read-only sandbox hook; inspect hook output with `--include-hook-events` or direct hook smoke tests when debugging.
