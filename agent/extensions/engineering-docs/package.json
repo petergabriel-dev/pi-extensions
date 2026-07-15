@@ -1,0 +1,11 @@
+{
+  "name": "pi-engineering-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npx --yes tsx test/test_tags.ts && npx --yes tsx test/test_spokes.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
