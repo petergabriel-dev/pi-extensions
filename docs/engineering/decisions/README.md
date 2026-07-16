@@ -23,3 +23,4 @@
 | ADR-0019 | Active | Multi-harness bridge and Cursor parity | changing bridge protocol fields, adding new harness clients, changing Cursor hooks/templates, changing read-only enforcement, or extending ADR-0001 bridge boundaries |
 | ADR-0020 | Superseded | Durable workflow plan store |  |
 | ADR-0021 | Active | Session-branch workflow plans |  |
+| ADR-0022 | Active | Network-allowed read-only Review sandbox | changing Review mode command policy, sandbox wrapping, fallback behavior, or GitHub review workflows |
