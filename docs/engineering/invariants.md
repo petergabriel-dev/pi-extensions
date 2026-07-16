@@ -1,5 +1,16 @@
 # Invariants
 
+## Workspace and package boundary
+
+- Workspace scripts, launchers, tests, and extension source must never modify, delete, repoint, or commit inside the active global `~/.pi` source checkout.
+- Root Pi manifest must declare exactly nine extension entrypoints and three authored skills. `.pi/agents` must resolve inside repository to exactly the two authored agent definitions.
+- Workspace launcher must disable global extension auto-discovery with `--no-extensions` and explicitly load repository package once.
+- Versioned `.pi/` content is limited to internal `agents` symlink. Credentials, trust/settings/model files, sessions, plans, personal memory, bridge IPC, caches, DBs, logs, dependency trees, and CCC indexes must never enter Git.
+- Global auth, settings, model catalogs, sessions, and personal memory remain Pi-owned outside repository. Package may reuse host state through Pi APIs/defaults but must not copy that state into workspace.
+- Package-owned source/assets must resolve from repository/module location. No machine-specific absolute source path or dependency on active `~/.pi` source is allowed.
+- Every versioned symlink must resolve inside repository. External authored-resource symlinks are excluded until explicitly added to manifest and integrity checks.
+- Runtime bridge state under `.pi/memory/bridge/` is ephemeral and ignored. Shutdown may leave ignored directories, but no request, response, processed cache, lock, or policy file may be treated as source.
+
 ## Pi ↔ Claude Code bridge
 
 - Client-side bridge code must have zero Pi internal imports. `agent/claude-bridge-client/*` and `agent/cursor-bridge-client/*` use Node stdlib/file IPC or hook input only.
@@ -23,6 +34,24 @@
 - Bridge workflow prompts must use `workflow-modes` prompt composition with live `cavemanEnabled`; bridge clients must not copy Caveman text or import Pi code.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
 - Bridge capture protocol primary field is `sessionId`; `claudeSessionId` remains a deprecated alias and must keep working for existing Claude Code callers.
+
+## Discussion notes
+
+- `discussion-notes` is sole owner of active note arrays, IDs, snapshots, and Notes UI. Other extensions must request changes over `discussion-notes:add`; they must not import mutable note state.
+- Active notes belong to selected Pi session ancestry. Session start/tree navigation must reconstruct from valid `discussion_notes` tool-result details and `discussion-notes` custom entries; no repository/global note file participates.
+- Event/manual note additions must append owner snapshot before returning success. Persistence failure must restore previous notes/next ID and surface an error.
+- Tool-result and custom-entry snapshots must preserve schema version, complete active notes, and next ID so branch replay is deterministic.
+- Note input must use a supported type, non-empty normalized text, 480-character maximum, branch limit, and type/text deduplication.
+- Discussion-note capture must not write project docs or user-global personal memory. Promotion to either store is a separate explicit action.
+
+## File-change tracking and rollback
+
+- `filechanges` tracks only successful Pi `edit`/`write` results. Failed tool results must discard pending preimages and must never establish baselines.
+- Pending preimages are keyed by tool-call ID. First successful tracked mutation establishes immutable original content for that path until clear/untrack; later diffs remain cumulative against that first baseline.
+- Baseline, clear, and untrack state belongs to selected Pi session ancestry and must reconstruct on session start/tree navigation. No repository log file may become source of truth.
+- Accept keeps current filesystem bytes and clears tracking. Decline requires interactive confirmation or explicit `force`, deletes files that did not exist at baseline, and restores existing files to recorded original UTF-8 content.
+- Decline failures must be reported per file and must never be presented as full success. Accept/decline must not stage, commit, or alter unrelated Git state.
+- File-change UI must not claim complete filesystem coverage: mutations outside observed Pi `edit`/`write` calls do not establish new baselines.
 
 ## Workflow modes Caveman composition
 
@@ -52,10 +81,10 @@
 - Global subagent concurrency defaults to 3 via the default lane. Nested worker-spawned explorers use the reserved explorer lane so workers cannot deadlock waiting on default worker slots.
 - Parallel worker file ownership must not overlap. `spawn_worker` refuses an overlapping `fileOwnership` request while another worker owns the same path/subtree.
 - Progress widget updates must be keyed by `subagents-progress`, throttled to 250 ms, and cleared when all runs finish.
-- Subagent idle timeout must measure time since the last child event, not time since spawn. `runSubagent()` must call `watchdog.touch()` for every child `AgentSessionEvent`, so `message_update` streaming and tool lifecycle activity cannot trip idle timeout while active (agent/extensions/subagents/spawn.ts:349-362).
-- Subagent `maxTotalMs` is an absolute backstop and must not be reset by child events. The watchdog arms it once and only resets the idle timer from `touch()` (agent/extensions/subagents/timeout.ts:61-68).
-- Role-agent timeouts are global-only: explorer, nested explorer, worker, and debug-run resolve the same validated `subagents` policy. Public role-agent schemas expose no `timeoutMs`, `idleTimeoutMs`, or `maxTotalMs`; invalid, out-of-range, or inverted settings fall back together to 600,000ms idle / 1,200,000ms max-total (agent/extensions/subagents/timeout-policy.ts, agent/extensions/subagents/index.ts).
-- Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `partialWork` is true once any child tool execution has started (agent/extensions/subagents/spawn.ts:60-73, agent/extensions/subagents/spawn.ts:430-440).
+- Subagent idle timeout must measure time since the last child event, not time since spawn. `runSubagent()` in `agent/extensions/subagents/spawn.ts` must call `watchdog.touch()` for every child `AgentSessionEvent`, so `message_update` streaming and tool lifecycle activity cannot trip idle timeout while active.
+- Subagent `maxTotalMs` is an absolute backstop and must not be reset by child events. `createSubagentWatchdog()` in `agent/extensions/subagents/timeout.ts` arms it once and only resets the idle timer from `touch()`.
+- Role-agent timeouts are global-only: explorer, nested explorer, worker, and debug-run resolve the same validated `subagents` policy. Public role-agent schemas expose no `timeoutMs`, `idleTimeoutMs`, or `maxTotalMs`; invalid, out-of-range, or inverted settings fall back together to 600,000ms idle / 1,200,000ms max-total (`agent/extensions/subagents/timeout-policy.ts`, `agent/extensions/subagents/index.ts`).
+- Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `hasPartialWork()` in `agent/extensions/subagents/spawn.ts` becomes true once any child tool execution has started.
 
 ## Engineering docs extension
 

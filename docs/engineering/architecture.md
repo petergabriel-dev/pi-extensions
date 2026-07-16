@@ -1,97 +1,214 @@
+# Architecture
+
+## Workspace and package boundary
+
+This repository is an explicit Pi package for extension development. It is source, not a separate Pi home.
+
+- `package.json` is the package manifest. It declares exactly nine extension entrypoints and three skills.
+- `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>`. `--no-extensions` disables global extension auto-discovery; `-e` loads this package explicitly.
+- `.pi/agents` is a versioned internal symlink to `agent/agents`. It makes the two project agent definitions discoverable without duplicating them.
+- The package reuses host Pi auth, settings, model catalogs, personal memory, and session storage. Those remain outside this repository under Pi-owned user-global paths.
+- The only versioned path below `.pi/` is `.pi/agents`. Live bridge IPC may create ignored `.pi/memory/bridge/` state while Pi runs.
+- Dependency installs, CCC indexes, bridge IPC, logs, DBs, credentials, sessions, plans, and personal memory are runtime/generated state and are ignored.
+- Active global extension source under `~/.pi` is independent. Workspace scripts and source must not import or mutate that source tree.
+
+`agent/extensions/workflow-modes/index.ts` resolves `plan-template.md` relative to `import.meta.url`; package behavior does not depend on checkout location or a user-specific absolute path.
+
+## Packaged component inventory
+
+### Extensions
+
+| # | Entrypoint | Surface | Owned state / role |
+|---|---|---|---|
+| 1 | `agent/extensions/ccc-search/index.ts` | `ccc_search` tool | Validates bounded semantic-search input and invokes fixed `ccc search` argv without a shell. |
+| 2 | `agent/extensions/claude-bridge/index.ts` | `/claude-bridge` command | Owns live project bridge watcher, lock, heartbeat, request processing, response cache, and event-bus adapters. |
+| 3 | `agent/extensions/discussion-notes.ts` | `discussion_notes` tool, `/notes` command, Notes UI | Owns typed notes for selected Pi session branch and reconstructs them from branch entries. |
+| 4 | `agent/extensions/engineering-docs/index.ts` | `docs_validate_tags` tool, `/docs` command | Owns managed engineering-doc operations, tag validation, generated spokes/indexes, and branch-local reminder tracking. |
+| 5 | `agent/extensions/filechanges/index.ts` | `/filechanges`, `/filechanges-accept`, `/filechanges-decline` | Tracks successful Pi `edit`/`write` mutations against branch-local first-write baselines and can keep or revert them. |
+| 6 | `agent/extensions/notify.ts` | `agent_end` lifecycle hook | Emits terminal-native “Ready for input” notification; no persistent state. |
+| 7 | `agent/extensions/personal-memory/index.ts` | `remember`, `recall_memory_entry`, `/remember` | Owns user-global indexed personal-memory reads, writes, and one-time legacy migration. |
+| 8 | `agent/extensions/subagents/index.ts` | `spawn_explorer`, `spawn_worker`, model command, debug tools | Discovers role definitions, enforces spawn policy/concurrency/ownership, and runs isolated persisted child sessions. |
+| 9 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, saved plan, Caveman preference, prompt composition, and read-only mode gates. |
+
+### Agent definitions
+
+| Definition | Contract | Discovery |
+|---|---|---|
+| `agent/agents/explorer.md` | Read-only discovery using `read`, `grep`, `find`, and `ls`; returns compressed files/code/architecture/open-question output. | Project definition through `.pi/agents`; selectable with `agentScope: "project"` or `"both"`. |
+| `agent/agents/worker.md` | Build-mode scoped implementation using coding tools; returns summary, touched files, commands, follow-ups, and questions. | Project definition through `.pi/agents`; selectable with `agentScope: "project"` or `"both"`. |
+
+Subagent discovery defaults to user scope. Project scope resolves the nearest ancestor `.pi/agents`; `both` merges user and project definitions with project definitions winning by name.
+
+### Skills
+
+| Skill | Purpose |
+|---|---|
+| `agent/skills/grill` | One-question-at-a-time plan interrogation with a recommended answer. |
+| `agent/skills/grill-with-docs` | Domain-aware interrogation that inspects code/docs, captures discussion notes, updates context docs, and offers ADRs only for durable trade-offs. |
+| `agent/skills/worker-orchestration` | Contract-first A+B orchestration, disjoint file ownership, sequential/parallel rules, and parent-owned integration. |
+
+### Harness clients and project integration
+
+- `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code and Cursor.
+- `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard.
+- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity and restores native edit preimages.
+- `.cursor/mcp.json` registers the shared bridge MCP client.
+- `.cursor/hooks.json` registers Cursor shell, MCP, and post-edit guards.
+- `.cursor/commands/discuss.md` and `.cursor/commands/plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints.
+
+## Runtime-state ownership
+
+| State | Location | Owner | Repository status |
+|---|---|---|---|
+| Package source, docs, agent definitions, skills | Repository tracked files | Git / contributors | Versioned |
+| Workflow mode, saved plan, Caveman preference | Selected Pi session branch entries | `workflow-modes` | Host session storage; never repository plan files |
+| Discussion notes | Selected Pi session branch tool-result/custom entries | `discussion-notes` | Host session storage |
+| File-change baselines and clear/untrack events | Selected Pi session branch custom entries | `filechanges` | Host session storage |
+| Docs changed-file/touched/snooze markers | Selected Pi session branch custom entries | `engineering-docs` | Host session storage |
+| Parent and child session files | Pi user-global agent session storage | Pi host / `SessionManager` | Excluded |
+| Auth, settings, model catalogs | Pi user-global agent directory | Pi host | Reused, never copied into Git |
+| Personal memory entries and generated index | `~/.pi/memory/*.md`, `~/.pi/memory/MEMORY.md` | `personal-memory/store.ts` | User-global, excluded |
+| Bridge requests, responses, processed cache, policy, heartbeat | `<project>/.pi/memory/bridge/` | `claude-bridge` | Ephemeral, ignored |
+| Dependency trees and semantic index | package `node_modules/`, `.cocoindex_code/` | npm / CCC | Generated, ignored |
+
+Project truth belongs in `docs/engineering/` and ADRs. Discussion notes are session handoff state, not project truth or personal memory. Personal memory is cross-repository user state, not project documentation.
+
+## Extension interaction map
+
+```text
+workflow-modes ──state/events──> engineering-docs write gating
+       │
+       ├──state/build gate──────> subagents spawn_worker
+       │
+       └──state/save-plan───────> claude-bridge <──file IPC── bridge clients
+                                      │
+                                      ├──add event────> discussion-notes
+                                      ├──pure validator> engineering-docs filesystem helpers
+                                      └──store calls───> personal-memory store
+
+edit/write lifecycle ───────────> filechanges + engineering-docs tracking
+agent_end ──────────────────────> notify + engineering-docs reminder
+```
+
+Live mutable extension state has one owner. Cross-extension mutation uses namespaced `pi.events` request/result pairs. Direct imports from the bridge are limited to pure prompt composition, docs validation, and personal-memory store functions; the bridge does not import mutable discussion-note or workflow session state.
+
 ## Pi ↔ multi-harness bridge
 
-Claude Code and Cursor are read-only planning surfaces for existing Pi projects. Pi remains source of truth for engineering docs validation, discussion notes, personal memory recall, workflow prompts, saved-plan handoff, and build execution.
+Claude Code and Cursor are read-only planning surfaces for existing Pi projects. Pi remains source of truth for engineering docs validation, discussion notes, personal memory, workflow prompts, saved-plan handoff, and build execution.
 
 Flow:
 
-1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active interactive session.
-2. Bridge resolves the project root from the nearest `.pi/` marker.
-3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json` for IPC and liveness.
-4. Harness clients use `agent/claude-bridge-client/pi-bridge-mcp.js` to write UUID request JSON files and poll matching responses for up to 2s. Cursor registers the same client through `.cursor/mcp.json`.
-5. Pi bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, and `save_plan` by reusing Pi-side extension functions.
-6. Bridge recall responses include engineering docs, indexed personal memory from `~/.pi/memory/MEMORY.md`, workflow-mode prompts composed with live Caveman preference, and saved-plan context.
-7. Client-side bridge code never imports Pi internals; only the Pi bridge extension imports sibling Pi extension code.
+1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active session.
+2. Bridge resolves project root from nearest `.pi/` marker.
+3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json`.
+4. MCP client writes UUID request JSON and polls matching response for up to two seconds.
+5. Bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, and `save_plan` using Pi-side owners/helpers.
+6. Recall returns canonical engineering docs, compact personal-memory index, composed workflow prompts, plan template, and live saved-plan state.
+7. Bridge shutdown removes its owned request/response/cache/lock/policy files; ignored directories may remain.
 
-Core boundaries:
-
-- **Pi bridge extension:** Pi-coupled layer. Reuses workflow-modes, discussion-notes, engineering-docs, and personal-memory code.
-- **MCP bridge client:** Thin file-protocol client. Node stdlib only; no Pi imports. It is shared by Claude Code and Cursor.
-- **Claude PreToolUse hook:** Fail-closed read-only guard for any cwd under a `.pi` marker. It blocks mutation tools and `dangerouslyDisableSandbox`. On macOS with `/usr/bin/sandbox-exec`, Bash is allowed only by rewriting the command through a Seatbelt sandbox. If that sandbox is unavailable, Bash denies closed.
-- **Cursor hooks:** Project-committed `.cursor/hooks.json` wires `agent/cursor-bridge-client/cursor-readonly-hook.js` for `beforeShellExecution`, `beforeMCPExecution`, and `afterFileEdit`. Shell writes deny, ambiguous shell asks, mutating non-bridge MCP calls deny, and native file edits are reverted from pre-edit bytes with a visible failure message.
-
-Bridge request protocol lives under `<project>/.pi/memory/bridge/`:
+Bridge request protocol:
 
 - `requests/<uuid>.json`: `{ id, type, payload, ts }`
 - `responses/<uuid>.json`: `{ id, ok, result | error }`
 - `processed/<uuid>.json`: idempotency cache
-- `policy.json`: fresh Bash/read-only policy snapshot sourced from Pi workflow-modes exports
-- `session.json`: active bridge session lock + heartbeat
+- `policy.json`: short-lived policy snapshot for clients/compatibility
+- `session.json`: active bridge lock and heartbeat
 
-`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; if both are present, `sessionId` wins. `capture` and `save_plan` use the Pi event bus rather than imported extension module state. `claude-bridge` emits `discussion-notes:add`; the live `discussion-notes` extension updates its own notes array, appends the session snapshot, and redraws the Notes widget. It does not stage memory candidates. `claude-bridge` emits `workflow-modes:save-plan`; the live `workflow-modes` extension appends a `workflow-plan` entry to the active session branch before updating live state, then returns `workflow-modes:save-plan-result`. Recall gets saved-plan state only through live `workflow-modes:get`; unavailable live state is an error, never a bridge cache or direct file read.
+Only one fresh bridge session processes a project. Another watcher becomes passive. Processed responses make UUID replay idempotent.
 
-`recall_memory` returns project docs and a compact personal-memory index instead of retired private indexes. Project truth comes from `docs/engineering/`; cross-repo personal preferences/traps live under `~/.pi/memory/` through `agent/extensions/personal-memory/store.ts` and are fetched on demand by slug. See ADR-0016 and ADR-0017.
+`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; primary wins. Capture emits `discussion-notes:add`, then waits for owner response. `save_plan` emits `workflow-modes:save-plan`, then waits for live owner response. Recall obtains saved plans only through `workflow-modes:get`; unavailable live state is an error.
 
-## Workflow modes read-only Bash sandbox
+### Read-only harness enforcement
 
-`agent/extensions/workflow-modes/plan-state.ts` resolves saved plans from ordered `workflow-plan` custom entries in the selected Pi session branch. Latest ancestral save or clear wins. New sessions have no plan; forks inherit only state present before their fork point; session resume and tree navigation reconstruct state from the selected ancestry. No repository- or Git-branch-scoped plan file participates.
+- Claude hook applies to any cwd below a `.pi` marker. Mutation tools and `dangerouslyDisableSandbox` are denied.
+- On macOS, Claude Bash is rewritten through `/usr/bin/sandbox-exec` with network and non-scratch writes denied. If unavailable, Bash denies closed.
+- Cursor shell commands are allow/deny/ask classified; mutating non-bridge MCP calls deny; unknown calls ask.
+- Cursor native edits are restored from exact pre-edit bytes and return a visible denial.
+- Client code has zero Pi internal imports. All Pi-state writes travel through live bridge requests.
 
-`agent/extensions/workflow-modes/index.ts` owns Pi-side mode prompts, branch-local Caveman preference, prompt composition, and Discuss/Plan/Review tool gating. There are four active modes: Discuss, Plan, Build, and Review; Off remains inactive behavior. Review is a read-only PR review mode, and mutation tools are blocked there. `agent/extensions/workflow-modes/caveman.ts` preserves the `caveman-mode-state` entry contract, defaults branches without an explicit entry to ON, and supplies the shared Caveman/normal-style composition logic. `/caveman` changes the retained preference; Discuss, Plan, Build, and Review apply it, while Off injects no workflow or Caveman-related prompt and reports the preference as inactive. Claude/Cursor bridge recall reads live `cavemanEnabled` through `workflow-modes:get` and uses the same composition export for four composed prompt fields: `discussPrompt`, `planPrompt`, `buildPrompt`, and `reviewPrompt`.
+## Workflow modes
 
-Mode prompt constants are also the single source of truth for the ponytail lazy-senior-dev reflex: Build carries the full minimal-code ruleset, while Discuss and Plan carry the scope-time subset that questions need, separates required behavior from nice-to-haves, and preserves non-negotiable correctness guardrails. Prompt injection in `before_agent_start` directs subagent delegation when the subagents extension is available: Discuss keeps quick lookups inline and uses `spawn_explorer` only for genuine multi-file/symbol sweeps; Plan defaults multi-file/symbol fan-out to `spawn_explorer` while the parent synthesizes; Build uses the worker-orchestration A+B model and spawns one `spawn_worker` per substantial confirmed saved-plan Section-4 task, with the parent retaining task selection, verification, commit, and confirmation. This integration is prompt-only; structural gates remain unchanged.
+`workflow-modes` reconstructs three branch-local contracts from selected session ancestry:
 
-Mutation tools remain blocked in Discuss, Plan, and Review. Review Bash is pre-gated by the scoped review allow/deny policy from `policy.ts` on both the sandbox and fallback paths, then wrapped with network enabled while retaining write denial. For Bash, the hook first tries `wrapCommand()` from `agent/extensions/workflow-modes/sandbox.ts`; when a launcher is detected, the command is rewritten in place before execution. If no launcher exists, or wrapping throws, the hook falls back to the shared conservative regex policy from `policy.ts`. Discuss and Plan keep network denied.
+- `workflow-mode-set` selects Off, Discuss, Plan, Build, or Review.
+- `workflow-plan` stores set/clear events for one saved plan.
+- `caveman-mode-state` stores Caveman preference; no explicit entry means enabled.
 
-Supported launcher paths:
+Off injects no workflow/style prompt. Discuss, Plan, Build, and Review compose mode prompt plus Caveman or normal-style override. Plan-template resolution is module-relative.
 
-- macOS: `/usr/bin/sandbox-exec`, with a Seatbelt profile denying `network*` (except Review) and `file-write*`, then re-allowing writes under a scratch `TMPDIR` and `/dev/null`.
-- Linux: `bwrap`, with `--unshare-net` except in Review, a read-only bind of `/`, scratch `TMPDIR`, and `PYTHONDONTWRITEBYTECODE=1`.
-- No launcher: conservative command allow-list plus mutation/redirect denies; Review remains scoped by its review allow/deny policy while network is unsandboxed.
+Discuss, Plan, and Review block mutation tools. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
 
-The Pi bridge still writes `policy.json` snapshots for clients and compatibility, but Claude bridge read-only Bash no longer depends on policy freshness or `planBashAllow` gating. Its Node-stdlib PreToolUse hook returns `hookSpecificOutput.updatedInput` so macOS Claude Code Bash calls under `.pi` projects are wrapped in `sandbox-exec` whenever available. Missing, stale, or expired bridge policy does not block sandboxed Bash; absence of `sandbox-exec` blocks Bash entirely.
+The extension publishes `workflow-modes:get/state`, `workflow-modes:changed`, and `workflow-modes:save-plan/result` events. Engineering docs consumes state for write gating; subagents queries it before worker spawn; bridge uses it for recall and plan save.
 
-## CCC semantic search boundary
+## Discussion notes
 
-`agent/extensions/ccc-search/index.ts` registers `ccc_search` as the semantic discovery path in every workflow mode. The tool invokes fixed `ccc search` argv through Node `execFile`; query text and filters never enter a shell. Its schema and runtime checks bound query, language filters, project-relative path glob, pagination, timeout, and output. Abort signals terminate the child process.
+`discussion-notes` owns an in-memory view reconstructed from selected branch entries on `session_start` and `session_tree`.
 
-This narrow tool sits outside generic Plan/Discuss Bash sandboxing because CCC search uses its daemon under `~/.cocoindex_code/`, may refresh ignored index artifacts under project `.cocoindex_code/`, and may contact its configured embedding provider. The tool exposes search plus optional refresh only. It never initializes projects or exposes daemon/reset commands; initialization and index management remain explicit Build-mode CLI operations.
+- Tool additions persist their versioned snapshot in tool-result details.
+- Manual `/notes` and bridge additions append `discussion-notes` custom entries.
+- Each note has type, text, timestamp, source, and branch-local numeric ID.
+- Input is normalized, deduplicated by type/text, limited to 480 characters per note and 200 active notes.
+- Failed custom-entry persistence restores previous in-memory state.
+- Compact status/widget shows latest notes; `/notes` provides list/detail/add/clear UI.
 
-## Pi subagents
+Bridge capture never mutates imported module state. It requests addition over the event bus; the live owner appends the snapshot, redraws UI, and returns result. Notes do not stage or write personal memory.
 
-Pi subagents live in `agent/extensions/subagents/` and run as persisted in-process child `AgentSession`s created from extension tool execution. The parent exposes `spawn_explorer` and `spawn_worker`; both call `runSubagent()` in `agent/extensions/subagents/spawn.ts`, which creates a fresh `SessionManager.create(ctx.cwd)`, disables child extension/theme/skill/context-file discovery, and captures only the final structured return for the parent.
+## File-change tracking and rollback
 
-Roles:
+`filechanges` watches Pi `edit` and `write` lifecycle events.
 
-- **Explorer:** read-only discovery role. `spawn_explorer` validates tools are limited to `read`, `grep`, `find`, and `ls` before spawning. It works in all workflow modes and returns parsed summary/findings/files/open questions. Workflow mode prompts use it with thresholds: sparse in Discuss, default for Plan fan-out.
-- **Worker:** coding role. `spawn_worker` first queries `workflow-modes:get` and refuses unless `workflow-modes:state.mode === "build"`. Worker children receive coding tools plus a nested `spawn_explorer` custom tool; they do not receive `spawn_worker`. Build-mode prompts direct sequential one-worker-per-substantial-saved-task delegation while keeping verification, commits, and confirmation in the parent.
+1. `tool_call` captures a preimage keyed by tool-call ID.
+2. Failed results discard pending preimages.
+3. First successful result appends one immutable branch baseline for that path.
+4. Current file bytes are reread as UTF-8 and compared with first baseline to render cumulative unified diff.
+5. Session start/tree navigation replays branch baseline/clear/untrack entries, then recomputes against disk.
 
-Child sessions are persisted as normal Pi sessions, making each subagent run inspectable after completion and providing the session-file foundation for future Context Transfer branch artifacts. The child transcript is not appended to the parent branch; parent context receives only the structured result object and short tool result text.
+Accept keeps current files and clears tracking. Decline requires confirmation unless forced, deletes files whose baseline was absent, restores original UTF-8 content for existing files, reports per-file failures, then clears tracking. This is a Pi-tool mutation log, not Git state: Bash/external mutations do not establish new baselines, and no accept/decline action stages or commits.
 
-Concurrency is managed by `agent/extensions/subagents/concurrency.ts`: a configurable default lane (default cap 3), a reserved explorer lane for nested worker→explorer calls, and a worker file-ownership overlap guard. Progress visibility is handled by `agent/extensions/subagents/progress.ts`, which renders the keyed `subagents-progress` widget at a 250 ms throttle and clears it when runs finish.
+## CCC semantic search
 
-Subagent timeouts are idle-based with an absolute backstop. `agent/extensions/subagents/timeout.ts` provides a host-import-free watchdog with `touch()` resetting only the idle timer and `maxTotalMs` remaining absolute. `runSubagent()` touches the watchdog on every child `AgentSessionEvent`, so streaming `message_update` events and tool lifecycle events keep an active child alive while silence past `idleTimeoutMs` aborts as `failureKind: "idle"`. `maxTotalMs` aborts continuously active runaway children as `failureKind: "max_total"`; timeout failures preserve partial output and include `partialWork`. `timeout-policy.ts` resolves one policy for `spawn_explorer`, nested explorer, `spawn_worker`, and `subagents_debug_run_agent`: validated global `subagents` settings or 600,000ms idle / 1,200,000ms max-total defaults. Role-agent schemas expose no per-call timeout fields.
+`ccc_search` invokes `ccc search` through `execFile` with fixed argv. Query, language filters, project-relative path glob, pagination, timeout, abort signal, and output size are validated/bounded. Query text never enters a shell.
 
-## Engineering docs extension
+Search may use daemon state under `~/.cocoindex_code/`, ignored project `.cocoindex_code/`, and configured embedding network access. Tool surface permits search and optional refresh only. Initialization/index management remain explicit Build-mode CLI operations.
 
-`agent/extensions/engineering-docs/` owns managed project docs under `docs/engineering/`. `/docs init` scaffolds canonical docs, writes `docs/engineering/manifest.json`, regenerates the decisions index, and emits root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) through a non-destructive `pi-docs` marker block. The spokes are pure pointers to canonical docs; the manifest `generated` list tracks the decisions index plus spoke files. `/docs check` validates spoke marker blocks and linked doc paths, then repairs missing/stale blocks only when writes are allowed.
+## Subagents
 
-## Memory architecture
+Subagents run as persisted in-process child `AgentSession`s with a fresh `SessionManager.create(ctx.cwd)`. Child resource loaders disable extension, theme, skill, and context-file discovery; parent receives only parsed final structured output, while child transcript remains in host session storage.
 
-Project memory now lives in engineering docs under `docs/engineering/`:
+- Explorer definitions must contain only `read`, `grep`, `find`, and `ls`.
+- Worker spawn queries live workflow mode and refuses outside Build.
+- Spawn graph is bounded to parent → worker → explorer. Workers receive nested explorer only; explorers receive no spawn tools.
+- Default concurrency lane cap is three; reserved nested-explorer lane cap is one. Global settings may be overridden by nearest project `.pi/settings.json`.
+- Concurrent worker ownership paths may not overlap.
+- Progress widget is keyed/throttled and clears after all runs.
+- Idle watchdog resets on every child event; absolute max-total timer does not reset. Timeout failures preserve partial output metadata.
+- `/subagent-model` manages per-role model defaults; debug tools expose progress, graph, concurrency, discovery, direct run, and in-process spike diagnostics.
 
-- `architecture.md` for system shape and component boundaries.
-- `dev-workflow.md` for how to operate and verify the system.
-- `conventions.md`, `invariants.md`, and `traps.md` for rules and known failure modes.
-- `decisions/ADR-*.md` for decisions and superseded history.
+## Engineering docs
 
-Cross-repo personal memory is a user-global markdown store under `~/.pi/memory/`. `agent/extensions/personal-memory/store.ts` owns the indexed store and `agent/extensions/personal-memory/index.ts` wires it into Pi:
+`engineering-docs` manages `docs/engineering/` according to `manifest.json`.
 
-1. Entries are slugged markdown files with frontmatter and body text.
-2. `MEMORY.md` is a generated index of entry names, descriptions, and links.
-3. `/remember <text>` validates a small text snippet, saves or overwrites a slug entry, and rebuilds `MEMORY.md`.
-4. `before_agent_start` injects only the compact index block when present; full entry bodies stay out of default prompt context.
-5. `recall_memory_entry(slug)` fetches one full entry when the injected index shows it is relevant.
-6. Legacy `~/.pi/memory.md` migrates once into `~/.pi/memory/`, then moves to `memory.md.bak`.
+- `/docs init` scaffolds missing canonical docs without overwriting existing files.
+- `/docs check` validates manifest, ADRs, decision index, and generated spoke marker blocks; repair writes occur only when mode permits.
+- `/docs update-index`, `/docs validate-tags`, and `/docs patch` cover index, plan tags, and change-driven suggestions.
+- `docs_validate_tags` validates `[DOCS:*]` and ADR-action pairing.
+- Write permission is derived from live workflow state and fails closed before state is known; only Build/Off allow docs writes.
+- Successful edit/write results append branch-local tracking markers. `agent_end` may remind when source changed but engineering docs did not.
+- `AGENTS.md` and `CLAUDE.md` are generated pointer spokes. Only marker blocks are extension-owned.
 
-There is no automatic model extraction or reconciliation pipeline. Reliability comes from host file writes/reads for personal memory and explicit docs edits for project truth. The personal index is injected by default; full entries require explicit fetch.
+## Personal memory
 
-Claude bridge recall combines the two sources: engineering docs plus the personal-memory index. Bridge `recall_entry` fetches one personal entry, `save_memory` writes one personal entry, and `capture` updates live discussion notes only. See ADR-0016 and ADR-0017.
+`personal-memory/store.ts` owns user-global indexed storage:
+
+1. Entries are slugged Markdown with required frontmatter.
+2. `MEMORY.md` is generated from conforming entries.
+3. `/remember` and `remember` write one entry through `writeMemoryFact`, then rebuild index.
+4. `before_agent_start` injects compact index only.
+5. `recall_memory_entry(slug)` validates one slug and fetches one full body.
+6. Legacy `~/.pi/memory.md` migrates once, then is renamed `memory.md.bak`.
+
+Bridge `recall_entry` and `save_memory` call same store. No automatic extraction/reconciliation pipeline exists.
+
+## Terminal notification
+
+`notify` has no persisted state. On `agent_end`, it selects Windows toast when `WT_SESSION` exists, Kitty OSC 99 when `KITTY_WINDOW_ID` exists, otherwise OSC 777, then announces that Pi is ready for input.
