@@ -434,6 +434,7 @@ function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boole
 		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
 		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
 		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled),
+		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
 		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
 	};
