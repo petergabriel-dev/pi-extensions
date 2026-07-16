@@ -30,7 +30,7 @@ export const ENTRY_DOCS_STATE = "engineering-docs:state";
 export const ENTRY_DOCS_REMINDER_SNOOZE = "engineering-docs:reminder-snooze";
 
 // Workflow mode types (mirrored from workflow-modes)
-export type WorkflowMode = "off" | "discuss" | "plan" | "build";
+export type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review";
 
 export interface WorkflowState {
 	mode: WorkflowMode;

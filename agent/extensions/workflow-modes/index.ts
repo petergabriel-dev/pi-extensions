@@ -7,7 +7,7 @@ import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
-export type Mode = "off" | "discuss" | "plan" | "build";
+export type Mode = "off" | "discuss" | "plan" | "build" | "review";
 export type PlanEvent = "set" | "clear";
 
 export const MODE_ENTRY = "workflow-mode-set";
@@ -35,6 +35,7 @@ const MODE_LABELS: Record<Mode, string> = {
 	discuss: "Discuss",
 	plan: "Plan",
 	build: "Build",
+	review: "Review",
 };
 
 let currentMode: Mode = "off";
@@ -50,6 +51,7 @@ function normalizeMode(raw: string): Mode | undefined {
 	if (value === "discuss" || value === "discussion") return "discuss";
 	if (value === "plan" || value === "planning") return "plan";
 	if (value === "build" || value === "building") return "build";
+	if (value === "review" || value === "reviewing") return "review";
 	return undefined;
 }
 
@@ -152,10 +154,10 @@ async function selectOverlay(ctx: ExtensionCommandContext, title: string, items:
 
 async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify("Use /mode <off|discuss|plan|build>.", "warning");
+		ctx.ui.notify("Use /mode <off|discuss|plan|build|review>.", "warning");
 		return;
 	}
-	const items: SelectItem[] = (["off", "discuss", "plan", "build"] as Mode[]).map((mode) => ({
+	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review"] as Mode[]).map((mode) => ({
 		value: mode,
 		label: `${MODE_LABELS[mode]}${mode === currentMode ? " (current)" : ""}`,
 		description:
@@ -165,6 +167,8 @@ async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 					? "Grill the idea/feature; read/search only"
 					: mode === "plan"
 						? "Grill implementation plan; read/search only"
+						: mode === "review"
+							? "Review changes; read-only"
 						: "Build with normal tools",
 	}));
 	const choice = await selectOverlay(ctx, "Select Workflow Mode", items);
@@ -264,6 +268,8 @@ export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless 
 
 export const PLAN_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When spawn_explorer is available, default to it for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal. Keep input validation, error handling that prevents data loss, security, accessibility, and explicitly requested features non-negotiable.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
 
+export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Never auto-post a review: ask for explicit user confirmation immediately before publishing. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
+
 export const BUILD_PROMPT = `Workflow mode: Build. Implement requested changes using the available tools.
 
 Ponytail lazy-senior-dev mode. Before writing code, evaluate in order: 1) Is it necessary (YAGNI)? 2) Standard-library solution — use it. 3) Native platform feature — use it. 4) Existing dependency — use it. 5) Single-line solution — implement it. 6) Only then write minimal working code.
@@ -340,7 +346,7 @@ Required post-task report format:
 `;
 
 export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string): string | undefined {
-	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT }, savedPlan);
+	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT, review: REVIEW_PROMPT }, savedPlan);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -393,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event) => {
-		if (currentMode !== "discuss" && currentMode !== "plan") return;
+		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review") return;
 
 		if (MUTATION_TOOLS.has(event.toolName)) {
 			return {
@@ -416,12 +422,12 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const normalized = command.replace(/\s+/g, " ");
-		const allowed = currentMode === "discuss" ? DISCUSS_BASH_ALLOW.test(normalized) : PLAN_BASH_ALLOW.test(normalized);
+		const allowed = currentMode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
 		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized);
 		if (!allowed || denied) {
 			return {
 				block: true,
-				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "discuss" ? "pwd, ls, find, rg, grep, ccc search" : "discovery plus tests/builds/checks"}. Mutating commands require /mode build.`,
+				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" ? "discovery plus tests/builds/checks" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
 			};
 		}
 	});
@@ -441,12 +447,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mode", {
-		description: "Select workflow mode: Off, Discuss, Plan, or Build",
+		description: "Select workflow mode: Off, Discuss, Plan, Build, or Review",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) return chooseMode(pi, ctx);
 			const mode = normalizeMode(arg);
-			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, or build.", "warning");
+			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, or review.", "warning");
 			await setMode(pi, ctx, mode);
 		},
 	});

@@ -13,6 +13,7 @@ const prompts: WorkflowPromptSet = {
 	discuss: "DISCUSS",
 	plan: "PLAN",
 	build: "BUILD",
+	review: "REVIEW",
 };
 const state = (enabled: unknown) => ({ type: "custom", customType: CAVEMAN_ENTRY, data: { enabled } });
 
