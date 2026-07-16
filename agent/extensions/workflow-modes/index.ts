@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@mariozechner/pi-tui";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode } from "./policy.js";
@@ -262,7 +263,7 @@ async function choosePlanAction(pi: ExtensionAPI, ctx: ExtensionCommandContext):
 	if (choice === "clear") await clearPlan(pi, ctx);
 }
 
-export const PLAN_TEMPLATE_PATH = "/Users/petergabrielrlopez/.pi/agent/extensions/workflow-modes/plan-template.md";
+export const PLAN_TEMPLATE_PATH = fileURLToPath(new URL("./plan-template.md", import.meta.url));
 
 export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless grilling session for the idea or feature. Ask one main question at a time and provide your recommended answer. If a question can be answered by lightly inspecting the codebase, inspect it instead. Prefer ccc_search for semantic discovery; use read plus light read-only Bash discovery (pwd, ls, find, rg, grep) for exact lookup or fallback. When spawn_explorer is available, use it sparingly for genuine multi-file or multi-symbol sweeps; keep quick lookups inline. The main agent remains synthesizer and decision-maker. Do not run tests/builds unless the user explicitly asks. Focus on user value, feature boundaries, terminology, edge cases, and how the idea fits existing behavior. Capture durable requirements, decisions, constraints, open questions, and lessons learned from failures with discussion_notes automatically. A lesson must pair a failure with its resolution. Do not implement or produce detailed code-level plans. Do not claim facts are confirmed unless backed by tool evidence or user-provided evidence. Use recall_memory when prior cross-session memory may be relevant. When the idea is shaped enough, softly suggest switching to Plan mode with /mode plan. Ponytail lazy-senior-dev reflex: favor minimalism. Question whether the request itself matches the actual need (YAGNI), separate required behavior from nice-to-haves, and prefer the smallest approach: deletion over addition, boring over clever, fewest files possible. Never trade away input validation at trust boundaries, error handling that prevents data loss, security, accessibility, or explicitly requested features.`;
 

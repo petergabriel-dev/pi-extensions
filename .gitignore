@@ -3,9 +3,33 @@
 .cocoindex_code/
 .claude/
 __pycache__/
-memory/
-settings.json
-*.db
-*.log
 node_modules/
 dist/
+*.db
+*.log
+*.tmp
+
+# Project-local Pi runtime; keep only project agent definitions link.
+.pi/*
+!.pi/agents
+
+# User/runtime state must never enter this source workspace.
+auth.json
+trust.json
+models-store.json
+settings.json
+memory.md
+memory.md.bak
+memory/
+truth/
+context-transfer-v1-concept.md
+agent/auth.json
+agent/trust.json
+agent/models-store.json
+agent/settings.json
+agent/sessions/
+agent/plans/
+agent/memory/
+agent/npm/
+agent/bin/
+agent/skills/find-skills

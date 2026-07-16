@@ -303,7 +303,6 @@ async function runInProcessSpike(
 			cwd: ctx.cwd,
 			agentDir,
 			model,
-			modelRegistry: ctx.modelRegistry,
 			tools: ["read", "grep"],
 			resourceLoader,
 			sessionManager: SessionManager.create(ctx.cwd),

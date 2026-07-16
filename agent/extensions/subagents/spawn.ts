@@ -331,7 +331,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			cwd: options.ctx.cwd,
 			agentDir,
 			model,
-			modelRegistry: options.ctx.modelRegistry,
 			tools: options.agent.tools,
 			customTools: options.customTools,
 			resourceLoader,
