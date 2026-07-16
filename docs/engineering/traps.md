@@ -1,53 +1,101 @@
 # Traps
 
+## Package and dependency boundary
+
+- **Root is an orchestration package, not dependency workspace.** Root has no lockfile/dependencies. `npm ci` at root is wrong; use `npm run bootstrap`, which installs four lockfile-backed extension packages.
+- **Bootstrap does not eliminate all network use.** Engineering-docs and personal-memory scripts invoke `npx --yes`; uncached TypeScript/tsx packages still require npm registry access during tests/typecheck.
+- **Extension dependencies are split.** A test passing in one package does not prove another package is installed. Run root bootstrap after cloning or lockfile changes, then root gate.
+- **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other.
+
+## Source isolation versus runtime sharing
+
+- **Workspace isolates source, not Pi home.** Normal launcher reuses global auth, settings, model catalogs, sessions, context, and personal memory. `/login`, `/settings`, `/trust`, `/remember`, and bridge `save_memory` can change shared user state.
+- **`--no-session` is not full isolation.** It prevents parent session persistence only. Use secure temporary `PI_CODING_AGENT_DIR` for live tests that save memory or alter settings, then remove it.
+- **Never copy runtime state into repository.** Temporary auth/settings copies belong in mode-protected OS temp directories and must be deleted after test.
+- **Only `.pi/agents` is tracked below `.pi/`.** Bridge creates ignored `.pi/memory/bridge/`; broad `rm -rf .pi` destroys project agent link.
+
+## Duplicate loading and stale code
+
+- **`pi -e .` can load duplicate extensions.** Without `--no-extensions`, global copies remain discoverable beside workspace package. Duplicate commands, event listeners, watchers, widgets, and notifications can result. Use `./bin/pi-workspace`.
+- **`--no-extensions` disables extensions only.** Global context/settings and other Pi-owned state remain available. Do not describe launcher as fully hermetic.
+- **Running Pi keeps loaded source.** After edits, use `/reload` when supported or restart launcher before live acceptance. A passing test against disk does not prove old process reloaded.
+
+## Project marker precedence
+
+- **Nearest ancestor `.pi` wins bridge/project discovery.** Starting below unintended marker can bind bridge IPC, project agents, and project settings to wrong root.
+- **This repository’s `.pi/agents` is also marker.** Before bridge tests, verify `pwd`, repository `.pi`, Pi bridge status root, and test argument all refer same checkout.
+- **Project agent scope is explicit.** Subagent discovery defaults to user scope. Use `agentScope: "project"` or `"both"` to select definitions exposed by repository `.pi/agents`.
+
+## Plan-mode verification limits
+
+- **Plan sandbox is not a general test environment.** Repository/home writes and network are denied. `npm ci`, uncached `npx`, CCC init/index, live bridge IPC, and write-heavy tests require Build.
+- **Sandbox failures can mimic code failures.** `EPERM` for temp/cache creation and `ENOTFOUND registry.npmjs.org` may indicate Plan restrictions. Rerun in Build before diagnosing source.
+- **CCC search is not filesystem-read-only.** It may start daemon, write user/project index state, and contact embedding provider. Use dedicated `ccc_search`; never broaden generic Bash sandbox permissions.
+
+## Pi ↔ harness bridge
+
+- **One active owner per project.** Fresh heartbeat from older Pi makes newer bridge passive. Stop old process before testing changed protocol.
+- **Bridge root follows nearest marker, not client config path.** MCP `cwd`, Pi cwd, and intended project marker must agree.
+- **Bridge protocol tests mutate state.** Core tests save notes, plan, and personal memory. Run against disposable `PI_CODING_AGENT_DIR`, not normal user memory.
+- **Bridge uses `fs.watch` without polling fallback.** Missed request events become two-second client timeouts. Preserve watcher lifecycle/coalescing behavior and diagnose request files before changing protocol.
+- **Session lock may be enveloped.** Consumers should read `session.lock ?? session` for compatibility; assuming top-level heartbeat/status breaks against current bridge output.
+- **Do not import live owner state.** Earlier direct workflow/discussion module imports produced false plan success and clobbered Notes UI. Use event-bus request/result handoff.
+- **Idle widget redraw is load-bearing.** Capture success requires live owner update while Pi waits for input. Unit tests cannot replace real idle UI acceptance.
+- **Bridge-down behavior is intentional.** Recall/capture/save must fail loud; no direct memory or plan-file fallback.
+- **Claude MCP config source matters.** `claude mcp add -s user` writes active user registration; editing an assumed sidecar config may not affect `claude mcp list`.
+- **Claude Bash rewriting depends on PreToolUse `updatedInput`.** If host stops honoring rewritten input, deny Bash rather than fall back to unsandboxed regex approval.
+- **Sandbox bypass flags require explicit denial.** `dangerouslyDisableSandbox` must be rejected before wrapping.
+- **Cursor native edits have a revert window.** `afterFileEdit` restores pre-edit text after write lands. Exact preimage is required; missing preimage denies closed.
+- **Cursor shell classification is conservative.** Known reads allow, obvious writes deny, unknown commands ask. New exotic write forms require deny-pattern coverage.
+
+## Workflow modes and review
+
+- **Mode union is mirrored.** Keep `workflow-modes/index.ts`, `workflow-modes/caveman.ts`, `subagents/index.ts`, and `engineering-docs/constants.ts` aligned when adding/changing modes.
+- **Review confirmation is prompt-enforced.** No structural hook proves user confirmed posting. Keep never-auto-post instruction and perform one explicit confirmation immediately before `gh pr review`.
+- **Review body must be inline.** Read-only filesystem rules exclude body-file workflows.
+- **Live GitHub checks require installed/authenticated `gh`.** Unit and typecheck success do not validate GitHub access.
+- **Saved plans are session ancestry, not repository files.** Ephemeral sessions do not persist after exit; never add shared fallback plan file.
+
 ## Engineering docs
 
-- **Root agent entrypoint spokes are shared user files.** `AGENTS.md` and `CLAUDE.md` may contain hand-written content. Engineering-docs generation must update only the `pi-docs` marker block and must preserve bytes outside that block.
+- **Root spokes contain mixed ownership.** Generator may replace only managed `pi-docs` marker block in `AGENTS.md`/`CLAUDE.md`; surrounding bytes are user-owned.
+- **Decision index is generated.** ADR changes can leave `/docs check --check` reporting stale index until `/docs update-index` runs in Build/Off.
+- **Tag validator sees literal bracketed examples.** Plan boilerplate containing bare docs tags can be interpreted as real tags. Use exact valid area/action pairs in plan tasks.
+- **Docs writes fail closed before workflow state arrives.** If workflow extension is absent/stale, docs extension reports Unknown and blocks writes.
 
-## Workflow modes and CCC
+## File changes
 
-- **Review never-auto-post is prompt-enforced, not a hard confirmation hook.** Keep the explicit confirmation instruction in the review prompt; do not claim posting is structurally confirmation-gated.
-- **Review posting must use an inline body.** Use `gh pr review --body ...`; Review's read-only filesystem means there is no `--body-file` workflow.
-- **The workflow-mode union is duplicated across exactly four files.** Keep `agent/extensions/workflow-modes/index.ts`, `agent/extensions/workflow-modes/caveman.ts`, `agent/extensions/subagents/index.ts`, and `agent/extensions/engineering-docs/constants.ts` aligned when changing modes.
-- **`ccc search` is not filesystem-read-only.** CCC may start a daemon, write `~/.cocoindex_code/daemon.log` and index artifacts, and contact an embedding provider. Running it through Plan/Discuss Bash fails under structural sandboxing with `PermissionError` on `daemon.log`. Use dedicated `ccc_search`; do not add broad home-write or network exceptions to generic Bash sandbox.
-- **Reload before live tool acceptance.** Running Pi keeps old extension registration after source edits. Run `/reload` before inspecting `ccc_search` metadata or testing Plan/Build behavior.
-
-## Pi ↔ Claude Code bridge
-
-- **Idle widget redraw is load-bearing.** The bridge depends on Pi `ctx.ui.setWidget` updating while Pi is idle. This was manually verified with `idle-widget-spike.ts`; if it regresses, live capture acceptance fails.
-- **Do not trust imported extension module state for live handoff.** `save_plan` initially returned OK but `/plan view` showed no plan because the bridge updated an imported workflow module instance. `capture` later overwrote the Notes widget with `Notes: 1` because the bridge imported `discussion-notes` and rendered a private notes array. Use event bus handoff so live extensions own state.
-- **Session-plan restart durability requires a persisted session.** Pi may defer creating/flushing a session file until an assistant message exists, and ephemeral sessions never persist. `workflow-plan` entries still own live branch state; do not add a shared fallback file because it leaks plans across sessions. Bridge recall must query live workflow state and must never retain a plan cache.
-- **Claude models may skip tool checkpoints.** A direct `/discuss` smoke once answered without capture. Polite, task-natural prompts worked; coercive “MUST call tool” phrasing was refused as prompt injection. Acceptance must audit transcript vs Pi notes.
-- **Docs validator sees bracketed examples.** Literal `[DOCS:*]` or `[DOCS]` in plan boilerplate can be treated as tags and rejected. Avoid bracketed wildcard examples in generated plan text.
-- **fs.watch can miss request creates.** Bridge uses `fs.watch` plus a polling scan fallback because a smoke test missed a request event.
-- **Target project root follows nearest ancestor `.pi`.** A Pi session under `~/Documents/Projects/claude-bridge` resolved to `/Users/petergabrielrlopez` because `~/.pi` existed as ancestor marker.
-- **Claude MCP config source matters.** Editing `~/.claude/mcp.json` did not make `claude mcp list` show the server. `claude mcp add -s user ...` wrote the active config to `~/.claude.json`.
-- **Hook failures should deny closed.** The read-only hook intentionally denies invalid hook input and denies Bash when macOS `sandbox-exec` is unavailable; sandboxed Bash no longer depends on fresh bridge policy.
-- **Claude bridge structural Bash wrapping depends on `updatedInput`.** PreToolUse hooks can rewrite tool input. If that support changes, Claude bridge must deny Bash rather than fall back to regex policy enforcement.
-- **Sandbox bypass flags must be denied explicitly.** Claude Code Bash `dangerouslyDisableSandbox` would undermine structural read-only; the Pi bridge hook rejects it before sandbox wrapping.
-- **Cursor native edits have a revert window.** Cursor has no pre-edit deny hook in v1; `afterFileEdit` restores pre-edit bytes and fails loud after the write lands. This preserves Pi-state boundaries but still creates a brief on-disk mutation window.
-- **Cursor shell classification is conservative, not complete.** `beforeShellExecution` denies obvious writers, allows known read-only discovery, and asks on ambiguous commands. Exotic write paths can require new deny patterns after real-Cursor acceptance.
-- **Only the active bridge owner processes protocol changes.** A newly opened Pi session may not own the bridge if an older Pi process is still heartbeating; stop the old owner before verifying changed bridge behavior.
+- **Only successful Pi `edit`/`write` establishes baseline.** Bash, external editor, Cursor, or manual changes are not new tracked baselines.
+- **Original text is stored in session.** Sensitive file edits can place preimage in Pi session history even if later declined.
+- **Decline is destructive and text-oriented.** It deletes files created after absent baseline and overwrites existing files with recorded UTF-8 content.
+- **Partial decline clears tracking after reporting errors.** Inspect warning/console and filesystem immediately; do not assume failed paths remain available for another tracked retry.
+- **Accept/decline is not Git.** Neither action stages, commits, or restores untracked changes outside extension log.
 
 ## Pi subagents
 
-- **In-process child sessions are viable but must be isolated.** The spike verified a child `AgentSession` can be created from a tool's `execute()`, read a file, persist a session, and leave parent branch/UI state unchanged. Keep child sessions on a fresh `SessionManager.create(ctx.cwd)` and dispose them in `finally`.
-- **Worker build-gate belongs in the parent tool.** Child sessions disable extensions, so they do not inherit workflow-modes mutation blocking. `spawn_worker` must fail closed before spawning unless workflow mode is build.
-- **Do not rely on child transcripts for parent context.** Parse and return the final assistant text into structured explorer/worker fields; inspect persisted child sessions only out-of-band.
-- **Progress redraws can outlive JSON-mode teardown.** Scheduled widget redraws may hit stale extension contexts after session teardown. Widget rendering must tolerate stale `ctx` and clear scheduled redraws when a progress handle finishes.
-- **Widget keys must not clobber other extensions.** Use the dedicated `subagents-progress` widget key; do not reuse discussion-notes or TPS footer widget/status keys.
-- **Faux-provider verification order matters.** For nested worker→explorer smokes, faux responses must match the parent worker call, nested explorer call, explorer final answer, then worker final answer.
-- **Agent scope in smokes must match file placement.** A project-scoped test agent must live under `<cwd>/.pi/agents`; placing it in a temp user agent dir while passing `agentScope: "project"` makes discovery return no agents.
-- **Idle timeout still fires for silent provider waits or tools.** The subagent watchdog resets idle on child events, not hidden work. A role agent can be aborted after the global 10-minute idle threshold despite ongoing silent work; tune only global `subagents.idleTimeoutMs`, never a per-call override.
-- **Current-process extension tools may be stale after local edits.** The already-running Pi process can keep old extension code loaded. Verify changed subagent tool behavior in a fresh `pi -p --no-extensions -e agent/extensions/subagents/index.ts ...` subprocess when checking new timeout fields or structured failure details.
+- **Worker gate belongs in parent.** Child loaders disable extensions, so child does not inherit workflow mutation hook. `spawn_worker` must verify live Build before child creation.
+- **Child transcript stays out of parent context.** Only parsed final structured result returns; persisted child session is out-of-band evidence.
+- **Nested graph is bounded.** Parent → worker → explorer only. Giving worker another worker tool or explorer any spawn tool breaks recursion bound.
+- **Default scope is user.** Project test agent placed under `.pi/agents` is invisible when caller leaves `agentScope` at default.
+- **Idle timeout observes emitted events, not hidden work.** Silent provider/tool wait can hit global idle threshold despite underlying activity.
+- **Progress callbacks can outlive teardown.** Clear scheduled redraws and tolerate stale UI context on finish/failure.
+- **Worker ownership guards are process-local.** They prevent overlap among concurrent runs in same Pi process, not another process or external editor.
 
-## Memory architecture
+## Personal memory and discussion notes
 
-- **Do not put project truth in `/remember` or `save_memory`.** Personal memory is user-global. Project facts, architecture, conventions, invariants, traps, and decisions belong under `docs/engineering/`.
-- **Personal memory index can still bloat context.** `~/.pi/memory/MEMORY.md` loads by default. Keep names/descriptions concise; migrate project-specific facts into docs instead.
-- **Legacy `~/.pi/memory/` can contain retired persistent-memory files.** A pre-existing directory must not block `~/.pi/memory.md` migration, and files without conforming frontmatter must stay out of `MEMORY.md` without being bulk-deleted.
-- **Full personal entries require explicit fetch.** Default recall/injection includes only the index. Use `recall_memory_entry(slug)` / bridge `recall_entry` when an indexed entry is relevant.
-- **Bridge capture is not memory capture.** `capture_note` updates live discussion notes/Notes widget only. It does not write engineering docs or personal memory.
-- **Model-obedience memory capture failed E2E.** Do not reintroduce a design where reliable capture depends on a model choosing to call a tool.
-- **Running Pi can have stale bridge code.** After bridge handler changes, live protocol tests can still fail with old request-type lists until Pi bridge reloads.
-- **Overlay key handling belongs to TUI primitives.** Do not compare raw input bytes like `data === "\u001b"` or `"\u001b[A"` in `ctx.ui.custom` overlays; Pi may not deliver those exact strings. Delegate to `SelectList.handleInput` or use framework key helpers such as `matchesKey`.
+- **Current personal memory is indexed directory, not flat append file.** `~/.pi/memory.md` is legacy migration input only; active entries live under `~/.pi/memory/` with generated `MEMORY.md`.
+- **Index can still bloat prompt.** Keep entry names/descriptions concise; fetch full body only by validated slug.
+- **Non-conforming legacy Markdown is preserved but not indexed.** Do not bulk-delete unknown files during migration/cleanup.
+- **Bridge capture is not memory capture.** It updates selected-branch discussion notes only. Project truth requires docs task; cross-project preference requires explicit personal-memory save.
+- **Discussion notes are bounded.** Note text over 480 characters fails; split durable facts rather than truncating silently.
+
+## Terminal notification
+
+- **Notification protocol depends on terminal environment.** Windows Terminal, Kitty, and OSC-777 terminals use different paths; unsupported terminals may show nothing or render escape sequences.
+- **`agent_end` may fire during automated/non-interactive work.** Notification output is side effect, not proof verification succeeded.
+
+## Cleanup
+
+- **Foreground exit is safest.** Use `/quit` or interrupt, wait for process, then remove ignored bridge state.
+- **Do not leave tmux/background Pi alive.** Old heartbeat causes passive bridge and tests hit wrong code.
+- **Cleanup order matters.** Stop bridge owner before deleting `.pi/memory/bridge`; otherwise watcher can recreate files or emit errors.

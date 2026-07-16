@@ -1,155 +1,245 @@
-# Dev workflow
+# Development workflow
 
-## Pi ↔ Claude Code bridge workflow
+## Bootstrap
 
-Use this flow for existing Pi projects:
+Requirements:
 
-1. Start/focus Pi in the project first.
-2. Confirm bridge is active in Pi footer/status: `Claude bridge: active`.
-3. Run Claude Code in the same Pi project or under the intended `.pi` marker.
-4. Use Claude Code `/discuss` or `/plan` for planning; use Pi `/mode review` for PR review.
-5. Before entering Review, install the runtime `gh` CLI and authenticate it; verify from Build mode or a normal shell with `command -v gh` and `gh auth status`. Unit tests and typecheck do not require `gh`.
-6. Claude Code should use MCP tools from `pi-claude-bridge`:
-   - `recall_memory`
-   - `capture_note`
-   - `validate_docs_tags`
-   - `save_plan`
-7. Bridge recall inherits Pi's live `/caveman` preference in its Discuss, Plan, Build, and Review prompts; new branches default ON. Recall exposes `discussPrompt`, `planPrompt`, `buildPrompt`, and `reviewPrompt`.
-8. Switch to Pi `/mode build` to implement saved plans.
+- Pi CLI on `PATH`
+- Node.js `>=22.19.0`
+- npm/network access for first install and uncached `npx` tools
+- Optional `ccc` for semantic search and `gh` for live Review-mode GitHub checks
 
-Verification commands used during bridge development:
+From repository root:
 
 ```bash
-node agent/claude-bridge-client/test-core-protocol.js /Users/petergabrielrlopez/.pi
-claude mcp list
+node --version
+pi --version
+npm run bootstrap
+npm run check
 ```
 
-Expected MCP server entry:
+`npm run bootstrap` runs `npm ci` only in lockfile-backed packages:
 
-```text
-pi-claude-bridge: node /Users/petergabrielrlopez/.pi/agent/claude-bridge-client/pi-bridge-mcp.js - ✓ Connected
-```
+- `agent/extensions/ccc-search`
+- `agent/extensions/filechanges`
+- `agent/extensions/subagents`
+- `agent/extensions/workflow-modes`
 
-Real acceptance checks:
+Do not run root `npm ci`: root has no lockfile or dependencies. Engineering-docs and personal-memory tests use `npx --yes`, so their first run may still need npm registry access even after bootstrap.
 
-- Claude Code `/discuss` records a decision through `capture_note`; Pi Notes widget updates live.
-- Bridge recall reports `cavemanEnabled: true` by default and includes `CAVEMAN MODE ACTIVE.` in Discuss, Plan, Build, and Review prompts, with the corresponding four prompt fields.
-- `/caveman off` replaces Caveman style with the normal-style override in active modes; `/mode off` injects neither style while retaining the preference.
-- Claude Code `/plan` recalls memory, validates docs tags, asks for save confirmation, and calls `save_plan`.
-- Pi `/plan view` shows bridge-saved plan.
-- Pi `/mode build` keeps saved plan available on the selected session branch.
-- A new Pi session starts without a plan; reopening the same persisted session restores its selected branch state.
-- Forking after a save inherits the plan; forking or navigating from before that save does not.
-- Navigating across save and clear points updates `/plan view`, status, bridge recall, and Build prompt injection immediately.
-- Claude Code `Edit` and `git commit` are denied in `.pi` projects.
-- Claude Code read-only Bash such as `rg` is allowed only through the sandbox hook; if sandboxing is unavailable, Bash denies closed.
-- On macOS with `/usr/bin/sandbox-exec`, Claude Code allowed Bash is rewritten through the read-only sandbox hook; inspect hook output with `--include-hook-events` or direct hook smoke tests when debugging.
-- Live `gh pr diff` and confirmed `gh pr review` smoke checks remain gated until `gh` is installed and authenticated; do not treat unit or typecheck success as live GitHub validation.
-
-No-commit note: this `~/.pi` workspace may not be a Git repo. Build checkpoints can be explicit no-commit checkpoints when approved by the user.
-
-## Pi ↔ Cursor bridge workflow
-
-Use this flow for Cursor parity checks in existing Pi projects:
-
-1. Start/focus Pi in the project first and confirm `Claude bridge: active`.
-2. Open the same project in Cursor ≥1.7.
-3. Confirm project templates exist:
-   - `.cursor/mcp.json` registers `pi-claude-bridge` with `node agent/claude-bridge-client/pi-bridge-mcp.js`.
-   - `.cursor/hooks.json` enables `beforeShellExecution`, `beforeMCPExecution`, and `afterFileEdit` with `failClosed: true`.
-   - `.cursor/commands/discuss.md` and `.cursor/commands/plan.md` use bridge recall/capture/save workflows.
-4. Use Cursor commands for discuss/plan only; Pi `/mode build` owns mutations.
-5. Cursor commands must pass `conversation_id` as bridge `sessionId` when available.
-
-Cursor acceptance checklist:
-
-- `recall_memory` succeeds through `pi-claude-bridge`.
-- `capture_note` with `sessionId` updates Pi Notes widget live.
-- `save_plan` succeeds and Pi `/plan view` sees the plan.
-- Read-only shell discovery such as `rg`, `ls`, `find`, and `cat` is allowed.
-- Shell write such as `echo x > f` is denied or asks before execution.
-- A mutating non-bridge MCP call is denied.
-- A native Cursor file edit is reverted to exact pre-edit bytes and shows a visible failure message.
-
-Hook unit checks:
+## Launch isolated source
 
 ```bash
-node agent/cursor-bridge-client/test-cursor-readonly-hook.js
+./bin/pi-workspace
+```
+
+Launcher resolves repository root from its own path and executes `pi --no-extensions -e <root>`. It disables global **extension** discovery and loads this package explicitly. It does not create a separate Pi home: current auth, settings, model catalogs, sessions, context, and personal memory remain shared.
+
+On first startup:
+
+1. Review project trust prompt before approval.
+2. Inspect `[Extensions]` header: exactly nine paths should resolve inside this repository.
+3. Confirm no global extension path appears.
+4. Confirm `.pi/agents` resolves to `agent/agents`.
+5. Exit with `/quit` when done.
+
+Use `--no-session` for a disposable parent session:
+
+```bash
+./bin/pi-workspace --no-session
+```
+
+`--no-session` disables session persistence only. Commands such as `/login`, `/settings`, `/trust`, `/remember`, and bridge `save_memory` still target shared Pi-owned user state unless `PI_CODING_AGENT_DIR` is overridden.
+
+## Standard verification gate
+
+After bootstrap:
+
+```bash
+npm test
+```
+
+This runs:
+
+1. Workspace inventory/integrity check.
+2. CCC, engineering-docs, personal-memory, subagent-timeout, and workflow-mode tests.
+3. Configured TypeScript checks.
+4. Cursor read-only hook tests.
+
+It does not start Pi, call a model, run live bridge protocol tests, exercise file-change rollback interactively, or verify terminal notification rendering.
+
+Useful focused commands:
+
+```bash
+npm run check
+npm run test:extensions
+npm run typecheck
+npm run test:cursor
+bash -n bin/pi-workspace
 python3 -m json.tool .cursor/hooks.json >/dev/null
 python3 -m json.tool .cursor/mcp.json >/dev/null
 ```
 
-## Engineering docs extension workflow
-
-`/docs init` creates managed docs plus root `AGENTS.md` and `CLAUDE.md` spokes. `/docs` and `/docs status` show spoke health. Spokes are repaired by `/docs check` only when writes are allowed (Build/Off). Use `/docs check --check` for validation-only runs; it reports missing marker blocks and dead spoke doc links without writing.
-
-Engineering-docs extension verification during development:
+Production dependency audits:
 
 ```bash
-cd agent/extensions/engineering-docs
-npm test
+for package in ccc-search filechanges subagents workflow-modes; do
+  npm --prefix "agent/extensions/$package" audit --omit=dev
+done
 ```
 
-This runs tag-validator and root-spoke regression suites.
+## Test matrix
 
-## Workflow-Modes Extension testing
+| Component | Automated gate | Live/manual acceptance |
+|---|---|---|
+| Root package, nine entrypoints, three skills, two agents | `npm run check` | Startup header lists nine workspace extensions once; `.pi/agents` resolves internally. |
+| `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
+| `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation are visible through live owners. |
+| `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |
+| `engineering-docs` | `npm --prefix agent/extensions/engineering-docs test` | `/docs check --check` reports managed docs, healthy spokes/ADRs/tags, current index. |
+| `filechanges` | Package load/inventory; no dedicated unit suite | Make disposable `edit`/`write`, inspect cumulative diff, verify accept keeps and decline restores/deletes. |
+| `notify` | Package load/inventory; no dedicated unit suite | Finish one assistant turn and confirm terminal-native “Ready for input” notification. |
+| `personal-memory` | `npm --prefix agent/extensions/personal-memory test` and `npm --prefix agent/extensions/personal-memory run typecheck` | In isolated Pi home, save slug, inspect generated `MEMORY.md`, fetch one entry. |
+| `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | Debug/live role runs only when explicitly needed; worker must refuse outside Build. |
+| `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify branch plan/Caveman restoration and read-only gates. |
+| Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff. |
+| Cursor MCP/hooks/commands | `node agent/cursor-bridge-client/test-cursor-readonly-hook.js` | Real Cursor recall/capture/save; shell/MCP denial; native edit byte restoration. |
+| Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |
 
-To run typecheck and tests for the workflow-modes sandbox and fallback policy:
+## Isolated live bridge protocol test
+
+Core protocol test writes discussion notes, saved-plan state, and personal memory. Never point it at normal user state. Use two terminals.
+
+Terminal A, from repository root:
 
 ```bash
-cd agent/extensions/workflow-modes
-npm test
-npm run typecheck
+ROOT="$PWD"
+umask 077
+PI_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-workspace-bridge.XXXXXX")"
+cleanup() {
+  rm -rf "$PI_TEST_DIR"
+  rm -rf "$ROOT/.pi/memory"
+}
+trap cleanup EXIT INT TERM
+mkdir -p "$PI_TEST_DIR/agent"
+for name in auth.json settings.json models-store.json; do
+  if [ -f "$HOME/.pi/agent/$name" ]; then
+    cp "$HOME/.pi/agent/$name" "$PI_TEST_DIR/agent/$name"
+  fi
+done
+PI_SKIP_VERSION_CHECK=1 \
+PI_CODING_AGENT_DIR="$PI_TEST_DIR/agent" \
+./bin/pi-workspace --approve --no-session
 ```
 
-`npm test` runs standalone `tsx` tests for:
+Wait for `Claude bridge: active`. Temporary credential copies are mode-protected by `umask 077`, live outside repository, and are removed by trap.
 
-- generated sandbox wrapper/profile strings;
-- fallback policy allow/deny behavior;
-- behavioral sandbox contract when a real launcher is available, otherwise a no-launcher skip path;
-- Review policy security cases and the network-on/write-denied sandbox profile;
-- session-branch plan restoration;
-- Caveman default/restore behavior, mode prompt composition, Off suppression, and 10,000-entry reconstruction.
-
-## CCC Search Extension testing
-
-Run focused checks:
+Terminal B, same repository root:
 
 ```bash
-cd agent/extensions/ccc-search
-npm test
-npm run typecheck
-npm audit --omit=dev
+node agent/claude-bridge-client/test-core-protocol.js "$PWD"
 ```
 
-Acceptance after changing extension or guidance:
+Expected: all core protocol checks pass. Then return to Terminal A, enter `/quit`, wait for process exit, and let trap remove temporary Pi home plus project bridge state.
 
-1. Run `/reload` so current Pi process registers fresh tool metadata.
-2. In Build mode, call `ccc_search` against initialized project and confirm results.
-3. Switch to Plan mode and repeat; search must succeed without `daemon.log` sandbox permission failure.
-4. Confirm uninitialized-project response directs initialization to Build mode. Run `ccc init` or `ccc index` only in Build mode.
+Confirm cleanup:
 
-## Personal-memory Extension testing
+```bash
+find .pi/memory -type f -print 2>/dev/null
+ps -ax -o pid=,command= | grep -F "$PWD" | grep '[p]i ' || true
+```
 
-Personal memory command:
+Both commands should print nothing. Do not leave Pi, tmux, or bridge processes running after tests.
+
+## Claude Code bridge workflow
+
+1. Launch workspace Pi in target project and confirm `Claude bridge: active`.
+2. Confirm status root is intended nearest `.pi` project.
+3. Register MCP client if user-level Claude config does not already contain it:
+
+   ```bash
+   claude mcp add -s user pi-claude-bridge -- node "$PWD/agent/claude-bridge-client/pi-bridge-mcp.js"
+   claude mcp list
+   ```
+
+4. Configure Claude PreToolUse hook to invoke `node agent/claude-bridge-client/pi-readonly-hook.js` for project use.
+5. Use Claude `/discuss` or `/plan`; state-changing bridge tools require active Pi.
+6. Implement only in Pi Build mode.
+
+Acceptance:
+
+- `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan.
+- `capture_note` updates live Pi Notes UI through `discussion-notes` owner.
+- `validate_docs_tags` uses engineering-docs validator.
+- Confirmed `save_plan` appears in Pi `/plan view`.
+- Claude mutation tools deny. Bash is sandbox-wrapped on supported macOS; without sandbox it denies closed.
+
+## Cursor bridge workflow
+
+Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and command templates are relative and ready from workspace root.
+
+1. Launch Pi and confirm intended bridge root.
+2. Open same root in Cursor.
+3. Use Cursor discuss/plan commands; pass `conversation_id` as `sessionId` when available.
+4. Verify recall/capture/save through `pi-claude-bridge`.
+5. Verify read-only shell, non-bridge MCP, and native-edit behavior.
+6. Return to Pi Build for mutations.
+
+Focused hook gate:
+
+```bash
+node agent/cursor-bridge-client/test-cursor-readonly-hook.js
+```
+
+## Engineering docs
+
+Canonical docs live under `docs/engineering/`; `AGENTS.md`, `CLAUDE.md`, and decisions index are generated outputs.
+
+Inside workspace Pi:
 
 ```text
-/remember <small durable personal preference or lesson>
+/docs status
+/docs check --check
+/docs update-index
 ```
 
-`/remember` appends a dated bullet to `~/.pi/memory.md`. That file is loaded in full on the next agent turn by `agent/extensions/personal-memory/index.ts`, so keep it small and do not put project-specific facts there.
+`/docs check --check` is validation-only. `/docs update-index` writes and therefore requires Build/Off. Run index update after ADR changes, then rerun validation.
 
-To run typecheck and tests:
+## CCC indexing
+
+Search tool never initializes project. In Build mode, from repository root:
 
 ```bash
-cd agent/extensions/personal-memory
-npm run typecheck
-npm test
+ccc init
+ccc index
+ccc search --limit 5 -- "workflow mode state"
 ```
 
-Manual verification:
+Use `ccc_search` for agent semantic discovery after initialization. `.cocoindex_code/` is ignored generated state. Do not run `ccc init`, `ccc index`, or daemon maintenance in Discuss/Plan.
 
-1. Run `/remember test-fact` in Pi.
-2. Confirm `~/.pi/memory.md` contains the dated bullet.
-3. Start a new Pi session in another project.
-4. Confirm the memory block appears in agent context.
+## Review mode
+
+Before live GitHub review:
+
+```bash
+command -v gh
+gh auth status
+```
+
+Unit/typecheck success does not prove live GitHub access. Review mode keeps filesystem read-only, allows only scoped read/approved `gh` commands, drafts verdict first, and requires explicit confirmation before posting.
+
+## Plan-mode test restrictions
+
+Plan is source-read-only. Structural sandbox denies repository/home writes and network while allowing a scratch temp directory. Consequences:
+
+- `npm ci`, uncached `npx`, package repair, CCC init/index, live bridge IPC, and tests that write repository fixtures require Build.
+- Read-only tests may run when dependencies are already installed and all writes stay in scratch temp.
+- `EPERM` creating temp/cache paths or `ENOTFOUND registry.npmjs.org` in Plan can be sandbox/environment failures, not source failures.
+- Rerun blocked verification in Build before diagnosing code or recording pass/fail.
+
+## Shutdown and cleanup
+
+- Exit interactive Pi with `/quit` or foreground interrupt; wait for process exit.
+- Stop any temporary tmux session explicitly.
+- Remove only ignored `.pi/memory/` after bridge process exits; never remove `.pi/agents` or broad `.pi/`.
+- Check `git status --short` after tests. Runtime credentials, sessions, memory, logs, DBs, caches, and bridge files must remain absent from Git.
