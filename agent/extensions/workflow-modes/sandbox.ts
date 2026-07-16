@@ -14,6 +14,7 @@ export interface SandboxWrapOptions {
 	cwd: string;
 	scratchDir?: string;
 	launcher?: SandboxLauncher;
+	allowNetwork?: boolean;
 }
 
 export interface SandboxWrapResult {
@@ -41,7 +42,7 @@ export function detectLauncher(options: DetectLauncherOptions = {}): SandboxLaun
 	return "none";
 }
 
-export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; scratchDir: string }): string {
+export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; scratchDir: string; allowNetwork?: boolean }): string {
 	const cwd = normalizePath(options.cwd);
 	const home = normalizePath(options.homeDir ?? process.env.HOME ?? cwd);
 	const scratch = normalizePath(options.scratchDir);
@@ -49,7 +50,7 @@ export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; s
 	return [
 		"(version 1)",
 		"(allow default)",
-		"(deny network*)",
+		...(options.allowNetwork ? [] : ["(deny network*)"]),
 		"(deny file-write*)",
 		`(allow file-write* (literal ${JSON.stringify(scratch)}))`,
 		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
@@ -59,13 +60,13 @@ export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; s
 	].join("\n");
 }
 
-export function buildBubblewrapCommand(command: string, options: { cwd: string; scratchDir: string }): string {
+export function buildBubblewrapCommand(command: string, options: { cwd: string; scratchDir: string; allowNetwork?: boolean }): string {
 	const cwd = normalizePath(options.cwd);
 	const scratch = normalizePath(options.scratchDir);
 	const inner = `cd ${shellQuote(cwd)} && ${command}`;
 	return [
 		"bwrap",
-		"--unshare-net",
+		...(options.allowNetwork ? [] : ["--unshare-net"]),
 		"--ro-bind / /",
 		`--tmpfs ${shellQuote(scratch)}`,
 		`--setenv TMPDIR ${shellQuote(scratch)}`,
@@ -85,7 +86,7 @@ export function wrapCommand(command: string, options: SandboxWrapOptions): Sandb
 	const inner = `cd ${shellQuote(cwd)} && ${command}`;
 
 	if (launcher === "sandbox-exec") {
-		const profile = buildSeatbeltProfile({ cwd, scratchDir });
+		const profile = buildSeatbeltProfile({ cwd, scratchDir, allowNetwork: options.allowNetwork });
 		return {
 			launcher,
 			command: [
@@ -105,7 +106,7 @@ export function wrapCommand(command: string, options: SandboxWrapOptions): Sandb
 
 	return {
 		launcher,
-		command: buildBubblewrapCommand(command, { cwd, scratchDir }),
+		command: buildBubblewrapCommand(command, { cwd, scratchDir, allowNetwork: options.allowNetwork }),
 		wrapped: true,
 	};
 }

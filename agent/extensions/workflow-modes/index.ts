@@ -3,7 +3,7 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@mariozechner/pi-tui";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode } from "./policy.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -16,7 +16,7 @@ export const STATUS_KEY = "workflow-modes";
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
 export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
-export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW } from "./policy.js";
+export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_ALLOW, REVIEW_BASH_DENY } from "./policy.js";
 
 export interface WorkflowPolicySnapshot {
 	mutationTools: string[];
@@ -411,8 +411,17 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName !== "bash") return;
 		const command = String((event.input as { command?: unknown }).command ?? "").trim();
 
+		// Review has an explicit allow-list; enforce it before sandboxing so a
+		// missing or failing launcher cannot turn the review sandbox into a bypass.
+		if (currentMode === "review" && !isBashAllowedInMode(command, "review")) {
+			return {
+				block: true,
+				reason: "bash command blocked in Review mode. Only read commands and approved gh PR commands are allowed.",
+			};
+		}
+
 		try {
-			const wrapped = wrapCommand(command, { cwd: process.cwd() });
+			const wrapped = wrapCommand(command, { cwd: process.cwd(), ...(currentMode === "review" ? { allowNetwork: true } : {}) });
 			if (wrapped.wrapped) {
 				(event.input as { command?: string }).command = `${wrapped.command}; status=$?; if [ $status -ne 0 ]; then echo 'Hint: editing requires /mode build.' >&2; fi; exit $status`;
 				return;
@@ -422,12 +431,14 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const normalized = command.replace(/\s+/g, " ");
-		const allowed = currentMode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
-		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized);
+		const allowed = currentMode === "review"
+			? isBashAllowedInMode(normalized, "review")
+			: currentMode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
+		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (currentMode === "review" && REVIEW_BASH_DENY.test(normalized));
 		if (!allowed || denied) {
 			return {
 				block: true,
-				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" ? "discovery plus tests/builds/checks" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
+				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" ? "discovery plus tests/builds/checks" : currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
 			};
 		}
 	});
