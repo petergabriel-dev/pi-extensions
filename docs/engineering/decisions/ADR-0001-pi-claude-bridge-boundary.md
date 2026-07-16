@@ -3,7 +3,7 @@ id: ADR-0001
 title: Pi Claude Code bridge boundary
 status: Active
 date: 2026-05-26
-updated: 2026-06-29
+updated: 2026-07-17
 ---
 
 # ADR-0001: Pi Claude Code bridge boundary
@@ -11,20 +11,20 @@ updated: 2026-06-29
 ## Decision
 
 - Pi remains source of truth for engineering docs validation, discussion notes, personal memory recall, and build handoff.
-- Project memory is engineering docs; personal cross-repo memory is `~/.pi/memory.md` per ADR-0016.
+- Project memory is engineering docs; personal cross-repo memory is indexed `~/.pi/memory/` per ADR-0016 and ADR-0017.
 - Claude Code is a thin read-only planning client for existing Pi projects in v1.
 - Claude Code side talks to Pi through a small file protocol under `<project>/.pi/memory/bridge/` and imports no Pi internals.
 - The Pi bridge extension is the only Pi-coupled layer and reuses real sibling extension functions.
 - `capture_note` updates live discussion notes through the event bus and never writes retired memory queues.
-- `recall_memory` returns engineering docs, `~/.pi/memory.md`, workflow prompts, and saved-plan context; it does not read retired private memory indexes.
-- A live active Pi session is required for bridge use; bridge tools fail loudly when Pi is not running or bridge heartbeat/policy is stale.
+- `recall_memory` returns engineering docs, compact `~/.pi/memory/MEMORY.md` index, workflow prompts, and saved-plan context; it does not read retired private memory indexes.
+- A live active Pi session is required for bridge use; bridge tools fail loudly when Pi is not running or bridge heartbeat is stale.
 - Claude Code mutation tools are denied in `.pi` projects; Bash is structurally sandboxed or denied closed.
 
 ## Why
 
 - Live Notes visibility is core user value: notes captured from Claude Code must appear in the active Pi session.
 - Project memory belongs in engineering docs so humans and non-Pi tools can read it.
-- Personal memory is host-loaded from a small markdown file, not extracted by model behavior.
+- Personal memory is host-loaded from an indexed markdown store, not extracted by model behavior.
 - Build should stay in Pi so plan-mode/read-only boundaries remain clear.
 - Fail-loud behavior prevents users from believing memory/notes/plans were captured when Pi was not active.
 - One active bridge session per project avoids duplicate file watchers processing the same request stream.
@@ -46,20 +46,25 @@ Docs:
 - `docs/engineering/invariants.md`
 - `docs/engineering/traps.md`
 - `docs/engineering/decisions/ADR-0016-memory-engineering-docs-and-personal-memory.md`
+- `docs/engineering/decisions/ADR-0017-indexed-personal-memory.md`
 
 Code:
 
 - `agent/extensions/claude-bridge/index.ts`
 - `agent/extensions/personal-memory/index.ts`
+- `agent/extensions/personal-memory/store.ts`
 - `agent/claude-bridge-client/pi-bridge-mcp.js`
 - `agent/claude-bridge-client/pi-readonly-hook.js`
 - `agent/claude-bridge-client/test-core-protocol.js`
 - `agent/extensions/workflow-modes/index.ts`
 - `agent/extensions/discussion-notes.ts`
 - `agent/extensions/engineering-docs/filesystem.ts`
-- `/Users/petergabrielrlopez/.claude/commands/discuss.md`
-- `/Users/petergabrielrlopez/.claude/commands/plan.md`
-- `/Users/petergabrielrlopez/.claude/settings.json`
+
+Historical user-level Claude configuration paths (not packaged here):
+
+- `~/.claude/commands/discuss.md`
+- `~/.claude/commands/plan.md`
+- `~/.claude/settings.json`
 
 ## Consequences
 

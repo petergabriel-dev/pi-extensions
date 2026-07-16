@@ -9,7 +9,7 @@ superseded_by: ADR-0016
 
 # ADR-0003: Non-Blocking Reason-Aware Persistent-Memory Consolidation
 
-> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory uses indexed `~/.pi/memory/` per [ADR-0017](ADR-0017-indexed-personal-memory.md).
 
 > Amended by [ADR-0013](ADR-0013-manual-single-writer-persistent-memory-consolidation.md). Persistent-memory canonical writes are now manual-only: lifecycle hooks no longer run start-time reconciliation or shutdown extraction/reinforcement.
 
@@ -68,20 +68,18 @@ To resolve the tradeoff between persistent memory consistency and interactive se
 
 Docs:
 
-- [architecture.md](file:///Users/petergabrielrlopez/.pi/docs/engineering/architecture.md#L32-L43)
-- [invariants.md](file:///Users/petergabrielrlopez/.pi/docs/engineering/invariants.md#L25-L29)
-- [traps.md](file:///Users/petergabrielrlopez/.pi/docs/engineering/traps.md#L22-L25)
+- [architecture.md](../architecture.md)
+- [invariants.md](../invariants.md)
+- [traps.md](../traps.md)
 
-Code:
+Historical code paths below were retired by ADR-0016. They remain non-link references so this record does not pretend removed files still exist:
 
-- [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L131-L157) (`session_start` hook)
-- [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L246-L329) (`session_shutdown` hook)
-- [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/index.ts#L391-L485) (`triggerBackgroundReconciliation` helper)
-- [lifecycle.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/lifecycle.ts) (extracted lifecycle logic)
-- [careful-model.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/careful-model.ts) (`forcedToolChoiceForApi`, TypeBox `submit_plan` schemas, provider-error logging, and free-text fallback)
-- [sweep.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/consolidation/sweep.ts) (T11 archival + T12 low-signal flagging + contradiction detection)
-- [markdown.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/storage/markdown.ts) (T12 optional field parsing: `low_signal`, `contradiction_group`)
-- [types.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/persistent-memory/types.ts) (T12 `LessonMeta` optional fields)
+- `agent/extensions/persistent-memory/index.ts` (`session_start`, `session_shutdown`, and `triggerBackgroundReconciliation`)
+- `agent/extensions/persistent-memory/lifecycle.ts` (extracted lifecycle logic)
+- `agent/extensions/persistent-memory/consolidation/careful-model.ts` (`forcedToolChoiceForApi`, TypeBox `submit_plan` schemas, provider-error logging, and free-text fallback)
+- `agent/extensions/persistent-memory/consolidation/sweep.ts` (T11 archival + T12 low-signal flagging + contradiction detection)
+- `agent/extensions/persistent-memory/storage/markdown.ts` (T12 optional field parsing: `low_signal`, `contradiction_group`)
+- `agent/extensions/persistent-memory/types.ts` (T12 `LessonMeta` optional fields)
 
 ## Consequences
 

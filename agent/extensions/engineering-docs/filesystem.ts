@@ -384,7 +384,7 @@ export async function checkDocs(cwd: string, options: CheckDocsOptions = {}): Pr
 		const indexContent = await readFile(indexPath, "utf-8");
 		// If there are ADR files but index doesn't reference them, it's stale
 		for (const adr of adrFiles) {
-			const adrName = adr.split("/").pop()?.replace(".md", "") ?? "";
+			const adrName = adr.split("/").pop()?.match(/^ADR-\d{4,}/)?.[0] ?? "";
 			if (!indexContent.includes(adrName)) {
 				staleIndex = true;
 				break;

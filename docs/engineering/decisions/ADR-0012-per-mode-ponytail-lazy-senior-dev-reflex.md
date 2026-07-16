@@ -50,8 +50,11 @@ Code:
 
 - `agent/extensions/workflow-modes/index.ts`
 - `agent/extensions/claude-bridge/index.ts`
-- `/Users/petergabrielrlopez/.claude/commands/discuss.md`
-- `/Users/petergabrielrlopez/.claude/commands/plan.md`
+
+Historical user-level Claude command paths (not packaged here):
+
+- `~/.claude/commands/discuss.md`
+- `~/.claude/commands/plan.md`
 
 ## Consequences
 

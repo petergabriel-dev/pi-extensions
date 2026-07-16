@@ -38,20 +38,20 @@ Pi subagents v1 use persisted, in-process child `AgentSession`s rather than subp
 
 Docs:
 
-- [architecture.md](file:///Users/petergabrielrlopez/.pi/docs/engineering/architecture.md)
-- [invariants.md](file:///Users/petergabrielrlopez/.pi/docs/engineering/invariants.md)
-- [traps.md](file:///Users/petergabrielrlopez/.pi/docs/engineering/traps.md)
+- [architecture.md](../architecture.md)
+- [invariants.md](../invariants.md)
+- [traps.md](../traps.md)
 
 Code:
 
-- [index.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/subagents/index.ts) (`spawn_explorer`, `spawn_worker`, nested spawn graph, commands/debug tools)
-- [spawn.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/subagents/spawn.ts) (`runSubagent`, structured parsing, child session lifecycle)
-- [agents.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/subagents/agents.ts) (agent definition discovery)
-- [concurrency.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/subagents/concurrency.ts) (default lane, explorer lane, settings)
-- [progress.ts](file:///Users/petergabrielrlopez/.pi/agent/extensions/subagents/progress.ts) (progress widget)
-- [explorer.md](file:///Users/petergabrielrlopez/.pi/agent/agents/explorer.md)
-- [worker.md](file:///Users/petergabrielrlopez/.pi/agent/agents/worker.md)
-- [SKILL.md](file:///Users/petergabrielrlopez/.pi/agent/skills/worker-orchestration/SKILL.md)
+- [index.ts](../../../agent/extensions/subagents/index.ts) (`spawn_explorer`, `spawn_worker`, nested spawn graph, commands/debug tools)
+- [spawn.ts](../../../agent/extensions/subagents/spawn.ts) (`runSubagent`, structured parsing, child session lifecycle)
+- [agents.ts](../../../agent/extensions/subagents/agents.ts) (agent definition discovery)
+- [concurrency.ts](../../../agent/extensions/subagents/concurrency.ts) (default lane, explorer lane, settings)
+- [progress.ts](../../../agent/extensions/subagents/progress.ts) (progress widget)
+- [explorer.md](../../../agent/agents/explorer.md)
+- [worker.md](../../../agent/agents/worker.md)
+- [SKILL.md](../../../agent/skills/worker-orchestration/SKILL.md)
 
 ## Consequences
 

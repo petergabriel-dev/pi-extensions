@@ -34,7 +34,7 @@ assert.equal(await realpath(agentsLink), await realpath(relative("agent/agents")
 
 const workflowSource = await readFile(relative("agent/extensions/workflow-modes/index.ts"), "utf8");
 assert.ok(workflowSource.includes("new URL(\"./plan-template.md\", import.meta.url)"));
-assert.ok(!workflowSource.includes("/Users/petergabrielrlopez/.pi"));
+assert.ok(!/\/(?:Users|home)\/[^/]+\/\.pi\//.test(workflowSource));
 await access(relative("agent/extensions/workflow-modes/plan-template.md"));
 
 console.log(`workspace check passed (${extensions.length} extensions, ${skills.length} skills, ${agents.length} agents)`);

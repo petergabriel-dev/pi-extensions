@@ -9,7 +9,7 @@ superseded_by: ADR-0016
 
 # ADR-0005: Pinned Default Persistent-Memory Model Resolution
 
-> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory lives in `~/.pi/memory.md`.
+> Superseded by [ADR-0016](ADR-0016-memory-engineering-docs-and-personal-memory.md). Persistent-memory has been retired; project memory now lives in engineering docs and personal cross-repo memory uses indexed `~/.pi/memory/` per [ADR-0017](ADR-0017-indexed-personal-memory.md).
 
 Superseded by [ADR-0014: Persistent Memory Inherits Session Model](ADR-0014-persistent-memory-inherits-session-model.md). This record is retained for historical context.
 
