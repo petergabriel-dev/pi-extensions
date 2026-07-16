@@ -25,7 +25,7 @@ assert.equal(resolveCavemanEnabled([state(true), state(false)]), false, "explici
 assert.equal(resolveCavemanEnabled([state(false), state("on")]), false, "invalid entries must not override state");
 assert.equal(resolveCavemanEnabled([{ type: "custom", customType: "other", data: { enabled: false } }]), true);
 
-for (const mode of ["discuss", "plan", "build"] as const) {
+for (const mode of ["discuss", "plan", "build", "review"] as const) {
 	const composed = composeWorkflowPrompt(mode, true, prompts);
 	assert.ok(composed?.startsWith(prompts[mode]), `${mode} workflow prompt must come first`);
 	assert.ok(composed?.includes(CAVEMAN_PROMPT), `${mode} must include Caveman while enabled`);
