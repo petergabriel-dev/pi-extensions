@@ -28,15 +28,18 @@
 
 - `workflow-modes` is the sole Caveman owner. The standalone `caveman-mode` extension must not exist or register a second `/caveman` command.
 - Caveman preference is selected-session-branch state using the stable `caveman-mode-state` custom entry. No explicit entry means ON; latest valid ancestral entry wins.
-- Discuss, Plan, and Build compose their workflow prompt with Caveman when enabled and the explicit normal-style override when disabled.
+- Discuss, Plan, Build, and Review compose their workflow prompt with Caveman when enabled and the explicit normal-style override when disabled.
 - Off must inject neither Caveman nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
 
 ## Workflow modes read-only Bash
 
-- Discuss/plan Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
-- Structural read-only Bash must deny network access and writes to the repo and `$HOME` while allowing reads, read-only interpreters, and writes under scratch `TMPDIR`.
+- Discuss/Plan Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
+- Discuss/Plan structural Bash must deny network access. All structural read-only Bash must deny writes to the repo and `$HOME` while allowing reads, read-only interpreters, and writes under scratch `TMPDIR`.
 - Scratch paths used in sandbox profiles must be resolved through real paths when they already exist, because macOS `/tmp` paths resolve under `/private/var`.
 - With no sandbox launcher, `wrapCommand()` must return the original command with `wrapped:false`; callers must then apply conservative policy and must not treat this as approval.
+- Review filesystem remains read-only; network is enabled only for commands admitted by the review allow-list and not denied by review/common denies, with policy enforced before sandbox wrapping and again on fallback.
+- Review sandbox must omit only network denial, never Seatbelt file-write denial or Bubblewrap's read-only root bind.
+- No-launcher or wrapping failure remains a conservative policy fallback and must not fail open beyond the explicit allow-list.
 - Behavioral sandbox tests must cover repo read, scratch write, repo write denial, network denial, and interpreter read when a real launcher is present.
 
 ## Pi subagents

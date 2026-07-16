@@ -7,14 +7,15 @@ Use this flow for existing Pi projects:
 1. Start/focus Pi in the project first.
 2. Confirm bridge is active in Pi footer/status: `Claude bridge: active`.
 3. Run Claude Code in the same Pi project or under the intended `.pi` marker.
-4. Use Claude Code `/discuss` or `/plan` for planning.
-5. Claude Code should use MCP tools from `pi-claude-bridge`:
+4. Use Claude Code `/discuss` or `/plan` for planning; use Pi `/mode review` for PR review.
+5. Before entering Review, install the runtime `gh` CLI and authenticate it; verify from Build mode or a normal shell with `command -v gh` and `gh auth status`. Unit tests and typecheck do not require `gh`.
+6. Claude Code should use MCP tools from `pi-claude-bridge`:
    - `recall_memory`
    - `capture_note`
    - `validate_docs_tags`
    - `save_plan`
-6. Bridge recall inherits Pi's live `/caveman` preference in its Discuss, Plan, and Build prompts; new branches default ON.
-7. Switch to Pi `/mode build` to implement saved plans.
+7. Bridge recall inherits Pi's live `/caveman` preference in its Discuss, Plan, Build, and Review prompts; new branches default ON. Recall exposes `discussPrompt`, `planPrompt`, `buildPrompt`, and `reviewPrompt`.
+8. Switch to Pi `/mode build` to implement saved plans.
 
 Verification commands used during bridge development:
 
@@ -32,7 +33,7 @@ pi-claude-bridge: node /Users/petergabrielrlopez/.pi/agent/claude-bridge-client/
 Real acceptance checks:
 
 - Claude Code `/discuss` records a decision through `capture_note`; Pi Notes widget updates live.
-- Bridge recall reports `cavemanEnabled: true` by default and includes `CAVEMAN MODE ACTIVE.` in Discuss, Plan, and Build prompts.
+- Bridge recall reports `cavemanEnabled: true` by default and includes `CAVEMAN MODE ACTIVE.` in Discuss, Plan, Build, and Review prompts, with the corresponding four prompt fields.
 - `/caveman off` replaces Caveman style with the normal-style override in active modes; `/mode off` injects neither style while retaining the preference.
 - Claude Code `/plan` recalls memory, validates docs tags, asks for save confirmation, and calls `save_plan`.
 - Pi `/plan view` shows bridge-saved plan.
@@ -43,6 +44,7 @@ Real acceptance checks:
 - Claude Code `Edit` and `git commit` are denied in `.pi` projects.
 - Claude Code read-only Bash such as `rg` is allowed only through the sandbox hook; if sandboxing is unavailable, Bash denies closed.
 - On macOS with `/usr/bin/sandbox-exec`, Claude Code allowed Bash is rewritten through the read-only sandbox hook; inspect hook output with `--include-hook-events` or direct hook smoke tests when debugging.
+- Live `gh pr diff` and confirmed `gh pr review` smoke checks remain gated until `gh` is installed and authenticated; do not treat unit or typecheck success as live GitHub validation.
 
 No-commit note: this `~/.pi` workspace may not be a Git repo. Build checkpoints can be explicit no-commit checkpoints when approved by the user.
 
@@ -105,6 +107,7 @@ npm run typecheck
 - generated sandbox wrapper/profile strings;
 - fallback policy allow/deny behavior;
 - behavioral sandbox contract when a real launcher is available, otherwise a no-launcher skip path;
+- Review policy security cases and the network-on/write-denied sandbox profile;
 - session-branch plan restoration;
 - Caveman default/restore behavior, mode prompt composition, Off suppression, and 10,000-entry reconstruction.
 

@@ -6,6 +6,9 @@
 
 ## Workflow modes and CCC
 
+- **Review never-auto-post is prompt-enforced, not a hard confirmation hook.** Keep the explicit confirmation instruction in the review prompt; do not claim posting is structurally confirmation-gated.
+- **Review posting must use an inline body.** Use `gh pr review --body ...`; Review's read-only filesystem means there is no `--body-file` workflow.
+- **The workflow-mode union is duplicated across exactly four files.** Keep `agent/extensions/workflow-modes/index.ts`, `agent/extensions/workflow-modes/caveman.ts`, `agent/extensions/subagents/index.ts`, and `agent/extensions/engineering-docs/constants.ts` aligned when changing modes.
 - **`ccc search` is not filesystem-read-only.** CCC may start a daemon, write `~/.cocoindex_code/daemon.log` and index artifacts, and contact an embedding provider. Running it through Plan/Discuss Bash fails under structural sandboxing with `PermissionError` on `daemon.log`. Use dedicated `ccc_search`; do not add broad home-write or network exceptions to generic Bash sandbox.
 - **Reload before live tool acceptance.** Running Pi keeps old extension registration after source edits. Run `/reload` before inspecting `ccc_search` metadata or testing Plan/Build behavior.
 
