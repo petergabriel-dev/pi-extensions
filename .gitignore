@@ -1,0 +1,11 @@
+.DS_Store
+.antigravitycli/
+.cocoindex_code/
+.claude/
+__pycache__/
+memory/
+settings.json
+*.db
+*.log
+node_modules/
+dist/
