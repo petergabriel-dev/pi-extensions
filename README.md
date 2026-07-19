@@ -1,6 +1,6 @@
 # Pi Extensions Workspace
 
-Independent development workspace for nine Pi extensions, three authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs.
+Independent development workspace for nine Pi extensions, three authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
 
 This repository isolates **source**, not Pi user state. Launcher reuses current Pi auth/settings/models/sessions/personal memory while disabling global extension discovery.
 
@@ -11,11 +11,31 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 - npm with network access for first bootstrap and uncached `npx` test dependencies
 - Optional: `ccc` for semantic search/indexing, `gh` for live Review-mode GitHub checks
 
-## Quick start
+## Install
+
+Public package `@lopezpetergabriel/pi-extensions@0.1.0` ships nine extensions, three skills, and two package-owned bundled agent definitions.
+
+```bash
+pi install npm:@lopezpetergabriel/pi-extensions@0.1.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.1.0   # install for this project
+pi -e npm:@lopezpetergabriel/pi-extensions@0.1.0   # temporary try
+pi list
+pi update npm:@lopezpetergabriel/pi-extensions
+pi remove npm:@lopezpetergabriel/pi-extensions
+```
+
+The exact `@0.1.0` source is pinned. Upgrade a pinned install with `pi install npm:@lopezpetergabriel/pi-extensions@NEW_VERSION`; `pi update npm:@lopezpetergabriel/pi-extensions` updates an unpinned source.
+
+`ccc` remains an external prerequisite for `ccc_search` (`ccc --version`). Existing raw or global copies can double-load; inspect `pi list` and `pi config`, then remove or disable duplicates.
+
+The npm package contains runtime TypeScript/helpers, the workflow plan template, bundled agent and skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs under engineering-docs/filechanges. It does not contain tests, bridge clients, Cursor configuration, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, or runtime/user state. Packed and unpacked package checks enforce 512 KiB and 1 MiB limits.
+
+## Develop from source
 
 From repository root:
 
 ```bash
+npm ci --ignore-scripts --legacy-peer-deps
 npm run bootstrap
 npm run check
 ./bin/pi-workspace
@@ -23,19 +43,14 @@ npm run check
 
 Review any Pi project-trust prompt before approving local resources. Startup header should list exactly nine extensions from this repository and no global extension paths. Exit with `/quit`.
 
-`bin/pi-workspace` executes:
-
-```bash
-pi --no-extensions -e <repository-root>
-```
-
-Do not replace it with `pi -e .`: without `--no-extensions`, active global copies may load beside workspace copies.
+`bin/pi-workspace` executes `pi --no-extensions -e <repository-root>`. Do not replace it with `pi -e .`: without `--no-extensions`, active global copies may load beside workspace copies.
 
 ## Common commands
 
 ```bash
-npm run bootstrap       # npm ci in four lockfile-backed extension packages
-npm run check           # verify 9 extensions, 3 skills, 2 agents, internal link
+npm ci --ignore-scripts --legacy-peer-deps # install root published runtime dependency
+npm run bootstrap       # npm ci in four lockfile-backed development packages
+npm run check           # verify workspace plus npm artifact inventory/size
 npm test                # extension tests, typechecks, Cursor hook tests
 npm run test:extensions # focused extension tests
 npm run typecheck       # all configured TypeScript checks

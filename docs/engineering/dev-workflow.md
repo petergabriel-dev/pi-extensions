@@ -1,5 +1,48 @@
 # Development workflow
 
+## Consumer install and release gates
+
+Install globally, for one project, or temporarily:
+
+```bash
+pi install npm:@lopezpetergabriel/pi-extensions@0.1.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.1.0
+pi -e npm:@lopezpetergabriel/pi-extensions@0.1.0
+pi list
+pi update npm:@lopezpetergabriel/pi-extensions
+pi remove npm:@lopezpetergabriel/pi-extensions
+```
+
+The exact `@0.1.0` source is pinned. Upgrade a pinned install with `pi install npm:@lopezpetergabriel/pi-extensions@NEW_VERSION`; `pi update npm:@lopezpetergabriel/pi-extensions` updates an unpinned source.
+
+The package provides nine extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Inspect `pi list` and `pi config` for existing raw/global copies before loading; duplicates can register the same extension twice.
+
+The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
+
+For a clean source/release setup, install the root published dependency/lock, then nested development packages. Pi-managed installs disable peer solving; Pi API imports remain `"*"` peers.
+
+```bash
+npm ci --ignore-scripts --legacy-peer-deps
+npm run bootstrap
+npm test
+npm pack --dry-run --json --ignore-scripts
+```
+
+Before publication, smoke-test the exact packed artifact without copying normal auth/settings/memory:
+
+```bash
+umask 077
+PACKAGE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-package.XXXXXX")"
+trap 'rm -rf "$PACKAGE_TEST_DIR"' EXIT INT TERM
+npm pack --ignore-scripts --pack-destination "$PACKAGE_TEST_DIR"
+mkdir -p "$PACKAGE_TEST_DIR/package" "$PACKAGE_TEST_DIR/agent"
+tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.1.0.tgz" \
+  -C "$PACKAGE_TEST_DIR/package" --strip-components=1
+npm install --prefix "$PACKAGE_TEST_DIR/package" --omit=dev --omit=peer --ignore-scripts
+PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
+  pi --no-extensions -e "$PACKAGE_TEST_DIR/package" --list-models
+```
+
 ## Bootstrap
 
 Requirements:
@@ -14,18 +57,19 @@ From repository root:
 ```bash
 node --version
 pi --version
+npm ci --ignore-scripts --legacy-peer-deps
 npm run bootstrap
 npm run check
 ```
 
-`npm run bootstrap` runs `npm ci` only in lockfile-backed packages:
+`npm run bootstrap` runs nested `npm ci` only in lockfile-backed development packages:
 
 - `agent/extensions/ccc-search`
 - `agent/extensions/filechanges`
 - `agent/extensions/subagents`
 - `agent/extensions/workflow-modes`
 
-Do not run root `npm ci`: root has no lockfile or dependencies. Engineering-docs and personal-memory tests use `npx --yes`, so their first run may still need npm registry access even after bootstrap.
+Root has a production `diff` dependency and lockfile; when preparing a clean source checkout, use `npm ci --ignore-scripts --legacy-peer-deps` before nested bootstrap. Pi-managed package installs disable peer solving. Engineering-docs and personal-memory tests use `npx --yes`, so their first run may still need npm registry access even after bootstrap.
 
 ## Launch isolated source
 
@@ -92,7 +136,7 @@ done
 
 | Component | Automated gate | Live/manual acceptance |
 |---|---|---|
-| Root package, nine entrypoints, three skills, two agents | `npm run check` | Startup header lists nine workspace extensions once; `.pi/agents` resolves internally. |
+| Root package, nine entrypoints, three skills, two agents | `npm run check` | Source header lists nine extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
 | `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation are visible through live owners. |
 | `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |

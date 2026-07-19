@@ -47,7 +47,7 @@
 
 ## Dependencies and checks
 
-- Keep extension-specific dependencies in that extension’s `package.json`; lock dependency-bearing packages. Root bootstrap orchestrates existing package installs rather than creating one monolithic dependency tree.
+- Published runtime dependencies belong in the root package: `diff` is a production dependency, while `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` are `"*"` peers. Keep nested extension packages, manifests, and locks for development bootstrap only; install them with `npm run bootstrap` rather than treating them as published package boundaries.
 - Prefer Node standard library for bridge clients, hooks, launchers, and integrity checks when it meets requirements.
 - Non-trivial policy/state logic keeps one focused runnable test. Root checks aggregate package tests/typechecks without duplicating their assertions.
 - Tests must isolate temporary runtime state and remove spawned processes/files when complete.

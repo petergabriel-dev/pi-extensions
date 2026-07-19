@@ -2,14 +2,12 @@
 
 ## Workspace and package boundary
 
-This repository is an explicit Pi package for extension development. It is source, not a separate Pi home.
+This repository publishes as `@lopezpetergabriel/pi-extensions@0.1.0`, one Pi package containing nine extensions, three skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
 
-- `package.json` is the package manifest. It declares exactly nine extension entrypoints and three skills.
-- `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>`. `--no-extensions` disables global extension auto-discovery; `-e` loads this package explicitly.
-- `.pi/agents` is a versioned internal symlink to `agent/agents`. It makes the two project agent definitions discoverable without duplicating them.
-- The package reuses host Pi auth, settings, model catalogs, personal memory, and session storage. Those remain outside this repository under Pi-owned user-global paths.
-- The only versioned path below `.pi/` is `.pi/agents`. Live bridge IPC may create ignored `.pi/memory/bridge/` state while Pi runs.
-- Dependency installs, CCC indexes, bridge IPC, logs, DBs, credentials, sessions, plans, and personal memory are runtime/generated state and are ignored.
+- The npm allowlist ships runtime TS/helpers, workflow plan template, agent/skill Markdown, `docs/engineering/**`, README/LICENSE, and npm-mandatory nested READMEs under engineering-docs/filechanges. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state; package gates enforce <=512 KiB packed and <=1 MiB unpacked.
+- `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
+- Bundled agent definitions load relative to the package module. Scope overrides are: default user = bundled then user; project = bundled then nearest project; both = bundled then user then project. Later definitions override by name, but a selected valid unsafe explorer override is rejected by the caller’s read-only validator.
+- The package reuses host Pi auth, settings, model catalogs, personal memory, and session storage. Those remain outside this repository under Pi-owned user-global paths. Dependency installs, CCC indexes, bridge IPC, logs, DBs, credentials, sessions, plans, and personal memory are runtime/generated state and ignored.
 - Active global extension source under `~/.pi` is independent. Workspace scripts and source must not import or mutate that source tree.
 
 `agent/extensions/workflow-modes/index.ts` resolves `plan-template.md` relative to `import.meta.url`; package behavior does not depend on checkout location or a user-specific absolute path.
@@ -34,10 +32,10 @@ This repository is an explicit Pi package for extension development. It is sourc
 
 | Definition | Contract | Discovery |
 |---|---|---|
-| `agent/agents/explorer.md` | Read-only discovery using `read`, `grep`, `find`, and `ls`; returns compressed files/code/architecture/open-question output. | Project definition through `.pi/agents`; selectable with `agentScope: "project"` or `"both"`. |
-| `agent/agents/worker.md` | Build-mode scoped implementation using coding tools; returns summary, touched files, commands, follow-ups, and questions. | Project definition through `.pi/agents`; selectable with `agentScope: "project"` or `"both"`. |
+| `agent/agents/explorer.md` | Read-only discovery using `read`, `grep`, `find`, and `ls`; returns compressed files/code/architecture/open-question output. | Bundled module-relative definition; user/project overrides follow explicit scope. |
+| `agent/agents/worker.md` | Build-mode scoped implementation using coding tools; returns summary, touched files, commands, follow-ups, and questions. | Bundled module-relative definition; user/project overrides follow explicit scope. |
 
-Subagent discovery defaults to user scope. Project scope resolves the nearest ancestor `.pi/agents`; `both` merges user and project definitions with project definitions winning by name.
+Subagent discovery is module-relative for bundled definitions. Scope defaults to bundled+user; project is bundled+nearest project; both is bundled, then user, then project, with later same-name definitions winning. A selected valid-but-unsafe explorer override remains selected for validation and is rejected rather than silently replaced.
 
 ### Skills
 

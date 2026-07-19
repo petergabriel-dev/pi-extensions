@@ -2,9 +2,9 @@
 
 ## Package and dependency boundary
 
-- **Root is an orchestration package, not dependency workspace.** Root has no lockfile/dependencies. `npm ci` at root is wrong; use `npm run bootstrap`, which installs four lockfile-backed extension packages.
+- **Root has two dependency roles.** The published root owns production `diff` plus `"*"` Pi peers and its lockfile; clean setup uses `npm ci --ignore-scripts --legacy-peer-deps`. Nested extension manifests/locks are development bootstrap only; use `npm run bootstrap` for their installs. Pi managed installs disable peer solving.
 - **Bootstrap does not eliminate all network use.** Engineering-docs and personal-memory scripts invoke `npx --yes`; uncached TypeScript/tsx packages still require npm registry access during tests/typecheck.
-- **Extension dependencies are split.** A test passing in one package does not prove another package is installed. Run root bootstrap after cloning or lockfile changes, then root gate.
+- **Extension dependencies are split.** A test passing in one package does not prove another package is installed. After cloning or lock changes, run root `npm ci --ignore-scripts --legacy-peer-deps`, nested `npm run bootstrap`, then root gate.
 - **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other.
 
 ## Source isolation versus runtime sharing
@@ -24,13 +24,13 @@
 
 - **Nearest ancestor `.pi` wins bridge/project discovery.** Starting below unintended marker can bind bridge IPC, project agents, and project settings to wrong root.
 - **This repository’s `.pi/agents` is also marker.** Before bridge tests, verify `pwd`, repository `.pi`, Pi bridge status root, and test argument all refer same checkout.
-- **Project agent scope is explicit.** Subagent discovery defaults to user scope. Use `agentScope: "project"` or `"both"` to select definitions exposed by repository `.pi/agents`.
+- **Bundled agents are always in scope.** Definitions load module-relatively. Default user scope is bundled+user; project is bundled+nearest project; both is bundled then user then project, with later same-name definitions winning. The source checkout `.pi/agents` link is only a dev/project mechanism, not npm registration. A selected valid unsafe explorer override is rejected by validation, not replaced silently. Use `agentScope: "project"` or `"both"` to add project definitions.
 
 ## Plan-mode verification limits
 
 - **Plan sandbox is not a general test environment.** Repository/home writes and network are denied. `npm ci`, uncached `npx`, CCC init/index, live bridge IPC, and write-heavy tests require Build.
 - **Sandbox failures can mimic code failures.** `EPERM` for temp/cache creation and `ENOTFOUND registry.npmjs.org` may indicate Plan restrictions. Rerun in Build before diagnosing source.
-- **CCC search is not filesystem-read-only.** It may start daemon, write user/project index state, and contact embedding provider. Use dedicated `ccc_search`; never broaden generic Bash sandbox permissions.
+- **CCC search is an external prerequisite and not filesystem-read-only.** Install/configure the separate `ccc` CLI before using `ccc_search`; it may start a daemon, write user/project index state, and contact an embedding provider. Use dedicated `ccc_search`; never broaden generic Bash sandbox permissions.
 
 ## Pi ↔ harness bridge
 
