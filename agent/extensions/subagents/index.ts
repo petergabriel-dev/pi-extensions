@@ -31,6 +31,8 @@ const DEBUG_PROGRESS_TOOL_NAME = "subagents_debug_progress";
 const DEFAULT_READ_PATH = "agent/AGENTS.md";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
+const AGENT_SCOPE_DESCRIPTION =
+	"Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.";
 
 const SpikeParams = Type.Object({
 	path: Type.Optional(
@@ -53,7 +55,7 @@ type SpikeParams = Static<typeof SpikeParams>;
 const DebugListParams = Type.Object({
 	agentScope: Type.Optional(
 		StringEnum(["user", "project", "both"] as const, {
-			description: 'Which agent definitions to discover. Defaults to "user".',
+			description: AGENT_SCOPE_DESCRIPTION,
 			default: "user",
 		}),
 	),
@@ -66,7 +68,7 @@ const DebugRunParams = Type.Object({
 	task: Type.String({ description: "Task string to send to the child subagent." }),
 	agentScope: Type.Optional(
 		StringEnum(["user", "project", "both"] as const, {
-			description: 'Which agent definitions to discover. Defaults to "user".',
+			description: AGENT_SCOPE_DESCRIPTION,
 			default: "user",
 		}),
 	),
@@ -111,7 +113,7 @@ const SpawnExplorerParams = Type.Object({
 	),
 	agentScope: Type.Optional(
 		StringEnum(["user", "project", "both"] as const, {
-			description: 'Which agent definitions to discover. Defaults to "user".',
+			description: AGENT_SCOPE_DESCRIPTION,
 			default: "user",
 		}),
 	),
@@ -129,7 +131,7 @@ const SpawnWorkerParams = Type.Object({
 	),
 	agentScope: Type.Optional(
 		StringEnum(["user", "project", "both"] as const, {
-			description: 'Which agent definitions to discover. Defaults to "user".',
+			description: AGENT_SCOPE_DESCRIPTION,
 			default: "user",
 		}),
 	),
@@ -864,7 +866,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 		name: DEBUG_LIST_TOOL_NAME,
 		label: "Subagents Debug List Agents",
 		description:
-			"Debug helper for subagents development: list discovered agent definitions with source, model, and tools. Defaults to user-level ~/.pi/agent/agents/*.md definitions.",
+			"Debug helper for subagents development: list discovered agent definitions with source, model, and tools. Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.",
 		parameters: DebugListParams,
 		async execute(_toolCallId, params: DebugListParams, _signal, _onUpdate, ctx) {
 			const agentScope = (params.agentScope ?? "user") as AgentScope;

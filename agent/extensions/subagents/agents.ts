@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 export type AgentRole = "explorer" | "worker";
 export type AgentScope = "user" | "project" | "both";
-export type AgentSource = "user" | "project";
+export type AgentSource = "bundled" | "user" | "project";
 
 export interface AgentConfig {
 	name: AgentRole | string;
@@ -32,6 +33,14 @@ type AgentFrontmatter = {
 };
 
 export const DEFAULT_AGENT_SCOPE: AgentScope = "user";
+
+const BUNDLED_AGENTS_DIR = fileURLToPath(new URL("../../agents", import.meta.url));
+
+export interface AgentDiscoveryOptions {
+	/** Test seam for supplying isolated definition directories. */
+	bundledAgentsDir?: string;
+	userAgentsDir?: string;
+}
 
 function asString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
@@ -63,7 +72,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 	}
 
 	const agents: AgentConfig[] = [];
-	for (const entry of entries) {
+	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
 		if (!entry.name.endsWith(".md")) continue;
 		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 
@@ -114,21 +123,25 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 	}
 }
 
-export function discoverAgents(cwd: string, agentScope: AgentScope = DEFAULT_AGENT_SCOPE): AgentDiscoveryResult {
-	const userAgentsDir = path.join(getAgentDir(), "agents");
+export function discoverAgents(
+	cwd: string,
+	agentScope: AgentScope = DEFAULT_AGENT_SCOPE,
+	options: AgentDiscoveryOptions = {},
+): AgentDiscoveryResult {
+	const bundledAgentsDir = options.bundledAgentsDir ?? BUNDLED_AGENTS_DIR;
+	const userAgentsDir = options.userAgentsDir ?? path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
-
+	const bundledAgents = loadAgentsFromDir(bundledAgentsDir, "bundled");
 	const userAgents = agentScope === "project" ? [] : loadAgentsFromDir(userAgentsDir, "user");
 	const projectAgents = agentScope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 	const byName = new Map<string, AgentConfig>();
 
-	if (agentScope === "both") {
+	for (const agent of bundledAgents) byName.set(agent.name, agent);
+	if (agentScope === "user" || agentScope === "both") {
 		for (const agent of userAgents) byName.set(agent.name, agent);
+	}
+	if (agentScope === "project" || agentScope === "both") {
 		for (const agent of projectAgents) byName.set(agent.name, agent);
-	} else if (agentScope === "project") {
-		for (const agent of projectAgents) byName.set(agent.name, agent);
-	} else {
-		for (const agent of userAgents) byName.set(agent.name, agent);
 	}
 
 	return {
