@@ -26,10 +26,6 @@ declare module "node:assert" {
 }
 
 declare module "@earendil-works/pi-coding-agent" {
-	export function getAgentDir(): string;
-}
-
-declare module "@mariozechner/pi-coding-agent" {
 	export interface ExtensionAPI {
 		on(event: string, callback: (...args: any[]) => any): void;
 		registerCommand(name: string, config: any): void;
@@ -42,5 +38,9 @@ declare module "@mariozechner/pi-coding-agent" {
 		[key: string]: any;
 	}
 
+	export function getAgentDir(): string;
+}
+
+declare module "@mariozechner/pi-coding-agent" {
 	export function getAgentDir(): string;
 }

@@ -230,7 +230,7 @@ function errorCode(error: unknown): string | undefined {
 }
 
 async function resolveAgentDir(): Promise<string> {
-	for (const specifier of ["@mariozechner/pi-coding-agent", "@earendil-works/pi-coding-agent"]) {
+	for (const specifier of ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"]) {
 		try {
 			const module = await import(specifier) as { getAgentDir?: () => string };
 			if (typeof module.getAgentDir === "function") return module.getAgentDir();

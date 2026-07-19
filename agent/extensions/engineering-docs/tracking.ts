@@ -2,8 +2,8 @@
 // Tracks edit/write tool calls that changed docs-relevant files
 // and reminds at agent_end if docs weren't touched.
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { DOCS_DIR, IGNORE_PATTERNS, ENTRY_DOCS_REMINDER_SNOOZE } from "./constants.js";
 import { isWriteAllowed } from "./mode.js";
 

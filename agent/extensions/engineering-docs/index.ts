@@ -1,8 +1,8 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Container, matchesKey, Key, SelectList, Text, type SelectItem } from "@mariozechner/pi-tui";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Container, matchesKey, Key, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	DOCS_DIR,
 	ENTRY_DOCS_STATE,

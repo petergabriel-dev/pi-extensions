@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -156,7 +156,7 @@ function dateStamp(date: Date): string {
 }
 
 async function resolveAgentDir(): Promise<string> {
-	for (const specifier of ["@mariozechner/pi-coding-agent", "@earendil-works/pi-coding-agent"]) {
+	for (const specifier of ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"]) {
 		try {
 			const module = await import(specifier) as { getAgentDir?: () => string };
 			if (typeof module.getAgentDir === "function") return module.getAgentDir();

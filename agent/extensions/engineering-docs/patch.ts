@@ -2,12 +2,12 @@
 // Scans changed files, drafts evidence-backed patch suggestions,
 // previews diff, and applies only after user confirmation in Build/Off mode.
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DOCS_DIR, type DocsAreaTag } from "./constants.js";
 import { isWriteAllowed, getModeLabel } from "./mode.js";
 import { shouldShowReminder, getChangedFilesSummary } from "./tracking.js";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Container, matchesKey, Key, SelectList, Text, type SelectItem } from "@mariozechner/pi-tui";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Container, matchesKey, Key, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
 
 // ── Patch suggestion ──
 
