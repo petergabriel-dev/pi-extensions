@@ -1,8 +1,31 @@
 {
-  "name": "pi-extensions-workspace",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@lopezpetergabriel/pi-extensions",
+  "version": "0.1.0",
+  "description": "Pi extensions, skills, and agents by lopezpetergabriel",
   "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "lopezpetergabriel",
+  "engines": { "node": ">=22.19.0" },
+  "publishConfig": { "access": "public" },
+  "files": [
+    "agent/extensions/ccc-search/index.ts",
+    "agent/extensions/claude-bridge/index.ts",
+    "agent/extensions/discussion-notes.ts",
+    "agent/extensions/engineering-docs/*.ts",
+    "agent/extensions/engineering-docs/README.md",
+    "agent/extensions/filechanges/index.ts",
+    "agent/extensions/filechanges/README.md",
+    "agent/extensions/notify.ts",
+    "agent/extensions/personal-memory/*.ts",
+    "agent/extensions/subagents/*.ts",
+    "agent/extensions/workflow-modes/*.ts",
+    "agent/extensions/workflow-modes/plan-template.md",
+    "agent/agents/*.md",
+    "agent/skills/**/*.md",
+    "docs/engineering/**",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./agent/extensions/ccc-search/index.ts",
@@ -23,10 +46,20 @@
   },
   "scripts": {
     "bootstrap": "npm --prefix agent/extensions/ccc-search ci && npm --prefix agent/extensions/filechanges ci && npm --prefix agent/extensions/subagents ci && npm --prefix agent/extensions/workflow-modes ci",
-    "check": "node scripts/check-workspace.mjs",
+    "check:workspace": "node scripts/check-workspace.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "check": "npm run check:workspace && npm run check:package",
     "test": "npm run check && npm run test:extensions && npm run typecheck && npm run test:cursor",
+    "prepublishOnly": "npm test",
     "test:extensions": "npm --prefix agent/extensions/ccc-search test && npm --prefix agent/extensions/engineering-docs test && npm --prefix agent/extensions/personal-memory test && npm --prefix agent/extensions/subagents test && npm --prefix agent/extensions/workflow-modes test",
     "typecheck": "npm --prefix agent/extensions/ccc-search run typecheck && npm --prefix agent/extensions/personal-memory run typecheck && npm --prefix agent/extensions/subagents run typecheck && npm --prefix agent/extensions/workflow-modes run typecheck",
     "test:cursor": "node agent/cursor-bridge-client/test-cursor-readonly-hook.js"
+  },
+  "dependencies": { "diff": "^5.2.0" },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   }
 }

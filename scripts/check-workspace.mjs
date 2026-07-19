@@ -22,8 +22,45 @@ const skills = [
   "agent/skills/worker-orchestration",
 ];
 const agents = ["agent/agents/explorer.md", "agent/agents/worker.md"];
+const publishedFiles = [
+  "agent/extensions/ccc-search/index.ts",
+  "agent/extensions/claude-bridge/index.ts",
+  "agent/extensions/discussion-notes.ts",
+  "agent/extensions/engineering-docs/*.ts",
+  "agent/extensions/engineering-docs/README.md",
+  "agent/extensions/filechanges/index.ts",
+  "agent/extensions/filechanges/README.md",
+  "agent/extensions/notify.ts",
+  "agent/extensions/personal-memory/*.ts",
+  "agent/extensions/subagents/*.ts",
+  "agent/extensions/workflow-modes/*.ts",
+  "agent/extensions/workflow-modes/plan-template.md",
+  "agent/agents/*.md",
+  "agent/skills/**/*.md",
+  "docs/engineering/**",
+  "README.md",
+  "LICENSE",
+];
 
 const manifest = JSON.parse(await readFile(relative("package.json"), "utf8"));
+assert.equal(manifest.name, "@lopezpetergabriel/pi-extensions");
+assert.equal(manifest.version, "0.1.0");
+assert.equal(manifest.private, undefined);
+assert.equal(manifest.license, "MIT");
+assert.equal(manifest.author, "lopezpetergabriel");
+assert.equal(manifest.engines?.node, ">=22.19.0");
+assert.deepEqual(manifest.publishConfig, { access: "public" });
+assert.deepEqual(manifest.files, publishedFiles);
+assert.deepEqual(manifest.dependencies, { diff: "^5.2.0" });
+assert.deepEqual(manifest.peerDependencies, {
+  "@earendil-works/pi-ai": "*",
+  "@earendil-works/pi-coding-agent": "*",
+  "@earendil-works/pi-tui": "*",
+  typebox: "*",
+});
+assert.equal(manifest.scripts?.install, undefined);
+assert.equal(manifest.scripts?.postinstall, undefined);
+assert.equal(manifest.scripts?.prepublishOnly, "npm test");
 assert.deepEqual(manifest.pi?.extensions, extensions.map((entry) => `./${entry}`));
 assert.deepEqual(manifest.pi?.skills, skills.map((entry) => `./${entry}`));
 for (const resource of [...extensions, ...skills, ...agents]) await access(relative(resource));
