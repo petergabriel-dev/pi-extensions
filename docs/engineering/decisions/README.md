@@ -5,7 +5,7 @@
 | ADR-0001 | Active | Pi Claude Code bridge boundary |  |
 | ADR-0002 | Superseded | Reliable Persistent-Memory Reconciliation |  |
 | ADR-0003 | Superseded | Non-Blocking Reason-Aware Persistent-Memory Consolidation |  |
-| ADR-0004 | Active | Pi Subagents |  |
+| ADR-0004 | Active | Pi Subagents | changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, or parent/child isolation |
 | ADR-0005 | Superseded | Pinned Default Persistent-Memory Model Resolution |  |
 | ADR-0006 | Superseded | Chunked Persistent-Memory Reconciliation |  |
 | ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
@@ -24,4 +24,4 @@
 | ADR-0020 | Superseded | Durable workflow plan store |  |
 | ADR-0021 | Active | Session-branch workflow plans |  |
 | ADR-0022 | Active | Network-allowed read-only Review sandbox | changing Review mode command policy, sandbox wrapping, fallback behavior, or GitHub review workflows |
-| ADR-0023 | Active | Workspace source and runtime separation | changing package resources, launcher flags, repository/runtime ownership, project agent discovery, ignored state, or migration policy |
+| ADR-0023 | Active | Workspace source and runtime separation | changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy |

@@ -3,6 +3,11 @@ id: ADR-0004
 title: Pi Subagents
 status: Active
 date: 2026-06-01
+decision: Use persisted, in-process child AgentSessions with bundled explorer/worker defaults and user/project definition precedence.
+why: In-process sessions preserve parent isolation and auditability; bundled module-relative defaults make clean installs work while scoped overrides remain explicit and validated.
+affects: agent/extensions/subagents, agent/agents/explorer.md, agent/agents/worker.md, agent/skills/worker-orchestration/SKILL.md, package.json, scripts/check-package.mjs
+consequences: Clean installs work without external agent copies; malformed overrides fall back to the next definition, while a selected valid-but-unsafe override is rejected by validation rather than silently replaced.
+readWhen: changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, or parent/child isolation
 ---
 
 # ADR-0004: Pi Subagents
@@ -15,9 +20,10 @@ Pi subagents v1 use persisted, in-process child `AgentSession`s rather than subp
 2. **Persisted child sessions:** Every subagent run leaves a normal Pi session file that can be inspected after completion and can later serve as a Context Transfer branch artifact foundation.
 3. **Structured-return-only parent context:** The parent receives the child final assistant message parsed into bounded structured explorer/worker fields. The child transcript does not enter parent message history.
 4. **Role split:** Explorers are read-only (`read`, `grep`, `find`, `ls`). Workers are coding agents, but `spawn_worker` is parent-gated to workflow Build mode before child creation.
-5. **Spawn graph bound:** The only nested graph is `main -> worker -> explorer`, with max depth 2. Workers receive nested `spawn_explorer`; workers do not receive `spawn_worker`; explorers are leaves.
-6. **Concurrency model:** Subagents use a configurable default lane (default cap 3), a reserved explorer lane for nested worker-spawned explorers, and an overlap guard for parallel worker `fileOwnership`.
-7. **Visibility:** Live progress uses a keyed `subagents-progress` widget, throttled to 250 ms, and clears when runs finish.
+5. **Definition precedence:** Package-owned explorer/worker Markdown files are bundled defaults and are resolved relative to the package module, not the active Pi home. Selected user definitions override bundled defaults; selected nearest project definitions override user definitions. A malformed override falls back to the next lower-precedence definition, while a valid but unsafe selected explorer override remains selected and is rejected by read-only validation.
+6. **Spawn graph bound:** The only nested graph is `main -> worker -> explorer`, with max depth 2. Workers receive nested `spawn_explorer`; workers do not receive `spawn_worker`; explorers are leaves.
+7. **Concurrency model:** Subagents use a configurable default lane (default cap 3), a reserved explorer lane for nested worker-spawned explorers, and an overlap guard for parallel worker `fileOwnership`.
+8. **Visibility:** Live progress uses a keyed `subagents-progress` widget, throttled to 250 ms, and clears when runs finish.
 
 ## Why
 
@@ -33,6 +39,7 @@ Pi subagents v1 use persisted, in-process child `AgentSession`s rather than subp
 - **Unbounded nested workers:** Rejected because worker→worker recursion complicates ownership, concurrency, and safety. v1 keeps the graph to main→worker→explorer.
 - **Letting workflow-modes block child tools:** Rejected because child sessions intentionally disable extension loading for isolation; relying on inherited workflow hooks would be false security.
 - **Putting child transcripts into parent context:** Rejected due to context bloat and isolation risk.
+- **Requiring external user/project role definitions:** Rejected because clean installs would be incomplete and coupled to machine-specific filesystem state.
 
 ## Affects
 
@@ -52,6 +59,8 @@ Code:
 - [explorer.md](../../../agent/agents/explorer.md)
 - [worker.md](../../../agent/agents/worker.md)
 - [SKILL.md](../../../agent/skills/worker-orchestration/SKILL.md)
+- [package.json](../../../package.json) (published agent asset allowlist)
+- [check-package.mjs](../../../scripts/check-package.mjs) (artifact inventory)
 
 ## Consequences
 
@@ -59,14 +68,17 @@ Code:
 - **Good:** Worker write capability is explicitly gated by parent workflow mode.
 - **Good:** Read-only explorer delegation can be used from workers without deadlocking worker slots.
 - **Good:** Parallel worker conflicts are caught before overlapping file ownership proceeds.
+- **Good:** Module-relative bundled assets survive relocation and clean npm installs do not require external user or project copies.
 - **Bad/risk:** In-process child sessions still share the same Pi process; future global singleton changes must preserve parent/child isolation.
 - **Bad/risk:** Structured parsing is markdown-section based and must tolerate malformed outputs rather than assuming perfect model compliance.
+- **Bad/risk:** A valid unsafe explorer override can be selected before validation rejects it; silently falling back would hide the safety failure.
 
 ## Read when
 
 - modifying `agent/extensions/subagents/*`.
 - changing workflow-mode tool gating or child extension loading.
 - changing subagent concurrency, nested spawn graph, or file ownership semantics.
+- changing bundled agent package assets, discovery scope, or precedence.
 - debugging parent/child session isolation, stale widgets, or persisted child sessions.
 
 ## Supersedes
