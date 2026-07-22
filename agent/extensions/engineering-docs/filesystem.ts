@@ -288,9 +288,10 @@ Declare custom properties only inside marked sections and supported theme roots:
 /* @semantic */
 :root { --color-action: var(--color-blue-500); }
 [data-theme="dark"] { --color-action: var(--color-blue-500); }
+.dark { --color-action: var(--color-blue-500); }
 \`\`\`
 
-Add each token CSS path to \`manifest.json\` before editing it. Preview HTML must use \`var(--*)\` values only.
+Use either \`[data-theme="dark"]\` or \`.dark\` for dark-theme roots. Add each token CSS path to \`manifest.json\` before editing it. Preview HTML must use \`var(--*)\` values only.
 `;
 
 const COMPONENT_TEMPLATE_CONTENT = `# Component name
@@ -331,11 +332,22 @@ const PREVIEW_INDEX_CONTENT = `<!doctype html>
   <!-- Add stylesheet links for tokenFiles declared in ../manifest.json. -->
 </head>
 <body>
+  <!-- Projects with a .dark-class base system (for example, shadcn) should toggle that class instead. -->
+  <button type="button" data-theme-toggle aria-pressed="false">Toggle theme</button>
   <header><h1>Design system gallery</h1></header>
   <main>
     <!-- Single-column vertical layout: stack sections; do not use grid galleries. -->
     <nav aria-label="Preview examples"><a href="example.html">Example screen</a></nav>
   </main>
+  <script>
+    const themeToggle = document.querySelector("[data-theme-toggle]");
+    themeToggle?.addEventListener("click", () => {
+      const root = document.documentElement;
+      const dark = root.dataset.theme !== "dark";
+      root.dataset.theme = dark ? "dark" : "light";
+      themeToggle.setAttribute("aria-pressed", String(dark));
+    });
+  </script>
 </body>
 </html>
 `;
@@ -348,10 +360,21 @@ const PREVIEW_EXAMPLE_CONTENT = `<!doctype html>
   <title>Example design screen</title>
 </head>
 <body>
+  <!-- Projects with a .dark-class base system (for example, shadcn) should toggle that class instead. -->
+  <button type="button" data-theme-toggle aria-pressed="false">Toggle theme</button>
   <main>
     <h1>Example screen</h1>
     <p>Compose approved components here after tokens and specs exist.</p>
   </main>
+  <script>
+    const themeToggle = document.querySelector("[data-theme-toggle]");
+    themeToggle?.addEventListener("click", () => {
+      const root = document.documentElement;
+      const dark = root.dataset.theme !== "dark";
+      root.dataset.theme = dark ? "dark" : "light";
+      themeToggle.setAttribute("aria-pressed", String(dark));
+    });
+  </script>
 </body>
 </html>
 `;

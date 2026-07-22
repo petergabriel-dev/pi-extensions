@@ -66,6 +66,15 @@ assert.deepEqual(firstScaffold.created, [
 	"docs/design/preview/index.html",
 	"docs/design/preview/example.html",
 ]);
+const scaffoldReadme = await readFile(join(scaffoldRoot, "docs/design/README.md"), "utf8");
+assert.match(scaffoldReadme, /\.dark/);
+for (const file of ["index.html", "example.html"]) {
+	const preview = await readFile(join(scaffoldRoot, "docs/design/preview", file), "utf8");
+	assert.match(preview, /<button type="button" data-theme-toggle/);
+	assert.match(preview, /root\.dataset\.theme/);
+	assert.match(preview, /shadcn/);
+}
+assert.equal((await checkDesignDocs(scaffoldRoot)).previewViolations.length, 0, "scaffold previews pass lint");
 await writeFile(join(scaffoldRoot, "docs/design/components/TEMPLATE.md"), "# Curated button\n");
 const beforeRerun = await Promise.all(firstScaffold.created.map(file => readFile(join(scaffoldRoot, file), "utf8")));
 const secondScaffold = await initDesignDocs(scaffoldRoot);
