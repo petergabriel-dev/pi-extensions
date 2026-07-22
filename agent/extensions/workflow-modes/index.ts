@@ -1,14 +1,17 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
+import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode } from "./policy.js";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
-export type Mode = "off" | "discuss" | "plan" | "build" | "review";
+export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 export type PlanEvent = "set" | "clear";
 
 export const MODE_ENTRY = "workflow-mode-set";
@@ -37,6 +40,7 @@ const MODE_LABELS: Record<Mode, string> = {
 	plan: "Plan",
 	build: "Build",
 	review: "Review",
+	design: "Design",
 };
 
 let currentMode: Mode = "off";
@@ -53,6 +57,7 @@ function normalizeMode(raw: string): Mode | undefined {
 	if (value === "plan" || value === "planning") return "plan";
 	if (value === "build" || value === "building") return "build";
 	if (value === "review" || value === "reviewing") return "review";
+	if (value === "design" || value === "designing") return "design";
 	return undefined;
 }
 
@@ -155,10 +160,10 @@ async function selectOverlay(ctx: ExtensionCommandContext, title: string, items:
 
 async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify("Use /mode <off|discuss|plan|build|review>.", "warning");
+		ctx.ui.notify("Use /mode <off|discuss|plan|build|review|design>.", "warning");
 		return;
 	}
-	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review"] as Mode[]).map((mode) => ({
+	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review", "design"] as Mode[]).map((mode) => ({
 		value: mode,
 		label: `${MODE_LABELS[mode]}${mode === currentMode ? " (current)" : ""}`,
 		description:
@@ -170,7 +175,9 @@ async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 						? "Grill implementation plan; read/search only"
 						: mode === "review"
 							? "Review changes; read-only"
-						: "Build with normal tools",
+							: mode === "design"
+								? "Design tokens and component specs"
+								: "Build with normal tools",
 	}));
 	const choice = await selectOverlay(ctx, "Select Workflow Mode", items);
 	if (choice) await setMode(pi, ctx, choice as Mode);
@@ -271,6 +278,8 @@ export const PLAN_PROMPT = `Workflow mode: Plan. Behave like a relentless implem
 
 export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Never auto-post a review: ask for explicit user confirmation immediately before publishing. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
+export const DESIGN_PROMPT = `Workflow mode: Design. Design-system work only. Write only under docs/design/ and declared token files; never app/component source or docs/engineering/. Inspect existing styles and components before creating tokens or specs; adopt or extract existing system instead of inventing a parallel one. If project builds on named base library (for example, shadcn), record it in docs/design/README.md and derive component specs from base components rather than reinventing them. Start tokens before components. Use /* @primitive */ and /* @semantic */ layers in token CSS. Semantic tokens define both light and dark values. Build roughly ten foundation component specs, curated enough to constrain later implementation. Never hard-code values: use token variables. Accessibility is non-negotiable. Every component spec and preview must be responsive-ready: mobile-first, fluid layouts, no fixed pixel widths; every component spec includes a Responsive section. Preview pages use a single-column vertical layout with stacked sections — never grid galleries or multi-column tile layouts. Previews must be viewable in both themes through project's theme-switch convention. Design surface only; suggest /mode build for component code.`;
+
 export const BUILD_PROMPT = `Workflow mode: Build. Implement requested changes using the available tools.
 
 Ponytail lazy-senior-dev mode. Before writing code, evaluate in order: 1) Is it necessary (YAGNI)? 2) Standard-library solution — use it. 3) Native platform feature — use it. 4) Existing dependency — use it. 5) Single-line solution — implement it. 6) Only then write minimal working code.
@@ -346,8 +355,13 @@ Required post-task report format:
 - On failure/block: Task blocked, Reason, Verification, Commit status, Next action needed, then ask how to proceed.
 `;
 
-export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string): string | undefined {
-	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT, review: REVIEW_PROMPT }, savedPlan);
+export const BUILD_DESIGN_AWARE_PROMPT = `Consult docs/design/components/ specs before creating or modifying frontend components. Compose from documented components first. Documented means filled Purpose, Props/API, and Accessibility sections; template stubs do not count. If a genuinely new component has no documented spec, do not invent it silently: state spec is missing, suggest /mode design, proceed only with explicit user approval. Implementations follow spec Responsive section: mobile-first, no fixed widths.`;
+
+export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string, cwd?: string): string | undefined {
+	const buildPrompt = mode === "build" && cwd && existsSync(resolve(cwd, DESIGN_DIR, DESIGN_MANIFEST_FILE))
+		? `${BUILD_PROMPT}\n\n${BUILD_DESIGN_AWARE_PROMPT}`
+		: BUILD_PROMPT;
+	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: buildPrompt, review: REVIEW_PROMPT, design: DESIGN_PROMPT }, savedPlan);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -394,15 +408,23 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan);
+		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan, process.cwd());
 		if (!extra) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${extra}` };
 	});
 
 	pi.on("tool_call", async (event) => {
-		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review") return;
+			if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review" && currentMode !== "design") return;
 
 		if (MUTATION_TOOLS.has(event.toolName)) {
+			if (currentMode === "design") {
+				const filePath = String((event.input as { path?: unknown }).path ?? "");
+				if (filePath && await isDesignWriteAllowed(process.cwd(), filePath)) return;
+				return {
+					block: true,
+					reason: `${event.toolName} is blocked outside design surface (docs/design/** and declared token files). Switch to Build mode with /mode build for implementation changes.`,
+				};
+			}
 			return {
 				block: true,
 				reason: `${event.toolName} is blocked in ${MODE_LABELS[currentMode]} mode. Switch to Build mode with /mode build for implementation changes.`,
@@ -434,12 +456,12 @@ export default function (pi: ExtensionAPI) {
 		const normalized = command.replace(/\s+/g, " ");
 		const allowed = currentMode === "review"
 			? isBashAllowedInMode(normalized, "review")
-			: currentMode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
+			: currentMode === "plan" || currentMode === "design" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
 		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (currentMode === "review" && REVIEW_BASH_DENY.test(normalized));
 		if (!allowed || denied) {
 			return {
 				block: true,
-				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" ? "discovery plus tests/builds/checks" : currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
+				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" || currentMode === "design" ? "discovery plus tests/builds/checks" : currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
 			};
 		}
 	});
@@ -459,12 +481,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mode", {
-		description: "Select workflow mode: Off, Discuss, Plan, Build, or Review",
+		description: "Select workflow mode: Off, Discuss, Plan, Build, Review, or Design",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) return chooseMode(pi, ctx);
 			const mode = normalizeMode(arg);
-			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, or review.", "warning");
+			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, review, or design.", "warning");
 			await setMode(pi, ctx, mode);
 		},
 	});

@@ -8,8 +8,9 @@ import {
 	ENTRY_DOCS_STATE,
 	DOCS_AREA_TAGS,
 } from "./constants.js";
-import { getMode, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
-import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
+import { getMode, isDesignWriteAllowed, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
+import { DESIGN_DIR } from "./design.js";
+import { checkDesignDocs, designManifestExists, initDesignDocs, initDocs, checkDocs, updateDecisionIndex, updateDesignTokens, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
 
@@ -157,8 +158,8 @@ async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 
 // ── Command handlers ──
 
-async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags: { yes?: boolean; check?: boolean } = {}): Promise<void> {
-	const writeOk = isWriteAllowed();
+async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags: { yes?: boolean; check?: boolean; design?: boolean } = {}): Promise<void> {
+	const writeOk = flags.design ? isDesignWriteAllowed() : isWriteAllowed();
 
 	// --check: validation only, no writes
 	if (flags.check) {
@@ -211,12 +212,12 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 	}
 
 	if (!writeOk) {
-		ctx.ui.notify(`Cannot init docs in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
+		ctx.ui.notify(`Cannot init ${flags.design ? "design docs" : "docs"} in ${getModeLabel()} mode. Switch to ${flags.design ? "/mode design, /mode build, or /mode off" : "/mode build or /mode off"}.`, "warning");
 		return;
 	}
 
 	// Interactive: ask before creating if not --yes
-	if (!flags.yes && ctx.hasUI) {
+	if (!flags.design && !flags.yes && ctx.hasUI) {
 		const check = await checkDocs(ctx.cwd);
 		if (check.status === "managed") {
 			ctx.ui.notify("Engineering docs already initialized and managed.", "info");
@@ -231,7 +232,7 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 		}
 	}
 
-	const result = await initDocs(ctx.cwd);
+	const result = flags.design ? await initDesignDocs(ctx.cwd) : await initDocs(ctx.cwd);
 
 	if (result.created.length > 0) {
 		ctx.ui.notify(`Created: ${result.created.join(", ")}`, "success");
@@ -241,12 +242,13 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 	}
 
 	// Store state
-	await Promise.resolve(pi.appendEntry(ENTRY_DOCS_STATE, { action: "init", at: Date.now() }));
+	await Promise.resolve(pi.appendEntry(ENTRY_DOCS_STATE, { action: flags.design ? "init-design" : "init", at: Date.now() }));
 }
 
 async function handleCheck(ctx: ExtensionCommandContext, flags: { check?: boolean } = {}): Promise<void> {
 	const repairSpokes = isWriteAllowed() && !flags.check;
 	const check = await enhancedCheckDocs(ctx.cwd, undefined, { repairSpokes });
+	const designCheck = await designManifestExists(ctx.cwd) ? await checkDesignDocs(ctx.cwd) : undefined;
 	const brokenSpokes = check.spokes.filter((spoke) => !spoke.healthy);
 	const lines: string[] = [
 		`Status: ${check.status}`,
@@ -257,6 +259,11 @@ async function handleCheck(ctx: ExtensionCommandContext, flags: { check?: boolea
 		`Decision index: ${check.staleIndex ? "STALE — run update-index" : "up to date"}`,
 		`Spokes: ${brokenSpokes.length === 0 ? "OK" : `${brokenSpokes.length} issue(s)`}`,
 	];
+
+	if (designCheck) {
+		lines.push(`Design tokens: ${designCheck.tokensStale ? "STALE — run update-tokens" : "up to date"}`);
+		for (const issue of [...designCheck.errors, ...designCheck.warnings, ...designCheck.previewViolations]) lines.push(`  Design: ${issue}`);
+	}
 
 	if (check.spokesRepaired.length > 0) {
 		lines.push(`Spokes repaired: ${check.spokesRepaired.join(", ")}`);
@@ -345,6 +352,19 @@ async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
 	}, { overlay: true, overlayOptions: { width: "60%", minWidth: 42, maxHeight: "70%", margin: 2, anchor: "center" } });
 }
 
+async function handleUpdateTokens(ctx: ExtensionCommandContext): Promise<void> {
+	if (!isDesignWriteAllowed()) {
+		ctx.ui.notify(`Cannot update tokens in ${getModeLabel()} mode. Switch to /mode design, /mode build, or /mode off.`, "warning");
+		return;
+	}
+	try {
+		const result = await updateDesignTokens(ctx.cwd);
+		ctx.ui.notify(`Updated ${result.path}${result.warnings.length ? ` with ${result.warnings.length} warning(s)` : ""}.`, "success");
+	} catch (error) {
+		ctx.ui.notify(`Failed to update tokens: ${error instanceof Error ? error.message : String(error)}`, "error");
+	}
+}
+
 async function handleUpdateIndex(ctx: ExtensionCommandContext): Promise<void> {
 	if (!isWriteAllowed()) {
 		ctx.ui.notify(`Cannot update index in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
@@ -415,17 +435,24 @@ export default function (pi: ExtensionAPI) {
 		return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
 	});
 
-	// Block docs write tools in Discuss/Plan mode
+	// Gate managed docs roots independently: engineering docs require Build/Off;
+	// design docs also allow Design mode.
 	pi.on("tool_call", async (event) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
-		const path = String((event.input as { path?: unknown })?.path ?? "");
-		// Only block writes to docs/engineering/
-		if (!path.includes(DOCS_DIR)) return;
-		if (isWriteAllowed()) return;
-		return {
-			block: true,
-			reason: `Write to ${DOCS_DIR} is blocked in ${getModeLabel()} mode. Use /mode build or /mode off to enable docs writes.`,
-		};
+		const path = String((event.input as { path?: unknown })?.path ?? "").replaceAll("\\", "/");
+		const inRoot = (root: string) => path === root || path.startsWith(`${root}/`) || path.endsWith(`/${root}`) || path.includes(`/${root}/`);
+		if (inRoot(DOCS_DIR) && !isWriteAllowed()) {
+			return {
+				block: true,
+				reason: `Write to ${DOCS_DIR} is blocked in ${getModeLabel()} mode. Use /mode build or /mode off to enable docs writes.`,
+			};
+		}
+		if (inRoot(DESIGN_DIR) && !isDesignWriteAllowed()) {
+			return {
+				block: true,
+				reason: `Write to ${DESIGN_DIR} is blocked in ${getModeLabel()} mode. Use /mode design, /mode build, or /mode off to enable design docs writes.`,
+			};
+		}
 	});
 
 	// ── /docs command ──
@@ -440,7 +467,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (arg === "init" || arg.startsWith("init ")) {
-				const initFlags = { yes: arg.includes("--yes") || arg.includes("-y"), check: arg.includes("--check") || arg.includes("-c") };
+				const initFlags = { yes: arg.includes("--yes") || arg.includes("-y"), check: arg.includes("--check") || arg.includes("-c"), design: arg.includes("--design") };
 				await handleInit(pi, ctx, initFlags);
 			} else if (arg === "check" || arg === "-c" || arg.startsWith("check ")) {
 				const checkFlags = { check: arg.includes("--check") || arg.includes("-c") };
@@ -451,6 +478,8 @@ export default function (pi: ExtensionAPI) {
 				await handleValidateTags(ctx);
 			} else if (arg === "patch") {
 				await handlePatch(pi, ctx);
+			} else if (arg === "update-tokens" || arg.startsWith("update-tokens ")) {
+				await handleUpdateTokens(ctx);
 			} else if (arg === "update-index" || arg.startsWith("update-decision-index")) {
 				await handleUpdateIndex(ctx);
 			} else {

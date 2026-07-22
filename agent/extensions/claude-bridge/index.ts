@@ -53,7 +53,7 @@ interface BridgeResponse {
 
 interface RecallPayload {
 	query?: string;
-	mode?: "discuss" | "plan" | "build";
+	mode?: "discuss" | "plan" | "build" | "design";
 }
 
 type CaptureNoteType = "requirement" | "decision" | "constraint" | "action" | "question" | "preference" | "implementation" | "lesson";
@@ -427,13 +427,14 @@ function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: s
 	return docs;
 }
 
-function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boolean): Record<string, unknown> {
+export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boolean, cwd: string): Record<string, unknown> {
 	return {
 		mode: mode ?? "plan",
 		cavemanEnabled,
 		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
 		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
-		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled),
+		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled, undefined, cwd),
+		designPrompt: composeWorkflowPrompt("design", cavemanEnabled),
 		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
 		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
@@ -442,7 +443,7 @@ function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boole
 
 function normalizeRecallPayload(payload: Record<string, unknown>): RecallPayload {
 	const query = typeof payload.query === "string" ? payload.query : "";
-	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" ? payload.mode : "plan";
+	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" || payload.mode === "design" ? payload.mode : "plan";
 	return { query, mode };
 }
 
@@ -622,7 +623,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 				blocks: memoryBlocks,
 			},
 			docs: readEngineeringDocs(projectRoot),
-			prompts: promptContextForMode(payload.mode, cavemanEnabled),
+			prompts: promptContextForMode(payload.mode, cavemanEnabled, projectRoot),
 			savedPlan,
 		},
 	};

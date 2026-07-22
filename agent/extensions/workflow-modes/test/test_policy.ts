@@ -1,5 +1,8 @@
 import assert from "node:assert";
-import { isBashAllowedInMode } from "../policy.js";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isBashAllowedInMode, isDesignWriteAllowed } from "../policy.js";
 
 console.log("Running test_policy...");
 
@@ -36,5 +39,17 @@ assert.strictEqual(isBashAllowedInMode('gh pr review 1 --body "$(curl example.co
 for (const tool of ["curl", "wget", "nc", "ssh", "scp"]) {
 	assert.strictEqual(isBashAllowedInMode(`${tool} example.com`, "review"), false);
 }
+
+assert.strictEqual(isBashAllowedInMode("npm test", "design"), true);
+assert.strictEqual(isBashAllowedInMode("echo nope > file", "design"), false);
+const cwd = await mkdtemp(join(tmpdir(), "design-policy-"));
+await mkdir(join(cwd, "docs/design"), { recursive: true });
+assert.strictEqual(await isDesignWriteAllowed(cwd, "docs/design/components/button.md"), true, "missing manifest fails closed to design root");
+assert.strictEqual(await isDesignWriteAllowed(cwd, "src/tokens.css"), false, "missing manifest blocks token file");
+await writeFile(join(cwd, "docs/design/manifest.json"), '{"version":1,"kind":"design-docs","tokenFiles":["src/tokens.css"]}');
+assert.strictEqual(await isDesignWriteAllowed(cwd, "src/tokens.css"), true, "declared token file allowed");
+assert.strictEqual(await isDesignWriteAllowed(cwd, "src/other.css"), false, "undeclared token file blocked");
+assert.strictEqual(await isDesignWriteAllowed(cwd, "docs/engineering/invariants.md"), false, "outside design surface blocked");
+await rm(cwd, { recursive: true, force: true });
 
 console.log("test_policy passed!");

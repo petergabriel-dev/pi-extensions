@@ -4,6 +4,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DOCS_DIR, type DocsAreaTag } from "./constants.js";
+import { suggestDesignDrift } from "./design-drift.js";
 import { isWriteAllowed, getModeLabel } from "./mode.js";
 import { shouldShowReminder, getChangedFilesSummary } from "./tracking.js";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
@@ -15,6 +16,7 @@ export interface PatchSuggestion {
 	targetDocs: { area: DocsAreaTag; file: string; reason: string }[];
 	changedFiles: string[];
 	evidence: string;
+	designActions: string[];
 }
 
 // Map file path patterns to docs areas
@@ -34,7 +36,7 @@ const PATH_AREA_MAP: [RegExp, DocsAreaTag[]][] = [
 	[/\.env$/i, []], // Never suggest docs for .env files (secrets)
 ];
 
-export function suggestPatches(changedFiles: string[], cwd: string): PatchSuggestion {
+export async function suggestPatches(changedFiles: string[], cwd: string): Promise<PatchSuggestion> {
 	const targetDocs: { area: DocsAreaTag; file: string; reason: string }[] = [];
 	const seen = new Set<string>();
 
@@ -73,6 +75,8 @@ export function suggestPatches(changedFiles: string[], cwd: string): PatchSugges
 		reason: d.reasons.join("; "),
 	}));
 
+	const designActions = await suggestDesignDrift(changedFiles, cwd);
+
 	const evidence = changedFiles.length <= 10
 		? changedFiles.join("\n")
 		: changedFiles.slice(0, 10).join("\n") + `\n...and ${changedFiles.length - 10} more`;
@@ -81,6 +85,7 @@ export function suggestPatches(changedFiles: string[], cwd: string): PatchSugges
 		targetDocs: dedupedDocs,
 		changedFiles,
 		evidence,
+		designActions,
 	};
 }
 
@@ -117,9 +122,10 @@ export async function showPatchPreview(
 		return "patch-apply";
 	}
 
-	const docsLines = suggestion.targetDocs.map(d =>
-		`  ${d.area}: ${d.reason}`
-	);
+	const docsLines = [
+		...suggestion.targetDocs.map(d => `  ${d.area}: ${d.reason}`),
+		...suggestion.designActions.map(action => `  Design: ${action}`),
+	];
 
 	const items: SelectItem[] = [
 		{ value: "generate", label: "Generate docs patch", description: "Ask agent to update docs based on changes" },
@@ -198,10 +204,14 @@ export async function handlePatch(pi: ExtensionAPI, ctx: ExtensionCommandContext
 		return;
 	}
 
-	const suggestion = suggestPatches(changedFiles, ctx.cwd);
+	const suggestion = await suggestPatches(changedFiles, ctx.cwd);
 
-	if (suggestion.targetDocs.length === 0) {
+	if (suggestion.targetDocs.length === 0 && suggestion.designActions.length === 0) {
 		ctx.ui.notify(`Changed ${changedFiles.length} file(s) but no docs updates suggested.`, "info");
+		return;
+	}
+	if (suggestion.targetDocs.length === 0) {
+		ctx.ui.notify(suggestion.designActions.join("\n"), "info");
 		return;
 	}
 

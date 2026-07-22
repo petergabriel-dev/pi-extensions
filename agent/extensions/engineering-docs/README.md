@@ -13,7 +13,8 @@ This extension creates and maintains `docs/engineering/` as a project knowledge 
 - **Root spokes** — generated `AGENTS.md` and `CLAUDE.md` pointers to canonical docs
 - **Patch suggestions** — detect code changes that may need docs updates
 - **Workflow-mode gates** — block docs writes in Discuss/Plan mode
-- **Tag validation** — validate `[DOCS:*]` and `[ADR:*]` task tags
+- **Tag validation** — validate `[DOCS:*]` and `[ADR:*]` task tags, including `[DOCS:design]`
+- **Design docs** — scaffold `docs/design/`, generate token reference, and check preview token usage
 
 ## Commands
 
@@ -38,6 +39,14 @@ Create `docs/engineering/` skeleton with manifest and root spokes (`AGENTS.md`, 
 | `--check` | Validation only: no writes, exit nonzero if broken |
 
 Existing curated files are never overwritten. Root spokes use a managed marker block, preserving all content outside that block.
+
+### `/docs init --design`
+
+Create missing `docs/design/` manifest, README, component spec template, and preview shell. Design mode, Build, and Off may write this surface; reruns never overwrite curated files.
+
+### `/docs update-tokens`
+
+Generate deterministic `docs/design/tokens.md` from manifest-declared token CSS. Blocked outside Design/Build/Off mode.
 
 ### `/docs check`
 
@@ -120,6 +129,7 @@ When implementation changes project truth, Plan mode should include a docs task 
 | `[DOCS:invariants]` | Must-not-break rules added or changed |
 | `[DOCS:traps]` | New gotchas, pitfalls, or issues discovered |
 | `[DOCS:decisions]` | High-impact decision recorded |
+| `[DOCS:design]` | Design-system tokens, specs, or preview changed |
 
 ### ADR Tags
 

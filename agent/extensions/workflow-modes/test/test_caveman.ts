@@ -14,6 +14,7 @@ const prompts: WorkflowPromptSet = {
 	plan: "PLAN",
 	build: "BUILD",
 	review: "REVIEW",
+	design: "DESIGN",
 };
 const state = (enabled: unknown) => ({ type: "custom", customType: CAVEMAN_ENTRY, data: { enabled } });
 
@@ -25,14 +26,14 @@ assert.equal(resolveCavemanEnabled([state(true), state(false)]), false, "explici
 assert.equal(resolveCavemanEnabled([state(false), state("on")]), false, "invalid entries must not override state");
 assert.equal(resolveCavemanEnabled([{ type: "custom", customType: "other", data: { enabled: false } }]), true);
 
-for (const mode of ["discuss", "plan", "build", "review"] as const) {
+for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 	const composed = composeWorkflowPrompt(mode, true, prompts);
 	assert.ok(composed?.startsWith(prompts[mode]), `${mode} workflow prompt must come first`);
 	assert.ok(composed?.includes(CAVEMAN_PROMPT), `${mode} must include Caveman while enabled`);
 	assert.ok(!composed?.includes(NORMAL_MODE_PROMPT), `${mode} must not include normal override while enabled`);
 }
 
-const disabled = composeWorkflowPrompt("plan", false, prompts);
+const disabled = composeWorkflowPrompt("design", false, prompts);
 assert.ok(disabled?.includes(NORMAL_MODE_PROMPT), "active workflow mode must include normal override while disabled");
 assert.ok(!disabled?.includes(CAVEMAN_PROMPT), "disabled workflow mode must omit Caveman prompt");
 
