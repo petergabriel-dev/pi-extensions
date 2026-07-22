@@ -35,6 +35,7 @@ const publishedFiles = [
   "agent/extensions/subagents/*.ts",
   "agent/extensions/workflow-modes/*.ts",
   "agent/extensions/workflow-modes/plan-template.md",
+  "agent/extensions/workflow-modes/README.md",
   "agent/agents/*.md",
   "agent/skills/**/*.md",
   "docs/engineering/**",

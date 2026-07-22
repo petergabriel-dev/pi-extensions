@@ -22,6 +22,9 @@ assert.equal(bare.length, 1);
 assert.equal(bare[0]?.valid, false);
 assert.match(bare[0]?.error ?? "", /Bare \[DOCS\]/);
 
+const designDocs = validatePlanDocsTags("[DOCS:design]");
+assert.equal(designDocs[0]?.valid, true);
+
 const unknownDocs = validatePlanDocsTags("[DOCS:operations]");
 assert.equal(unknownDocs[0]?.valid, false);
 assert.match(unknownDocs[0]?.error ?? "", /Unknown docs area: operations/);

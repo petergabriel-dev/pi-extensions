@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "npx --yes tsx test/test_tags.ts && npx --yes tsx test/test_spokes.ts && npx --yes tsx test/test_design.ts && npx --yes tsx test/test_mode.ts"
+    "test": "npx --yes tsx test/test_tags.ts && npx --yes tsx test/test_spokes.ts && npx --yes tsx test/test_design.ts && npx --yes tsx test/test_mode.ts && npx --yes tsx test/test_patch.ts"
   },
   "pi": {
     "extensions": ["./index.ts"]

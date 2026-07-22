@@ -33,6 +33,7 @@ const isAllowed = (file) =>
   file === "agent/extensions/engineering-docs/README.md" ||
   file === "agent/extensions/filechanges/README.md" ||
   file === "agent/extensions/workflow-modes/plan-template.md" ||
+  file === "agent/extensions/workflow-modes/README.md" ||
   /^agent\/agents\/[^/]+\.md$/.test(file) ||
   /^agent\/skills\/.*\.md$/.test(file) ||
   file.startsWith("docs/engineering/");

@@ -72,6 +72,7 @@ export const DOCS_AREA_TAGS = [
 	"invariants",
 	"traps",
 	"decisions",
+	"design",
 ] as const;
 
 export type DocsAreaTag = (typeof DOCS_AREA_TAGS)[number];
@@ -97,4 +98,5 @@ export const IGNORE_PATTERNS = [
 	/\.map$/,
 	/\.d\.ts$/,
 	/\/docs\/engineering\//,  // Don't remind about docs changes themselves
+	/\/docs\/design\//,       // Don't remind about design docs changes themselves
 ] as const;
