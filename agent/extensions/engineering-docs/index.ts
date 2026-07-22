@@ -8,7 +8,8 @@ import {
 	ENTRY_DOCS_STATE,
 	DOCS_AREA_TAGS,
 } from "./constants.js";
-import { getMode, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
+import { getMode, isDesignWriteAllowed, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
+import { DESIGN_DIR } from "./design.js";
 import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
@@ -415,17 +416,24 @@ export default function (pi: ExtensionAPI) {
 		return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
 	});
 
-	// Block docs write tools in Discuss/Plan mode
+	// Gate managed docs roots independently: engineering docs require Build/Off;
+	// design docs also allow Design mode.
 	pi.on("tool_call", async (event) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
-		const path = String((event.input as { path?: unknown })?.path ?? "");
-		// Only block writes to docs/engineering/
-		if (!path.includes(DOCS_DIR)) return;
-		if (isWriteAllowed()) return;
-		return {
-			block: true,
-			reason: `Write to ${DOCS_DIR} is blocked in ${getModeLabel()} mode. Use /mode build or /mode off to enable docs writes.`,
-		};
+		const path = String((event.input as { path?: unknown })?.path ?? "").replaceAll("\\", "/");
+		const inRoot = (root: string) => path === root || path.startsWith(`${root}/`) || path.endsWith(`/${root}`) || path.includes(`/${root}/`);
+		if (inRoot(DOCS_DIR) && !isWriteAllowed()) {
+			return {
+				block: true,
+				reason: `Write to ${DOCS_DIR} is blocked in ${getModeLabel()} mode. Use /mode build or /mode off to enable docs writes.`,
+			};
+		}
+		if (inRoot(DESIGN_DIR) && !isDesignWriteAllowed()) {
+			return {
+				block: true,
+				reason: `Write to ${DESIGN_DIR} is blocked in ${getModeLabel()} mode. Use /mode design, /mode build, or /mode off to enable design docs writes.`,
+			};
+		}
 	});
 
 	// ── /docs command ──

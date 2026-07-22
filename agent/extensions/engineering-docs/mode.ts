@@ -15,11 +15,12 @@ export function getMode(): WorkflowMode {
 	return currentWorkflowState.mode;
 }
 
-export function isWriteAllowed(): boolean {
-	const mode = currentWorkflowState.mode;
-	// If we never received workflow state, fail closed: no writes
-	if (!hasReceivedState) return false;
+export function isWriteAllowed(mode: WorkflowMode | undefined = hasReceivedState ? currentWorkflowState.mode : undefined): boolean {
 	return mode === "build" || mode === "off";
+}
+
+export function isDesignWriteAllowed(mode: WorkflowMode | undefined = hasReceivedState ? currentWorkflowState.mode : undefined): boolean {
+	return mode === "design" || mode === "build" || mode === "off";
 }
 
 export function getModeLabel(): string {
@@ -30,6 +31,7 @@ export function getModeLabel(): string {
 		plan: "Plan",
 		build: "Build",
 		review: "Review",
+		design: "Design",
 	};
 	return labels[currentWorkflowState.mode] ?? "Unknown";
 }
