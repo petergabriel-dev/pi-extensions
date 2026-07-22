@@ -44,6 +44,15 @@ assert.deepEqual(parsed.tokens, [
 	{ name: "--color-text", value: "var(--color-blue)", layer: "semantic", theme: "light" },
 	{ name: "--color-text", value: "#fff", layer: "semantic", theme: "dark" },
 ]);
+const darkClassParsed = parseCssTokens(`
+/* @semantic */
+.dark { --color-text: #111; }
+.dark-header { --ignored: red; }
+.darkmode { --also-ignored: red; }
+`);
+assert.deepEqual(darkClassParsed.tokens, [
+	{ name: "--color-text", value: "#111", layer: "semantic", theme: "dark" },
+]);
 assert.equal(parseCssTokens(":root { --unmarked: red; }").warnings.length, 1);
 assert.match(parseCssTokens("/* @primitive */ :root { --bad: red;").warnings[0] ?? "", /Unclosed/);
 assert.match(parseCssTokens("x".repeat(MAX_TOKEN_FILE_BYTES + 1)).warnings[0] ?? "", /exceeds/);

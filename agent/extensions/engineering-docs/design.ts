@@ -91,7 +91,7 @@ export function parseCssTokens(css: string): TokenParseResult {
 	}
 
 	const tokens: DesignToken[] = [];
-	const blocks = /:root|\[data-theme\s*=\s*["']dark["']\s*\]/g;
+	const blocks = /:root|\[data-theme\s*=\s*["']dark["']\s*\]|\.dark(?![\w-])/g;
 	for (let match = blocks.exec(css); match; match = blocks.exec(css)) {
 		const theme: DesignToken["theme"] = match[0] === ":root" ? "light" : "dark";
 		const open = css.indexOf("{", match.index + match[0].length);
