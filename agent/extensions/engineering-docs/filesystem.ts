@@ -276,7 +276,7 @@ const DESIGN_README_CONTENT = `# Design System
 
 ## Principles
 
-Tokens before components. Use primitive values through semantic aliases. Component specs constrain implementation; component code belongs in Build mode.
+Tokens before components. Use primitive values through semantic aliases. Component specs constrain implementation; component code belongs in Build mode. Previews are single-column, vertically stacked, and responsive-ready — no grid galleries.
 
 ## Token CSS convention
 
@@ -311,6 +311,10 @@ const COMPONENT_TEMPLATE_CONTENT = `# Component name
 
 Describe keyboard behavior, semantics, labels, focus, and contrast. This section is required.
 
+## Responsive
+
+Describe breakpoint behavior, fluid sizing, and touch targets. This section is required.
+
 ## Usage
 
 ## Preview
@@ -329,6 +333,7 @@ const PREVIEW_INDEX_CONTENT = `<!doctype html>
 <body>
   <header><h1>Design system gallery</h1></header>
   <main>
+    <!-- Single-column vertical layout: stack sections; do not use grid galleries. -->
     <nav aria-label="Preview examples"><a href="example.html">Example screen</a></nav>
   </main>
 </body>
