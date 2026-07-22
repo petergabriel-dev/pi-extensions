@@ -1,8 +1,11 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
+import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { resolveSavedPlanState } from "./plan-state.js";
@@ -352,8 +355,13 @@ Required post-task report format:
 - On failure/block: Task blocked, Reason, Verification, Commit status, Next action needed, then ask how to proceed.
 `;
 
-export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string): string | undefined {
-	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT, review: REVIEW_PROMPT, design: DESIGN_PROMPT }, savedPlan);
+export const BUILD_DESIGN_AWARE_PROMPT = `Consult docs/design/components/ specs before creating or modifying frontend components. Compose from documented components first. Documented means filled Purpose, Props/API, and Accessibility sections; template stubs do not count. If a genuinely new component has no documented spec, do not invent it silently: state spec is missing, suggest /mode design, proceed only with explicit user approval. Implementations follow spec Responsive section: mobile-first, no fixed widths.`;
+
+export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string, cwd?: string): string | undefined {
+	const buildPrompt = mode === "build" && cwd && existsSync(resolve(cwd, DESIGN_DIR, DESIGN_MANIFEST_FILE))
+		? `${BUILD_PROMPT}\n\n${BUILD_DESIGN_AWARE_PROMPT}`
+		: BUILD_PROMPT;
+	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: buildPrompt, review: REVIEW_PROMPT, design: DESIGN_PROMPT }, savedPlan);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -400,7 +408,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan);
+		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan, process.cwd());
 		if (!extra) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${extra}` };
 	});

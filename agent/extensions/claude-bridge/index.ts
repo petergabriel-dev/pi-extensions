@@ -427,13 +427,13 @@ function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: s
 	return docs;
 }
 
-export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boolean): Record<string, unknown> {
+export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boolean, cwd: string): Record<string, unknown> {
 	return {
 		mode: mode ?? "plan",
 		cavemanEnabled,
 		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
 		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
-		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled),
+		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled, undefined, cwd),
 		designPrompt: composeWorkflowPrompt("design", cavemanEnabled),
 		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
@@ -623,7 +623,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 				blocks: memoryBlocks,
 			},
 			docs: readEngineeringDocs(projectRoot),
-			prompts: promptContextForMode(payload.mode, cavemanEnabled),
+			prompts: promptContextForMode(payload.mode, cavemanEnabled, projectRoot),
 			savedPlan,
 		},
 	};
