@@ -128,13 +128,13 @@ Only one fresh bridge session processes a project. Another watcher becomes passi
 
 `workflow-modes` reconstructs three branch-local contracts from selected session ancestry:
 
-- `workflow-mode-set` selects Off, Discuss, Plan, Build, or Review.
+- `workflow-mode-set` selects Off, Discuss, Plan, Build, Review, or Design.
 - `workflow-plan` stores set/clear events for one saved plan.
 - `caveman-mode-state` stores Caveman preference; no explicit entry means enabled.
 
-Off injects no workflow/style prompt. Discuss, Plan, Build, and Review compose mode prompt plus Caveman or normal-style override. Plan-template resolution is module-relative.
+Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus Caveman or normal-style override. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
 
-Discuss, Plan, and Review block mutation tools. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
+Discuss, Plan, and Review block mutation tools. Design allows `write`/`edit` only inside `docs/design/**` or manifest-declared token files, failing closed to `docs/design/**` when manifest is missing or invalid. Design Bash reuses Plan's sandboxed read/test policy. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
 
 The extension publishes `workflow-modes:get/state`, `workflow-modes:changed`, and `workflow-modes:save-plan/result` events. Engineering docs consumes state for write gating; subagents queries it before worker spawn; bridge uses it for recall and plan save.
 
@@ -184,10 +184,11 @@ Subagents run as persisted in-process child `AgentSession`s with a fresh `Sessio
 
 ## Engineering docs
 
-`engineering-docs` manages `docs/engineering/` according to `manifest.json`.
+`engineering-docs` manages `docs/engineering/` according to `manifest.json` and design-system docs under `docs/design/` according to its separate `design-docs` manifest.
 
 - `/docs init` scaffolds missing canonical docs without overwriting existing files.
 - `/docs check` validates manifest, ADRs, decision index, and generated spoke marker blocks; repair writes occur only when mode permits.
+- `/docs init --design` scaffolds non-destructive design docs; `/docs update-tokens` generates deterministic token reference; `/docs check` validates manifest, token freshness, marker usage, and preview `var()` styling.
 - `/docs update-index`, `/docs validate-tags`, and `/docs patch` cover index, plan tags, and change-driven suggestions.
 - `docs_validate_tags` validates `[DOCS:*]` and ADR-action pairing.
 - Write permission is derived from live workflow state and fails closed before state is known; only Build/Off allow docs writes.

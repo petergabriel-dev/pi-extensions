@@ -249,6 +249,10 @@ Inside workspace Pi:
 
 `/docs check --check` is validation-only. `/docs update-index` writes and therefore requires Build/Off. Run index update after ADR changes, then rerun validation.
 
+## Design docs workflow
+
+Use `/mode design` for design-system docs. `/docs init --design` creates missing `docs/design/` files without overwriting curated content. List each token CSS file in `docs/design/manifest.json`, use `/* @primitive */` and `/* @semantic */` sections with `:root` and optional `[data-theme="dark"]`, then run `/docs update-tokens`. `/docs check` reports invalid manifests, stale `tokens.md`, unmarked properties, and preview style literals. Use `/mode build` for component source.
+
 ## CCC indexing
 
 Search tool never initializes project. In Build mode, from repository root:

@@ -58,12 +58,14 @@
 
 - `workflow-modes` is the sole Caveman owner. The standalone `caveman-mode` extension must not exist or register a second `/caveman` command.
 - Caveman preference is selected-session-branch state using the stable `caveman-mode-state` custom entry. No explicit entry means ON; latest valid ancestral entry wins.
-- Discuss, Plan, Build, and Review compose their workflow prompt with Caveman when enabled and the explicit normal-style override when disabled.
+- Discuss, Plan, Build, Review, and Design compose their workflow prompt with Caveman when enabled and the explicit normal-style override when disabled.
 - Off must inject neither Caveman nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
+
+- Design write/edit gates fail closed: missing, unreadable, or invalid design manifest permits only `docs/design/**`; only validated manifest `tokenFiles` may extend this surface. Design never permits `docs/engineering/**` writes.
 
 ## Workflow modes read-only Bash
 
-- Discuss/Plan Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
+- Discuss/Plan/Design Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
 - Discuss/Plan structural Bash must deny network access. All structural read-only Bash must deny writes to the repo and `$HOME` while allowing reads, read-only interpreters, and writes under scratch `TMPDIR`.
 - Scratch paths used in sandbox profiles must be resolved through real paths when they already exist, because macOS `/tmp` paths resolve under `/private/var`.
 - With no sandbox launcher, `wrapCommand()` must return the original command with `wrapped:false`; callers must then apply conservative policy and must not treat this as approval.
@@ -88,6 +90,9 @@
 - Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `hasPartialWork()` in `agent/extensions/subagents/spawn.ts` becomes true once any child tool execution has started.
 
 ## Engineering docs extension
+
+- `docs/design/` writes allow only Design/Build/Off; `docs/engineering/` writes remain Build/Off-only. Unknown mode fails closed for both.
+- Design manifest `tokenFiles` is sole permission to write token files outside `docs/design/` in Design mode.
 
 - Root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) must never overwrite content outside the managed `pi-docs` marker block.
 - Spoke bodies must remain pure pointers to canonical `docs/engineering/` paths; do not add generated project facts or summaries to spokes.
