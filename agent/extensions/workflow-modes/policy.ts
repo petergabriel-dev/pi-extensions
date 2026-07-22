@@ -1,3 +1,5 @@
+import { isDesignSurfacePath, loadDesignManifest } from "../engineering-docs/design.js";
+
 export const READ_COMMANDS = String.raw`pwd|ls|find|rg|grep|cat|head|tail|wc|jq|tree|diff|stat|file|sort|uniq|column`;
 export const READ_GIT_COMMANDS = String.raw`diff|log|show|status|blame`;
 export const READ_SED_AWK = String.raw`sed\s+-n|awk`;
@@ -21,9 +23,13 @@ export const REVIEW_BASH_DENY = /(^|[;&|()]\s*)(curl|wget|nc|ssh|scp)(\s|$)|(^|[
 export const BASH_MUTATION_DENY = /(^|[;&|()]\s*)(rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|tee|cat\s*>|python|python3|node|perl|ruby|sh|bash|zsh|fish|npm\s+(i|install|add|update|audit\s+fix)|pnpm\s+(i|install|add|update)|yarn\s+(add|install|upgrade)|bun\s+(add|install)|pip\s+install|cargo\s+(add|update|install)|go\s+get|git\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash)|find\s+.*-delete|(?:format|fmt|fix|write|migrate|migration)(\s|$))/;
 export const BASH_WRITE_REDIRECT = /(^|[^<])>(?!>?)|>>/;
 
-export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review"): boolean {
+export async function isDesignWriteAllowed(cwd: string, filePath: string): Promise<boolean> {
+	return isDesignSurfacePath(cwd, filePath, await loadDesignManifest(cwd));
+}
+
+export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review" | "design"): boolean {
 	const normalized = command.trim().replace(/\s+/g, " ");
-	const allowed = mode === "discuss" ? DISCUSS_BASH_ALLOW.test(normalized) : mode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : REVIEW_BASH_ALLOW.test(command.trim());
+	const allowed = mode === "discuss" ? DISCUSS_BASH_ALLOW.test(normalized) : mode === "review" ? REVIEW_BASH_ALLOW.test(command.trim()) : PLAN_BASH_ALLOW.test(normalized);
 	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (mode === "review" && REVIEW_BASH_DENY.test(command));
 	return allowed && !denied;
 }

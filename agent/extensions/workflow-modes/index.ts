@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode } from "./policy.js";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -406,9 +406,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event) => {
-		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review") return;
+			if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review" && currentMode !== "design") return;
 
 		if (MUTATION_TOOLS.has(event.toolName)) {
+			if (currentMode === "design") {
+				const filePath = String((event.input as { path?: unknown }).path ?? "");
+				if (filePath && await isDesignWriteAllowed(process.cwd(), filePath)) return;
+				return {
+					block: true,
+					reason: `${event.toolName} is blocked outside design surface (docs/design/** and declared token files). Switch to Build mode with /mode build for implementation changes.`,
+				};
+			}
 			return {
 				block: true,
 				reason: `${event.toolName} is blocked in ${MODE_LABELS[currentMode]} mode. Switch to Build mode with /mode build for implementation changes.`,
@@ -440,12 +448,12 @@ export default function (pi: ExtensionAPI) {
 		const normalized = command.replace(/\s+/g, " ");
 		const allowed = currentMode === "review"
 			? isBashAllowedInMode(normalized, "review")
-			: currentMode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
+			: currentMode === "plan" || currentMode === "design" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
 		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (currentMode === "review" && REVIEW_BASH_DENY.test(normalized));
 		if (!allowed || denied) {
 			return {
 				block: true,
-				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" ? "discovery plus tests/builds/checks" : currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
+				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" || currentMode === "design" ? "discovery plus tests/builds/checks" : currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
 			};
 		}
 	});
