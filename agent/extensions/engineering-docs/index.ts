@@ -10,7 +10,7 @@ import {
 } from "./constants.js";
 import { getMode, isDesignWriteAllowed, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
 import { DESIGN_DIR } from "./design.js";
-import { initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
+import { initDesignDocs, initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
 
@@ -158,8 +158,8 @@ async function docsDashboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 
 // ── Command handlers ──
 
-async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags: { yes?: boolean; check?: boolean } = {}): Promise<void> {
-	const writeOk = isWriteAllowed();
+async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags: { yes?: boolean; check?: boolean; design?: boolean } = {}): Promise<void> {
+	const writeOk = flags.design ? isDesignWriteAllowed() : isWriteAllowed();
 
 	// --check: validation only, no writes
 	if (flags.check) {
@@ -212,12 +212,12 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 	}
 
 	if (!writeOk) {
-		ctx.ui.notify(`Cannot init docs in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
+		ctx.ui.notify(`Cannot init ${flags.design ? "design docs" : "docs"} in ${getModeLabel()} mode. Switch to ${flags.design ? "/mode design, /mode build, or /mode off" : "/mode build or /mode off"}.`, "warning");
 		return;
 	}
 
 	// Interactive: ask before creating if not --yes
-	if (!flags.yes && ctx.hasUI) {
+	if (!flags.design && !flags.yes && ctx.hasUI) {
 		const check = await checkDocs(ctx.cwd);
 		if (check.status === "managed") {
 			ctx.ui.notify("Engineering docs already initialized and managed.", "info");
@@ -232,7 +232,7 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 		}
 	}
 
-	const result = await initDocs(ctx.cwd);
+	const result = flags.design ? await initDesignDocs(ctx.cwd) : await initDocs(ctx.cwd);
 
 	if (result.created.length > 0) {
 		ctx.ui.notify(`Created: ${result.created.join(", ")}`, "success");
@@ -242,7 +242,7 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 	}
 
 	// Store state
-	await Promise.resolve(pi.appendEntry(ENTRY_DOCS_STATE, { action: "init", at: Date.now() }));
+	await Promise.resolve(pi.appendEntry(ENTRY_DOCS_STATE, { action: flags.design ? "init-design" : "init", at: Date.now() }));
 }
 
 async function handleCheck(ctx: ExtensionCommandContext, flags: { check?: boolean } = {}): Promise<void> {
@@ -448,7 +448,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (arg === "init" || arg.startsWith("init ")) {
-				const initFlags = { yes: arg.includes("--yes") || arg.includes("-y"), check: arg.includes("--check") || arg.includes("-c") };
+				const initFlags = { yes: arg.includes("--yes") || arg.includes("-y"), check: arg.includes("--check") || arg.includes("-c"), design: arg.includes("--design") };
 				await handleInit(pi, ctx, initFlags);
 			} else if (arg === "check" || arg === "-c" || arg.startsWith("check ")) {
 				const checkFlags = { check: arg.includes("--check") || arg.includes("-c") };

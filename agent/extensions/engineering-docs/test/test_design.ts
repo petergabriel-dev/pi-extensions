@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { initDesignDocs } from "../filesystem.ts";
 import {
 	DESIGN_DIR,
 	MAX_TOKEN_FILE_BYTES,
@@ -47,5 +48,23 @@ assert.equal(parseCssTokens(":root { --unmarked: red; }").warnings.length, 1);
 assert.match(parseCssTokens("/* @primitive */ :root { --bad: red;").warnings[0] ?? "", /Unclosed/);
 assert.match(parseCssTokens("x".repeat(MAX_TOKEN_FILE_BYTES + 1)).warnings[0] ?? "", /exceeds/);
 
+const scaffoldRoot = await mkdtemp(join(tmpdir(), "design-scaffold-"));
+const firstScaffold = await initDesignDocs(scaffoldRoot);
+assert.deepEqual(firstScaffold.created, [
+	"docs/design/manifest.json",
+	"docs/design/README.md",
+	"docs/design/components/TEMPLATE.md",
+	"docs/design/preview/index.html",
+	"docs/design/preview/example.html",
+]);
+await writeFile(join(scaffoldRoot, "docs/design/components/TEMPLATE.md"), "# Curated button\n");
+const beforeRerun = await Promise.all(firstScaffold.created.map(file => readFile(join(scaffoldRoot, file), "utf8")));
+const secondScaffold = await initDesignDocs(scaffoldRoot);
+const afterRerun = await Promise.all(firstScaffold.created.map(file => readFile(join(scaffoldRoot, file), "utf8")));
+assert.deepEqual(afterRerun, beforeRerun, "design scaffold rerun is byte-identical");
+assert.equal(secondScaffold.created.length, 0);
+assert.equal(await readFile(join(scaffoldRoot, "docs/design/components/TEMPLATE.md"), "utf8"), "# Curated button\n", "curated file remains untouched");
+
 await rm(cwd, { recursive: true, force: true });
+await rm(scaffoldRoot, { recursive: true, force: true });
 console.log("design assertions passed");

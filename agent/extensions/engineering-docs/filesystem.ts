@@ -2,6 +2,7 @@
 
 import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { join, resolve, relative } from "node:path";
+import { DESIGN_DIR, DESIGN_MANIFEST_FILE, DESIGN_MANIFEST_KIND, DESIGN_MANIFEST_VERSION } from "./design.js";
 import {
 	DOCS_DIR,
 	MANIFEST_FILE,
@@ -125,6 +126,11 @@ export interface InitResult {
 	created: string[];
 	skipped: string[];
 	manifest: DocsManifest;
+}
+
+export interface DesignInitResult {
+	created: string[];
+	skipped: string[];
 }
 
 export function generateSpokeBody(): string {
@@ -257,6 +263,116 @@ export async function initDocs(cwd: string): Promise<InitResult> {
 	created.push(relative(cwd, manifestPath(cwd)));
 
 	return { created, skipped, manifest };
+}
+
+const DESIGN_README_CONTENT = `# Design System
+
+## Index
+
+- [Tokens](tokens.md)
+- [Components](components/)
+- [Preview gallery](preview/index.html)
+
+## Principles
+
+Tokens before components. Use primitive values through semantic aliases. Component specs constrain implementation; component code belongs in Build mode.
+
+## Token CSS convention
+
+Declare custom properties only inside marked sections and supported theme roots:
+
+\`\`\`css
+/* @primitive */
+:root { --color-blue-500: #2563eb; }
+/* @semantic */
+:root { --color-action: var(--color-blue-500); }
+[data-theme="dark"] { --color-action: var(--color-blue-500); }
+\`\`\`
+
+Add each token CSS path to \`manifest.json\` before editing it. Preview HTML must use \`var(--*)\` values only.
+`;
+
+const COMPONENT_TEMPLATE_CONTENT = `# Component name
+
+## Purpose
+
+## Anatomy
+
+## Variants
+
+## Sizes
+
+## States
+
+## Props/API
+
+## Accessibility
+
+Describe keyboard behavior, semantics, labels, focus, and contrast. This section is required.
+
+## Usage
+
+## Preview
+
+[Open preview](../preview/index.html)
+`;
+
+const PREVIEW_INDEX_CONTENT = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Design system gallery</title>
+  <!-- Add stylesheet links for tokenFiles declared in ../manifest.json. -->
+</head>
+<body>
+  <header><h1>Design system gallery</h1></header>
+  <main>
+    <nav aria-label="Preview examples"><a href="example.html">Example screen</a></nav>
+  </main>
+</body>
+</html>
+`;
+
+const PREVIEW_EXAMPLE_CONTENT = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Example design screen</title>
+</head>
+<body>
+  <main>
+    <h1>Example screen</h1>
+    <p>Compose approved components here after tokens and specs exist.</p>
+  </main>
+</body>
+</html>
+`;
+
+export async function initDesignDocs(cwd: string): Promise<DesignInitResult> {
+	const created: string[] = [];
+	const skipped: string[] = [];
+	const files = new Map<string, string>([
+		[join(DESIGN_DIR, DESIGN_MANIFEST_FILE), `${JSON.stringify({ version: DESIGN_MANIFEST_VERSION, kind: DESIGN_MANIFEST_KIND, tokenFiles: [] }, null, 2)}\n`],
+		[join(DESIGN_DIR, "README.md"), DESIGN_README_CONTENT],
+		[join(DESIGN_DIR, "components", "TEMPLATE.md"), COMPONENT_TEMPLATE_CONTENT],
+		[join(DESIGN_DIR, "preview", "index.html"), PREVIEW_INDEX_CONTENT],
+		[join(DESIGN_DIR, "preview", "example.html"), PREVIEW_EXAMPLE_CONTENT],
+	]);
+	for (const [file, content] of files) {
+		const path = join(cwd, file);
+		try {
+			await stat(path);
+			skipped.push(file);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			await mkdir(resolve(path, ".."), { recursive: true });
+			await writeFile(path, content, "utf8");
+			created.push(file);
+		}
+	}
+	return { created, skipped };
 }
 
 // ── Docs check/status ──
