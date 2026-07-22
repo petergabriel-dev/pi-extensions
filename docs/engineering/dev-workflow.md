@@ -13,7 +13,7 @@ pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-The exact `@0.2.0` source is pinned. Upgrade a pinned install with `pi install npm:@lopezpetergabriel/pi-extensions@NEW_VERSION`; `pi update npm:@lopezpetergabriel/pi-extensions` updates an unpinned source.
+Install commands pin the exact `@0.2.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 The package provides nine extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Inspect `pi list` and `pi config` for existing raw/global copies before loading; duplicates can register the same extension twice.
 
