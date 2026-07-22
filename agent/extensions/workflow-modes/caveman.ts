@@ -1,4 +1,4 @@
-export type CavemanWorkflowMode = "off" | "discuss" | "plan" | "build" | "review";
+export type CavemanWorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 
 export const CAVEMAN_ENTRY = "caveman-mode-state";
 
@@ -48,6 +48,7 @@ export interface WorkflowPromptSet {
 	plan: string;
 	build: string;
 	review: string;
+	design: string;
 }
 
 export function resolveCavemanEnabled(branch: readonly unknown[]): boolean {

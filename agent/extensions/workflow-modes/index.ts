@@ -8,7 +8,7 @@ import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
-export type Mode = "off" | "discuss" | "plan" | "build" | "review";
+export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 export type PlanEvent = "set" | "clear";
 
 export const MODE_ENTRY = "workflow-mode-set";
@@ -37,6 +37,7 @@ const MODE_LABELS: Record<Mode, string> = {
 	plan: "Plan",
 	build: "Build",
 	review: "Review",
+	design: "Design",
 };
 
 let currentMode: Mode = "off";
@@ -53,6 +54,7 @@ function normalizeMode(raw: string): Mode | undefined {
 	if (value === "plan" || value === "planning") return "plan";
 	if (value === "build" || value === "building") return "build";
 	if (value === "review" || value === "reviewing") return "review";
+	if (value === "design" || value === "designing") return "design";
 	return undefined;
 }
 
@@ -155,10 +157,10 @@ async function selectOverlay(ctx: ExtensionCommandContext, title: string, items:
 
 async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify("Use /mode <off|discuss|plan|build|review>.", "warning");
+		ctx.ui.notify("Use /mode <off|discuss|plan|build|review|design>.", "warning");
 		return;
 	}
-	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review"] as Mode[]).map((mode) => ({
+	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review", "design"] as Mode[]).map((mode) => ({
 		value: mode,
 		label: `${MODE_LABELS[mode]}${mode === currentMode ? " (current)" : ""}`,
 		description:
@@ -170,7 +172,9 @@ async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 						? "Grill implementation plan; read/search only"
 						: mode === "review"
 							? "Review changes; read-only"
-						: "Build with normal tools",
+							: mode === "design"
+								? "Design tokens and component specs"
+								: "Build with normal tools",
 	}));
 	const choice = await selectOverlay(ctx, "Select Workflow Mode", items);
 	if (choice) await setMode(pi, ctx, choice as Mode);
@@ -271,6 +275,8 @@ export const PLAN_PROMPT = `Workflow mode: Plan. Behave like a relentless implem
 
 export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Never auto-post a review: ask for explicit user confirmation immediately before publishing. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
+export const DESIGN_PROMPT = `Workflow mode: Design. Design-system work only. Write only under docs/design/ and declared token files; never app/component source or docs/engineering/. Start tokens before components. Use /* @primitive */ and /* @semantic */ layers in token CSS. Build roughly ten foundation component specs, curated enough to constrain later implementation. Never hard-code values: use token variables. Accessibility is non-negotiable. Design surface only; suggest /mode build for component code.`;
+
 export const BUILD_PROMPT = `Workflow mode: Build. Implement requested changes using the available tools.
 
 Ponytail lazy-senior-dev mode. Before writing code, evaluate in order: 1) Is it necessary (YAGNI)? 2) Standard-library solution — use it. 3) Native platform feature — use it. 4) Existing dependency — use it. 5) Single-line solution — implement it. 6) Only then write minimal working code.
@@ -347,7 +353,7 @@ Required post-task report format:
 `;
 
 export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: string): string | undefined {
-	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT, review: REVIEW_PROMPT }, savedPlan);
+	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: BUILD_PROMPT, review: REVIEW_PROMPT, design: DESIGN_PROMPT }, savedPlan);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -459,12 +465,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mode", {
-		description: "Select workflow mode: Off, Discuss, Plan, Build, or Review",
+		description: "Select workflow mode: Off, Discuss, Plan, Build, Review, or Design",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) return chooseMode(pi, ctx);
 			const mode = normalizeMode(arg);
-			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, or review.", "warning");
+			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, review, or design.", "warning");
 			await setMode(pi, ctx, mode);
 		},
 	});
