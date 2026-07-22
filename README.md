@@ -13,18 +13,18 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 
 ## Install
 
-Public package `@lopezpetergabriel/pi-extensions@0.1.0` ships nine extensions, three skills, and two package-owned bundled agent definitions.
+Public package `@lopezpetergabriel/pi-extensions@0.2.0` ships nine extensions, three skills, and two package-owned bundled agent definitions.
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.1.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.1.0   # install for this project
-pi -e npm:@lopezpetergabriel/pi-extensions@0.1.0   # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.2.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.0   # install for this project
+pi -e npm:@lopezpetergabriel/pi-extensions@0.2.0   # temporary try
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-The exact `@0.1.0` source is pinned. Upgrade a pinned install with `pi install npm:@lopezpetergabriel/pi-extensions@NEW_VERSION`; `pi update npm:@lopezpetergabriel/pi-extensions` updates an unpinned source.
+The exact `@0.2.0` source is pinned. Upgrade a pinned install with `pi install npm:@lopezpetergabriel/pi-extensions@NEW_VERSION`; `pi update npm:@lopezpetergabriel/pi-extensions` updates an unpinned source.
 
 `ccc` remains an external prerequisite for `ccc_search` (`ccc --version`). Existing raw or global copies can double-load; inspect `pi list` and `pi config`, then remove or disable duplicates.
 
