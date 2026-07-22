@@ -10,7 +10,7 @@ import {
 } from "./constants.js";
 import { getMode, isDesignWriteAllowed, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
 import { DESIGN_DIR } from "./design.js";
-import { initDesignDocs, initDocs, checkDocs, updateDecisionIndex, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
+import { checkDesignDocs, designManifestExists, initDesignDocs, initDocs, checkDocs, updateDecisionIndex, updateDesignTokens, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
 
@@ -248,6 +248,7 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 async function handleCheck(ctx: ExtensionCommandContext, flags: { check?: boolean } = {}): Promise<void> {
 	const repairSpokes = isWriteAllowed() && !flags.check;
 	const check = await enhancedCheckDocs(ctx.cwd, undefined, { repairSpokes });
+	const designCheck = await designManifestExists(ctx.cwd) ? await checkDesignDocs(ctx.cwd) : undefined;
 	const brokenSpokes = check.spokes.filter((spoke) => !spoke.healthy);
 	const lines: string[] = [
 		`Status: ${check.status}`,
@@ -258,6 +259,11 @@ async function handleCheck(ctx: ExtensionCommandContext, flags: { check?: boolea
 		`Decision index: ${check.staleIndex ? "STALE — run update-index" : "up to date"}`,
 		`Spokes: ${brokenSpokes.length === 0 ? "OK" : `${brokenSpokes.length} issue(s)`}`,
 	];
+
+	if (designCheck) {
+		lines.push(`Design tokens: ${designCheck.tokensStale ? "STALE — run update-tokens" : "up to date"}`);
+		for (const issue of [...designCheck.errors, ...designCheck.warnings, ...designCheck.previewViolations]) lines.push(`  Design: ${issue}`);
+	}
 
 	if (check.spokesRepaired.length > 0) {
 		lines.push(`Spokes repaired: ${check.spokesRepaired.join(", ")}`);
@@ -344,6 +350,19 @@ async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
 			},
 		};
 	}, { overlay: true, overlayOptions: { width: "60%", minWidth: 42, maxHeight: "70%", margin: 2, anchor: "center" } });
+}
+
+async function handleUpdateTokens(ctx: ExtensionCommandContext): Promise<void> {
+	if (!isDesignWriteAllowed()) {
+		ctx.ui.notify(`Cannot update tokens in ${getModeLabel()} mode. Switch to /mode design, /mode build, or /mode off.`, "warning");
+		return;
+	}
+	try {
+		const result = await updateDesignTokens(ctx.cwd);
+		ctx.ui.notify(`Updated ${result.path}${result.warnings.length ? ` with ${result.warnings.length} warning(s)` : ""}.`, "success");
+	} catch (error) {
+		ctx.ui.notify(`Failed to update tokens: ${error instanceof Error ? error.message : String(error)}`, "error");
+	}
 }
 
 async function handleUpdateIndex(ctx: ExtensionCommandContext): Promise<void> {
@@ -459,6 +478,8 @@ export default function (pi: ExtensionAPI) {
 				await handleValidateTags(ctx);
 			} else if (arg === "patch") {
 				await handlePatch(pi, ctx);
+			} else if (arg === "update-tokens" || arg.startsWith("update-tokens ")) {
+				await handleUpdateTokens(ctx);
 			} else if (arg === "update-index" || arg.startsWith("update-decision-index")) {
 				await handleUpdateIndex(ctx);
 			} else {

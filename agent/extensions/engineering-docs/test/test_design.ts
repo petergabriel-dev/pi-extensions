@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initDesignDocs } from "../filesystem.ts";
+import { checkDesignDocs, initDesignDocs, updateDesignTokens } from "../filesystem.ts";
 import {
 	DESIGN_DIR,
 	MAX_TOKEN_FILE_BYTES,
@@ -64,6 +64,19 @@ const afterRerun = await Promise.all(firstScaffold.created.map(file => readFile(
 assert.deepEqual(afterRerun, beforeRerun, "design scaffold rerun is byte-identical");
 assert.equal(secondScaffold.created.length, 0);
 assert.equal(await readFile(join(scaffoldRoot, "docs/design/components/TEMPLATE.md"), "utf8"), "# Curated button\n", "curated file remains untouched");
+await mkdir(join(scaffoldRoot, "src"), { recursive: true });
+await writeFile(join(scaffoldRoot, "src/tokens.css"), `/* @primitive */\n:root { --blue: #00f; }\n/* @semantic */\n:root { --action: var(--blue); }\n[data-theme="dark"] { --action: var(--blue); }\n`);
+await writeFile(join(scaffoldRoot, "docs/design/manifest.json"), '{"version":1,"kind":"design-docs","tokenFiles":["src/tokens.css"]}\n');
+await updateDesignTokens(scaffoldRoot);
+const generated = await readFile(join(scaffoldRoot, "docs/design/tokens.md"), "utf8");
+assert.match(generated, /\| --action \| var\(--blue\) \| var\(--blue\) \|/);
+assert.equal((await checkDesignDocs(scaffoldRoot)).tokensStale, false, "fresh token reference passes");
+await writeFile(join(scaffoldRoot, "src/tokens.css"), "/* @primitive */\n:root { --blue: #0ff; }\n");
+assert.equal((await checkDesignDocs(scaffoldRoot)).tokensStale, true, "token edits mark reference stale");
+await writeFile(join(scaffoldRoot, "docs/design/preview/example.html"), '<style>.bad { color: #fff; margin: 8px; }</style>');
+assert.equal((await checkDesignDocs(scaffoldRoot)).previewViolations.length, 1, "preview lint flags literal values");
+await writeFile(join(scaffoldRoot, "docs/design/preview/example.html"), '<style>.ok { color: var(--action); }</style>');
+assert.equal((await checkDesignDocs(scaffoldRoot)).previewViolations.length, 0, "preview lint accepts var-only values");
 
 await rm(cwd, { recursive: true, force: true });
 await rm(scaffoldRoot, { recursive: true, force: true });

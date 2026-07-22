@@ -1,8 +1,9 @@
 // Filesystem utilities for docs/engineering/ management
 
+import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { join, resolve, relative } from "node:path";
-import { DESIGN_DIR, DESIGN_MANIFEST_FILE, DESIGN_MANIFEST_KIND, DESIGN_MANIFEST_VERSION } from "./design.js";
+import { DESIGN_DIR, DESIGN_MANIFEST_FILE, DESIGN_MANIFEST_KIND, DESIGN_MANIFEST_VERSION, loadDesignManifest, parseCssTokens, type DesignManifest, type DesignToken } from "./design.js";
 import {
 	DOCS_DIR,
 	MANIFEST_FILE,
@@ -350,6 +351,15 @@ const PREVIEW_EXAMPLE_CONTENT = `<!doctype html>
 </html>
 `;
 
+export async function designManifestExists(cwd: string): Promise<boolean> {
+	try {
+		await stat(join(cwd, DESIGN_DIR, DESIGN_MANIFEST_FILE));
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export async function initDesignDocs(cwd: string): Promise<DesignInitResult> {
 	const created: string[] = [];
 	const skipped: string[] = [];
@@ -373,6 +383,84 @@ export async function initDesignDocs(cwd: string): Promise<DesignInitResult> {
 		}
 	}
 	return { created, skipped };
+}
+
+export interface DesignCheckResult {
+	manifest: DesignManifest | null;
+	errors: string[];
+	warnings: string[];
+	tokensStale: boolean;
+	previewViolations: string[];
+}
+
+async function readDesignTokenFiles(cwd: string, manifest: DesignManifest): Promise<{ sources: Array<{ path: string; content: string }>; errors: string[] }> {
+	const sources: Array<{ path: string; content: string }> = [];
+	const errors: string[] = [];
+	for (const file of manifest.tokenFiles) {
+		try {
+			sources.push({ path: file, content: await readFile(join(cwd, file), "utf8") });
+		} catch {
+			errors.push(`Token file unreadable: ${file}`);
+		}
+	}
+	return { sources, errors };
+}
+
+function tokenHash(sources: Array<{ path: string; content: string }>): string {
+	return createHash("sha256").update(sources.map(source => `${source.path}\0${source.content}`).join("\0")).digest("hex");
+}
+
+export function generateTokensMarkdown(tokens: readonly DesignToken[], hash: string): string {
+	const rows = new Map<string, { layer: DesignToken["layer"]; light?: string; dark?: string }>();
+	for (const token of tokens) {
+		const row = rows.get(token.name) ?? { layer: token.layer };
+		row[token.theme] = token.value;
+		rows.set(token.name, row);
+	}
+	const byLayer = (layer: DesignToken["layer"]) => [...rows.entries()].filter(([, row]) => row.layer === layer).sort(([a], [b]) => a.localeCompare(b));
+	const table = (layer: DesignToken["layer"]) => {
+		const rows = byLayer(layer);
+		return rows.length === 0 ? "No tokens found.\n" : ["| Token | Light | Dark |", "|---|---|---|", ...rows.map(([name, row]) => `| ${name} | ${row.light ?? "—"} | ${row.dark ?? "—"} |`), ""].join("\n");
+	};
+	return `# Design Tokens\n\n<!-- token-hash: ${hash} -->\n\n## Primitive\n\n${table("primitive")}## Semantic\n\n${table("semantic")}`;
+}
+
+export async function updateDesignTokens(cwd: string): Promise<{ path: string; warnings: string[] }> {
+	const manifest = await loadDesignManifest(cwd);
+	if (!manifest) throw new Error(`Invalid or missing ${DESIGN_DIR}/${DESIGN_MANIFEST_FILE}.`);
+	const { sources, errors } = await readDesignTokenFiles(cwd, manifest);
+	if (errors.length > 0) throw new Error(errors.join(" "));
+	const parsed = sources.flatMap(source => parseCssTokens(source.content));
+	const warnings = parsed.flatMap(result => result.warnings);
+	const tokens = parsed.flatMap(result => result.tokens);
+	const path = join(cwd, DESIGN_DIR, "tokens.md");
+	await writeFile(path, generateTokensMarkdown(tokens, tokenHash(sources)), "utf8");
+	return { path: relative(cwd, path), warnings };
+}
+
+function previewLint(content: string, file: string): string[] {
+	const violations: string[] = [];
+	const styles = [...content.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>|\sstyle\s*=\s*(["'])([\s\S]*?)\2/gi)].map(match => match[1] ?? match[3] ?? "");
+	for (const style of styles) {
+		if (/#(?:[0-9a-f]{3,8})\b/i.test(style) || /\b\d+(?:\.\d+)?(?:px|rem)\b/i.test(style) || /:(?!\s*var\(--)[^;{}]+(?:;|$)/.test(style)) violations.push(`${file}: preview styles must use var(--*) values only`);
+	}
+	return violations;
+}
+
+export async function checkDesignDocs(cwd: string): Promise<DesignCheckResult> {
+	const manifest = await loadDesignManifest(cwd);
+	if (!manifest) return { manifest: null, errors: [`Invalid or missing ${DESIGN_DIR}/${DESIGN_MANIFEST_FILE}.`], warnings: [], tokensStale: false, previewViolations: [] };
+	const { sources, errors } = await readDesignTokenFiles(cwd, manifest);
+	const parsed = sources.map(source => parseCssTokens(source.content));
+	const warnings = parsed.flatMap(result => result.warnings);
+	const expected = generateTokensMarkdown(parsed.flatMap(result => result.tokens), tokenHash(sources));
+	let tokensStale = true;
+	try { tokensStale = await readFile(join(cwd, DESIGN_DIR, "tokens.md"), "utf8") !== expected; } catch { /* missing tokens.md is stale */ }
+	const previewViolations: string[] = [];
+	for (const file of ["index.html", "example.html"]) {
+		try { previewViolations.push(...previewLint(await readFile(join(cwd, DESIGN_DIR, "preview", file), "utf8"), `${DESIGN_DIR}/preview/${file}`)); } catch { /* preview is optional until scaffolded */ }
+	}
+	return { manifest, errors, warnings, tokensStale, previewViolations };
 }
 
 // ── Docs check/status ──
