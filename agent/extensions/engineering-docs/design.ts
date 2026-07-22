@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export const DESIGN_DIR = "docs/design";
 export const DESIGN_MANIFEST_FILE = "manifest.json";
@@ -28,7 +28,8 @@ export interface TokenParseResult {
 
 function isSafeTokenFile(value: unknown): value is string {
 	if (typeof value !== "string" || !value || isAbsolute(value) || !value.toLowerCase().endsWith(".css")) return false;
-	return value.split(/[\\/]/).every(part => part !== ".." && part !== "");
+	const parts = value.split(/[\\/]/);
+	return parts.every(part => part !== ".." && part !== "") && parts[0] !== ".pi" && !(parts[0] === "docs" && parts[1] === "engineering");
 }
 
 export function validateDesignManifest(value: unknown): DesignManifest | null {
@@ -60,12 +61,32 @@ function isInside(root: string, path: string): boolean {
 	return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
-export function isDesignSurfacePath(cwd: string, filePath: string, manifest: DesignManifest | null): boolean {
-	const root = resolve(cwd);
+async function resolveForWrite(path: string): Promise<string | null> {
+	const missing: string[] = [];
+	for (let current = path;; current = dirname(current)) {
+		try {
+			return resolve(await realpath(current), ...missing);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+			try {
+				if ((await lstat(current)).isSymbolicLink()) return null;
+			} catch { /* current path does not exist */ }
+			if (dirname(current) === current) return null;
+			missing.unshift(basename(current));
+		}
+	}
+}
+
+export async function isDesignSurfacePath(cwd: string, filePath: string, manifest: DesignManifest | null): Promise<boolean> {
+	const root = await resolveForWrite(resolve(cwd));
+	if (!root) return false;
 	const target = resolve(root, filePath);
 	if (!isInside(root, target)) return false;
+	const resolvedTarget = await resolveForWrite(target);
+	if (!resolvedTarget || !isInside(root, resolvedTarget)) return false;
 	const designRoot = resolve(root, DESIGN_DIR);
-	if (isInside(designRoot, target)) return true;
+	const resolvedDesignRoot = await resolveForWrite(designRoot);
+	if (resolvedDesignRoot && isInside(designRoot, target) && isInside(resolvedDesignRoot, resolvedTarget)) return true;
 	if (!manifest) return false;
 	return manifest.tokenFiles.some(tokenFile => resolve(root, tokenFile) === target);
 }

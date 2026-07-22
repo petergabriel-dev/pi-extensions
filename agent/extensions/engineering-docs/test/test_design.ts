@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkDesignDocs, initDesignDocs, updateDesignTokens } from "../filesystem.ts";
@@ -21,6 +21,7 @@ assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles"
 assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["/escape.css"]}'), null);
 assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["package.json"]}'), null, "non-CSS files cannot extend Design write scope");
 assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["src/app.ts"]}'), null, "source files cannot extend Design write scope");
+assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["docs/engineering/tokens.css"]}'), null, "engineering docs cannot extend Design write scope");
 assert.equal(parseDesignManifest("not json"), null);
 
 const cwd = await mkdtemp(join(tmpdir(), "design-docs-"));
@@ -28,11 +29,18 @@ await mkdir(join(cwd, DESIGN_DIR), { recursive: true });
 await writeFile(join(cwd, DESIGN_DIR, "manifest.json"), '{"version":1,"kind":"design-docs","tokenFiles":["src/tokens.css"]}');
 const manifest = await loadDesignManifest(cwd);
 assert.ok(manifest);
-assert.equal(isDesignSurfacePath(cwd, "docs/design/components/button.md", manifest), true);
-assert.equal(isDesignSurfacePath(cwd, "src/tokens.css", manifest), true);
-assert.equal(isDesignSurfacePath(cwd, "src/app.ts", manifest), false);
-assert.equal(isDesignSurfacePath(cwd, "../outside.md", manifest), false);
-assert.equal(isDesignSurfacePath(cwd, "src/tokens.css", null), false);
+assert.equal(await isDesignSurfacePath(cwd, "docs/design/components/button.md", manifest), true);
+assert.equal(await isDesignSurfacePath(cwd, "src/tokens.css", manifest), true);
+assert.equal(await isDesignSurfacePath(cwd, "src/app.ts", manifest), false);
+assert.equal(await isDesignSurfacePath(cwd, "../outside.md", manifest), false);
+assert.equal(await isDesignSurfacePath(cwd, "src/tokens.css", null), false);
+const outside = await mkdtemp(join(tmpdir(), "design-outside-"));
+await symlink(outside, join(cwd, DESIGN_DIR, "escape"));
+assert.equal(await isDesignSurfacePath(cwd, "docs/design/escape/blocked.md", manifest), false, "design-root symlinks cannot escape write scope");
+await mkdir(join(cwd, "src"), { recursive: true });
+await writeFile(join(outside, "tokens.css"), "/* @primitive */ :root { --outside: red; }");
+await symlink(join(outside, "tokens.css"), join(cwd, "src/tokens.css"));
+assert.equal(await isDesignSurfacePath(cwd, "src/tokens.css", manifest), false, "declared token symlinks cannot escape write scope");
 
 const parsed = parseCssTokens(`
 /* @primitive */
@@ -99,5 +107,6 @@ await writeFile(join(scaffoldRoot, "docs/design/preview/example.html"), '<style>
 assert.equal((await checkDesignDocs(scaffoldRoot)).previewViolations.length, 0, "preview lint accepts var-only values");
 
 await rm(cwd, { recursive: true, force: true });
+await rm(outside, { recursive: true, force: true });
 await rm(scaffoldRoot, { recursive: true, force: true });
 console.log("design assertions passed");
