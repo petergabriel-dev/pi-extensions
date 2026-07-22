@@ -26,8 +26,8 @@ export interface TokenParseResult {
 	warnings: string[];
 }
 
-function isSafeRelativePath(value: unknown): value is string {
-	if (typeof value !== "string" || !value || isAbsolute(value)) return false;
+function isSafeTokenFile(value: unknown): value is string {
+	if (typeof value !== "string" || !value || isAbsolute(value) || !value.toLowerCase().endsWith(".css")) return false;
 	return value.split(/[\\/]/).every(part => part !== ".." && part !== "");
 }
 
@@ -35,7 +35,7 @@ export function validateDesignManifest(value: unknown): DesignManifest | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	const manifest = value as Record<string, unknown>;
 	if (manifest.version !== DESIGN_MANIFEST_VERSION || manifest.kind !== DESIGN_MANIFEST_KIND || !Array.isArray(manifest.tokenFiles)) return null;
-	if (!manifest.tokenFiles.every(isSafeRelativePath)) return null;
+	if (!manifest.tokenFiles.every(isSafeTokenFile)) return null;
 	return { version: DESIGN_MANIFEST_VERSION, kind: DESIGN_MANIFEST_KIND, tokenFiles: [...manifest.tokenFiles] };
 }
 

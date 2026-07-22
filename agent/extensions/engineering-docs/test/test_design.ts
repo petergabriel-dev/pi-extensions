@@ -19,6 +19,8 @@ assert.deepEqual(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFi
 });
 assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["../escape.css"]}'), null);
 assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["/escape.css"]}'), null);
+assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["package.json"]}'), null, "non-CSS files cannot extend Design write scope");
+assert.equal(parseDesignManifest('{"version":1,"kind":"design-docs","tokenFiles":["src/app.ts"]}'), null, "source files cannot extend Design write scope");
 assert.equal(parseDesignManifest("not json"), null);
 
 const cwd = await mkdtemp(join(tmpdir(), "design-docs-"));
