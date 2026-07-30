@@ -103,7 +103,7 @@ After bootstrap:
 npm test
 ```
 
-GitHub Actions runs the same bootstrap and `npm test` gate for pull requests and pushes to `main` via `.github/workflows/ci.yml` on Node.js 22.
+GitHub Actions runs the same bootstrap and `npm test` gate for pull requests and branch pushes via `.github/workflows/ci.yml` on Node.js 22.
 
 This runs:
 
