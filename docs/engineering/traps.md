@@ -55,6 +55,8 @@
 - **Review body must be inline.** Read-only filesystem rules exclude body-file workflows.
 - **Live GitHub checks require installed/authenticated `gh`.** Unit and typecheck success do not validate GitHub access.
 - **Saved plans are session ancestry, not repository files.** Ephemeral sessions do not persist after exit; never add shared fallback plan file.
+- **Custom entries and custom messages use different context channels.** Pi `pi.appendEntry()` custom entries stay out of LLM context; `before_agent_start.message` and `pi.sendMessage()` custom messages enter it, and `@earendil-works/pi-coding-agent/dist/core/messages.js#convertToLlm` maps them to LLM role `user`. Prefix harness-authored content, as in `agent/extensions/workflow-modes/index.ts`.
+- **One-shot custom messages do not survive compaction reliably.** `@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js#findValidCutPoints` treats `custom_message` entries as valid cut points, so active-mode authority must be regenerated per turn; reserve one-shot announcements for Off transitions.
 
 ## Engineering docs
 

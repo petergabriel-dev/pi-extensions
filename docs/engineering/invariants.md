@@ -63,6 +63,10 @@
 
 - Design write/edit gates fail closed: missing, unreadable, or invalid design manifest permits only `docs/design/**`; only validated manifest `tokenFiles` may extend this surface. Design never permits `docs/engineering/**` writes.
 
+## Workflow modes announcement channel
+
+- State enforced at the tool boundary must be announced in the same LLM message channel where enforcement errors appear: `agent/extensions/workflow-modes/index.ts` `before_agent_start` regenerates a hidden active-mode message every user turn, while `setMode` sends one transition message for Off, which has no per-turn prompt.
+
 ## Workflow modes read-only Bash
 
 - Discuss/Plan/Design Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
