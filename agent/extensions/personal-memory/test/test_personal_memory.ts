@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import personalMemory, { appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } from "../index.js";
-import { buildGlobalMemoryCurationPrompt, buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, isPrintInvocation, MAX_CURATION_PROMPT_BYTES, MAX_LESSON_LIST_PAGE, MAX_TOOL_OUTPUT_BYTES, printCommandArgs, slashCommandArgs } from "../curation.js";
+import { buildGlobalMemoryCurationPrompt, buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, isPrintInvocation, MAX_CURATION_PROMPT_BYTES, MAX_LESSON_LIST_PAGE, MAX_TOOL_OUTPUT_BYTES, printCommandArgs, printNoticeLine, slashCommandArgs } from "../curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, rebuildIndex, resolveMemoryDir, slugify, validateSlug, writeMemoryFact } from "../store.js";
 
 console.log("Running test_personal_memory...");
@@ -19,6 +19,12 @@ console.log("Running test_personal_memory...");
 	assert.equal(printCommandArgs("remember", ["--print", "/remember keep this"]), "keep this");
 	assert.equal(printCommandArgs("notes", ["-p", "/notes promote"]), "promote");
 	assert.equal(printCommandArgs("notes", ["/notes promote"]), null);
+	assert.equal(printNoticeLine("Nothing to do.", ["-p"]), "Nothing to do.");
+	assert.deepEqual(JSON.parse(printNoticeLine("Nothing to do.", ["--mode", "json", "--print"])), {
+		type: "extension_notice",
+		extension: "lesson-curation",
+		message: "Nothing to do.",
+	});
 }
 
 {

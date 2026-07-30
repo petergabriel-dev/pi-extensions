@@ -2,7 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, MAX_LESSON_LIST_PAGE, printCommandArgs, slashCommandArgs } from "./personal-memory/curation.js";
+import { buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, MAX_LESSON_LIST_PAGE, printCommandArgs, slashCommandArgs, writePrintNotice } from "./personal-memory/curation.js";
 
 export const EXTENSION_ID = "discussion-notes";
 export const TOOL_NAME = "discussion_notes";
@@ -714,7 +714,8 @@ export default function (pi: ExtensionAPI) {
 			if (slashCommandArgs(event.text, "notes") !== "promote") return { action: "continue" };
 			const lessons = notes.filter((note) => note.type === "lesson");
 			if (lessons.length === 0) {
-				return { action: "transform", text: "Report exactly: No lesson notes to promote. Do not call tools." };
+				writePrintNotice("No lesson notes to promote.");
+				return { action: "handled" };
 			}
 			return { action: "transform", text: buildProjectNotesPromotionPrompt(lessons) };
 		});

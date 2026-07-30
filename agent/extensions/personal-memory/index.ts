@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt, printCommandArgs, slashCommandArgs } from "./curation.js";
+import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt, printCommandArgs, slashCommandArgs, writePrintNotice } from "./curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, titleFromBody, writeMemoryFact } from "./store.js";
 
 const MEMORY_FILE = "memory.md";
@@ -41,7 +41,8 @@ export default function personalMemory(pi: ExtensionAPI, options: PersonalMemory
 			if (args === null) return { action: "continue" };
 			const prepared = prepareRememberPrompt(args);
 			if (prepared.error) {
-				return { action: "transform", text: `Report this validation error without calling tools: ${JSON.stringify(prepared.error)}` };
+				writePrintNotice(prepared.error);
+				return { action: "handled" };
 			}
 			return { action: "transform", text: prepared.prompt! };
 		});

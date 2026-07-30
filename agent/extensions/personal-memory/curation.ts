@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { writeSync } from "node:fs";
 import process from "node:process";
 
 export const MAX_LESSON_LIST_PAGE = 50;
@@ -25,6 +26,16 @@ export function printCommandArgs(name: string, argv: readonly string[] = process
 		if (args !== null) return args;
 	}
 	return null;
+}
+
+export function printNoticeLine(message: string, argv: readonly string[] = process.argv.slice(2)): string {
+	const modeIndex = argv.indexOf("--mode");
+	const json = (modeIndex >= 0 && argv[modeIndex + 1] === "json") || argv.includes("--mode=json");
+	return json ? JSON.stringify({ type: "extension_notice", extension: "lesson-curation", message }) : message;
+}
+
+export function writePrintNotice(message: string): void {
+	writeSync(1, `${printNoticeLine(message)}\n`);
 }
 
 export interface CuratableNote {

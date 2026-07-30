@@ -4,6 +4,10 @@ declare module "node:buffer" {
 	}
 }
 
+declare module "node:fs" {
+	export function writeSync(fd: number, text: string): number;
+}
+
 declare module "node:fs/promises" {
 	export function readFile(path: string, encoding: string): Promise<string>;
 	export function appendFile(path: string, data: string, encoding: string): Promise<void>;
