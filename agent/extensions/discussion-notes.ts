@@ -2,7 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { formatDiscussionNotesPage, MAX_LESSON_LIST_PAGE } from "./personal-memory/curation.js";
+import { buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, MAX_LESSON_LIST_PAGE } from "./personal-memory/curation.js";
 
 export const EXTENSION_ID = "discussion-notes";
 export const TOOL_NAME = "discussion_notes";
@@ -381,7 +381,7 @@ function formatAddResult(result: AddResult): string {
 }
 
 function usage(): string {
-	return "Usage:\n  /notes\n  /notes add [type] <text>\n  /notes clear";
+	return "Usage:\n  /notes\n  /notes add [type] <text>\n  /notes clear\n  /notes promote";
 }
 
 function parseManualNote(args: string): { type: NoteType; text: string } | { error: string } {
@@ -710,11 +710,26 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("notes", {
-		description: "View, add, or clear discussion notes",
+		description: "View, add, clear, or promote discussion notes",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const trimmed = args.trim();
 			if (!trimmed) {
 				await openNotesOverlay(ctx);
+				return;
+			}
+
+			if (trimmed === "promote") {
+				const lessons = notes.filter((note) => note.type === "lesson");
+				if (lessons.length === 0) {
+					ctx.ui.notify("No lesson notes to promote.", "info");
+					return;
+				}
+				try {
+					const delivery = dispatchCurationPrompt(pi, ctx, buildProjectNotesPromotionPrompt(lessons));
+					if (delivery === "queued") ctx.ui.notify("Project lesson promotion queued as follow-up.", "info");
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : "Could not prepare lesson promotion.", "error");
+				}
 				return;
 			}
 
