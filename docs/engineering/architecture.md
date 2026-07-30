@@ -2,7 +2,7 @@
 
 ## Workspace and package boundary
 
-This repository publishes as `@lopezpetergabriel/pi-extensions@0.2.0`, one Pi package containing nine extensions, three skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
+This repository publishes as `@lopezpetergabriel/pi-extensions@0.2.1`, one Pi package containing nine extensions, three skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
 
 - The npm allowlist ships runtime TS/helpers, workflow plan template, agent/skill Markdown, `docs/engineering/**`, README/LICENSE, and npm-mandatory nested READMEs under engineering-docs/filechanges. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state; package gates enforce <=512 KiB packed and <=1 MiB unpacked.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
