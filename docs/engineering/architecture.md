@@ -148,8 +148,10 @@ The extension publishes `workflow-modes:get/state`, `workflow-modes:changed`, an
 - Input is normalized, deduplicated by type/text, limited to 480 characters per note and 200 active notes.
 - Failed custom-entry persistence restores previous in-memory state.
 - Compact status/widget shows latest notes; `/notes` provides list/detail/add/clear UI.
+- Filtered `discussion_notes list` calls expose bounded pages of at most 50 notes to the model; unfiltered calls retain count-only content.
+- `/notes promote` starts a visible current-session turn containing every active `lesson` as delimited JSON. Build/Off curates into canonical `docs/engineering/`; read-only modes propose changes and point to `/mode build`.
 
-Bridge capture never mutates imported module state. It requests addition over the event bus; the live owner appends the snapshot, redraws UI, and returns result. Notes do not stage or write personal memory.
+Bridge capture never mutates imported module state. It requests addition over the event bus; the live owner appends the snapshot, redraws UI, and returns result. Capture does not stage or write memory; project promotion remains explicit and never targets user-global personal memory.
 
 ## File-change tracking and rollback
 
@@ -201,12 +203,13 @@ Subagents run as persisted in-process child `AgentSession`s with a fresh `Sessio
 
 1. Entries are slugged Markdown with required frontmatter.
 2. `MEMORY.md` is generated from conforming entries.
-3. `/remember` and `remember` write one entry through `writeMemoryFact`, then rebuild index.
-4. `before_agent_start` injects compact index only.
-5. `recall_memory_entry(slug)` validates one slug and fetches one full body.
-6. Legacy `~/.pi/memory.md` migrates once, then is renamed `memory.md.bak`.
+3. Bare or prefilled `/remember` starts a visible two-turn global curation flow: first list/ask without saving, then consolidate the user's selection.
+4. The `remember` tool writes one entry through `writeMemoryFact`; an optional validated slug replaces that exact entry, in-process writes serialize around the index path, and `MEMORY.md` is rebuilt.
+5. `before_agent_start` injects compact index only.
+6. `recall_memory_entry(slug)` validates one slug and fetches one full body.
+7. Legacy `~/.pi/memory.md` migrates once, then is renamed `memory.md.bak`.
 
-Bridge `recall_entry` and `save_memory` call same store. No automatic extraction/reconciliation pipeline exists.
+Bridge `recall_entry` and `save_memory` call same store. Curation uses the current visible session model, but no automatic/background extraction, staging, or reconciliation pipeline exists; persistence claims require successful tool results.
 
 ## Terminal notification
 

@@ -88,8 +88,11 @@
 - **Current personal memory is indexed directory, not flat append file.** `~/.pi/memory.md` is legacy migration input only; active entries live under `~/.pi/memory/` with generated `MEMORY.md`.
 - **Index can still bloat prompt.** Keep entry names/descriptions concise; fetch full body only by validated slug.
 - **Non-conforming legacy Markdown is preserved but not indexed.** Do not bulk-delete unknown files during migration/cleanup.
-- **Bridge capture is not memory capture.** It updates selected-branch discussion notes only. Project truth requires docs task; cross-project preference requires explicit personal-memory save.
-- **Discussion notes are bounded.** Note text over 480 characters fails; split durable facts rather than truncating silently.
+- **Bridge capture is not memory capture.** It updates selected-branch discussion notes only. `/notes promote` is current-project engineering-doc curation; `/remember` is Pi user-global curation. Never swap destinations.
+- **Curation is visible but model-behavioral.** Command dispatch and deterministic writes are host-owned, but classification/merging uses the current session model. Require successful `remember` or edit/write results before claiming persistence.
+- **Explicit slug means replacement.** `remember` with a slug overwrites that exact indexed entry after validation; recall it first and send the complete merged lesson.
+- **Memory write serialization is process-local.** Parallel writes in one Pi process queue around `MEMORY.md`; separate Pi processes can still race until cross-process locking is introduced.
+- **Discussion notes and prompts are bounded.** Note text over 480 characters fails; filtered listing uses 50-note/50-KiB pages, and oversized project-promotion prompts fail rather than truncate lessons silently.
 
 ## Terminal notification
 

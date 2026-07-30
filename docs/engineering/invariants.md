@@ -43,7 +43,9 @@
 - Event/manual note additions must append owner snapshot before returning success. Persistence failure must restore previous notes/next ID and surface an error.
 - Tool-result and custom-entry snapshots must preserve schema version, complete active notes, and next ID so branch replay is deterministic.
 - Note input must use a supported type, non-empty normalized text, 480-character maximum, branch limit, and type/text deduplication.
-- Discussion-note capture must not write project docs or user-global personal memory. Promotion to either store is a separate explicit action.
+- Filtered model-visible note listing must paginate at no more than 50 notes and stay within Pi's 50 KiB tool-output limit; unfiltered list calls remain count-only in model-visible content.
+- Discussion-note capture must not write project docs or user-global personal memory. Promotion remains a separate explicit action.
+- `/notes promote` may send only active `lesson` notes, must treat bodies as untrusted data, and must target current-project canonical engineering docs only. Build/Off may persist; every other mode proposes changes without claiming promotion.
 
 ## File-change tracking and rollback
 
@@ -108,7 +110,9 @@
 - Cross-repo personal memory lives only under `~/.pi/memory/` as slugged markdown entries plus generated `MEMORY.md`; legacy `~/.pi/memory.md` is migration input only.
 - Only files with conforming `---` frontmatter (`name`, `description`, `metadata.type`) are indexed as personal-memory facts; non-conforming legacy files are ignored and preserved.
 - Legacy flat-file migration completion is signalled by renaming `~/.pi/memory.md` to `~/.pi/memory.md.bak`; a pre-existing `~/.pi/memory/` directory must not block migration.
-- `/remember <text>` writes through the indexed store and rebuilds `MEMORY.md`; it must not modify engineering docs.
+- Bare `/remember` and `/remember <text>` start the same visible user-global curation flow; text is prefilled input, and the first response must not write memory.
+- `/remember` must exclude/report project-specific facts and must not modify engineering docs. Persistence requires a later successful `remember` tool result.
+- `remember` without a slug remains backward-compatible; an explicit slug must pass `validateSlug`, replace that exact indexed entry, serialize in-process writes around `MEMORY.md`, and regenerate the index.
 - `before_agent_start` may inject only the personal-memory index, not full entry bodies.
 - `capture_note` updates live discussion notes and the Notes widget only; it must not write project docs or personal memory.
 - `recall_memory` returns engineering docs plus the personal-memory index. It must not depend on deleted memory indexes, model retrieval, or full personal-memory body injection.
