@@ -18,7 +18,8 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE } from "./index.ts";
+import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE } from "./index.ts";
+import { wrapCommand } from "./sandbox.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 const absent = composeWorkflowPrompt("build", true, undefined, cwd);
@@ -81,6 +82,31 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if ((operations[2]?.data as { mode?: string })?.mode !== "build") throw new Error("failed Off send did not restore durable mode");
 	const restored = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string } };
 	if (restored.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("failed Off send did not restore in-memory mode");
+	for (const mode of ["discuss", "plan", "review", "design"] as const) {
+		const reason = formatModeBlockReason(mode, "operation was blocked.");
+		if (!reason.includes("Workflow mode was " + MODE_LABELS[mode] + " at tool-call time.")) throw new Error(mode + " block reason was not mode-stamped");
+		if (!reason.includes("latest [workflow-modes] line")) throw new Error(mode + " block reason omitted authoritative line");
+		if (reason.includes("/mode")) throw new Error(mode + " block reason instructed a mode switch");
+	}
+	const toolCall = handlers.get("tool_call");
+	const modeContext = (mode: string) => ({
+		sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode } }] },
+		ui: context.ui,
+	});
+	handlers.get("session_start")?.({}, modeContext("discuss"));
+	const mutationBlock = await toolCall?.({ toolName: "edit", input: { path: "README.md" } }) as { reason?: string };
+	if (!mutationBlock.reason?.startsWith("edit was blocked.")) throw new Error("mutation block reason was not past-tense");
+	const readEvent = { toolName: "bash", input: { command: "rg workflow-mode-no-match" } };
+	if (await toolCall?.(readEvent) !== undefined) throw new Error("Discuss read command was blocked");
+	const expectedWrap = wrapCommand("rg workflow-mode-no-match", { cwd: process.cwd() });
+	if (readEvent.input.command !== expectedWrap.command) throw new Error("wrapped command was not passed through unchanged");
+	if (readEvent.input.command.includes("Hint: editing requires") || readEvent.input.command.includes("status=$?")) throw new Error("wrapped command retained bash hint suffix");
+	handlers.get("session_start")?.({}, modeContext("review"));
+	const reviewBlock = await toolCall?.({ toolName: "bash", input: { command: "curl example.com" } }) as { reason?: string };
+	if (!reviewBlock.reason?.startsWith("bash command was blocked;")) throw new Error("Review block reason was not past-tense");
+	handlers.get("session_start")?.({}, modeContext("design"));
+	const designBlock = await toolCall?.({ toolName: "edit", input: { path: "src/not-a-token.css" } }) as { reason?: string };
+	if (!designBlock.reason?.startsWith("edit was blocked outside the design surface")) throw new Error("Design block reason was not past-tense");
 });
 `;
 try {

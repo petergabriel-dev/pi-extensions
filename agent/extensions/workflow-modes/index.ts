@@ -36,6 +36,10 @@ export function getWorkflowPolicySnapshot(): WorkflowPolicySnapshot {
 	};
 }
 
+export function formatModeBlockReason(mode: Mode, detail: string): string {
+	return `${detail} Workflow mode was ${MODE_LABELS[mode]} at tool-call time. Check the latest [workflow-modes] line for the current mode.`;
+}
+
 let currentMode: Mode = "off";
 let cavemanEnabled = true;
 let currentPlan: string | undefined;
@@ -445,12 +449,12 @@ export default function (pi: ExtensionAPI) {
 				if (filePath && await isDesignWriteAllowed(process.cwd(), filePath)) return;
 				return {
 					block: true,
-					reason: `${event.toolName} is blocked outside design surface (docs/design/** and declared token files). Switch to Build mode with /mode build for implementation changes.`,
+					reason: formatModeBlockReason(currentMode, `${event.toolName} was blocked outside the design surface (docs/design/** and declared token files).`),
 				};
 			}
 			return {
 				block: true,
-				reason: `${event.toolName} is blocked in ${MODE_LABELS[currentMode]} mode. Switch to Build mode with /mode build for implementation changes.`,
+				reason: formatModeBlockReason(currentMode, `${event.toolName} was blocked.`),
 			};
 		}
 
@@ -462,14 +466,14 @@ export default function (pi: ExtensionAPI) {
 		if (currentMode === "review" && !isBashAllowedInMode(command, "review")) {
 			return {
 				block: true,
-				reason: "bash command blocked in Review mode. Only read commands and approved gh PR commands are allowed.",
+				reason: formatModeBlockReason(currentMode, "bash command was blocked; only read commands and approved gh PR commands were allowed."),
 			};
 		}
 
 		try {
 			const wrapped = wrapCommand(command, { cwd: process.cwd(), ...(currentMode === "review" ? { allowNetwork: true } : {}) });
 			if (wrapped.wrapped) {
-				(event.input as { command?: string }).command = `${wrapped.command}; status=$?; if [ $status -ne 0 ]; then echo 'Hint: editing requires /mode build.' >&2; fi; exit $status`;
+				(event.input as { command?: string }).command = wrapped.command;
 				return;
 			}
 		} catch {
@@ -482,9 +486,12 @@ export default function (pi: ExtensionAPI) {
 			: currentMode === "plan" || currentMode === "design" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
 		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (currentMode === "review" && REVIEW_BASH_DENY.test(normalized));
 		if (!allowed || denied) {
+			const allowedThen = currentMode === "plan" || currentMode === "design"
+				? "discovery plus tests/builds/checks"
+				: currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search";
 			return {
 				block: true,
-				reason: `bash command blocked in ${MODE_LABELS[currentMode]} mode. Allowed: ${currentMode === "plan" || currentMode === "design" ? "discovery plus tests/builds/checks" : currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search"}. Mutating commands require /mode build.`,
+				reason: formatModeBlockReason(currentMode, `bash command was blocked; allowed commands were ${allowedThen}.`),
 			};
 		}
 	});
