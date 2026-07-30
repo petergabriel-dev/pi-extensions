@@ -6,11 +6,13 @@
 - **Bootstrap does not eliminate all network use.** Engineering-docs and personal-memory scripts invoke `npx --yes`; uncached TypeScript/tsx packages still require npm registry access during tests/typecheck.
 - **Extension dependencies are split.** A test passing in one package does not prove another package is installed. After cloning or lock changes, run root `npm ci --ignore-scripts --legacy-peer-deps`, nested `npm run bootstrap`, then root gate.
 - **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other.
+- **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or non-bundled esbuild transpilation for syntax-only checks.
 
 ## Source isolation versus runtime sharing
 
 - **Workspace isolates source, not Pi home.** Normal launcher reuses global auth, settings, model catalogs, sessions, context, and personal memory. `/login`, `/settings`, `/trust`, `/remember`, and bridge `save_memory` can change shared user state.
 - **`--no-session` is not full isolation.** It prevents parent session persistence only. Use secure temporary `PI_CODING_AGENT_DIR` for live tests that save memory or alter settings, then remove it.
+- **Provider overload is not source failure.** For live acceptance, retry a fresh disposable session or another suitable configured model before diagnosing code; keep all temporary auth and state isolated.
 - **Never copy runtime state into repository.** Temporary auth/settings copies belong in mode-protected OS temp directories and must be deleted after test.
 - **Only `.pi/agents` is tracked below `.pi/`.** Bridge creates ignored `.pi/memory/bridge/`; broad `rm -rf .pi` destroys project agent link.
 
@@ -19,6 +21,7 @@
 - **`pi -e .` can load duplicate extensions.** Without `--no-extensions`, global copies remain discoverable beside workspace package. Duplicate commands, event listeners, watchers, widgets, and notifications can result. Use `./bin/pi-workspace`.
 - **`--no-extensions` disables extensions only.** Global context/settings and other Pi-owned state remain available. Do not describe launcher as fully hermetic.
 - **Running Pi keeps loaded source.** After edits, use `/reload` when supported or restart launcher before live acceptance. A passing test against disk does not prove old process reloaded.
+- **Upstream docs links can lag package metadata.** When locating Pi host source, prefer the installed package's `repository` field; current `@earendil-works/pi-coding-agent` points to `earendil-works/pi`, package directory `packages/coding-agent`.
 
 ## Project marker precedence
 
@@ -55,6 +58,7 @@
 - **Review body must be inline.** Read-only filesystem rules exclude body-file workflows.
 - **Live GitHub checks require installed/authenticated `gh`.** Unit and typecheck success do not validate GitHub access.
 - **Saved plans are session ancestry, not repository files.** Ephemeral sessions do not persist after exit; never add shared fallback plan file.
+- **Section 4 completion is not full-plan completion.** Section 4 checkboxes define Build task order, while Section 5 Definition of Done remains a separate closure gate; report both statuses instead of claiming the whole plan complete.
 - **Custom entries and custom messages use different context channels.** Pi `pi.appendEntry()` custom entries stay out of LLM context; `before_agent_start.message` and `pi.sendMessage()` custom messages enter it, and `@earendil-works/pi-coding-agent/dist/core/messages.js#convertToLlm` maps them to LLM role `user`. Prefix harness-authored content, as in `agent/extensions/workflow-modes/index.ts`.
 - **One-shot custom messages do not survive compaction reliably.** `@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js#findValidCutPoints` treats `custom_message` entries as valid cut points, so active-mode authority must be regenerated per turn; reserve one-shot announcements for Off transitions.
 
@@ -90,6 +94,7 @@
 - **Non-conforming legacy Markdown is preserved but not indexed.** Do not bulk-delete unknown files during migration/cleanup.
 - **Bridge capture is not memory capture.** It updates selected-branch discussion notes only. `/notes promote` is current-project engineering-doc curation; `/remember` is Pi user-global curation. Never swap destinations.
 - **Curation is visible but model-behavioral.** Command dispatch and deterministic writes are host-owned, but classification/merging uses the current session model. Require successful `remember` or edit/write results before claiming persistence.
+- **Pi 0.83.0 print command dispatch cannot start curation turns.** Direct/follow-up `sendUserMessage` hangs, `sendMessage({ triggerTurn: true })` exits without a turn, and deferred sends use stale context. Print-mode curation therefore bypasses command registration and transforms input; deterministic notices use `writeSync(1, ...)` because ordinary extension stdout is redirected to stderr. Remove shim when command dispatch becomes awaitable.
 - **Explicit slug means replacement.** `remember` with a slug overwrites that exact indexed entry after validation; recall it first and send the complete merged lesson.
 - **Memory write serialization is process-local.** Parallel writes in one Pi process queue around `MEMORY.md`; separate Pi processes can still race until cross-process locking is introduced.
 - **Discussion notes and prompts are bounded.** Note text over 480 characters fails; filtered listing uses 50-note/50-KiB pages, and oversized project-promotion prompts fail rather than truncate lessons silently.
