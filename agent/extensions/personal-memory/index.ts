@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt } from "./curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, titleFromBody, writeMemoryFact } from "./store.js";
 
 const MEMORY_FILE = "memory.md";
@@ -9,9 +10,14 @@ const MAX_REMEMBER_CHARS = 2_000;
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
-export default function personalMemory(pi: ExtensionAPI) {
-	const memoryDirPromise = resolveMemoryDir();
-	const migrationPromise = memoryDirPromise.then((memoryDir) => migrateFlatFile(memoryDir));
+export interface PersonalMemoryOptions {
+	memoryDir?: string;
+	legacyMemoryPath?: string;
+}
+
+export default function personalMemory(pi: ExtensionAPI, options: PersonalMemoryOptions = {}) {
+	const memoryDirPromise = options.memoryDir ? Promise.resolve(options.memoryDir) : resolveMemoryDir();
+	const migrationPromise = memoryDirPromise.then((memoryDir) => migrateFlatFile(memoryDir, options.legacyMemoryPath));
 
 	pi.on("before_agent_start", async (event: { systemPrompt: string }) => {
 		const memoryDir = await memoryDirPromise;
@@ -22,20 +28,15 @@ export default function personalMemory(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("remember", {
-		description: "Save a small user-global personal memory to ~/.pi/memory/",
+		description: "Curate user-global Pi memory in the current chat",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const text = normalizeRememberText(args);
-			if (!text) {
-				ctx.ui.notify("Usage: /remember <small durable lesson>", "warning");
-				return;
-			}
-			if (text.length > MAX_REMEMBER_CHARS) {
+			if (text && text.length > MAX_REMEMBER_CHARS) {
 				ctx.ui.notify(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep personal memory small.`, "warning");
 				return;
 			}
-			await migrationPromise;
-			const result = await writeRememberText(text, await memoryDirPromise);
-			ctx.ui.notify(`Remembered in ${result.path}`, "success");
+			const delivery = dispatchCurationPrompt(pi, ctx, buildGlobalMemoryCurationPrompt(text));
+			if (delivery === "queued") ctx.ui.notify("Memory curation queued as follow-up.", "info");
 		},
 	});
 
@@ -43,11 +44,11 @@ export default function personalMemory(pi: ExtensionAPI) {
 		name: "remember",
 		label: "Remember",
 		description: "Best-effort save of short user-global personal memory to ~/.pi/memory/.",
-		promptSnippet: "Silently save durable user-global personal memory when useful. Prefer updating an existing slug over duplicating stale facts. Do not ask confirmation.",
+		promptSnippet: "Persist curated user-global memory; provide slug when replacing an existing indexed entry.",
 		promptGuidelines: [
 			"Use remember for durable user preferences or lessons that should persist across sessions.",
 			"Do not use remember for project facts; those belong in engineering docs.",
-			"Keep entries small; update existing slug when possible instead of duplicating.",
+			"Keep remember entries small; provide the validated existing slug when replacing instead of duplicating.",
 		],
 		parameters: {
 			type: "object",

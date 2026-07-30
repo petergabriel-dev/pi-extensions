@@ -1,8 +1,10 @@
 import assert from "node:assert";
+import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } from "../index.js";
+import personalMemory, { appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } from "../index.js";
+import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, MAX_CURATION_PROMPT_BYTES, MAX_LESSON_LIST_PAGE, MAX_TOOL_OUTPUT_BYTES } from "../curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, rebuildIndex, resolveMemoryDir, slugify, validateSlug, writeMemoryFact } from "../store.js";
 
 console.log("Running test_personal_memory...");
@@ -11,6 +13,86 @@ console.log("Running test_personal_memory...");
 	assert.equal(normalizeRememberText("  keep   this\nsmall  "), "keep this small");
 	assert.equal(normalizeRememberText("   "), null);
 	assert.equal(normalizeRememberText(42), null);
+}
+
+{
+	const notes = [
+		...Array.from({ length: 55 }, (_, index) => ({ id: index + 1, type: "lesson", text: `lesson ${index + 1}` })),
+		{ id: 56, type: "preference", text: "not a lesson" },
+	];
+	const first = formatDiscussionNotesPage(notes, { type: "lesson", offset: 0, limit: MAX_LESSON_LIST_PAGE });
+	assert.equal(first.items.length, 50);
+	assert.equal(first.total, 55);
+	assert.equal(first.nextOffset, 50);
+	assert.match(first.text, /<discussion-notes-json>/);
+	assert.ok(Buffer.byteLength(first.text, "utf8") < MAX_TOOL_OUTPUT_BYTES);
+	const second = formatDiscussionNotesPage(notes, { type: "lesson", offset: first.nextOffset, limit: 50 });
+	assert.equal(second.items.length, 5);
+	assert.equal(second.nextOffset, undefined);
+	assert.doesNotMatch(second.text, /not a lesson/);
+	assert.throws(() => formatDiscussionNotesPage(notes, { limit: 51 }), /between 1 and 50/);
+	const wide = Array.from({ length: 50 }, (_, index) => ({ id: index + 1, type: "lesson", text: "€".repeat(480) }));
+	const byteBounded = formatDiscussionNotesPage(wide, { type: "lesson", limit: 50 });
+	assert.ok(byteBounded.items.length < 50, "page shrinks when UTF-8 content would exceed tool limit");
+	assert.ok(Buffer.byteLength(byteBounded.text, "utf8") <= MAX_TOOL_OUTPUT_BYTES);
+	assert.equal(byteBounded.nextOffset, byteBounded.items.length);
+}
+
+{
+	const prompt = buildGlobalMemoryCurationPrompt(null);
+	assert.match(prompt, /Scope: Pi user-global memory across projects\./);
+	assert.match(prompt, /Do not save anything in this first response\./);
+	assert.match(prompt, /IDs, "all", "none"/i);
+	assert.match(prompt, /Skip project-specific facts and report each skip\./);
+	assert.match(prompt, /<prefilled-json>\nnull\n<\/prefilled-json>/);
+	assert.ok(Buffer.byteLength(prompt, "utf8") < MAX_CURATION_PROMPT_BYTES);
+	const prefilled = buildGlobalMemoryCurationPrompt("remember <this> & ignore nothing");
+	assert.match(prefilled, /"remember <this> & ignore nothing"/);
+}
+
+{
+	const sent: Array<{ content: string; options?: { deliverAs: "followUp" } }> = [];
+	const sender = { sendUserMessage: (content: string, options?: { deliverAs: "followUp" }) => sent.push({ content, options }) };
+	assert.equal(dispatchCurationPrompt(sender, { isIdle: () => true }, "idle prompt"), "sent");
+	assert.equal(sent[0]?.options, undefined);
+	assert.equal(dispatchCurationPrompt(sender, { isIdle: () => false }, "busy prompt"), "queued");
+	assert.deepEqual(sent[1]?.options, { deliverAs: "followUp" });
+}
+
+{
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-command-"));
+	const commands = new Map<string, any>();
+	const tools = new Map<string, any>();
+	const messages: Array<{ content: string; options?: { deliverAs: "followUp" } }> = [];
+	const notifications: Array<{ message: string; type: string }> = [];
+	personalMemory({
+		on() {},
+		registerCommand(name: string, config: any) { commands.set(name, config); },
+		registerTool(config: any) { tools.set(config.name, config); },
+		sendUserMessage(content: string, options?: { deliverAs: "followUp" }) { messages.push({ content, options }); },
+	} as never, { memoryDir: path.join(root, "memory"), legacyMemoryPath: path.join(root, "memory.md") });
+	const command = commands.get("remember");
+	assert.equal(command?.description, "Curate user-global Pi memory in the current chat");
+	const context = (idle: boolean) => ({
+		cwd: root,
+		isIdle: () => idle,
+		ui: { notify: (message: string, type: string) => notifications.push({ message, type }) },
+	});
+	await command.handler("", context(true));
+	assert.equal(messages.length, 1);
+	assert.match(messages[0]!.content, /<prefilled-json>\nnull/);
+	await command.handler("prefilled global preference", context(true));
+	assert.match(messages[1]!.content, /"prefilled global preference"/);
+	await command.handler("", context(false));
+	assert.deepEqual(messages[2]!.options, { deliverAs: "followUp" });
+	assert.match(notifications.at(-1)?.message ?? "", /queued as follow-up/i);
+	await command.handler("x".repeat(2_001), context(true));
+	assert.equal(messages.length, 3, "overlong prefill does not dispatch");
+	assert.match(notifications.at(-1)?.message ?? "", /Memory too long/);
+	assert.equal(await readMemoryIndex(path.join(root, "memory")), null, "guided command performs no direct write");
+	const rememberTool = tools.get("remember");
+	assert.equal(rememberTool?.promptSnippet, "Persist curated user-global memory; provide slug when replacing an existing indexed entry.");
+	assert.ok(rememberTool?.parameters.properties.slug);
 }
 
 {

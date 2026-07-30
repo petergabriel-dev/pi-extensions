@@ -2,6 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { formatDiscussionNotesPage, MAX_LESSON_LIST_PAGE } from "./personal-memory/curation.js";
 
 export const EXTENSION_ID = "discussion-notes";
 export const TOOL_NAME = "discussion_notes";
@@ -74,6 +75,9 @@ const DiscussionNotesParams = Type.Object({
 			{ minItems: 1, maxItems: 10 },
 		),
 	),
+	type: Type.Optional(StringEnum(NOTE_TYPES)),
+	offset: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_ACTIVE_NOTES })),
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LESSON_LIST_PAGE })),
 });
 
 type DiscussionNotesParams = Static<typeof DiscussionNotesParams>;
@@ -667,9 +671,16 @@ export default function (pi: ExtensionAPI) {
 		parameters: DiscussionNotesParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (params.action === "list") {
+				if (params.type === undefined && params.offset === undefined && params.limit === undefined) {
+					return {
+						content: [{ type: "text", text: `${notes.length} active note${notes.length === 1 ? "" : "s"}.` }],
+						details: { notes: notes.map((note) => ({ ...note })), nextId },
+					};
+				}
+				const page = formatDiscussionNotesPage(notes, { type: params.type, offset: params.offset, limit: params.limit });
 				return {
-					content: [{ type: "text", text: `${notes.length} active note${notes.length === 1 ? "" : "s"}.` }],
-					details: { notes: notes.map((note) => ({ ...note })), nextId },
+					content: [{ type: "text", text: page.text }],
+					details: { notes: page.items, total: page.total, offset: page.offset, nextOffset: page.nextOffset, nextId },
 				};
 			}
 

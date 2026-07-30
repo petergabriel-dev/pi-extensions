@@ -1,3 +1,9 @@
+declare module "node:buffer" {
+	export class Buffer {
+		static byteLength(value: string, encoding?: string): number;
+	}
+}
+
 declare module "node:fs/promises" {
 	export function readFile(path: string, encoding: string): Promise<string>;
 	export function appendFile(path: string, data: string, encoding: string): Promise<void>;
@@ -30,10 +36,12 @@ declare module "@earendil-works/pi-coding-agent" {
 		on(event: string, callback: (...args: any[]) => any): void;
 		registerCommand(name: string, config: any): void;
 		registerTool?(config: any): void;
+		sendUserMessage(content: string, options?: { deliverAs: "followUp" }): void;
 	}
 
 	export interface ExtensionCommandContext {
 		cwd: string;
+		isIdle(): boolean;
 		ui: { notify(message: string, type: "info" | "warning" | "error" | "success"): void };
 		[key: string]: any;
 	}
