@@ -17,6 +17,7 @@ export type PlanEvent = "set" | "clear";
 export const MODE_ENTRY = "workflow-mode-set";
 export const PLAN_ENTRY = "workflow-plan";
 export const STATUS_KEY = "workflow-modes";
+export const MODE_MESSAGE_TYPE = "workflow-mode-current";
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
 export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
@@ -355,6 +356,15 @@ export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: 
 	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: buildPrompt, review: REVIEW_PROMPT, design: DESIGN_PROMPT }, savedPlan);
 }
 
+export function composeModeMessage(mode: Mode) {
+	if (mode === "off") return undefined;
+	return {
+		customType: MODE_MESSAGE_TYPE,
+		content: `[workflow-modes] Active workflow mode: ${MODE_LABELS[mode]}.`,
+		display: false,
+	};
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.events.on("workflow-modes:save-plan", async (data: unknown) => {
 		const request = data && typeof data === "object" ? data as { requestId?: unknown; plan?: unknown; planId?: unknown } : {};
@@ -400,8 +410,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event) => {
 		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan, process.cwd());
-		if (!extra) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${extra}` };
+		const message = composeModeMessage(currentMode);
+		if (!extra || !message) return;
+		return {
+			message,
+			systemPrompt: `${event.systemPrompt}\n\n${extra}`,
+		};
 	});
 
 	pi.on("tool_call", async (event) => {

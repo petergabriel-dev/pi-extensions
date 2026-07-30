@@ -18,7 +18,7 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BUILD_DESIGN_AWARE_PROMPT, composeWorkflowPrompt } from "./index.ts";
+import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE } from "./index.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 const absent = composeWorkflowPrompt("build", true, undefined, cwd);
@@ -27,6 +27,31 @@ mkdirSync(join(cwd, "docs/design"), { recursive: true });
 writeFileSync(join(cwd, "docs/design/manifest.json"), "{}");
 if (!composeWorkflowPrompt("build", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("manifest failed to inject design block");
 if (composeWorkflowPrompt("design", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("non-build mode used cwd");
+for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
+	const message = composeModeMessage(mode);
+	if (message?.customType !== MODE_MESSAGE_TYPE) throw new Error(mode + " mode message customType changed");
+	if (message?.content !== "[workflow-modes] Active workflow mode: " + MODE_LABELS[mode] + ".") throw new Error(mode + " mode message content invalid");
+	if (message.display !== false) throw new Error(mode + " mode message must be hidden");
+	if (message.content.includes("\\n")) throw new Error(mode + " mode message must be one line");
+	if (message.content.split(/\\s+/).length > 40) throw new Error(mode + " mode message exceeds token proxy budget");
+}
+if (composeModeMessage("off") !== undefined) throw new Error("Off injected a mode message");
+const handlers = new Map<string, Function>();
+workflowModesExtension({
+	events: { on() {}, emit() {} },
+	on(name: string, handler: Function) { handlers.set(name, handler); },
+	registerCommand() {},
+} as never);
+const context = {
+	sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }] },
+	ui: { setStatus() {} },
+};
+handlers.get("session_start")?.({}, context);
+handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then((result: unknown) => {
+	const value = result as { message?: ReturnType<typeof composeModeMessage>; systemPrompt?: string };
+	if (value.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("before_agent_start omitted active mode message");
+	if (!value.systemPrompt?.startsWith("BASE")) throw new Error("before_agent_start omitted system prompt");
+});
 `;
 try {
 	await execFileAsync("./node_modules/.bin/tsx", ["-e", source], {
