@@ -26,6 +26,11 @@ declare module "node:path" {
 	export function basename(path: string): string;
 }
 
+declare module "node:process" {
+	const process: { argv: string[] };
+	export default process;
+}
+
 declare module "node:assert" {
 	const assert: any;
 	export default assert;

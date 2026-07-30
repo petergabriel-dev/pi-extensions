@@ -3,11 +3,23 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import process from "node:process";
 import personalMemory, { appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } from "../index.js";
-import { buildGlobalMemoryCurationPrompt, buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, MAX_CURATION_PROMPT_BYTES, MAX_LESSON_LIST_PAGE, MAX_TOOL_OUTPUT_BYTES } from "../curation.js";
+import { buildGlobalMemoryCurationPrompt, buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, isPrintInvocation, MAX_CURATION_PROMPT_BYTES, MAX_LESSON_LIST_PAGE, MAX_TOOL_OUTPUT_BYTES, printCommandArgs, slashCommandArgs } from "../curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, rebuildIndex, resolveMemoryDir, slugify, validateSlug, writeMemoryFact } from "../store.js";
 
 console.log("Running test_personal_memory...");
+
+{
+	assert.equal(isPrintInvocation(["--print", "/remember"]), true);
+	assert.equal(isPrintInvocation(["--mode", "json", "-p", "/remember x"]), true);
+	assert.equal(isPrintInvocation(["/remember"]), false);
+	assert.equal(slashCommandArgs(" /remember  keep this ", "remember"), "keep this");
+	assert.equal(slashCommandArgs("/remembered nope", "remember"), null);
+	assert.equal(printCommandArgs("remember", ["--print", "/remember keep this"]), "keep this");
+	assert.equal(printCommandArgs("notes", ["-p", "/notes promote"]), "promote");
+	assert.equal(printCommandArgs("notes", ["/notes promote"]), null);
+}
 
 {
 	assert.equal(normalizeRememberText("  keep   this\nsmall  "), "keep this small");
@@ -131,6 +143,29 @@ console.log("Running test_personal_memory...");
 	const rememberTool = tools.get("remember");
 	assert.equal(rememberTool?.promptSnippet, "Persist curated user-global memory; provide slug when replacing an existing indexed entry.");
 	assert.ok(rememberTool?.parameters.properties.slug);
+}
+
+{
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-print-command-"));
+	const originalArgv = process.argv;
+	const inputs: Array<(event: { text: string }) => any> = [];
+	const commands = new Map<string, any>();
+	try {
+		process.argv = [...originalArgv, "--print", "/remember prefilled"];
+		personalMemory({
+			on(event: string, handler: (event: { text: string }) => any) { if (event === "input") inputs.push(handler); },
+			registerCommand(name: string, config: any) { commands.set(name, config); },
+			registerTool() {},
+		} as never, { memoryDir: path.join(root, "memory"), legacyMemoryPath: path.join(root, "memory.md") });
+	} finally {
+		process.argv = originalArgv;
+	}
+	assert.equal(commands.has("remember"), false, "print command bypasses registered-command interception");
+	assert.equal(inputs.length, 1);
+	const transformed = inputs[0]!({ text: "/remember prefilled" });
+	assert.equal(transformed.action, "transform");
+	assert.match(transformed.text, /"prefilled"/);
+	assert.equal(inputs[0]!({ text: "ordinary prompt" }).action, "continue");
 }
 
 {

@@ -1,8 +1,31 @@
 import { Buffer } from "node:buffer";
+import process from "node:process";
 
 export const MAX_LESSON_LIST_PAGE = 50;
 export const MAX_CURATION_PROMPT_BYTES = 128 * 1024;
 export const MAX_TOOL_OUTPUT_BYTES = 50 * 1024;
+
+// ponytail: print-mode command handlers cannot start turns in Pi 0.83.0; remove this shim when command dispatch becomes awaitable.
+export function isPrintInvocation(argv: readonly string[] = process.argv.slice(2)): boolean {
+	return argv.includes("-p") || argv.includes("--print");
+}
+
+export function slashCommandArgs(text: string, name: string): string | null {
+	const trimmed = text.trim();
+	const command = `/${name}`;
+	if (trimmed === command) return "";
+	if (!trimmed.startsWith(`${command} `)) return null;
+	return trimmed.slice(command.length).trim();
+}
+
+export function printCommandArgs(name: string, argv: readonly string[] = process.argv.slice(2)): string | null {
+	if (!isPrintInvocation(argv)) return null;
+	for (const value of argv) {
+		const args = slashCommandArgs(value, name);
+		if (args !== null) return args;
+	}
+	return null;
+}
 
 export interface CuratableNote {
 	id: number;

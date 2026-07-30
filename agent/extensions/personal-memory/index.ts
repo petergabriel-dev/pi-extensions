@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt } from "./curation.js";
+import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt, printCommandArgs, slashCommandArgs } from "./curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, titleFromBody, writeMemoryFact } from "./store.js";
 
 const MEMORY_FILE = "memory.md";
@@ -27,18 +27,38 @@ export default function personalMemory(pi: ExtensionAPI, options: PersonalMemory
 		return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
 	});
 
-	pi.registerCommand("remember", {
-		description: "Curate user-global Pi memory in the current chat",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const text = normalizeRememberText(args);
-			if (text && text.length > MAX_REMEMBER_CHARS) {
-				ctx.ui.notify(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep personal memory small.`, "warning");
-				return;
+	const prepareRememberPrompt = (args: string): { prompt?: string; error?: string } => {
+		const text = normalizeRememberText(args);
+		if (text && text.length > MAX_REMEMBER_CHARS) {
+			return { error: `Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep personal memory small.` };
+		}
+		return { prompt: buildGlobalMemoryCurationPrompt(text) };
+	};
+
+	if (printCommandArgs("remember") !== null) {
+		pi.on("input", (event) => {
+			const args = slashCommandArgs(event.text, "remember");
+			if (args === null) return { action: "continue" };
+			const prepared = prepareRememberPrompt(args);
+			if (prepared.error) {
+				return { action: "transform", text: `Report this validation error without calling tools: ${JSON.stringify(prepared.error)}` };
 			}
-			const delivery = dispatchCurationPrompt(pi, ctx, buildGlobalMemoryCurationPrompt(text));
-			if (delivery === "queued") ctx.ui.notify("Memory curation queued as follow-up.", "info");
-		},
-	});
+			return { action: "transform", text: prepared.prompt! };
+		});
+	} else {
+		pi.registerCommand("remember", {
+			description: "Curate user-global Pi memory in the current chat",
+			handler: async (args: string, ctx: ExtensionCommandContext) => {
+				const prepared = prepareRememberPrompt(args);
+				if (prepared.error) {
+					ctx.ui.notify(prepared.error, "warning");
+					return;
+				}
+				const delivery = dispatchCurationPrompt(pi, ctx, prepared.prompt!);
+				if (delivery === "queued") ctx.ui.notify("Memory curation queued as follow-up.", "info");
+			},
+		});
+	}
 
 	pi.registerTool?.({
 		name: "remember",
