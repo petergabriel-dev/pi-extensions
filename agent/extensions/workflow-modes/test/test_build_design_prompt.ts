@@ -18,7 +18,7 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE } from "./index.ts";
+import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE } from "./index.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 const absent = composeWorkflowPrompt("build", true, undefined, cwd);
@@ -37,20 +37,50 @@ for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 }
 if (composeModeMessage("off") !== undefined) throw new Error("Off injected a mode message");
 const handlers = new Map<string, Function>();
+const commands = new Map<string, { handler: Function }>();
+const operations: Array<{ action: string; type?: string; data?: unknown; message?: unknown }> = [];
+let failSend = false;
 workflowModesExtension({
 	events: { on() {}, emit() {} },
 	on(name: string, handler: Function) { handlers.set(name, handler); },
-	registerCommand() {},
+	registerCommand(name: string, command: { handler: Function }) { commands.set(name, command); },
+	appendEntry(type: string, data: unknown) { operations.push({ action: "append", type, data }); },
+	sendMessage(message: unknown) {
+		operations.push({ action: "send", message });
+		if (failSend) throw new Error("send failed");
+	},
 } as never);
 const context = {
 	sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }] },
-	ui: { setStatus() {} },
+	ui: { setStatus() {}, notify() {} },
 };
 handlers.get("session_start")?.({}, context);
-handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then((result: unknown) => {
+handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (result: unknown) => {
 	const value = result as { message?: ReturnType<typeof composeModeMessage>; systemPrompt?: string };
 	if (value.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("before_agent_start omitted active mode message");
 	if (!value.systemPrompt?.startsWith("BASE")) throw new Error("before_agent_start omitted system prompt");
+	operations.length = 0;
+	await commands.get("mode")?.handler("off", context);
+	if (operations[0]?.action !== "append" || operations[0]?.type !== MODE_ENTRY || (operations[0]?.data as { mode?: string })?.mode !== "off") throw new Error("Off mode was not persisted first");
+	const transition = (operations[1]?.message ?? {}) as { customType?: string; content?: string; display?: boolean };
+	if (operations[1]?.action !== "send" || transition.customType !== MODE_TRANSITION_MESSAGE_TYPE) throw new Error("Off transition message missing");
+	if (transition.content !== "[workflow-modes] Active workflow mode: OFF." || transition.display !== false) throw new Error("Off transition message invalid");
+	if (await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) !== undefined) throw new Error("Off injected per-turn context");
+	operations.length = 0;
+	await commands.get("mode")?.handler("build", context);
+	if (operations.length !== 1 || operations[0]?.action !== "append") throw new Error("active mode was double-announced");
+	operations.length = 0;
+	failSend = true;
+	let failed = false;
+	try {
+		await commands.get("mode")?.handler("off", context);
+	} catch (error) {
+		failed = error instanceof Error && error.message === "send failed";
+	}
+	if (!failed) throw new Error("Off send failure was not surfaced");
+	if ((operations[2]?.data as { mode?: string })?.mode !== "build") throw new Error("failed Off send did not restore durable mode");
+	const restored = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string } };
+	if (restored.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("failed Off send did not restore in-memory mode");
 });
 `;
 try {

@@ -18,6 +18,7 @@ export const MODE_ENTRY = "workflow-mode-set";
 export const PLAN_ENTRY = "workflow-plan";
 export const STATUS_KEY = "workflow-modes";
 export const MODE_MESSAGE_TYPE = "workflow-mode-current";
+export const MODE_TRANSITION_MESSAGE_TYPE = "workflow-mode-transition";
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
 export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
@@ -109,8 +110,25 @@ function updateStatus(ctx: ExtensionContext): void {
 }
 
 async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Promise<void> {
-	currentMode = mode;
+	const previousMode = currentMode;
 	await Promise.resolve(pi.appendEntry(MODE_ENTRY, { mode, at: Date.now() }));
+	if (mode === "off") {
+		try {
+			await Promise.resolve(pi.sendMessage({
+				customType: MODE_TRANSITION_MESSAGE_TYPE,
+				content: "[workflow-modes] Active workflow mode: OFF.",
+				display: false,
+			}));
+		} catch (error) {
+			try {
+				await Promise.resolve(pi.appendEntry(MODE_ENTRY, { mode: previousMode, at: Date.now() }));
+			} catch (rollbackError) {
+				throw new AggregateError([error, rollbackError], "Failed to announce Off mode and restore durable workflow mode");
+			}
+			throw error;
+		}
+	}
+	currentMode = mode;
 	updateStatus(ctx);
 	ctx.ui.notify(`Mode: ${MODE_LABELS[mode]}`, "info");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
