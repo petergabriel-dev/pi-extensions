@@ -7,6 +7,7 @@ const INDEX_FILE = "MEMORY.md";
 const LEGACY_MEMORY_FILE = "memory.md";
 const LEGACY_BACKUP_FILE = "memory.md.bak";
 const VALID_TYPES = new Set(["user", "feedback", "project", "reference"]);
+const memoryWriteQueues = new Map<string, Promise<void>>();
 
 export type MemoryFactType = "user" | "feedback" | "project" | "reference";
 
@@ -15,6 +16,7 @@ export interface MemoryFactInput {
 	description?: unknown;
 	type?: unknown;
 	body?: unknown;
+	slug?: unknown;
 }
 
 interface NormalizedFact {
@@ -60,11 +62,13 @@ export async function readMemoryEntry(memoryDir: string, slug: string): Promise<
 
 export async function writeMemoryFact(input: MemoryFactInput, memoryDir: string = path.join(os.homedir(), ".pi", MEMORY_DIR)): Promise<{ slug: string; path: string; index: string }> {
 	const fact = normalizeFact(input);
-	await fs.mkdir(memoryDir, { recursive: true });
-	const target = path.join(memoryDir, `${fact.slug}.md`);
-	await fs.writeFile(target, serializeFact(fact), "utf8");
-	const index = await rebuildIndex(memoryDir);
-	return { slug: fact.slug, path: target, index };
+	return withMemoryWriteQueue(indexPath(memoryDir), async () => {
+		await fs.mkdir(memoryDir, { recursive: true });
+		const target = path.join(memoryDir, `${fact.slug}.md`);
+		await fs.writeFile(target, serializeFact(fact), "utf8");
+		const index = await rebuildIndex(memoryDir);
+		return { slug: fact.slug, path: target, index };
+	});
 }
 
 export async function rebuildIndex(memoryDir: string): Promise<string> {
@@ -126,7 +130,7 @@ function normalizeFact(input: MemoryFactInput): NormalizedFact {
 	const name = normalizeOneLine(input.name) ?? titleFromBody(body);
 	const description = normalizeOneLine(input.description) ?? firstLine(body);
 	const type = normalizeType(input.type);
-	const slug = slugify(name);
+	const slug = input.slug === undefined ? slugify(name) : validateSlug(input.slug);
 	return { name, description, type, body, slug };
 }
 
@@ -213,6 +217,19 @@ function escapeFrontmatter(value: string): string {
 
 function indexPath(memoryDir: string): string {
 	return path.join(memoryDir, INDEX_FILE);
+}
+
+async function withMemoryWriteQueue<T>(queueKey: string, operation: () => Promise<T>): Promise<T> {
+	// ponytail: process-local serialization covers parallel extension calls; add a lockfile if cross-process writers become supported.
+	const prior = memoryWriteQueues.get(queueKey) ?? Promise.resolve();
+	const result = prior.catch(() => undefined).then(operation);
+	const settled = result.then(() => undefined, () => undefined);
+	memoryWriteQueues.set(queueKey, settled);
+	try {
+		return await result;
+	} finally {
+		if (memoryWriteQueues.get(queueKey) === settled) memoryWriteQueues.delete(queueKey);
+	}
 }
 
 async function exists(target: string): Promise<boolean> {

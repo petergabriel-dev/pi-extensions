@@ -55,14 +55,15 @@ export default function personalMemory(pi: ExtensionAPI) {
 			required: ["text"],
 			properties: {
 				text: { type: "string", description: "Small durable personal memory to save." },
+				slug: { type: "string", description: "Optional existing indexed entry slug to replace." },
 			},
 		},
-		async execute(_toolCallId: string, params: { text?: unknown }) {
+		async execute(_toolCallId: string, params: { text?: unknown; slug?: unknown }) {
 			const text = normalizeRememberText(params.text);
 			if (!text) return toolText("No memory text supplied.");
 			if (text.length > MAX_REMEMBER_CHARS) return toolText(`Memory too long (${text.length}/${MAX_REMEMBER_CHARS}). Keep personal memory small.`);
 			await migrationPromise;
-			const result = await writeRememberText(text, await memoryDirPromise);
+			const result = await writeRememberText(text, await memoryDirPromise, params.slug);
 			return toolText(`Remembered in ${result.path}`);
 		},
 	});
@@ -133,8 +134,8 @@ export function normalizeRememberText(value: unknown): string | null {
 	return normalized.length > 0 ? normalized : null;
 }
 
-async function writeRememberText(text: string, memoryDir: string): Promise<{ slug: string; path: string; index: string }> {
-	return writeMemoryFact({ name: titleFromBody(text), description: text, type: "user", body: text }, memoryDir);
+async function writeRememberText(text: string, memoryDir: string, slug?: unknown): Promise<{ slug: string; path: string; index: string }> {
+	return writeMemoryFact({ name: titleFromBody(text), description: text, type: "user", body: text, slug }, memoryDir);
 }
 
 async function filePrefix(memoryPath: string): Promise<string> {

@@ -71,6 +71,45 @@ console.log("Running test_personal_memory...");
 }
 
 {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-upsert-"));
+	await writeMemoryFact({
+		name: "Original lesson",
+		description: "Original description",
+		body: "Original body",
+	}, dir);
+	const replacement = await writeMemoryFact({
+		slug: "original-lesson",
+		name: "Improved lesson",
+		description: "Improved description",
+		body: "Improved body",
+	}, dir);
+	assert.equal(replacement.slug, "original-lesson");
+	assert.equal(path.basename(replacement.path), "original-lesson.md");
+	assert.equal(await readMemoryEntry(dir, "improved-lesson"), null);
+	const entry = await readMemoryEntry(dir, "original-lesson");
+	assert.match(entry ?? "", /name: Improved lesson/);
+	assert.match(entry ?? "", /Improved body/);
+	const index = await readMemoryIndex(dir);
+	assert.match(index ?? "", /\[Improved lesson\]\(original-lesson\.md\) — Improved description/);
+	assert.doesNotMatch(index ?? "", /Original description/);
+	await assert.rejects(
+		() => writeMemoryFact({ slug: "../escape", body: "No traversal" }, dir),
+		/invalid memory slug/,
+	);
+}
+
+{
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-concurrent-"));
+	await Promise.all([
+		writeMemoryFact({ name: "Parallel A", description: "A", body: "A body" }, dir),
+		writeMemoryFact({ name: "Parallel B", description: "B", body: "B body" }, dir),
+	]);
+	const index = await readMemoryIndex(dir);
+	assert.match(index ?? "", /\[Parallel A\]\(parallel-a\.md\) — A/);
+	assert.match(index ?? "", /\[Parallel B\]\(parallel-b\.md\) — B/);
+}
+
+{
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-rebuild-"));
 	await writeMemoryFact({ name: "Z fact", description: "Last", type: "project", body: "Z body" }, dir);
 	await writeMemoryFact({ name: "A fact", description: "First", type: "reference", body: "A body" }, dir);
