@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
-import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
+import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
@@ -19,7 +19,7 @@ export const PLAN_ENTRY = "workflow-plan";
 export const STATUS_KEY = "workflow-modes";
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 
-export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
+export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_ALLOW, REVIEW_BASH_DENY } from "./policy.js";
 
 export interface WorkflowPolicySnapshot {
@@ -33,15 +33,6 @@ export function getWorkflowPolicySnapshot(): WorkflowPolicySnapshot {
 		discussBashAllow: DISCUSS_BASH_ALLOW.source,
 	};
 }
-
-const MODE_LABELS: Record<Mode, string> = {
-	off: "OFF",
-	discuss: "Discuss",
-	plan: "Plan",
-	build: "Build",
-	review: "Review",
-	design: "Design",
-};
 
 let currentMode: Mode = "off";
 let cavemanEnabled = true;

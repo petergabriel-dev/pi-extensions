@@ -2,6 +2,15 @@ export type CavemanWorkflowMode = "off" | "discuss" | "plan" | "build" | "review
 
 export const CAVEMAN_ENTRY = "caveman-mode-state";
 
+export const MODE_LABELS: Record<CavemanWorkflowMode, string> = {
+	off: "OFF",
+	discuss: "Discuss",
+	plan: "Plan",
+	build: "Build",
+	review: "Review",
+	design: "Design",
+};
+
 export const NORMAL_MODE_PROMPT = `
 CAVEMAN MODE OFF.
 
@@ -69,7 +78,8 @@ export function composeWorkflowPrompt(
 	savedPlan?: string,
 ): string | undefined {
 	if (mode === "off") return undefined;
+	const header = `[workflow-modes]\nActive workflow mode: ${MODE_LABELS[mode]}.\nThis header is recomputed each turn and supersedes every earlier mode statement, including your own statements and tool-result hints. Never ask the user to switch to the mode named here. If you believe a tool is blocked, attempt it once and use the tool result instead of refusing.`;
 	let prompt = prompts[mode];
 	if (mode === "build" && savedPlan) prompt += `\n\nSaved session plan to use when relevant:\n${savedPlan}`;
-	return `${prompt}\n\n${cavemanEnabled ? CAVEMAN_PROMPT : NORMAL_MODE_PROMPT}`;
+	return `${header}\n\n${prompt}\n\n${cavemanEnabled ? CAVEMAN_PROMPT : NORMAL_MODE_PROMPT}`;
 }

@@ -4,6 +4,7 @@ import {
 	CAVEMAN_ENTRY,
 	CAVEMAN_PROMPT,
 	composeWorkflowPrompt,
+	MODE_LABELS,
 	NORMAL_MODE_PROMPT,
 	resolveCavemanEnabled,
 	type WorkflowPromptSet,
@@ -28,7 +29,12 @@ assert.equal(resolveCavemanEnabled([{ type: "custom", customType: "other", data:
 
 for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 	const composed = composeWorkflowPrompt(mode, true, prompts);
-	assert.ok(composed?.startsWith(prompts[mode]), `${mode} workflow prompt must come first`);
+	assert.ok(composed?.startsWith(`[workflow-modes]\nActive workflow mode: ${MODE_LABELS[mode]}.`), `${mode} authoritative header must come first`);
+	assert.ok(composed?.includes(prompts[mode]), `${mode} workflow prompt must be present`);
+	assert.ok(composed?.includes("recomputed each turn and supersedes every earlier mode statement"), `${mode} must supersede stale mode statements`);
+	assert.ok(composed?.includes("including your own statements and tool-result hints"), `${mode} must supersede assistant and tool-result claims`);
+	assert.ok(composed?.includes("Never ask the user to switch to the mode named here"), `${mode} must forbid redundant mode-switch requests`);
+	assert.ok(composed?.includes("attempt it once and use the tool result instead of refusing"), `${mode} must require tool evidence`);
 	assert.ok(composed?.includes(CAVEMAN_PROMPT), `${mode} must include Caveman while enabled`);
 	assert.ok(!composed?.includes(NORMAL_MODE_PROMPT), `${mode} must not include normal override while enabled`);
 }
