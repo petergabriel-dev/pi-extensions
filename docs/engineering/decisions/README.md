@@ -26,3 +26,4 @@
 | ADR-0022 | Active | Network-allowed read-only Review sandbox | changing Review mode command policy, sandbox wrapping, fallback behavior, or GitHub review workflows |
 | ADR-0023 | Active | Workspace source and runtime separation | changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy |
 | ADR-0024 | Active | Design mode and design docs root | changing Design prompts, design scaffolds, token parsing, preview themes, base-library guidance, build prompt composition, frontend component guidance, or bridge prompt recall |
+| ADR-0025 | Active | Workflow mode announcement channel | changing workflow-mode prompt composition, mode transitions, before_agent_start messages, tool block reasons, compaction behavior, or provider continuation/cache behavior |
