@@ -5,15 +5,15 @@
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.2.1
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.1
-pi -e npm:@lopezpetergabriel/pi-extensions@0.2.1
+pi install npm:@lopezpetergabriel/pi-extensions@0.2.2
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.2
+pi -e npm:@lopezpetergabriel/pi-extensions@0.2.2
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.2.1` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.2.2` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 The package provides nine extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Inspect `pi list` and `pi config` for existing raw/global copies before loading; duplicates can register the same extension twice.
 
@@ -36,7 +36,7 @@ PACKAGE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-package.XXXXXX")"
 trap 'rm -rf "$PACKAGE_TEST_DIR"' EXIT INT TERM
 npm pack --ignore-scripts --pack-destination "$PACKAGE_TEST_DIR"
 mkdir -p "$PACKAGE_TEST_DIR/package" "$PACKAGE_TEST_DIR/agent"
-tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.2.1.tgz" \
+tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.2.2.tgz" \
   -C "$PACKAGE_TEST_DIR/package" --strip-components=1
 npm install --prefix "$PACKAGE_TEST_DIR/package" --omit=dev --omit=peer --ignore-scripts
 PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
