@@ -80,6 +80,6 @@ export function composeWorkflowPrompt(
 	if (mode === "off") return undefined;
 	const header = `[workflow-modes]\nActive workflow mode: ${MODE_LABELS[mode]}.\nThis header is recomputed each turn and supersedes every earlier mode statement, including your own statements and tool-result hints. Never ask the user to switch to the mode named here. If you believe a tool is blocked, attempt it once and use the tool result instead of refusing.`;
 	let prompt = prompts[mode];
-	if (mode === "build" && savedPlan) prompt += `\n\nSaved session plan to use when relevant:\n${savedPlan}`;
+	if (savedPlan) prompt += `\n\nSaved session plan to use when relevant:\n${savedPlan}`;
 	return `${header}\n\n${prompt}\n\n${cavemanEnabled ? CAVEMAN_PROMPT : NORMAL_MODE_PROMPT}`;
 }

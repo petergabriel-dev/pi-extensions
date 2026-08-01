@@ -43,9 +43,12 @@ const disabled = composeWorkflowPrompt("design", false, prompts);
 assert.ok(disabled?.includes(NORMAL_MODE_PROMPT), "active workflow mode must include normal override while disabled");
 assert.ok(!disabled?.includes(CAVEMAN_PROMPT), "disabled workflow mode must omit Caveman prompt");
 
-const buildWithPlan = composeWorkflowPrompt("build", true, prompts, "# Saved plan");
-assert.ok(buildWithPlan?.includes("Saved session plan to use when relevant:\n# Saved plan"));
-assert.equal(composeWorkflowPrompt("plan", true, prompts, "# Saved plan")?.includes("# Saved plan"), false);
+for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
+	assert.ok(
+		composeWorkflowPrompt(mode, true, prompts, "# Saved plan")?.includes("Saved session plan to use when relevant:\n# Saved plan"),
+		`${mode} must include saved plan`,
+	);
+}
 assert.equal(composeWorkflowPrompt("off", true, prompts, "# Saved plan"), undefined, "Off must suppress enabled Caveman");
 assert.equal(composeWorkflowPrompt("off", false, prompts, "# Saved plan"), undefined, "Off must suppress normal override");
 
