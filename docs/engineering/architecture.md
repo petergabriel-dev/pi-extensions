@@ -132,7 +132,7 @@ Only one fresh bridge session processes a project. Another watcher becomes passi
 - `workflow-plan` stores set/clear events for one saved plan.
 - `caveman-mode-state` stores Caveman preference; no explicit entry means enabled.
 
-Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus Caveman or normal-style override. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
+Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus saved plan when present (`workflow-modes/caveman.ts`), then Caveman or normal-style override. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
 
 Discuss, Plan, and Review block mutation tools. Design allows `write`/`edit` only inside `docs/design/**` or manifest-declared token files, failing closed to `docs/design/**` when manifest is missing or invalid. Design Bash reuses Plan's sandboxed read/test policy. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
 
