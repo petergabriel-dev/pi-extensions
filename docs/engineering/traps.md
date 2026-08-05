@@ -18,7 +18,8 @@
 
 ## Duplicate loading and stale code
 
-- **`pi -e .` can load duplicate extensions.** Without `--no-extensions`, global copies remain discoverable beside workspace package. Duplicate commands, event listeners, watchers, widgets, and notifications can result. Use `./bin/pi-workspace`.
+- **Extension auto-discovery ignores `settings.json` removal.** `loader.js:534-539` unconditionally discovers `cwd/.pi/extensions/` then `agentDir/extensions/` before configured paths. Removing `extensions` entries cannot disable either location. Keep retired global copies under `~/.pi/agent/extensions.disabled/`; use `./bin/pi-workspace` for source runs.
+- **`pi -e .` can load duplicate extensions.** Without `--no-extensions`, any project-local or restored global copies remain discoverable beside workspace package. Duplicate commands, event listeners, watchers, widgets, and notifications can result.
 - **`--no-extensions` disables extensions only.** Global context/settings and other Pi-owned state remain available. Do not describe launcher as fully hermetic.
 - **Running Pi keeps loaded source.** After edits, use `/reload` when supported or restart launcher before live acceptance. A passing test against disk does not prove old process reloaded.
 - **Upstream docs links can lag package metadata.** When locating Pi host source, prefer the installed package's `repository` field; current `@earendil-works/pi-coding-agent` points to `earendil-works/pi`, package directory `packages/coding-agent`.

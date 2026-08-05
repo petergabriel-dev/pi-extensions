@@ -15,7 +15,7 @@ pi remove npm:@lopezpetergabriel/pi-extensions
 
 Install commands pin the exact `@0.2.2` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
-The package provides nine extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Inspect `pi list` and `pi config` for existing raw/global copies before loading; duplicates can register the same extension twice.
+The package provides nine extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
 The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
