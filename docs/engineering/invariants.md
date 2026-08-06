@@ -29,9 +29,10 @@
 - When `sandbox-exec` is unavailable, Claude Code Bash in `.pi` projects must deny closed; there is no unsandboxed allowlist fallback.
 - Bridge requests are idempotent by UUID. Replayed request IDs return the processed response and must not duplicate notes or saved plans.
 - v1 supports one active Pi bridge session per project. A second active watcher must become passive/refuse rather than process the same request stream.
-- `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry.
-- Saved plans belong only to selected Pi session ancestry. `workflow-modes` must append a `workflow-plan` save/clear entry before changing live state, reconstruct from `getBranch()` on session start/tree navigation, and never read or write repository- or Git-branch-scoped plan files.
-- Bridge recall must obtain saved-plan state only from live `workflow-modes`; no bridge cache or direct plan-file fallback is allowed.
+- `save_plan` must update live `workflow-modes` state, not only append a raw `workflow-plan` entry; it writes the same session-scoped body and seeds the same tasks as `/plan save`.
+- Saved-plan pointers, active selection, and task progress belong only to selected Pi session ancestry. `workflow-modes` must append the durable `workflow-plan` set/activate/clear/tick entry before changing live state and reconstruct from `getBranch()` on session start/tree navigation.
+- Plan bodies live only under `<agentDir>/plans/<sessionId>/<planId>.md`; paths derive from validated session/plan identifiers, writes are atomic and bounded to 256 KiB, missing reads degrade to no active plan, and referenced files are never deleted. Repository-, Git-branch-, and bridge-scoped plan files are forbidden; current-session GC may remove only unreferenced files older than the retention period.
+- Bridge recall must obtain saved-plan state only from live `workflow-modes`; no bridge cache or direct client-side plan-file fallback is allowed. Bridge `read_plan_tasks` and `tick_plan_task` must use the live workflow owner and preserve UUID idempotency.
 - Bridge workflow prompts must use `workflow-modes` prompt composition with live `cavemanEnabled`; bridge clients must not copy Caveman text or import Pi code.
 - Docs tag validation must use Pi `engineering-docs` validation logic; bare `[DOCS]` is invalid and `[DOCS:decisions]` requires an ADR action tag.
 - Bridge capture protocol primary field is `sessionId`; `claudeSessionId` remains a deprecated alias and must keep working for existing Claude Code callers.

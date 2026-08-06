@@ -26,7 +26,7 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.2.2`, one Pi pa
 | 6 | `agent/extensions/notify.ts` | `agent_end` lifecycle hook | Emits terminal-native “Ready for input” notification; no persistent state. |
 | 7 | `agent/extensions/personal-memory/index.ts` | `remember`, `recall_memory_entry`, `/remember` | Owns user-global indexed personal-memory reads, writes, and one-time legacy migration. |
 | 8 | `agent/extensions/subagents/index.ts` | `spawn_explorer`, `spawn_worker`, model command, debug tools | Discovers role definitions, enforces spawn policy/concurrency/ownership, and runs isolated persisted child sessions. |
-| 9 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, saved plan, Caveman preference, prompt composition, and read-only mode gates. |
+| 9 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
 
 ### Agent definitions
 
@@ -59,7 +59,7 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 | State | Location | Owner | Repository status |
 |---|---|---|---|
 | Package source, docs, agent definitions, skills | Repository tracked files | Git / contributors | Versioned |
-| Workflow mode, saved plan, Caveman preference | Selected Pi session branch entries | `workflow-modes` | Host session storage; never repository plan files |
+| Workflow mode, saved-plan pointers/selection/task progress, Caveman preference | Selected Pi session branch entries; plan body at `<agentDir>/plans/<sessionId>/<planId>.md` | `workflow-modes` | Host session storage; body is atomic, session-scoped, and never repository/Git-branch/bridge-scoped |
 | Discussion notes | Selected Pi session branch tool-result/custom entries | `discussion-notes` | Host session storage |
 | File-change baselines and clear/untrack events | Selected Pi session branch custom entries | `filechanges` | Host session storage |
 | Docs changed-file/touched/snooze markers | Selected Pi session branch custom entries | `engineering-docs` | Host session storage |
@@ -100,8 +100,8 @@ Flow:
 2. Bridge resolves project root from nearest `.pi/` marker.
 3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json`.
 4. MCP client writes UUID request JSON and polls matching response for up to two seconds.
-5. Bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, and `save_plan` using Pi-side owners/helpers.
-6. Recall returns canonical engineering docs, compact personal-memory index, composed workflow prompts, plan template, and live saved-plan state.
+5. Bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, `save_plan`, `read_plan_tasks`, and `tick_plan_task` using Pi-side owners/helpers.
+6. Recall returns canonical engineering docs, compact personal-memory index, composed workflow prompts, plan template, and live saved-plan state; task reads/ticks use the live workflow owner rather than a bridge cache.
 7. Bridge shutdown removes its owned request/response/cache/lock/policy files; ignored directories may remain.
 
 Bridge request protocol:
@@ -126,13 +126,15 @@ Only one fresh bridge session processes a project. Another watcher becomes passi
 
 ## Workflow modes
 
-`workflow-modes` reconstructs three branch-local contracts from selected session ancestry:
+`workflow-modes` reconstructs branch-local contracts from selected session ancestry:
 
 - `workflow-mode-set` selects Off, Discuss, Plan, Build, Review, or Design.
-- `workflow-plan` stores set/clear events for one saved plan.
+- `workflow-plan` stores plan pointer set/activate/clear events plus task ticks. The immutable plan body lives at `<agentDir>/plans/<sessionId>/<planId>.md`; only its session-scoped pointer and progress state live in branch entries.
 - `caveman-mode-state` stores Caveman preference; no explicit entry means enabled.
 
-Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus saved plan when present (`workflow-modes/caveman.ts`), then Caveman or normal-style override. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
+`/plan save` writes the bounded plan body atomically, seeds Section 4 tasks, then appends the durable pointer before activating it. `/plan select`, `/plan view`, and `/plan clear` operate on plans visible in selected ancestry; clear deactivates the pointer but does not delete its file. `workflow_plan_tick` records one completed task per confirmation, so the tracker—not immutable Section 4 checkboxes—is the Build queue. Before each turn, workflow-modes rereads the active body and injects a compact marker with plan identity, path, savedAt, progress, and next task.
+
+Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus the active saved-plan body when present (`workflow-modes/caveman.ts`), then Caveman or normal-style override. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
 
 Discuss, Plan, and Review block mutation tools. Design allows `write`/`edit` only inside `docs/design/**` or manifest-declared token files, failing closed to `docs/design/**` when manifest is missing or invalid. Design Bash reuses Plan's sandboxed read/test policy. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
 

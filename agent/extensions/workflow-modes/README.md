@@ -11,6 +11,16 @@
 | Build | Implementation | allowed |
 | Off | Normal Pi behavior | allowed |
 
+## Saved plans and task progress
+
+`/plan` stores plan bodies outside the repository at `<agentDir>/plans/<sessionId>/<planId>.md`. The selected session branch stores only plan pointer/activation/clear entries and task-tick entries. Plan files are bounded, written atomically, reread before each active-mode turn, and treated as immutable specs during Build.
+
+- `/plan save` creates and activates a new plan; it seeds tasks from top-level unchecked Section 4 items.
+- `/plan select <planId>` activates an ancestry-visible plan; `/plan view` lists plans and progress; `/plan clear` deactivates the active plan without deleting its body.
+- `workflow_plan_tick` completes one seeded task by durable branch entry. Tracker progress is the Build queue; Section 4 checkboxes are seed syntax only.
+- The per-turn marker carries plan id, path, savedAt, progress counts, and next task—not the full task list.
+- Bridge `save_plan`, `read_plan_tasks`, and `tick_plan_task` route through this owner. Bridge clients never read plan files directly.
+
 Design mode composes with Caveman. Use `/mode design` for token layers, component specs, and previews; use `/mode build` for component source. Design writes fail closed outside `docs/design/**` and manifest-declared token files. Design Bash uses Plan read/test policy and sandbox wrapping.
 
 ## Mode announcement channel

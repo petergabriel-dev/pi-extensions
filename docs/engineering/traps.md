@@ -41,7 +41,7 @@
 - **One active owner per project.** Fresh heartbeat from older Pi makes newer bridge passive. Stop old process before testing changed protocol.
 - **Bridge root follows nearest marker, not client config path.** MCP `cwd`, Pi cwd, and intended project marker must agree.
 - **Bridge protocol tests mutate state.** Core tests save notes, plan, and personal memory. Run against disposable `PI_CODING_AGENT_DIR`, not normal user memory.
-- **Bridge uses `fs.watch` without polling fallback.** Missed request events become two-second client timeouts. Preserve watcher lifecycle/coalescing behavior and diagnose request files before changing protocol.
+- **Bridge uses `fs.watch` without polling fallback.** Missed request events become two-second client timeouts. Preserve watcher lifecycle/coalescing behavior and diagnose request files before changing protocol. Plan reads/ticks must remain live workflow-owner requests; never add a direct MCP plan-file fallback.
 - **Session lock may be enveloped.** Consumers should read `session.lock ?? session` for compatibility; assuming top-level heartbeat/status breaks against current bridge output.
 - **Do not import live owner state.** Earlier direct workflow/discussion module imports produced false plan success and clobbered Notes UI. Use event-bus request/result handoff.
 - **Idle widget redraw is load-bearing.** Capture success requires live owner update while Pi waits for input. Unit tests cannot replace real idle UI acceptance.
@@ -58,9 +58,10 @@
 - **Review confirmation is prompt-enforced.** No structural hook proves user confirmed posting. Keep never-auto-post instruction and perform one explicit confirmation immediately before `gh pr review`.
 - **Review body must be inline.** Read-only filesystem rules exclude body-file workflows.
 - **Live GitHub checks require installed/authenticated `gh`.** Unit and typecheck success do not validate GitHub access.
-- **Saved plans are session ancestry, not repository files.** Ephemeral sessions do not persist after exit; never add shared fallback plan file.
-- **Stale saved plans anchor every active mode.** Saved plan text enters Discuss, Plan, Build, Review, and Design prompts every turn; run `/plan clear` once obsolete or completed.
-- **Section 4 completion is not full-plan completion.** Section 4 checkboxes define Build task order, while Section 5 Definition of Done remains a separate closure gate; report both statuses instead of claiming the whole plan complete.
+- **Saved-plan pointers and progress are session ancestry; bodies are session-scoped agent files.** Bodies live under `<agentDir>/plans/<sessionId>/<planId>.md`, not in the repository, Git-branch store, or bridge directory. Ephemeral sessions do not promise restart persistence; never add a shared fallback plan file.
+- **Plan files are immutable specs during Build.** `/plan save` writes the body atomically, Section 4 seeds branch-backed tasks, and `workflow_plan_tick` records progress. Do not edit plan checkboxes to claim completion; do not delete a referenced body. Age GC is limited to unreferenced files in the current session.
+- **Stale saved plans anchor every active mode.** Active plan body and compact identity/progress marker enter Discuss, Plan, Build, Review, and Design prompts every turn; use `/plan select` or `/plan clear` when active selection changes.
+- **Section 4 completion is not full-plan completion.** Tracker progress uses Section 4 only; Section 5 Definition of Done remains a separate closure gate. Report both statuses instead of claiming the whole plan complete.
 - **Custom entries and custom messages use different context channels.** Pi `pi.appendEntry()` custom entries stay out of LLM context; `before_agent_start.message` and `pi.sendMessage()` custom messages enter it, and `@earendil-works/pi-coding-agent/dist/core/messages.js#convertToLlm` maps them to LLM role `user`. Prefix harness-authored content, as in `agent/extensions/workflow-modes/index.ts`.
 - **One-shot custom messages do not survive compaction reliably.** `@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js#findValidCutPoints` treats `custom_message` entries as valid cut points, so active-mode authority must be regenerated per turn; reserve one-shot announcements for Off transitions.
 

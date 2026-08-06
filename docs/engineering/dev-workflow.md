@@ -140,21 +140,30 @@ done
 |---|---|---|
 | Root package, nine entrypoints, three skills, two agents | `npm run check` | Source header lists nine extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
-| `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation are visible through live owners. |
+| `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |
 | `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |
 | `engineering-docs` | `npm --prefix agent/extensions/engineering-docs test` | `/docs check --check` reports managed docs, healthy spokes/ADRs/tags, current index. |
 | `filechanges` | Package load/inventory; no dedicated unit suite | Make disposable `edit`/`write`, inspect cumulative diff, verify accept keeps and decline restores/deletes. |
 | `notify` | Package load/inventory; no dedicated unit suite | Finish one assistant turn and confirm terminal-native “Ready for input” notification. |
 | `personal-memory` | `npm --prefix agent/extensions/personal-memory test` and `npm --prefix agent/extensions/personal-memory run typecheck` | In isolated Pi home, save slug, inspect generated `MEMORY.md`, fetch one entry. |
 | `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | Debug/live role runs only when explicitly needed; worker must refuse outside Build. |
-| `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify branch plan/Caveman restoration and read-only gates. |
-| Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff. |
+| `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
+| Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff plus `read_plan_tasks`/`tick_plan_task`. |
 | Cursor MCP/hooks/commands | `node agent/cursor-bridge-client/test-cursor-readonly-hook.js` | Real Cursor recall/capture/save; shell/MCP denial; native edit byte restoration. |
 | Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |
 
+## Saved plan workflow
+
+`/plan` operates on plans visible in selected session ancestry:
+
+- `/plan save` writes a new immutable plan body to `<agentDir>/plans/<sessionId>/<planId>.md`, seeds tasks from top-level unchecked Section 4 items, appends its pointer, then activates it. It does not overwrite another plan.
+- `/plan select` changes active pointer; `/plan view` shows active plan and available ancestry plans; `/plan clear` deactivates the selected plan but leaves its file for retention GC.
+- Build progress is branch-backed. Complete and verify one tracker task, then call `workflow_plan_tick`; never edit plan-file checkboxes. The per-turn marker carries only plan identity/path/time, progress counts, and next task.
+- Claude Code and Cursor use the same live owner through `save_plan`, `read_plan_tasks`, and `tick_plan_task`; they must not read plan files directly.
+
 ## Isolated live bridge protocol test
 
-Core protocol test writes discussion notes, saved-plan state, and personal memory. Never point it at normal user state. Use two terminals.
+Core protocol test writes discussion notes, saved-plan state, and personal memory. Never point it at normal user state or the current project bridge. Use two terminals and a disposable project marker.
 
 Terminal A, from repository root:
 
@@ -162,40 +171,44 @@ Terminal A, from repository root:
 ROOT="$PWD"
 umask 077
 PI_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-workspace-bridge.XXXXXX")"
+PI_PROJECT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-workspace-project.XXXXXX")"
 cleanup() {
-  rm -rf "$PI_TEST_DIR"
-  rm -rf "$ROOT/.pi/memory"
+  rm -rf "$PI_TEST_DIR" "$PI_PROJECT_DIR"
 }
 trap cleanup EXIT INT TERM
-mkdir -p "$PI_TEST_DIR/agent"
+mkdir -p "$PI_TEST_DIR/agent" "$PI_PROJECT_DIR/.pi"
+printf 'PI_PROJECT_DIR=%s\n' "$PI_PROJECT_DIR"
 for name in auth.json settings.json models-store.json; do
   if [ -f "$HOME/.pi/agent/$name" ]; then
     cp "$HOME/.pi/agent/$name" "$PI_TEST_DIR/agent/$name"
   fi
 done
-PI_SKIP_VERSION_CHECK=1 \
-PI_CODING_AGENT_DIR="$PI_TEST_DIR/agent" \
-./bin/pi-workspace --approve --no-session
+(
+  cd "$PI_PROJECT_DIR"
+  PI_SKIP_VERSION_CHECK=1 \
+  PI_CODING_AGENT_DIR="$PI_TEST_DIR/agent" \
+  pi --no-extensions --approve --no-session -e "$ROOT"
+)
 ```
 
-Wait for `Claude bridge: active`. Temporary credential copies are mode-protected by `umask 077`, live outside repository, and are removed by trap.
+Wait for `Claude bridge: active`. Copy the printed `PI_PROJECT_DIR` value into Terminal B. Temporary credentials and project marker are mode-protected by `umask 077`, live outside repository, and are removed only after the child Pi exits.
 
 Terminal B, same repository root:
 
 ```bash
-node agent/claude-bridge-client/test-core-protocol.js "$PWD"
+node agent/claude-bridge-client/test-core-protocol.js "/path/to/PI_PROJECT_DIR"
 ```
 
-Expected: all core protocol checks pass. Then return to Terminal A, enter `/quit`, wait for process exit, and let trap remove temporary Pi home plus project bridge state.
+Expected: all core protocol checks pass, including MCP plan-task dispatch. Return to Terminal A, enter `/quit`, wait for process exit, then let `cleanup` remove temporary state.
 
 Confirm cleanup:
 
 ```bash
-find .pi/memory -type f -print 2>/dev/null
-ps -ax -o pid=,command= | grep -F "$PWD" | grep '[p]i ' || true
+find "/path/to/PI_PROJECT_DIR/.pi/memory" -type f -print 2>/dev/null
+ps -ax -o pid=,command= | grep -F "/path/to/PI_PROJECT_DIR" | grep '[p]i ' || true
 ```
 
-Both commands should print nothing. Do not leave Pi, tmux, or bridge processes running after tests.
+Both commands should print nothing. Do not signal the current Pi, delete its bridge state, or leave temporary Pi, tmux, or bridge processes running after tests.
 
 ## Claude Code bridge workflow
 
@@ -217,7 +230,8 @@ Acceptance:
 - `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan.
 - `capture_note` updates live Pi Notes UI through `discussion-notes` owner.
 - `validate_docs_tags` uses engineering-docs validator.
-- Confirmed `save_plan` appears in Pi `/plan view`.
+- Confirmed `save_plan` appears in Pi `/plan view` with its session-scoped body path and seeded task count.
+- `read_plan_tasks` returns live task metadata/progress; `tick_plan_task` updates the same branch-backed tracker and replays idempotently.
 - Claude mutation tools deny. Bash is sandbox-wrapped on supported macOS; without sandbox it denies closed.
 
 ## Cursor bridge workflow
@@ -227,7 +241,7 @@ Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and command templates are r
 1. Launch Pi and confirm intended bridge root.
 2. Open same root in Cursor.
 3. Use Cursor discuss/plan commands; pass `conversation_id` as `sessionId` when available.
-4. Verify recall/capture/save through `pi-claude-bridge`.
+4. Verify recall/capture/save plus `read_plan_tasks`/`tick_plan_task` through `pi-claude-bridge`.
 5. Verify read-only shell, non-bridge MCP, and native-edit behavior.
 6. Return to Pi Build for mutations.
 
