@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 import {
 	CAVEMAN_ENTRY,
 	CAVEMAN_PROMPT,
+	composeModeMarker,
 	composeWorkflowPrompt,
 	MODE_LABELS,
 	NORMAL_MODE_PROMPT,
@@ -51,6 +52,17 @@ for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 }
 assert.equal(composeWorkflowPrompt("off", true, prompts, "# Saved plan"), undefined, "Off must suppress enabled Caveman");
 assert.equal(composeWorkflowPrompt("off", false, prompts, "# Saved plan"), undefined, "Off must suppress normal override");
+
+const marker = {
+	planId: "plan-a",
+	path: "/agent/plans/session-a/plan-a.md",
+	savedAt: "2026-07-01T00:00:00.000Z",
+	progress: { done: 2, total: 5 },
+	nextTask: { id: "task-a", title: "Next task" },
+};
+assert.deepEqual(composeModeMarker("build", marker)?.details, marker, "marker must carry O(1) plan identity and progress");
+assert.equal(JSON.stringify(composeModeMarker("build", marker)).includes("tasks"), false, "marker must not carry full task list");
+assert.equal(composeModeMarker("off", marker), undefined, "Off must not carry marker");
 
 const longBranch = Array.from({ length: 10_000 }, (_, index) =>
 	index % 2 === 0 ? { type: "message" } : state(index === 9_999 ? false : true));

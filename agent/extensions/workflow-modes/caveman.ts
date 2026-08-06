@@ -60,6 +60,22 @@ export interface WorkflowPromptSet {
 	design: string;
 }
 
+export interface WorkflowPlanMarker {
+	planId: string;
+	path: string;
+	savedAt: string;
+	progress: { done: number; total: number };
+	nextTask?: { id: string; title: string };
+}
+
+export function composeModeMarker(mode: CavemanWorkflowMode, plan?: WorkflowPlanMarker): { content: string; details?: WorkflowPlanMarker } | undefined {
+	if (mode === "off") return undefined;
+	return {
+		content: `[workflow-modes] Active workflow mode: ${MODE_LABELS[mode]}.`,
+		...(plan ? { details: plan } : {}),
+	};
+}
+
 export function resolveCavemanEnabled(branch: readonly unknown[]): boolean {
 	let enabled = true;
 	for (const rawEntry of branch) {

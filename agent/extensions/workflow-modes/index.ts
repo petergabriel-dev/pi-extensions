@@ -6,9 +6,9 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
-import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
+import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
-import { MAX_PLAN_BYTES, writePlanFile } from "./plan-file.js";
+import { MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, type PlanTask } from "./plan-tasks.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
@@ -48,7 +48,9 @@ let currentMode: Mode = "off";
 let cavemanEnabled = true;
 let currentPlan: string | undefined;
 let currentPlanId: string | undefined;
+let currentPlanPath: string | undefined;
 let currentPlanSavedAt: string | undefined;
+let planReadNoticeKey: string | undefined;
 let latestContext: ExtensionContext | null = null;
 let pendingPlanSave = false;
 let planSaveToolCalled = false;
@@ -108,10 +110,59 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 	}
 	cavemanEnabled = resolveCavemanEnabled(branch);
 	const plan = resolveSavedPlanState(branch, PLAN_ENTRY);
-	currentPlan = plan?.plan;
-	currentPlanId = plan?.planId;
-	currentPlanSavedAt = plan?.savedAt;
+	const active = plan.plans.find((item) => item.planId === plan.activePlanId);
+	currentPlan = plan.plan;
+	currentPlanId = active?.planId ?? plan.planId;
+	currentPlanPath = active?.path;
+	currentPlanSavedAt = active?.savedAt ?? plan.savedAt;
+	planReadNoticeKey = undefined;
 	updateStatus(ctx);
+}
+
+async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanMarker | undefined> {
+	try {
+		const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+		const active = state.plans.find((item) => item.planId === state.activePlanId);
+		if (!active) {
+			currentPlan = undefined;
+			currentPlanId = undefined;
+			currentPlanPath = undefined;
+			currentPlanSavedAt = undefined;
+			planReadNoticeKey = undefined;
+			updateStatus(ctx);
+			return undefined;
+		}
+
+		currentPlanId = active.planId;
+		currentPlanPath = active.path;
+		currentPlanSavedAt = active.savedAt;
+		const text = await readPlanFile(sessionIdFromContext(ctx), active.planId);
+		if (text === undefined) throw new Error("plan file is missing");
+		currentPlan = text;
+		planReadNoticeKey = undefined;
+		const tasks = parsePlanTasks(text);
+		updateStatus(ctx);
+		return {
+			planId: active.planId,
+			path: active.path,
+			savedAt: active.savedAt,
+			progress: { done: 0, total: tasks.length },
+			...(tasks[0] ? { nextTask: { id: tasks[0].id, title: tasks[0].title } } : {}),
+		};
+	} catch (error) {
+		currentPlan = undefined;
+		const key = currentPlanPath ?? currentPlanId ?? "active-plan";
+		if (planReadNoticeKey !== key) {
+			planReadNoticeKey = key;
+			try {
+				ctx.ui.notify(`Saved plan unavailable; treating as no active plan (${error instanceof Error ? error.message : String(error)}).`, "warning");
+			} catch {
+				// before_agent_start must not fail because notice delivery is unavailable.
+			}
+		}
+		updateStatus(ctx);
+		return undefined;
+	}
 }
 
 function updateStatus(ctx: ExtensionContext): void {
@@ -270,7 +321,9 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 
 	currentPlan = text;
 	currentPlanId = planId;
+	currentPlanPath = path;
 	currentPlanSavedAt = savedAt;
+	planReadNoticeKey = undefined;
 	updateStatus(ctx);
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: true });
 	return entry;
@@ -314,7 +367,9 @@ async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 	pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, at: Date.now() });
 	currentPlan = undefined;
 	currentPlanId = undefined;
+	currentPlanPath = undefined;
 	currentPlanSavedAt = undefined;
+	planReadNoticeKey = undefined;
 	updateStatus(ctx);
 	ctx.ui.notify("Cleared saved plan.", "success");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: false });
@@ -426,12 +481,14 @@ export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: 
 	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: buildPrompt, review: REVIEW_PROMPT, design: DESIGN_PROMPT }, savedPlan);
 }
 
-export function composeModeMessage(mode: Mode) {
-	if (mode === "off") return undefined;
+export function composeModeMessage(mode: Mode, plan?: WorkflowPlanMarker) {
+	const marker = composeModeMarker(mode, plan);
+	if (!marker) return undefined;
 	return {
 		customType: MODE_MESSAGE_TYPE,
-		content: `[workflow-modes] Active workflow mode: ${MODE_LABELS[mode]}.`,
+		content: marker.content,
 		display: false,
+		...(marker.details ? { details: marker.details } : {}),
 	};
 }
 
@@ -510,9 +567,11 @@ export default function (pi: ExtensionAPI) {
 		if (!called) ctx.ui.notify("Plan save tool was not called. Use /plan save --last.", "warning");
 	});
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
+		const activeContext = ctx ?? latestContext;
+		const marker = activeContext ? await refreshPlanFromDisk(activeContext) : undefined;
 		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan, process.cwd());
-		const message = composeModeMessage(currentMode);
+		const message = composeModeMessage(currentMode, marker);
 		if (!extra || !message) return;
 		return {
 			message,

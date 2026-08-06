@@ -18,7 +18,7 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE } from "./index.ts";
+import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
@@ -74,12 +74,33 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if (!savedDetails.planId || !savedDetails.path || savedDetails.taskCount !== 1) throw new Error("plan tool result missing host metadata");
 	if (!existsSync(savedDetails.path)) throw new Error("plan tool did not write plan file");
 	if ((operations[0]?.data as { event?: string })?.event !== "set" || (operations[1]?.data as { event?: string })?.event !== "activate") throw new Error("plan state was not durably set then activated");
+	branchEntries = [
+		{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } },
+		{ type: "custom", customType: PLAN_ENTRY, data: operations[0]?.data },
+		{ type: "custom", customType: PLAN_ENTRY, data: operations[1]?.data },
+	];
+	const activeTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { planId?: string; path?: string; progress?: { done: number; total: number }; nextTask?: { title?: string } } } };
+	const activeDetails = activeTurn.message?.details;
+	if (activeDetails?.planId !== savedDetails.planId || activeDetails.path !== savedDetails.path || activeDetails.progress?.total !== 1 || activeDetails.progress.done !== 0 || activeDetails.nextTask?.title !== "Seed task") throw new Error("active plan marker missing identity/progress");
+	writeFileSync(savedDetails.path, "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n");
+	const editedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { systemPrompt?: string; message?: { details?: { nextTask?: { title?: string } } } };
+	if (!editedTurn.systemPrompt?.includes("# Hand edited") || editedTurn.message?.details?.nextTask?.title !== "Edited task") throw new Error("before_agent_start did not reread edited plan file");
 	operations.length = 0;
 	notifications.length = 0;
 	await commands.get("plan")?.handler("save", context);
 	if (operations[0]?.action !== "user" || !String(operations[0]?.message).includes("workflow_plan_save")) throw new Error("/plan save did not start directive turn");
 	await handlers.get("turn_end")?.({ toolResults: [] }, context);
 	if (notifications.filter((message) => message.includes("Plan save tool was not called")).length !== 1) throw new Error("missed plan tool did not emit exactly one nudge");
+	branchEntries = [
+		{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } },
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "missing-plan", path: "/missing/plan.md", savedAt: "2026-07-01T00:00:00.000Z" } },
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "activate", planId: "missing-plan" } },
+	];
+	notifications.length = 0;
+	const missingFirst = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: unknown } };
+	if (missingFirst.message?.details !== undefined) throw new Error("missing plan file retained marker identity");
+	await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context);
+	if (notifications.filter((message) => message.includes("Saved plan unavailable")).length !== 1) throw new Error("missing plan file did not emit one notice");
 	branchEntries = [{ role: "assistant", content: "LAST PLAN" }];
 	operations.length = 0;
 	await commands.get("plan")?.handler("save --last", context);
