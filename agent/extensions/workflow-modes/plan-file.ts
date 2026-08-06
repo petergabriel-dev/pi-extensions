@@ -7,7 +7,6 @@ export const MAX_PLAN_BYTES = 256 * 1024;
 export const PLAN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface PlanFileReference {
-	sessionId: string;
 	planId: string;
 }
 
@@ -124,23 +123,24 @@ export async function readPlanFile(sessionId: string, planId: string): Promise<s
 	}
 }
 
-export async function gcPlanFiles(referencedPlans: Iterable<PlanFileReference>, now = Date.now()): Promise<string[]> {
+export async function gcPlanFiles(sessionId: string, referencedPlans: Iterable<PlanFileReference>, now = Date.now()): Promise<string[]> {
 	if (!Number.isFinite(now)) throw new Error("now must be a finite timestamp");
+	const safeSessionId = validateSegment(sessionId, "sessionId");
 	const referenced = new Set<string>();
-	for (const plan of referencedPlans) referenced.add(getPlanFilePath(plan.sessionId, plan.planId));
+	for (const plan of referencedPlans) referenced.add(getPlanFilePath(safeSessionId, plan.planId));
 
-	const root = plansDirectory();
+	const sessionDirectory = join(plansDirectory(), safeSessionId);
 	try {
-		const rootInfo = await lstat(root);
-		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("plan store root is not a directory");
+		const rootInfo = await lstat(sessionDirectory);
+		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("plan session path is not a directory");
 	} catch (error) {
 		if (isMissing(error)) return [];
 		throw error;
 	}
 
-	let sessions;
+	let files;
 	try {
-		sessions = await readdir(root, { withFileTypes: true });
+		files = await readdir(sessionDirectory, { withFileTypes: true });
 	} catch (error) {
 		if (isMissing(error)) return [];
 		throw error;
@@ -148,27 +148,16 @@ export async function gcPlanFiles(referencedPlans: Iterable<PlanFileReference>, 
 
 	const deleted: string[] = [];
 	const cutoff = now - PLAN_RETENTION_MS;
-	for (const session of sessions) {
-		if (!session.isDirectory() || !SAFE_SEGMENT.test(session.name)) continue;
-		const sessionDirectory = join(root, session.name);
-		let files;
-		try {
-			files = await readdir(sessionDirectory, { withFileTypes: true });
-		} catch (error) {
-			if (isMissing(error)) continue;
-			throw error;
-		}
-		for (const file of files) {
-			if (!file.isFile() || !file.name.endsWith(".md")) continue;
-			const planId = file.name.slice(0, -3);
-			if (!SAFE_SEGMENT.test(planId)) continue;
-			const filePath = join(sessionDirectory, file.name);
-			if (referenced.has(filePath)) continue;
-			const fileInfo = await stat(filePath);
-			if (fileInfo.mtimeMs >= cutoff) continue;
-			await unlink(filePath);
-			deleted.push(filePath);
-		}
+	for (const file of files) {
+		if (!file.isFile() || !file.name.endsWith(".md")) continue;
+		const planId = file.name.slice(0, -3);
+		if (!SAFE_SEGMENT.test(planId)) continue;
+		const filePath = join(sessionDirectory, file.name);
+		if (referenced.has(filePath)) continue;
+		const fileInfo = await stat(filePath);
+		if (fileInfo.mtimeMs >= cutoff) continue;
+		await unlink(filePath);
+		deleted.push(filePath);
 	}
 	return deleted;
 }

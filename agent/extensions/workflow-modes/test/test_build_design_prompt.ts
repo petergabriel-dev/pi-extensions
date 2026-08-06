@@ -42,6 +42,7 @@ const commands = new Map<string, { handler: Function }>();
 const tools = new Map<string, any>();
 const operations: Array<{ action: string; type?: string; data?: unknown; message?: unknown }> = [];
 const notifications: string[] = [];
+const statuses: string[] = [];
 let branchEntries: any[] = [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }];
 let failSend = false;
 workflowModesExtension({
@@ -49,7 +50,10 @@ workflowModesExtension({
 	on(name: string, handler: Function) { handlers.set(name, handler); },
 	registerCommand(name: string, command: { handler: Function }) { commands.set(name, command); },
 	registerTool(tool: any) { tools.set(tool.name, tool); },
-	appendEntry(type: string, data: unknown) { operations.push({ action: "append", type, data }); },
+	appendEntry(type: string, data: unknown) {
+		operations.push({ action: "append", type, data });
+		if (type === PLAN_ENTRY) branchEntries.push({ type: "custom", customType: type, data });
+	},
 	sendUserMessage(message: unknown) { operations.push({ action: "user", message }); },
 	sendMessage(message: unknown) {
 		operations.push({ action: "send", message });
@@ -58,7 +62,7 @@ workflowModesExtension({
 } as never);
 const context = {
 	sessionManager: { getBranch: () => branchEntries, getSessionId: () => "session-test" },
-	ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
+	ui: { setStatus(key: string, message: string) { statuses.push(key + ":" + message); }, notify(message: string) { notifications.push(message); } },
 };
 handlers.get("session_start")?.({}, context);
 handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (result: unknown) => {
@@ -74,10 +78,12 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if (!savedDetails.planId || !savedDetails.path || savedDetails.taskCount !== 1) throw new Error("plan tool result missing host metadata");
 	if (!existsSync(savedDetails.path)) throw new Error("plan tool did not write plan file");
 	if ((operations[0]?.data as { event?: string })?.event !== "set" || (operations[1]?.data as { event?: string })?.event !== "activate") throw new Error("plan state was not durably set then activated");
+	const firstSet = operations[0]?.data;
+	const firstActivate = operations[1]?.data;
 	branchEntries = [
 		{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } },
-		{ type: "custom", customType: PLAN_ENTRY, data: operations[0]?.data },
-		{ type: "custom", customType: PLAN_ENTRY, data: operations[1]?.data },
+		{ type: "custom", customType: PLAN_ENTRY, data: firstSet },
+		{ type: "custom", customType: PLAN_ENTRY, data: firstActivate },
 	];
 	const activeTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { planId?: string; path?: string; progress?: { done: number; total: number }; nextTask?: { title?: string } } } };
 	const activeDetails = activeTurn.message?.details;
@@ -85,6 +91,18 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	writeFileSync(savedDetails.path, "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n");
 	const editedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { systemPrompt?: string; message?: { details?: { nextTask?: { title?: string } } } };
 	if (!editedTurn.systemPrompt?.includes("# Hand edited") || editedTurn.message?.details?.nextTask?.title !== "Edited task") throw new Error("before_agent_start did not reread edited plan file");
+	operations.length = 0;
+	const second = await planTool.execute("plan-call-2", { plan: "# Plan B\\n\\n## Section 4 — Tasks\\n- [ ] Second task\\n" }, undefined, undefined, context);
+	const secondDetails = second.details as { path?: string; planId?: string; taskCount?: number };
+	if (!secondDetails.planId || !secondDetails.path || secondDetails.taskCount !== 1) throw new Error("second plan save failed");
+	await commands.get("plan")?.handler("select " + savedDetails.planId, context);
+	const selectedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { systemPrompt?: string; message?: { details?: { planId?: string } } };
+	if (!selectedTurn.systemPrompt?.includes("# Hand edited") || selectedTurn.message?.details?.planId !== savedDetails.planId) throw new Error("plan select did not activate requested plan");
+	if (!statuses.some((status) => status.includes(savedDetails.planId!))) throw new Error("status omitted active plan identity");
+	operations.length = 0;
+	await commands.get("plan")?.handler("clear", context);
+	if ((operations.at(-1)?.data as { event?: string; planId?: string })?.event !== "clear" || (operations.at(-1)?.data as { planId?: string })?.planId !== savedDetails.planId) throw new Error("clear did not target active plan");
+	if (!existsSync(savedDetails.path)) throw new Error("clear deleted plan file");
 	operations.length = 0;
 	notifications.length = 0;
 	await commands.get("plan")?.handler("save", context);

@@ -8,9 +8,9 @@ import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithA
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
-import { MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
+import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, type PlanTask } from "./plan-tasks.js";
-import { resolveSavedPlanState } from "./plan-state.js";
+import { resolveSavedPlanState, type SavedPlan } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
@@ -50,6 +50,8 @@ let currentPlan: string | undefined;
 let currentPlanId: string | undefined;
 let currentPlanPath: string | undefined;
 let currentPlanSavedAt: string | undefined;
+let currentPlanProgress = { done: 0, total: 0 };
+let currentPlanNextTask: WorkflowPlanMarker["nextTask"] | undefined;
 let planReadNoticeKey: string | undefined;
 let latestContext: ExtensionContext | null = null;
 let pendingPlanSave = false;
@@ -66,8 +68,9 @@ function normalizeMode(raw: string): Mode | undefined {
 	return undefined;
 }
 
-function normalizePlanAction(raw: string): "view" | "save" | "clear" | undefined {
+function normalizePlanAction(raw: string): "select" | "view" | "save" | "clear" | undefined {
 	const value = raw.trim().toLowerCase();
+	if (value === "select" || value === "activate" || value === "switch") return "select";
 	if (value === "view" || value === "show") return "view";
 	if (value === "save" || value === "set") return "save";
 	if (value === "clear" || value === "delete" || value === "remove") return "clear";
@@ -115,6 +118,8 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 	currentPlanId = active?.planId ?? plan.planId;
 	currentPlanPath = active?.path;
 	currentPlanSavedAt = active?.savedAt ?? plan.savedAt;
+	currentPlanProgress = { done: 0, total: 0 };
+	currentPlanNextTask = undefined;
 	planReadNoticeKey = undefined;
 	updateStatus(ctx);
 }
@@ -128,6 +133,8 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 			currentPlanId = undefined;
 			currentPlanPath = undefined;
 			currentPlanSavedAt = undefined;
+			currentPlanProgress = { done: 0, total: 0 };
+			currentPlanNextTask = undefined;
 			planReadNoticeKey = undefined;
 			updateStatus(ctx);
 			return undefined;
@@ -141,17 +148,24 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		currentPlan = text;
 		planReadNoticeKey = undefined;
 		const tasks = parsePlanTasks(text);
+		currentPlanProgress = { done: 0, total: tasks.length };
+		currentPlanNextTask = tasks[0] ? { id: tasks[0].id, title: tasks[0].title } : undefined;
 		updateStatus(ctx);
 		return {
 			planId: active.planId,
 			path: active.path,
 			savedAt: active.savedAt,
-			progress: { done: 0, total: tasks.length },
-			...(tasks[0] ? { nextTask: { id: tasks[0].id, title: tasks[0].title } } : {}),
+			progress: currentPlanProgress,
+			...(currentPlanNextTask ? { nextTask: currentPlanNextTask } : {}),
 		};
 	} catch (error) {
-		currentPlan = undefined;
 		const key = currentPlanPath ?? currentPlanId ?? "active-plan";
+		currentPlan = undefined;
+		currentPlanId = undefined;
+		currentPlanPath = undefined;
+		currentPlanSavedAt = undefined;
+		currentPlanProgress = { done: 0, total: 0 };
+		currentPlanNextTask = undefined;
 		if (planReadNoticeKey !== key) {
 			planReadNoticeKey = key;
 			try {
@@ -167,7 +181,8 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 
 function updateStatus(ctx: ExtensionContext): void {
 	const cavemanStatus = `${cavemanEnabled ? "ON" : "OFF"}${currentMode === "off" ? " (inactive)" : ""}`;
-	ctx.ui.setStatus(STATUS_KEY, `Mode: ${MODE_LABELS[currentMode]} Saved Plan: ${currentPlan ? "ON" : "OFF"} Caveman: ${cavemanStatus}`);
+	const planStatus = currentPlanId ? `${currentPlanId} ${currentPlanProgress.done}/${currentPlanProgress.total}` : "OFF";
+	ctx.ui.setStatus(STATUS_KEY, `Mode: ${MODE_LABELS[currentMode]} Saved Plan: ${planStatus} Caveman: ${cavemanStatus}`);
 }
 
 async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Promise<void> {
@@ -323,6 +338,8 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanId = planId;
 	currentPlanPath = path;
 	currentPlanSavedAt = savedAt;
+	currentPlanProgress = { done: 0, total: tasks.length };
+	currentPlanNextTask = tasks[0] ? { id: tasks[0].id, title: tasks[0].title } : undefined;
 	planReadNoticeKey = undefined;
 	updateStatus(ctx);
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: true });
@@ -360,28 +377,73 @@ async function savePlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 	requestPlanSave(pi, ctx);
 }
 
+function planState(ctx: ExtensionCommandContext | ExtensionContext) {
+	return resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+}
+
+function formatPlanList(plans: readonly SavedPlan[], activePlanId: string | undefined): string {
+	if (plans.length === 0) return "No saved plans.";
+	return plans.map((plan) => `${plan.planId}${plan.planId === activePlanId ? " (active)" : ""} — ${plan.path}`).join("\n");
+}
+
+function planSelectItems(plans: readonly SavedPlan[], activePlanId: string | undefined): SelectItem[] {
+	return plans.map((plan) => ({
+		value: plan.planId,
+		label: `${plan.planId}${plan.planId === activePlanId ? " (active)" : ""}`,
+		description: `${plan.savedAt} — ${plan.path}`,
+	}));
+}
+
+async function gcSessionPlans(ctx: ExtensionContext): Promise<void> {
+	try {
+		const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+		await gcPlanFiles(sessionIdFromContext(ctx), state.plans.map((plan) => ({ planId: plan.planId })));
+	} catch {
+		// Missing or unavailable runtime plan storage must not block session start.
+	}
+}
+
+async function selectPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext, requestedPlanId?: string): Promise<void> {
+	const state = planState(ctx);
+	if (state.plans.length === 0) return ctx.ui.notify("No saved plans. Use /plan save.", "info");
+	let planId = requestedPlanId?.trim();
+	if (!planId) {
+		if (!ctx.hasUI) return ctx.ui.notify(`${formatPlanList(state.plans, state.activePlanId)}\nUse /plan select <planId>.`, "info");
+		planId = await selectOverlay(ctx, "Select Plan", planSelectItems(state.plans, state.activePlanId)) ?? undefined;
+	}
+	if (!planId) return;
+	const target = state.plans.find((plan) => plan.planId === planId);
+	if (!target) return ctx.ui.notify(`Unknown planId ${planId}.\n${formatPlanList(state.plans, state.activePlanId)}`, "warning");
+
+	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "activate" satisfies PlanEvent, planId: target.planId, at: Date.now() }));
+	reconstructFromBranch(ctx);
+	await refreshPlanFromDisk(ctx);
+	ctx.ui.notify(`Selected plan ${target.planId}.`, "success");
+	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
+}
+
 async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	if (!currentPlan) return ctx.ui.notify("No saved plan for this branch.", "info");
-	const ok = await ctx.ui.confirm("Clear plan?", "Clear the saved plan for this branch?");
+	const state = planState(ctx);
+	const planId = state.activePlanId;
+	if (!planId) return ctx.ui.notify("No active saved plan.", "info");
+	const ok = ctx.hasUI ? await ctx.ui.confirm("Clear plan?", "Drop active plan from this branch? Its file stays on disk.") : true;
 	if (!ok) return;
-	pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, at: Date.now() });
-	currentPlan = undefined;
-	currentPlanId = undefined;
-	currentPlanPath = undefined;
-	currentPlanSavedAt = undefined;
-	planReadNoticeKey = undefined;
-	updateStatus(ctx);
-	ctx.ui.notify("Cleared saved plan.", "success");
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: false });
+	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, planId, at: Date.now() }));
+	reconstructFromBranch(ctx);
+	await refreshPlanFromDisk(ctx);
+	ctx.ui.notify(`Cleared plan ${planId}; file retained.`, "success");
+	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 }
 
 async function choosePlanAction(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	if (!ctx.hasUI) return ctx.ui.notify("Use /plan <view|save|clear>.", "warning");
+	if (!ctx.hasUI) return ctx.ui.notify(`${formatPlanList(planState(ctx).plans, planState(ctx).activePlanId)}\nUse /plan <select|view|save|clear>.`, "info");
 	const choice = await selectOverlay(ctx, "Plan", [
-		{ value: "view", label: "View", description: currentPlan ? "View saved plan" : "No saved plan" },
-		{ value: "save", label: "Save last assistant message", description: currentPlan ? "Overwrite current plan" : "Save current plan" },
-		{ value: "clear", label: "Clear", description: "Clear saved plan" },
+		{ value: "select", label: "Select", description: "Activate an ancestry plan" },
+		{ value: "view", label: "View", description: currentPlan ? "View active plan" : "No active plan" },
+		{ value: "save", label: "Save", description: "Save new plan; no overwrite" },
+		{ value: "clear", label: "Clear", description: "Drop active plan; retain file" },
 	]);
+	if (choice === "select") await selectPlan(pi, ctx);
 	if (choice === "view") await showPlan(ctx);
 	if (choice === "save") await savePlan(pi, ctx);
 	if (choice === "clear") await clearPlan(pi, ctx);
@@ -549,6 +611,7 @@ export default function (pi: ExtensionAPI) {
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
+		await gcSessionPlans(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 	pi.on("session_tree", async (_event, ctx) => {
@@ -661,13 +724,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("plan", {
-		description: "Manage the branch-local saved plan",
+		description: "Manage session-scoped saved plans",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) return choosePlanAction(pi, ctx);
 			if (arg.toLowerCase() === "save --last") return savePlanLast(pi, ctx);
-			const action = normalizePlanAction(arg);
-			if (!action) return ctx.ui.notify("Unknown plan action. Use view, save, or clear.", "warning");
+			const [actionArg, ...actionArgs] = arg.split(/\s+/);
+			const action = normalizePlanAction(actionArg);
+			if (!action) return ctx.ui.notify("Unknown plan action. Use select, view, save, or clear.", "warning");
+			if (action === "select") await selectPlan(pi, ctx, actionArgs.join(" ") || undefined);
 			if (action === "view") await showPlan(ctx);
 			if (action === "save") await savePlan(pi, ctx);
 			if (action === "clear") await clearPlan(pi, ctx);

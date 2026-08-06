@@ -28,16 +28,19 @@ try {
 	const oldPath = await writePlanFile("session-b", "old", "old");
 	const keptPath = await writePlanFile("session-b", "kept", "kept");
 	const freshPath = await writePlanFile("session-b", "fresh", "fresh");
+	const otherSessionPath = await writePlanFile("session-other", "old-other", "old-other");
 	const now = Date.now();
 	const oldTime = new Date(now - PLAN_RETENTION_MS - 1);
 	await fs.utimes(oldPath, oldTime, oldTime);
 	await fs.utimes(keptPath, oldTime, oldTime);
-	const deleted = await gcPlanFiles([{ sessionId: "session-b", planId: "kept" }], now);
+	await fs.utimes(otherSessionPath, oldTime, oldTime);
+	const deleted = await gcPlanFiles("session-b", [{ planId: "kept" }], now);
 	assert.deepEqual(deleted, [oldPath]);
 	assert.equal(await readPlanFile("session-b", "old"), undefined);
 	assert.equal(await readPlanFile("session-b", "kept"), "kept");
 	assert.equal(await readPlanFile("session-b", "fresh"), "fresh");
-	assert.deepEqual(await gcPlanFiles([], now), [keptPath]);
+	assert.equal(await readPlanFile("session-other", "old-other"), "old-other", "GC must not sweep another session");
+	assert.deepEqual(await gcPlanFiles("session-b", [], now), [keptPath]);
 } finally {
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
