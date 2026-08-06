@@ -39,27 +39,51 @@ for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 if (composeModeMessage("off") !== undefined) throw new Error("Off injected a mode message");
 const handlers = new Map<string, Function>();
 const commands = new Map<string, { handler: Function }>();
+const tools = new Map<string, any>();
 const operations: Array<{ action: string; type?: string; data?: unknown; message?: unknown }> = [];
+const notifications: string[] = [];
+let branchEntries: any[] = [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }];
 let failSend = false;
 workflowModesExtension({
 	events: { on() {}, emit() {} },
 	on(name: string, handler: Function) { handlers.set(name, handler); },
 	registerCommand(name: string, command: { handler: Function }) { commands.set(name, command); },
+	registerTool(tool: any) { tools.set(tool.name, tool); },
 	appendEntry(type: string, data: unknown) { operations.push({ action: "append", type, data }); },
+	sendUserMessage(message: unknown) { operations.push({ action: "user", message }); },
 	sendMessage(message: unknown) {
 		operations.push({ action: "send", message });
 		if (failSend) throw new Error("send failed");
 	},
 } as never);
 const context = {
-	sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }] },
-	ui: { setStatus() {}, notify() {} },
+	sessionManager: { getBranch: () => branchEntries, getSessionId: () => "session-test" },
+	ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
 };
 handlers.get("session_start")?.({}, context);
 handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (result: unknown) => {
 	const value = result as { message?: ReturnType<typeof composeModeMessage>; systemPrompt?: string };
 	if (value.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("before_agent_start omitted active mode message");
 	if (!value.systemPrompt?.startsWith("BASE")) throw new Error("before_agent_start omitted system prompt");
+	process.env.PI_CODING_AGENT_DIR = cwd;
+	const planTool = tools.get("workflow_plan_save");
+	if (!planTool) throw new Error("plan authoring tool was not registered");
+	operations.length = 0;
+	const saved = await planTool.execute("plan-call", { plan: "# Plan\\n\\n## Section 4 — Tasks\\n- [ ] Seed task\\n" }, undefined, undefined, context);
+	const savedDetails = saved.details as { path?: string; planId?: string; taskCount?: number };
+	if (!savedDetails.planId || !savedDetails.path || savedDetails.taskCount !== 1) throw new Error("plan tool result missing host metadata");
+	if (!existsSync(savedDetails.path)) throw new Error("plan tool did not write plan file");
+	if ((operations[0]?.data as { event?: string })?.event !== "set" || (operations[1]?.data as { event?: string })?.event !== "activate") throw new Error("plan state was not durably set then activated");
+	operations.length = 0;
+	notifications.length = 0;
+	await commands.get("plan")?.handler("save", context);
+	if (operations[0]?.action !== "user" || !String(operations[0]?.message).includes("workflow_plan_save")) throw new Error("/plan save did not start directive turn");
+	await handlers.get("turn_end")?.({ toolResults: [] }, context);
+	if (notifications.filter((message) => message.includes("Plan save tool was not called")).length !== 1) throw new Error("missed plan tool did not emit exactly one nudge");
+	branchEntries = [{ role: "assistant", content: "LAST PLAN" }];
+	operations.length = 0;
+	await commands.get("plan")?.handler("save --last", context);
+	if (operations.some((operation) => operation.action === "user") || !operations.some((operation) => operation.action === "append")) throw new Error("/plan save --last did not use deterministic fallback");
 	operations.length = 0;
 	await commands.get("mode")?.handler("off", context);
 	if (operations[0]?.action !== "append" || operations[0]?.type !== MODE_ENTRY || (operations[0]?.data as { mode?: string })?.mode !== "off") throw new Error("Off mode was not persisted first");

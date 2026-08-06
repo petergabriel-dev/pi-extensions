@@ -8,11 +8,15 @@ import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithA
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
+import { MAX_PLAN_BYTES, writePlanFile } from "./plan-file.js";
+import { parsePlanTasks, type PlanTask } from "./plan-tasks.js";
 import { resolveSavedPlanState } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
-export type PlanEvent = "set" | "clear";
+export type PlanEvent = "set" | "activate" | "clear";
+export const PLAN_AUTHORING_TOOL = "workflow_plan_save";
+export const PLAN_SAVE_DIRECTIVE = "[workflow-modes] Plan save directive: call workflow_plan_save exactly once with complete plan text in plan only. Do not explain or add fields.";
 
 export const MODE_ENTRY = "workflow-mode-set";
 export const PLAN_ENTRY = "workflow-plan";
@@ -46,6 +50,8 @@ let currentPlan: string | undefined;
 let currentPlanId: string | undefined;
 let currentPlanSavedAt: string | undefined;
 let latestContext: ExtensionContext | null = null;
+let pendingPlanSave = false;
+let planSaveToolCalled = false;
 
 function normalizeMode(raw: string): Mode | undefined {
 	const value = raw.trim().toLowerCase();
@@ -232,14 +238,36 @@ async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
 	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", margin: 2, anchor: "center" } });
 }
 
-export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionContext, text: string, metadata: { planId?: string; savedAt?: string } = {}): Promise<{ event: "set"; plan: string; at: number; planId: string; savedAt: string }> {
+export interface SavedWorkflowPlanEntry {
+	event: "set";
+	planId: string;
+	path: string;
+	savedAt: string;
+	at: number;
+	tasks: PlanTask[];
+}
+
+function sessionIdFromContext(ctx: ExtensionContext): string {
+	const sessionId = (ctx.sessionManager as { getSessionId?: () => unknown }).getSessionId?.();
+	if (typeof sessionId !== "string" || sessionId.trim().length === 0) throw new Error("Pi session id is unavailable");
+	return sessionId;
+}
+
+export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionContext, text: string, metadata: { planId?: string; savedAt?: string } = {}): Promise<SavedWorkflowPlanEntry> {
 	if (typeof text !== "string" || text.trim().length === 0) throw new Error("plan text is required");
+	if (Buffer.byteLength(text, "utf8") > MAX_PLAN_BYTES) throw new Error(`plan text exceeds ${MAX_PLAN_BYTES} bytes`);
 	const planId = metadata.planId ?? randomUUID();
 	if (typeof planId !== "string" || planId.trim().length === 0) throw new Error("planId is required");
 	const savedAt = metadata.savedAt ?? new Date().toISOString();
 	if (Number.isNaN(Date.parse(savedAt))) throw new Error("savedAt must be an ISO date");
-	const entry = { event: "set" satisfies PlanEvent, plan: text, planId, savedAt, at: Date.parse(savedAt) };
-	pi.appendEntry(PLAN_ENTRY, entry);
+
+	const path = await writePlanFile(sessionIdFromContext(ctx), planId, text);
+	const tasks = parsePlanTasks(text);
+	const at = Date.now();
+	const entry = { event: "set" satisfies PlanEvent, planId, path, savedAt, at, tasks };
+	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
+	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "activate" satisfies PlanEvent, planId, at: Date.now() }));
+
 	currentPlan = text;
 	currentPlanId = planId;
 	currentPlanSavedAt = savedAt;
@@ -248,15 +276,35 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	return entry;
 }
 
-async function savePlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+async function savePlanLast(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	const text = getLastAssistantText(ctx);
 	if (!text) return ctx.ui.notify("No assistant message found to save as the current plan.", "warning");
-	if (currentPlan) {
-		const ok = await ctx.ui.confirm("Overwrite plan?", "Overwrite the existing saved plan for this branch?");
-		if (!ok) return;
-	}
 	await setSavedWorkflowPlan(pi, ctx, text);
 	ctx.ui.notify("Saved current plan from the last assistant message.", "success");
+}
+
+function requestPlanSave(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+	pendingPlanSave = true;
+	planSaveToolCalled = false;
+	try {
+		pi.sendUserMessage(PLAN_SAVE_DIRECTIVE);
+	} catch (error) {
+		pendingPlanSave = false;
+		ctx.ui.notify(`Could not start plan save: ${error instanceof Error ? error.message : String(error)}`, "error");
+	}
+}
+
+const PLAN_AUTHORING_PARAMETERS = {
+	type: "object",
+	properties: {
+		plan: { type: "string", minLength: 1, maxLength: MAX_PLAN_BYTES },
+	},
+	required: ["plan"],
+	additionalProperties: false,
+} as const;
+
+async function savePlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+	requestPlanSave(pi, ctx);
 }
 
 async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -388,6 +436,26 @@ export function composeModeMessage(mode: Mode) {
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: PLAN_AUTHORING_TOOL,
+		label: "Save Plan",
+		description: "Persist complete plan text into the active Pi session plan store.",
+		promptSnippet: "Save complete authored plan text through workflow-modes",
+		promptGuidelines: [
+			"Call workflow_plan_save exactly once during the /plan save directive turn, with complete plan text in plan only.",
+			"Do not supply planId, path, timestamps, task state, or explanatory fields; workflow-modes owns those values.",
+		],
+		parameters: PLAN_AUTHORING_PARAMETERS as never,
+		async execute(_toolCallId, params: { plan: string }, _signal, _onUpdate, ctx) {
+			planSaveToolCalled = true;
+			const entry = await setSavedWorkflowPlan(pi, ctx, params.plan);
+			return {
+				content: [{ type: "text", text: `Saved plan ${entry.planId} with ${entry.tasks.length} Section 4 task${entry.tasks.length === 1 ? "" : "s"}.` }],
+				details: { planId: entry.planId, path: entry.path, savedAt: entry.savedAt, taskCount: entry.tasks.length },
+			};
+		},
+	});
+
 	pi.events.on("workflow-modes:save-plan", async (data: unknown) => {
 		const request = data && typeof data === "object" ? data as { requestId?: unknown; plan?: unknown; planId?: unknown } : {};
 		const requestId = typeof request.requestId === "string" ? request.requestId : undefined;
@@ -421,13 +489,25 @@ export default function (pi: ExtensionAPI) {
 	// Re-emit state on session restore so late-loaded extensions can sync
 	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
+		pendingPlanSave = false;
+		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		latestContext = ctx;
+		pendingPlanSave = false;
+		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
+	});
+
+	pi.on("turn_end", async (_event, ctx) => {
+		if (!pendingPlanSave) return;
+		pendingPlanSave = false;
+		const called = planSaveToolCalled;
+		planSaveToolCalled = false;
+		if (!called) ctx.ui.notify("Plan save tool was not called. Use /plan save --last.", "warning");
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -526,6 +606,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) return choosePlanAction(pi, ctx);
+			if (arg.toLowerCase() === "save --last") return savePlanLast(pi, ctx);
 			const action = normalizePlanAction(arg);
 			if (!action) return ctx.ui.notify("Unknown plan action. Use view, save, or clear.", "warning");
 			if (action === "view") await showPlan(ctx);
