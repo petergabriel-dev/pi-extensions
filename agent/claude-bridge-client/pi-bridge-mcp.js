@@ -230,6 +230,30 @@ const tools = [
 			},
 			required: ["planText", "confirmed"]
 		}
+	},
+	{
+		name: "read_plan_tasks",
+		description: "Read active workflow plan tasks and branch-backed completion progress through live Pi bridge.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				planId: { type: "string", description: "Optional active plan id." },
+				cwd: { type: "string" }
+			}
+		}
+	},
+	{
+		name: "tick_plan_task",
+		description: "Mark exactly one completed active workflow plan task through live Pi bridge.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				taskId: { type: "string" },
+				planId: { type: "string", description: "Optional active plan id." },
+				cwd: { type: "string" }
+			},
+			required: ["taskId"]
+		}
 	}
 ];
 
@@ -241,6 +265,8 @@ async function callTool(name, args) {
 	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, sessionId: args.sessionId, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd }));
 	if (name === "validate_docs_tags") return toolResult(name, await bridgeRequest("validate_tags", { planText: args.planText }, { cwd }));
 	if (name === "save_plan") return toolResult(name, await bridgeRequest("save_plan", { planText: args.planText, planId: args.planId, confirmed: args.confirmed === true }, { cwd }));
+	if (name === "read_plan_tasks") return toolResult(name, await bridgeRequest("read_plan_tasks", { planId: args.planId }, { cwd }));
+	if (name === "tick_plan_task") return toolResult(name, await bridgeRequest("tick_plan_task", { taskId: args.taskId, planId: args.planId }, { cwd }));
 	throw new Error(`Unknown tool: ${name}`);
 }
 

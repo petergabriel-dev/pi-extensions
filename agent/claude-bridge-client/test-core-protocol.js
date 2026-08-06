@@ -185,12 +185,26 @@ test("MCP exposes and dispatches memory entry tools", async ({ projectRoot }) =>
 	const listed = responses.find((response) => response.id === 1)?.result?.tools?.map((tool) => tool.name) || [];
 	assert(listed.includes("recall_memory_entry"), "recall_memory_entry missing from tools/list");
 	assert(listed.includes("save_memory"), "save_memory missing from tools/list");
+	assert(listed.includes("read_plan_tasks"), "read_plan_tasks missing from tools/list");
+	assert(listed.includes("tick_plan_task"), "tick_plan_task missing from tools/list");
 	const saved = responses.find((response) => response.id === 2);
 	assert(!saved.error, `save_memory MCP error: ${JSON.stringify(saved)}`);
 	assert(saved.result.structuredContent.result.slug === `core-mcp-memory-${id}`, "save_memory slug mismatch");
 	const recalled = responses.find((response) => response.id === 3);
 	assert(!recalled.error, `recall_memory_entry MCP error: ${JSON.stringify(recalled)}`);
 	assert(recalled.result.structuredContent.result.entry.includes(`MCP body ${id}`), "recall_memory_entry body missing");
+
+	const taskRead = runMcp([
+		{ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "read_plan_tasks", arguments: { cwd: projectRoot } } },
+	], projectRoot).find((response) => response.id === 4);
+	assert(!taskRead.error, `read_plan_tasks MCP error: ${JSON.stringify(taskRead)}`);
+	const taskResult = taskRead.result.structuredContent.result;
+	assert(taskResult.tasks?.length === 1 && taskResult.progress?.done === 1, "read_plan_tasks MCP result missing live task state");
+	const taskTick = runMcp([
+		{ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "tick_plan_task", arguments: { taskId: taskResult.tasks[0].id, cwd: projectRoot } } },
+	], projectRoot).find((response) => response.id === 5);
+	assert(!taskTick.error, `tick_plan_task MCP error: ${JSON.stringify(taskTick)}`);
+	assert(taskTick.result.structuredContent.result.idempotent === true, "tick_plan_task MCP did not use live idempotency");
 });
 
 test("MCP client fails loudly when bridge down", async () => {
