@@ -22,8 +22,9 @@
 | ADR-0018 | Active | Engineering docs root spokes | changing engineering-docs init/check, manifest.generated, AGENTS.md/CLAUDE.md generation, or marker-block merge behavior |
 | ADR-0019 | Active | Multi-harness bridge and Cursor parity | changing bridge protocol fields, adding new harness clients, changing Cursor hooks/templates, changing read-only enforcement, or extending ADR-0001 bridge boundaries |
 | ADR-0020 | Superseded | Durable workflow plan store |  |
-| ADR-0021 | Active | Session-branch workflow plans |  |
+| ADR-0021 | Superseded | Session-branch workflow plans |  |
 | ADR-0022 | Active | Network-allowed read-only Review sandbox | changing Review mode command policy, sandbox wrapping, fallback behavior, or GitHub review workflows |
 | ADR-0023 | Active | Workspace source and runtime separation | changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy |
 | ADR-0024 | Active | Design mode and design docs root | changing Design prompts, design scaffolds, token parsing, preview themes, base-library guidance, build prompt composition, frontend component guidance, or bridge prompt recall |
 | ADR-0025 | Active | Workflow mode announcement channel | changing workflow-mode prompt composition, mode transitions, before_agent_start messages, tool block reasons, compaction behavior, or provider continuation/cache behavior |
+| ADR-0026 | Active | Session-scoped workflow plan files and task tracking | changing /plan save/select/view/clear, plan-file paths or retention, task seeding/ticking, workflow markers, bridge plan access, or session ancestry semantics |

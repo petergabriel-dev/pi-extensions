@@ -1,11 +1,14 @@
 ---
 id: ADR-0021
 title: Session-branch workflow plans
-status: Active
+status: Superseded
 date: 2026-07-15
+superseded_by: ADR-0026
 ---
 
 # ADR-0021: Session-branch workflow plans
+
+> Superseded by [ADR-0026](ADR-0026-session-scoped-workflow-plan-files-and-task-tracking.md). Session ancestry remains authoritative for plan pointers and task progress, but plan bodies now live in session-scoped Pi agent files.
 
 ## Decision
 
@@ -52,3 +55,7 @@ Code:
 ## Supersedes
 
 - ADR-0020
+
+## Superseded by
+
+- ADR-0026
