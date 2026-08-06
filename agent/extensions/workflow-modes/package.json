@@ -8,7 +8,7 @@
     ]
   },
   "scripts": {
-    "test": "npx tsx test/test_sandbox.ts && npx tsx test/test_policy.ts && npx tsx test/test_behavioral_sandbox.ts && npx tsx test/test_plan_state.ts && npx tsx test/test_caveman.ts && npx tsx test/test_build_design_prompt.ts",
+    "test": "npx tsx test/test_sandbox.ts && npx tsx test/test_policy.ts && npx tsx test/test_behavioral_sandbox.ts && npx tsx test/test_plan_state.ts && npx tsx test/test_plan_file.ts && npx tsx test/test_caveman.ts && npx tsx test/test_build_design_prompt.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
