@@ -52,6 +52,8 @@ let currentPlanId: string | undefined;
 let currentPlanPath: string | undefined;
 let currentPlanSavedAt: string | undefined;
 let currentPlanProgress = { done: 0, total: 0 };
+let currentPlanTasks: PlanTask[] = [];
+let currentPlanCompletedTaskIds: string[] = [];
 let currentPlanNextTask: WorkflowPlanMarker["nextTask"] | undefined;
 let planReadNoticeKey: string | undefined;
 let latestContext: ExtensionContext | null = null;
@@ -120,6 +122,8 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 	currentPlanPath = active?.path;
 	currentPlanSavedAt = active?.savedAt ?? plan.savedAt;
 	const taskState = active ? resolveSavedPlanTaskState(branch, active.planId) : undefined;
+	currentPlanTasks = taskState?.tasks ?? [];
+	currentPlanCompletedTaskIds = taskState?.completedTaskIds ?? [];
 	currentPlanProgress = taskState?.progress ?? { done: 0, total: 0 };
 	currentPlanNextTask = taskState?.nextTask;
 	planReadNoticeKey = undefined;
@@ -136,6 +140,8 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 			currentPlanPath = undefined;
 			currentPlanSavedAt = undefined;
 			currentPlanProgress = { done: 0, total: 0 };
+			currentPlanTasks = [];
+			currentPlanCompletedTaskIds = [];
 			currentPlanNextTask = undefined;
 			planReadNoticeKey = undefined;
 			updateStatus(ctx);
@@ -150,6 +156,8 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		currentPlan = text;
 		planReadNoticeKey = undefined;
 		const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), active.planId, parsePlanTasks(text));
+		currentPlanTasks = taskState.tasks;
+		currentPlanCompletedTaskIds = taskState.completedTaskIds;
 		currentPlanProgress = taskState.progress;
 		currentPlanNextTask = taskState.nextTask;
 		updateStatus(ctx);
@@ -167,6 +175,8 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		currentPlanPath = undefined;
 		currentPlanSavedAt = undefined;
 		currentPlanProgress = { done: 0, total: 0 };
+		currentPlanTasks = [];
+		currentPlanCompletedTaskIds = [];
 		currentPlanNextTask = undefined;
 		if (planReadNoticeKey !== key) {
 			planReadNoticeKey = key;
@@ -356,6 +366,8 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanPath = path;
 	currentPlanSavedAt = savedAt;
 	const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId, tasks);
+	currentPlanTasks = taskState.tasks;
+	currentPlanCompletedTaskIds = taskState.completedTaskIds;
 	currentPlanProgress = taskState.progress;
 	currentPlanNextTask = taskState.nextTask;
 	planReadNoticeKey = undefined;
@@ -380,6 +392,8 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, at: Date.now() };
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
 	const nextState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId);
+	currentPlanTasks = nextState.tasks;
+	currentPlanCompletedTaskIds = nextState.completedTaskIds;
 	currentPlanProgress = nextState.progress;
 	currentPlanNextTask = nextState.nextTask;
 	updateStatus(ctx);
@@ -658,7 +672,7 @@ export default function (pi: ExtensionAPI) {
 		if (!latestContext) return emitResult({ ok: false, error: "workflow-modes has no active context" });
 		try {
 			const entry = await setSavedWorkflowPlan(pi, latestContext, plan, { planId });
-			emitResult({ ok: true, planId: entry.planId, savedAt: entry.savedAt, chars: plan.length });
+			emitResult({ ok: true, planId: entry.planId, path: entry.path, savedAt: entry.savedAt, taskCount: entry.tasks.length, chars: plan.length });
 		} catch (error) {
 			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
 		}
@@ -670,9 +684,43 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit("workflow-modes:state", {
 			mode: currentMode,
 			cavemanEnabled,
-			hasPlan: currentPlan !== undefined,
-			...(currentPlan ? { plan: currentPlan, planId: currentPlanId, savedAt: currentPlanSavedAt } : {}),
+			hasPlan: currentPlanId !== undefined,
+			...(currentPlanId ? {
+				planId: currentPlanId,
+				path: currentPlanPath,
+				savedAt: currentPlanSavedAt,
+				progress: currentPlanProgress,
+				...(currentPlanNextTask ? { nextTask: currentPlanNextTask } : {}),
+			} : {}),
+			...(currentPlan ? { plan: currentPlan } : {}),
 		});
+	});
+
+	pi.events.on("workflow-modes:get-plan-tasks", (data: unknown) => {
+		const request = data && typeof data === "object" ? data as { requestId?: unknown; planId?: unknown } : {};
+		const requestId = typeof request.requestId === "string" ? request.requestId : undefined;
+		const emitResult = (result: Record<string, unknown>) => pi.events.emit("workflow-modes:get-plan-tasks-result", { requestId, ...result });
+		if (!requestId) return emitResult({ ok: false, error: "workflow-modes task read requestId is required" });
+		const requestedPlanId = typeof request.planId === "string" ? request.planId : undefined;
+		if (!currentPlanId) return emitResult({ ok: false, error: "workflow-modes has no active saved plan" });
+		if (requestedPlanId && requestedPlanId !== currentPlanId) return emitResult({ ok: false, error: "workflow-modes task state is available only for active plan" });
+		emitResult({ ok: true, planId: currentPlanId, tasks: currentPlanTasks, completedTaskIds: currentPlanCompletedTaskIds, progress: currentPlanProgress, ...(currentPlanNextTask ? { nextTask: currentPlanNextTask } : {}) });
+	});
+
+	pi.events.on("workflow-modes:tick-plan-task", async (data: unknown) => {
+		const request = data && typeof data === "object" ? data as { requestId?: unknown; planId?: unknown; taskId?: unknown } : {};
+		const requestId = typeof request.requestId === "string" ? request.requestId : undefined;
+		const emitResult = (result: Record<string, unknown>) => pi.events.emit("workflow-modes:tick-plan-task-result", { requestId, ...result });
+		if (!requestId) return emitResult({ ok: false, error: "workflow-modes task tick requestId is required" });
+		if (typeof request.taskId !== "string" || request.taskId.trim().length === 0) return emitResult({ ok: false, error: "workflow-modes task tick taskId is required" });
+		if (request.planId !== undefined && request.planId !== currentPlanId) return emitResult({ ok: false, error: "workflow-modes task state is available only for active plan" });
+		if (!latestContext) return emitResult({ ok: false, error: "workflow-modes has no active context" });
+		try {
+			const result = await tickWorkflowPlanTask(pi, latestContext, request.taskId);
+			emitResult({ ok: true, ...result });
+		} catch (error) {
+			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
+		}
 	});
 
 	// Re-emit state on session restore so late-loaded extensions can sync

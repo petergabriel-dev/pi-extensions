@@ -140,6 +140,8 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	const first = await sendRequest(projectRoot, "save_plan", { planText, planId: `core-${id}`, confirmed: true }, id);
 	assert(first.response.ok, `save_plan failed: ${JSON.stringify(first.response)}`);
 	assert(first.response.result.planId === `core-${id}`, "planId mismatch");
+	assert(typeof first.response.result.path === "string" && first.response.result.path.endsWith(`${first.response.result.planId}.md`), "save_plan missing plan path");
+	assert(first.response.result.taskCount === 1, "save_plan missing task count");
 
 	// Recall must see the saved plan after a successful save.
 	const recall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
@@ -148,7 +150,22 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	assert(sp && typeof sp === "object", "recall missing savedPlan after save_plan");
 	assert(sp.planId === `core-${id}`, `recall savedPlan.planId mismatch: got ${sp.planId}`);
 	assert(sp.planText === planText, `recall savedPlan.planText mismatch`);
+	assert(sp.path === first.response.result.path, "recall savedPlan path mismatch");
+	assert(sp.progress?.done === 0 && sp.progress?.total === 1, "recall savedPlan progress mismatch before tick");
 	assert(typeof sp.savedAt === "string" && sp.savedAt.length > 0, "recall savedPlan missing savedAt");
+
+	const tasks = await sendRequest(projectRoot, "read_plan_tasks", { planId: `core-${id}` });
+	assert(tasks.response.ok, `read_plan_tasks failed: ${JSON.stringify(tasks.response)}`);
+	assert(tasks.response.result.planId === `core-${id}` && tasks.response.result.tasks?.length === 1, "read_plan_tasks result missing seeded task");
+	const taskId = tasks.response.result.tasks[0].id;
+	const tickId = crypto.randomUUID();
+	const tick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId }, tickId);
+	assert(tick.response.ok && tick.response.result.progress?.done === 1, `tick_plan_task failed: ${JSON.stringify(tick.response)}`);
+	fs.unlinkSync(tick.responsePath);
+	const tickReplay = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId: "different" }, tickId);
+	assert(JSON.stringify(tickReplay.response) === JSON.stringify(tick.response), "duplicate tick response changed");
+	const recalledAfterTick = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
+	assert(recalledAfterTick.response.result.savedPlan?.progress?.done === 1, "recall did not return live tick progress");
 
 	// Duplicate save_plan response must remain stable.
 	fs.unlinkSync(first.responsePath);

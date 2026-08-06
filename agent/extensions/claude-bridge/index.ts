@@ -8,7 +8,7 @@ import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 
 const EXTENSION_ID = "claude-bridge";
-const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan"]);
+const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LOCK_TTL_MS = 5_000;
 const HEARTBEAT_MS = 2_000; // 2s; Pi lock TTL is 5s, so 2s gives 2.5x headroom.
@@ -93,6 +93,15 @@ interface SavePlanPayload {
 	confirmed?: boolean;
 }
 
+interface ReadPlanTasksPayload {
+	planId?: string;
+}
+
+interface TickPlanTaskPayload {
+	taskId: string;
+	planId?: string;
+}
+
 interface RecallEntryPayload {
 	slug: string;
 }
@@ -118,6 +127,8 @@ let watcher: FSWatcher | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
 const pendingSavePlans = new Map<string, PendingEventResult>();
+const pendingPlanTaskReads = new Map<string, PendingEventResult>();
+const pendingPlanTaskTicks = new Map<string, PendingEventResult>();
 const pendingDiscussionNotes = new Map<string, PendingEventResult>();
 
 const SCAN_COALESCE_MS = 50; // coalesce rapid watcher events into one scan per window.
@@ -489,6 +500,20 @@ function normalizeSavePlanPayload(payload: Record<string, unknown>): SavePlanPay
 	};
 }
 
+function normalizeReadPlanTasksPayload(payload: Record<string, unknown>): ReadPlanTasksPayload {
+	if (payload.planId !== undefined && (typeof payload.planId !== "string" || payload.planId.trim().length === 0)) throw new Error("read_plan_tasks planId must be a non-empty string when provided.");
+	return typeof payload.planId === "string" ? { planId: payload.planId.trim() } : {};
+}
+
+function normalizeTickPlanTaskPayload(payload: Record<string, unknown>): TickPlanTaskPayload {
+	if (typeof payload.taskId !== "string" || payload.taskId.trim().length === 0 || payload.taskId.length > 128) throw new Error("tick_plan_task requires taskId string of at most 128 characters.");
+	if (payload.planId !== undefined && (typeof payload.planId !== "string" || payload.planId.trim().length === 0)) throw new Error("tick_plan_task planId must be a non-empty string when provided.");
+	return {
+		taskId: payload.taskId.trim(),
+		...(typeof payload.planId === "string" ? { planId: payload.planId.trim() } : {}),
+	};
+}
+
 function normalizeRecallEntryPayload(payload: Record<string, unknown>): RecallEntryPayload {
 	if (typeof payload.slug !== "string" || payload.slug.trim().length === 0) throw new Error("recall_entry requires slug string.");
 	return { slug: payload.slug.trim() };
@@ -540,6 +565,30 @@ function requestWorkflowSavePlan(pi: ExtensionAPI, requestId: string, payload: S
 	});
 }
 
+function requestWorkflowPlanTasks(pi: ExtensionAPI, requestId: string, payload: ReadPlanTasksPayload): Promise<Record<string, unknown>> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			pendingPlanTaskReads.delete(requestId);
+			reject(new Error("workflow-modes task read event timed out."));
+		}, 1_500);
+		timer.unref?.();
+		pendingPlanTaskReads.set(requestId, { resolve, reject, timer });
+		pi.events.emit("workflow-modes:get-plan-tasks", { requestId, ...payload });
+	});
+}
+
+function requestWorkflowPlanTaskTick(pi: ExtensionAPI, requestId: string, payload: TickPlanTaskPayload): Promise<Record<string, unknown>> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			pendingPlanTaskTicks.delete(requestId);
+			reject(new Error("workflow-modes task tick event timed out."));
+		}, 1_500);
+		timer.unref?.();
+		pendingPlanTaskTicks.set(requestId, { resolve, reject, timer });
+		pi.events.emit("workflow-modes:tick-plan-task", { requestId, ...payload });
+	});
+}
+
 async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
 	try {
 		const payload = normalizeSavePlanPayload(request.payload);
@@ -555,7 +604,9 @@ async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request:
 			result: {
 				requestId: request.id,
 				planId,
+				path: typeof result.path === "string" ? result.path : null,
 				savedAt,
+				taskCount: typeof result.taskCount === "number" ? result.taskCount : 0,
 				chars: typeof result.chars === "number" ? result.chars : payload.planText.length,
 			},
 		};
@@ -581,6 +632,50 @@ function requestWorkflowState(pi: ExtensionAPI): Promise<Record<string, unknown>
 	});
 }
 
+async function handleReadPlanTasks(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeReadPlanTasksPayload(request.payload);
+		const result = await requestWorkflowPlanTasks(pi, request.id, payload);
+		if (result.ok !== true) return errorResponse(request.id, "read_plan_tasks_failed", typeof result.error === "string" ? result.error : "workflow-modes task read failed.");
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				planId: result.planId ?? null,
+				tasks: Array.isArray(result.tasks) ? result.tasks : [],
+				completedTaskIds: Array.isArray(result.completedTaskIds) ? result.completedTaskIds : [],
+				progress: result.progress ?? { done: 0, total: 0 },
+				...(result.nextTask ? { nextTask: result.nextTask } : {}),
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "read_plan_tasks_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeTickPlanTaskPayload(request.payload);
+		const result = await requestWorkflowPlanTaskTick(pi, request.id, payload);
+		if (result.ok !== true) return errorResponse(request.id, "tick_plan_task_failed", typeof result.error === "string" ? result.error : "workflow-modes task tick failed.");
+		return {
+			id: request.id,
+			ok: true,
+			result: {
+				requestId: request.id,
+				planId: result.planId ?? null,
+				taskId: result.taskId ?? payload.taskId,
+				progress: result.progress ?? { done: 0, total: 0 },
+				...(result.nextTask ? { nextTask: result.nextTask } : {}),
+				idempotent: result.idempotent === true,
+			},
+		};
+	} catch (error) {
+		return errorResponse(request.id, "tick_plan_task_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
 async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
 	const payload = normalizeRecallPayload(request.payload);
 	const cwd = activeProjectRoot ?? process.cwd();
@@ -595,11 +690,16 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 	}
 	const cavemanEnabled = workflowState.cavemanEnabled !== false;
 	const workflowPlan = typeof workflowState.plan === "string" ? workflowState.plan : undefined;
-	const savedPlan = workflowPlan
+	const workflowPlanId = typeof workflowState.planId === "string" ? workflowState.planId : undefined;
+	const progress = workflowState.progress && typeof workflowState.progress === "object" ? workflowState.progress : { done: 0, total: 0 };
+	const savedPlan = workflowPlanId || workflowPlan
 		? {
-			planId: typeof workflowState.planId === "string" ? workflowState.planId : null,
-			planText: workflowPlan,
+			planId: workflowPlanId ?? null,
+			path: typeof workflowState.path === "string" ? workflowState.path : null,
+			planText: workflowPlan ?? null,
 			savedAt: typeof workflowState.savedAt === "string" ? workflowState.savedAt : null,
+			progress,
+			...(workflowState.nextTask ? { nextTask: workflowState.nextTask } : {}),
 		}
 		: null;
 	const memoryDir = await resolveMemoryDir();
@@ -742,6 +842,8 @@ async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	if (request.type === "capture") return handleCapture(pi, ctx, request);
 	if (request.type === "validate_tags") return handleValidateTags(request);
 	if (request.type === "save_plan") return handleSavePlan(pi, ctx, request);
+	if (request.type === "read_plan_tasks") return handleReadPlanTasks(pi, request);
+	if (request.type === "tick_plan_task") return handleTickPlanTask(pi, request);
 	return errorResponse(request.id, "not_implemented", `Bridge handler not implemented for request type: ${request.type}.`);
 }
 
@@ -857,6 +959,22 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		clearTimeout(pending.timer);
 		pending.resolve(result);
 	});
+
+	for (const [eventName, pendingMap] of [
+		["workflow-modes:get-plan-tasks-result", pendingPlanTaskReads],
+		["workflow-modes:tick-plan-task-result", pendingPlanTaskTicks],
+	] as const) {
+		pi.events.on(eventName, (data: unknown) => {
+			const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
+			const requestId = typeof result.requestId === "string" ? result.requestId : undefined;
+			if (!requestId) return;
+			const pending = pendingMap.get(requestId);
+			if (!pending) return;
+			pendingMap.delete(requestId);
+			clearTimeout(pending.timer);
+			pending.resolve(result);
+		});
+	}
 
 	pi.events.on("discussion-notes:add-result", (data: unknown) => {
 		const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
