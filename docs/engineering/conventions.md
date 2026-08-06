@@ -22,6 +22,8 @@
 - Direct cross-extension imports are limited to pure logic or explicit stores: prompt composition, validation, and personal-memory persistence helpers.
 - Branch-local state is appended with `pi.appendEntry()` and reconstructed from `ctx.sessionManager.getBranch()` on both `session_start` and `session_tree`.
 - Update durable branch entry before reporting a manual/event-driven state change as successful. If persistence fails, restore in-memory/UI state and return an error.
+- Reconstruct synchronous state before awaiting session-start maintenance such as plan-file GC; lifecycle hooks must not expose default mode or empty plan state during that window.
+- `plan-tasks.ts` parses top-level unchecked Section 4 items only. Given/When/Then metadata accepts optional colons and same-line labels; Section 5 and malformed input must not become tasks.
 - Use namespaced custom-entry and event names (`workflow-*`, `discussion-notes:*`, `filechanges:*`, `engineering-docs:*`) to avoid collisions.
 
 ## Tool and lifecycle handling

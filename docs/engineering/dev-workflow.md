@@ -69,7 +69,7 @@ npm run check
 - `agent/extensions/subagents`
 - `agent/extensions/workflow-modes`
 
-Root has a production `diff` dependency and lockfile; when preparing a clean source checkout, use `npm ci --ignore-scripts --legacy-peer-deps` before nested bootstrap. Pi-managed package installs disable peer solving. Engineering-docs and personal-memory tests use `npx --yes`, so their first run may still need npm registry access even after bootstrap.
+Root has a production `diff` dependency and lockfile; when preparing a clean source checkout, use `npm ci --ignore-scripts --legacy-peer-deps` before nested bootstrap. Pi-managed package installs disable peer solving. Engineering-docs and personal-memory tests use `npx --yes`, so their first run may still need npm registry access even after bootstrap. If workflow tests report missing nested `tsx`/`tsc` or `@types/node`, treat that as incomplete bootstrap; use `npm run bootstrap` or a temporary ignored `tsx` shim for focused verification, then remove the shim.
 
 ## Launch isolated source
 
@@ -279,7 +279,7 @@ ccc index
 ccc search --limit 5 -- "workflow mode state"
 ```
 
-Use `ccc_search` for agent semantic discovery after initialization. `.cocoindex_code/` is ignored generated state. Do not run `ccc init`, `ccc index`, or daemon maintenance in Discuss/Plan.
+Use `ccc_search` for agent semantic discovery after initialization. If a query times out or returns no results, retry narrowly, then use `rg`/`read` for exact fallback discovery. Inspect `git diff` after indexing because CCC may update ignored-project metadata such as `.gitignore`; revert unrelated changes. `.cocoindex_code/` is ignored generated state. Do not run `ccc init`, `ccc index`, or daemon maintenance in Discuss/Plan.
 
 ## Review mode
 

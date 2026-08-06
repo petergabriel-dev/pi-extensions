@@ -4,9 +4,9 @@
 
 - **Root has two dependency roles.** The published root owns production `diff` plus `"*"` Pi peers and its lockfile; clean setup uses `npm ci --ignore-scripts --legacy-peer-deps`. Nested extension manifests/locks are development bootstrap only; use `npm run bootstrap` for their installs. Pi managed installs disable peer solving.
 - **Bootstrap does not eliminate all network use.** Engineering-docs and personal-memory scripts invoke `npx --yes`; uncached TypeScript/tsx packages still require npm registry access during tests/typecheck.
-- **Extension dependencies are split.** A test passing in one package does not prove another package is installed. After cloning or lock changes, run root `npm ci --ignore-scripts --legacy-peer-deps`, nested `npm run bootstrap`, then root gate.
-- **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other.
-- **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or non-bundled esbuild transpilation for syntax-only checks.
+- **Extension dependencies are split.** A test passing in one package does not prove another package is installed. After cloning or lock changes, run root `npm ci --ignore-scripts --legacy-peer-deps`, nested `npm run bootstrap`, then root gate. If nested workflow tests fail before source execution because `node_modules/.bin/tsx`, `tsc`, or `@types/node` is absent, bootstrap first; a temporary ignored `tsx` shim may unblock tests, but remove it afterward.
+- **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other. Missing nested `tsc` is a dependency/bootstrap failure, not proof of source failure.
+- **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or esbuild bundling with Pi peers externalized for syntax-only checks; live behavior still needs a real Pi session.
 
 ## Source isolation versus runtime sharing
 
@@ -34,7 +34,8 @@
 
 - **Plan sandbox is not a general test environment.** Repository/home writes and network are denied. `npm ci`, uncached `npx`, CCC init/index, live bridge IPC, and write-heavy tests require Build.
 - **Sandbox failures can mimic code failures.** `EPERM` for temp/cache creation and `ENOTFOUND registry.npmjs.org` may indicate Plan restrictions. Rerun in Build before diagnosing source.
-- **CCC search is an external prerequisite and not filesystem-read-only.** Install/configure the separate `ccc` CLI before using `ccc_search`; it may start a daemon, write user/project index state, and contact an embedding provider. Use dedicated `ccc_search`; never broaden generic Bash sandbox permissions.
+- **CCC search is an external prerequisite and not filesystem-read-only.** Install/configure the separate `ccc` CLI before using `ccc_search`; it may start a daemon, write user/project index state, and contact an embedding provider. Use dedicated `ccc_search`; never broaden generic Bash sandbox permissions. Inspect `git diff` afterward: indexing can add ignored-project metadata such as `.gitignore` entries.
+- **CCC fallback is deliberate.** A timed-out or empty `ccc_search` result is not source evidence; retry with a narrower query, then use exact `rg`/`read` discovery when the index is unavailable.
 
 ## Pi ↔ harness bridge
 
@@ -46,6 +47,8 @@
 - **Do not import live owner state.** Earlier direct workflow/discussion module imports produced false plan success and clobbered Notes UI. Use event-bus request/result handoff.
 - **Idle widget redraw is load-bearing.** Capture success requires live owner update while Pi waits for input. Unit tests cannot replace real idle UI acceptance.
 - **Bridge-down behavior is intentional.** Recall/capture/save must fail loud; no direct memory or plan-file fallback.
+- **Large bridge recalls exceed some harness result limits.** Inspect the saved response JSON with `jq`, selecting `.result.prompts` or `.result.memory`, instead of loading a full response into the chat/tool result.
+- **Live bridge tests must load current source.** Use `--no-extensions -e <repo-root>` (or explicit repository extension paths), not a stale installed package. Automated PTY runners must continuously drain Pi terminal output or the child can block and cause false request timeouts.
 - **Claude MCP config source matters.** `claude mcp add -s user` writes active user registration; editing an assumed sidecar config may not affect `claude mcp list`.
 - **Claude Bash rewriting depends on PreToolUse `updatedInput`.** If host stops honoring rewritten input, deny Bash rather than fall back to unsandboxed regex approval.
 - **Sandbox bypass flags require explicit denial.** `dangerouslyDisableSandbox` must be rejected before wrapping.
@@ -59,7 +62,8 @@
 - **Review body must be inline.** Read-only filesystem rules exclude body-file workflows.
 - **Live GitHub checks require installed/authenticated `gh`.** Unit and typecheck success do not validate GitHub access.
 - **Saved-plan pointers and progress are session ancestry; bodies are session-scoped agent files.** Bodies live under `<agentDir>/plans/<sessionId>/<planId>.md`, not in the repository, Git-branch store, or bridge directory. Ephemeral sessions do not promise restart persistence; never add a shared fallback plan file.
-- **Plan files are immutable specs during Build.** `/plan save` writes the body atomically, Section 4 seeds branch-backed tasks, and `workflow_plan_tick` records progress. Do not edit plan checkboxes to claim completion; do not delete a referenced body. Age GC is limited to unreferenced files in the current session.
+- **Plan files are immutable specs during Build.** `/plan save` writes the body atomically, Section 4 seeds branch-backed tasks, and `workflow_plan_tick` records progress. Do not edit plan checkboxes to claim completion; do not delete a referenced body. Age GC is limited to unreferenced files in the current session. Reconstruct plan state synchronously before awaiting session-start GC so prompt hooks cannot observe default mode/empty state.
+- **Section 4 metadata is tolerant by design.** `plan-tasks.ts` accepts `**Given**`, `**When**`, and `**Then**` labels with or without a colon, including the template's same-line Given/When/Then form; keep malformed input on the empty-task path.
 - **Stale saved plans anchor every active mode.** Active plan body and compact identity/progress marker enter Discuss, Plan, Build, Review, and Design prompts every turn; use `/plan select` or `/plan clear` when active selection changes.
 - **Section 4 completion is not full-plan completion.** Tracker progress uses Section 4 only; Section 5 Definition of Done remains a separate closure gate. Report both statuses instead of claiming the whole plan complete.
 - **Custom entries and custom messages use different context channels.** Pi `pi.appendEntry()` custom entries stay out of LLM context; `before_agent_start.message` and `pi.sendMessage()` custom messages enter it, and `@earendil-works/pi-coding-agent/dist/core/messages.js#convertToLlm` maps them to LLM role `user`. Prefix harness-authored content, as in `agent/extensions/workflow-modes/index.ts`.
@@ -69,6 +73,7 @@
 
 - **Root spokes contain mixed ownership.** Generator may replace only managed `pi-docs` marker block in `AGENTS.md`/`CLAUDE.md`; surrounding bytes are user-owned.
 - **Decision index is generated.** ADR changes can leave `/docs check --check` reporting stale index until `/docs update-index` runs in Build/Off.
+- **ADR filenames carry descriptive suffixes.** Do not guess `ADR-0021.md`; discover exact paths with `find docs/engineering/decisions -maxdepth 1 -type f -print` before reading or editing.
 - **Tag validator sees literal bracketed examples.** Plan boilerplate containing bare docs tags can be interpreted as real tags. Use exact valid area/action pairs in plan tasks.
 - **Docs writes fail closed before workflow state arrives.** If workflow extension is absent/stale, docs extension reports Unknown and blocks writes.
 
