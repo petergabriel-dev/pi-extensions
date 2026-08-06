@@ -16,7 +16,7 @@ await writeFile(join(stubs, "@earendil-works/pi-coding-agent/index.js"), "export
 await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Container = class {}; exports.matchesKey = () => false; exports.SelectList = class {}; exports.Text = class {}; exports.truncateToWidth = value => value; exports.wrapTextWithAnsi = value => [value];\n");
 
 const source = `
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
@@ -27,6 +27,8 @@ if (absent?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("missing manife
 mkdirSync(join(cwd, "docs/design"), { recursive: true });
 writeFileSync(join(cwd, "docs/design/manifest.json"), "{}");
 if (!composeWorkflowPrompt("build", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("manifest failed to inject design block");
+const buildPrompt = composeWorkflowPrompt("build", true, undefined, cwd);
+if (!buildPrompt?.includes("workflow_plan_tick") || !buildPrompt.includes("authoritative queue") || !buildPrompt.includes("immutable seed text")) throw new Error("Build prompt omitted tracker queue rules");
 if (composeWorkflowPrompt("design", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("non-build mode used cwd");
 for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 	const message = composeModeMessage(mode);
@@ -71,7 +73,8 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if (!value.systemPrompt?.startsWith("BASE")) throw new Error("before_agent_start omitted system prompt");
 	process.env.PI_CODING_AGENT_DIR = cwd;
 	const planTool = tools.get("workflow_plan_save");
-	if (!planTool) throw new Error("plan authoring tool was not registered");
+	const tickTool = tools.get("workflow_plan_tick");
+	if (!planTool || !tickTool) throw new Error("plan tools were not registered");
 	operations.length = 0;
 	const saved = await planTool.execute("plan-call", { plan: "# Plan\\n\\n## Section 4 — Tasks\\n- [ ] Seed task\\n" }, undefined, undefined, context);
 	const savedDetails = saved.details as { path?: string; planId?: string; taskCount?: number };
@@ -89,8 +92,31 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	const activeDetails = activeTurn.message?.details;
 	if (activeDetails?.planId !== savedDetails.planId || activeDetails.path !== savedDetails.path || activeDetails.progress?.total !== 1 || activeDetails.progress.done !== 0 || activeDetails.nextTask?.title !== "Seed task") throw new Error("active plan marker missing identity/progress");
 	writeFileSync(savedDetails.path, "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n");
-	const editedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { systemPrompt?: string; message?: { details?: { nextTask?: { title?: string } } } };
-	if (!editedTurn.systemPrompt?.includes("# Hand edited") || editedTurn.message?.details?.nextTask?.title !== "Edited task") throw new Error("before_agent_start did not reread edited plan file");
+	const editedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { systemPrompt?: string; message?: { details?: { planId?: string; progress?: { done: number; total: number }; nextTask?: { id?: string; title?: string } } } };
+	if (!editedTurn.systemPrompt?.includes("# Hand edited") || editedTurn.message?.details?.nextTask?.title !== "Seed task") throw new Error("tracker did not remain authoritative after plan hand-edit");
+	if (readFileSync(savedDetails.path, "utf8") !== "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n") throw new Error("hand-edited plan text changed unexpectedly");
+	const seededTaskId = editedTurn.message?.details?.nextTask?.id;
+	if (!seededTaskId || editedTurn.message?.details?.progress?.done !== 0 || editedTurn.message?.details?.progress?.total !== 1) throw new Error("tracker marker missing seeded task state");
+	operations.length = 0;
+	const ticked = await tickTool.execute("tick-call", { taskId: seededTaskId }, undefined, undefined, context);
+	if ((operations[0]?.data as { event?: string; planId?: string; taskId?: string })?.event !== "tick" || (operations[0]?.data as { taskId?: string })?.taskId !== seededTaskId) throw new Error("task tick was not appended");
+	if (readFileSync(savedDetails.path, "utf8") !== "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n") throw new Error("task tick mutated plan file");
+	if (!(ticked.details as { progress?: { done: number; total: number }; idempotent?: boolean }).progress || (ticked.details as { progress: { done: number; total: number } }).progress.done !== 1 || (ticked.details as { idempotent?: boolean }).idempotent) throw new Error("task tick result missing progress");
+	if (!statuses.some((status) => status.includes(savedDetails.planId!) && status.includes("1/1"))) throw new Error("status did not update task progress");
+	const repeated = await tickTool.execute("tick-call-replay", { taskId: seededTaskId }, undefined, undefined, context);
+	if (!(repeated.details as { idempotent?: boolean }).idempotent || operations.length !== 1) throw new Error("repeated task tick was not idempotent");
+	const tickedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { progress?: { done: number; total: number }; nextTask?: unknown } } };
+	if (tickedTurn.message?.details?.progress?.done !== 1 || tickedTurn.message?.details?.progress?.total !== 1 || tickedTurn.message?.details?.nextTask !== undefined) throw new Error("task tick did not survive marker refresh");
+	const tickedBranch = [...branchEntries];
+	await handlers.get("session_start")?.({}, context);
+	const reloadedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { progress?: { done: number; total: number } } } };
+	if (reloadedTurn.message?.details?.progress?.done !== 1) throw new Error("task tick did not survive session reload");
+	branchEntries = tickedBranch.slice(0, -1);
+	await handlers.get("session_tree")?.({}, context);
+	const forkTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { progress?: { done: number; total: number } } } };
+	if (forkTurn.message?.details?.progress?.done !== 0) throw new Error("fork branch incorrectly inherited task tick");
+	branchEntries = tickedBranch;
+	await handlers.get("session_tree")?.({}, context);
 	operations.length = 0;
 	const second = await planTool.execute("plan-call-2", { plan: "# Plan B\\n\\n## Section 4 — Tasks\\n- [ ] Second task\\n" }, undefined, undefined, context);
 	const secondDetails = second.details as { path?: string; planId?: string; taskCount?: number };

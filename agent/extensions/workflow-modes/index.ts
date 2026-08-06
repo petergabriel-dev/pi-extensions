@@ -10,12 +10,13 @@ import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, type PlanTask } from "./plan-tasks.js";
-import { resolveSavedPlanState, type SavedPlan } from "./plan-state.js";
+import { resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
-export type PlanEvent = "set" | "activate" | "clear";
+export type PlanEvent = "set" | "activate" | "clear" | "tick";
 export const PLAN_AUTHORING_TOOL = "workflow_plan_save";
+export const PLAN_TASK_TICK_TOOL = "workflow_plan_tick";
 export const PLAN_SAVE_DIRECTIVE = "[workflow-modes] Plan save directive: call workflow_plan_save exactly once with complete plan text in plan only. Do not explain or add fields.";
 
 export const MODE_ENTRY = "workflow-mode-set";
@@ -118,8 +119,9 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 	currentPlanId = active?.planId ?? plan.planId;
 	currentPlanPath = active?.path;
 	currentPlanSavedAt = active?.savedAt ?? plan.savedAt;
-	currentPlanProgress = { done: 0, total: 0 };
-	currentPlanNextTask = undefined;
+	const taskState = active ? resolveSavedPlanTaskState(branch, active.planId) : undefined;
+	currentPlanProgress = taskState?.progress ?? { done: 0, total: 0 };
+	currentPlanNextTask = taskState?.nextTask;
 	planReadNoticeKey = undefined;
 	updateStatus(ctx);
 }
@@ -147,9 +149,9 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		if (text === undefined) throw new Error("plan file is missing");
 		currentPlan = text;
 		planReadNoticeKey = undefined;
-		const tasks = parsePlanTasks(text);
-		currentPlanProgress = { done: 0, total: tasks.length };
-		currentPlanNextTask = tasks[0] ? { id: tasks[0].id, title: tasks[0].title } : undefined;
+		const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), active.planId, parsePlanTasks(text));
+		currentPlanProgress = taskState.progress;
+		currentPlanNextTask = taskState.nextTask;
 		updateStatus(ctx);
 		return {
 			planId: active.planId,
@@ -313,6 +315,21 @@ export interface SavedWorkflowPlanEntry {
 	tasks: PlanTask[];
 }
 
+export interface WorkflowPlanTaskTickEntry {
+	event: "tick";
+	planId: string;
+	taskId: string;
+	at: number;
+}
+
+export interface WorkflowPlanTaskTickResult {
+	planId: string;
+	taskId: string;
+	progress: { done: number; total: number };
+	nextTask?: { id: string; title: string };
+	idempotent: boolean;
+}
+
 function sessionIdFromContext(ctx: ExtensionContext): string {
 	const sessionId = (ctx.sessionManager as { getSessionId?: () => unknown }).getSessionId?.();
 	if (typeof sessionId !== "string" || sessionId.trim().length === 0) throw new Error("Pi session id is unavailable");
@@ -338,12 +355,36 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanId = planId;
 	currentPlanPath = path;
 	currentPlanSavedAt = savedAt;
-	currentPlanProgress = { done: 0, total: tasks.length };
-	currentPlanNextTask = tasks[0] ? { id: tasks[0].id, title: tasks[0].title } : undefined;
+	const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId, tasks);
+	currentPlanProgress = taskState.progress;
+	currentPlanNextTask = taskState.nextTask;
 	planReadNoticeKey = undefined;
 	updateStatus(ctx);
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: true });
 	return entry;
+}
+
+export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawTaskId: unknown): Promise<WorkflowPlanTaskTickResult> {
+	if (typeof rawTaskId !== "string" || rawTaskId.trim().length === 0 || rawTaskId.length > 128) throw new Error("taskId must be a non-empty string of at most 128 characters");
+	const taskId = rawTaskId.trim();
+	const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+	const planId = state.activePlanId;
+	if (!planId) throw new Error("no active saved plan");
+	const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId);
+	const task = taskState.tasks.find((candidate) => candidate.id === taskId);
+	if (!task) throw new Error(`unknown taskId ${taskId}`);
+	if (taskState.completedTaskIds.includes(taskId)) {
+		return { planId, taskId, progress: taskState.progress, ...(taskState.nextTask ? { nextTask: taskState.nextTask } : {}), idempotent: true };
+	}
+
+	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, at: Date.now() };
+	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
+	const nextState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId);
+	currentPlanProgress = nextState.progress;
+	currentPlanNextTask = nextState.nextTask;
+	updateStatus(ctx);
+	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
+	return { planId, taskId, progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false };
 }
 
 async function savePlanLast(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -370,6 +411,15 @@ const PLAN_AUTHORING_PARAMETERS = {
 		plan: { type: "string", minLength: 1, maxLength: MAX_PLAN_BYTES },
 	},
 	required: ["plan"],
+	additionalProperties: false,
+} as const;
+
+const PLAN_TASK_TICK_PARAMETERS = {
+	type: "object",
+	properties: {
+		taskId: { type: "string", minLength: 1, maxLength: 128 },
+	},
+	required: ["taskId"],
 	additionalProperties: false,
 } as const;
 
@@ -472,19 +522,20 @@ General behavior:
 - When implementation appears complete, softly remind the user to clear the saved plan with /plan clear if it is no longer needed.
 
 Saved-plan task orchestration:
-- When a saved session plan contains Section 4 — Tasks, treat only unchecked markdown tasks inside Section 4 as the task queue.
-- A task is an unchecked top-level Section 4 checkbox line in the form \`- [ ] ...\`, plus its nested metadata lines such as Given/When/Then, NFRs, Verification Gate, and Checkpoint.
-- Ignore checked tasks, prose, headings, numbered lists, and all Section 5 Definition of Done checklist items when selecting the next task.
-- Do not mutate the saved plan or mark checkboxes as checked. Track progress through commits, chat reports, and discussion_notes.
+- When a saved session plan contains Section 4 — Tasks, treat workflow task tracker as authoritative queue; Section 4 unchecked tasks seed tracker when plan is saved.
+- Tracker tasks preserve stable ids, titles, and nested metadata from unchecked top-level Section 4 checkbox lines; Section 5 Definition of Done items never seed tracker.
+- Ignore prose, headings, numbered lists, and checked Section 4 items when seeding or selecting tasks.
+- Do not mutate saved plan or mark checkboxes as checked. Track progress through workflow_plan_tick branch entries, commits, chat reports, and discussion_notes.
+- After completing and verifying exactly one next tracker task, call workflow_plan_tick once with its taskId. Repeated same-task ticks are safe no-ops; never tick multiple tasks for one confirmation.
 
 Confirmation gates:
-- Before starting task 1 from a saved Section 4 task queue, summarize the plan title or feature if available, total unchecked Section 4 tasks, and the first task. Then ask: \"Ready to start on task 1?\"
+- Before starting task 1 from a saved tracker queue, summarize the plan title or feature if available, total tracker tasks, and the first task. Then ask: \"Ready to start on task 1?\"
 - Start task 1 only after explicit confirmation such as yes, y, proceed, continue, next task, or go ahead.
 - After every completed, failed, or blocked task, stop and ask for explicit confirmation before starting another task.
 - Treat non-confirmation replies as discussion or clarification, not permission to advance.
 
 One-task-at-a-time rules:
-- Execute exactly one Section 4 task per confirmation.
+- Execute exactly one tracker task per confirmation; Section 4 remains its immutable seed text.
 - Do not batch tasks, skip tasks, start future tasks opportunistically, or make broad unrelated changes.
 - If a task is ambiguous or conflicts with NFRs or the saved plan, stop and ask the user.
 
@@ -571,6 +622,25 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: `Saved plan ${entry.planId} with ${entry.tasks.length} Section 4 task${entry.tasks.length === 1 ? "" : "s"}.` }],
 				details: { planId: entry.planId, path: entry.path, savedAt: entry.savedAt, taskCount: entry.tasks.length },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: PLAN_TASK_TICK_TOOL,
+		label: "Tick Plan Task",
+		description: "Mark one active workflow plan task complete in branch state.",
+		promptSnippet: "Tick exactly one completed workflow plan task",
+		promptGuidelines: [
+			"Call workflow_plan_tick once after completing and verifying exactly one tracker task.",
+			"Pass only taskId from the current tracker marker; never edit the saved plan file to record progress.",
+		],
+		parameters: PLAN_TASK_TICK_PARAMETERS as never,
+		async execute(_toolCallId, params: { taskId: string }, _signal, _onUpdate, ctx) {
+			const result = await tickWorkflowPlanTask(pi, ctx, params.taskId);
+			return {
+				content: [{ type: "text", text: `Ticked ${result.taskId}: ${result.progress.done}/${result.progress.total} task${result.progress.total === 1 ? "" : "s"} complete${result.idempotent ? " (already ticked)" : ""}.` }],
+				details: result,
 			};
 		},
 	});

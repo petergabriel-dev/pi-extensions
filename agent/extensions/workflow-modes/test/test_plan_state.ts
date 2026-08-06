@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
-import { resolveSavedPlanState } from "../plan-state.js";
+import { resolveSavedPlanState, resolveSavedPlanTaskState } from "../plan-state.js";
 
 interface Entry {
 	type: string;
@@ -95,6 +95,34 @@ assert.deepEqual(resolveSavedPlanState([
 	entry("invalid", null, { event: "set", planId: "plan-x", path: "/x", savedAt: "invalid" }),
 	entry("legacy", "invalid", { event: "set", plan: "legacy", planId: "plan-y", savedAt: timestamp(2) }),
 ]), { plans: [], activePlanId: undefined }, "invalid or legacy entries must be ignored");
+
+const seededTasks = [
+	{ id: "task-1", title: "First", metadata: {} },
+	{ id: "task-2", title: "Second", metadata: {} },
+];
+const seeded = entry("seeded", "root", {
+	event: "set",
+	planId: "plan-tasks",
+	path: "/plans/plan-tasks.md",
+	savedAt: timestamp(2),
+	tasks: seededTasks,
+});
+const tick = entry("tick", "seeded", { event: "tick", planId: "plan-tasks", taskId: "task-1" });
+const duplicateTick = entry("duplicate-tick", "tick", { event: "tick", planId: "plan-tasks", taskId: "task-1" });
+assert.deepEqual(resolveSavedPlanTaskState(branch([root, seeded, tick, duplicateTick], duplicateTick.id), "plan-tasks"), {
+	tasks: seededTasks,
+	completedTaskIds: ["task-1"],
+	progress: { done: 1, total: 2 },
+	nextTask: { id: "task-2", title: "Second" },
+	seeded: true,
+}, "ticks must be durable and idempotent");
+assert.deepEqual(resolveSavedPlanTaskState([root], "legacy-plan", seededTasks), {
+	tasks: seededTasks,
+	completedTaskIds: [],
+	progress: { done: 0, total: 2 },
+	nextTask: { id: "task-1", title: "First" },
+	seeded: false,
+}, "legacy plans may fall back to parsed file tasks");
 
 const longBranch: Entry[] = [entry("perf-root", null)];
 for (let index = 1; index < 10_000; index++) longBranch.push(entry(`perf-${index}`, longBranch.at(-1)!.id));

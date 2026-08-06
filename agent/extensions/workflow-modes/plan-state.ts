@@ -1,3 +1,5 @@
+import { MAX_PLAN_TASKS, type PlanTask } from "./plan-tasks.js";
+
 export interface SavedPlan {
 	planId: string;
 	path: string;
@@ -26,6 +28,8 @@ interface PlanEventData {
 	planId?: unknown;
 	path?: unknown;
 	savedAt?: unknown;
+	tasks?: unknown;
+	taskId?: unknown;
 }
 
 interface VersionedPlan extends SavedPlan {
@@ -35,6 +39,55 @@ interface VersionedPlan extends SavedPlan {
 interface PlanVersion {
 	planId: string;
 	generation: number;
+}
+
+export interface SavedPlanTaskState {
+	tasks: PlanTask[];
+	completedTaskIds: string[];
+	progress: { done: number; total: number };
+	nextTask?: { id: string; title: string };
+	seeded: boolean;
+}
+
+export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planId: string, fallbackTasks: readonly PlanTask[] = [], customType = "workflow-plan"): SavedPlanTaskState {
+	let tasks: PlanTask[] | undefined;
+	let cleared = false;
+	const completed = new Set<string>();
+
+	for (const entry of entries) {
+		if (entry.type !== "custom" || entry.customType !== customType) continue;
+		const data = asPlanEventData(entry.data);
+		if (!data || data.planId !== planId) continue;
+		if (data.event === "set") {
+			const seed = parseTasks(data.tasks);
+			if (seed === undefined) continue;
+			tasks = seed;
+			cleared = false;
+			completed.clear();
+			continue;
+		}
+		if (data.event === "clear") {
+			tasks = undefined;
+			cleared = true;
+			completed.clear();
+			continue;
+		}
+		if (data.event !== "tick" || !tasks) continue;
+		const taskId = nonEmptyText(data.taskId);
+		if (taskId && tasks.some((task) => task.id === taskId)) completed.add(taskId);
+	}
+
+	const seeded = tasks !== undefined;
+	const resolvedTasks = tasks ?? (cleared ? [] : [...fallbackTasks]);
+	const completedTaskIds = resolvedTasks.filter((task) => completed.has(task.id)).map((task) => task.id);
+	const nextTask = resolvedTasks.find((task) => !completed.has(task.id));
+	return {
+		tasks: resolvedTasks,
+		completedTaskIds,
+		progress: { done: completedTaskIds.length, total: resolvedTasks.length },
+		...(nextTask ? { nextTask: { id: nextTask.id, title: nextTask.title } } : {}),
+		seeded,
+	};
 }
 
 export function resolveSavedPlanState(entries: readonly BranchEntry[], customType = "workflow-plan"): SavedPlanState {
@@ -73,6 +126,19 @@ export function resolveSavedPlanState(entries: readonly BranchEntry[], customTyp
 		plans: Array.from(plans.values(), ({ generation: _generation, ...plan }) => plan),
 		activePlanId,
 	};
+}
+
+function parseTasks(value: unknown): PlanTask[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value
+		.slice(0, MAX_PLAN_TASKS)
+		.filter((task): task is PlanTask => {
+			if (!task || typeof task !== "object") return false;
+			const candidate = task as { id?: unknown; title?: unknown; metadata?: unknown };
+			return typeof candidate.id === "string" && candidate.id.trim().length > 0
+				&& typeof candidate.title === "string" && candidate.title.trim().length > 0
+				&& !!candidate.metadata && typeof candidate.metadata === "object";
+		});
 }
 
 function asPlanEventData(value: unknown): PlanEventData | undefined {

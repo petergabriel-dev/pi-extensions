@@ -50,7 +50,7 @@ Do not begin a task without confirming this context is present.
 
 ## Section 4 — Tasks
 
-Break the implementation into atomic, implementation-ready tasks, ordered by implementation sequence:
+Unchecked top-level task checkboxes seed workflow task tracker when plan is saved. Build progress lives in session branch tick entries; do not edit plan checkboxes to record progress. Keep tasks atomic, implementation-ready, ordered by implementation sequence:
 
 1. Database migrations
 2. Backend service and handler
