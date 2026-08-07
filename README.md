@@ -13,18 +13,18 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 
 ## Install
 
-Public package `@lopezpetergabriel/pi-extensions@0.2.2` ships nine extensions, three skills, and two package-owned bundled agent definitions.
+Public package `@lopezpetergabriel/pi-extensions@0.2.3` ships nine extensions, three skills, and two package-owned bundled agent definitions.
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.2.2
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.2   # install for this project
-pi -e npm:@lopezpetergabriel/pi-extensions@0.2.2   # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.2.3
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.3   # install for this project
+pi -e npm:@lopezpetergabriel/pi-extensions@0.2.3   # temporary try
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.2.2` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.2.3` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 `ccc` remains an external prerequisite for `ccc_search` (`ccc --version`). Existing raw or global copies can double-load; inspect `pi list` and `pi config`, then remove or disable duplicates.
 
