@@ -12,7 +12,7 @@ const stubs = join(root, "stubs");
 const project = join(root, "project");
 await mkdir(join(stubs, "@earendil-works/pi-coding-agent"), { recursive: true });
 await mkdir(join(stubs, "@earendil-works/pi-tui"), { recursive: true });
-await writeFile(join(stubs, "@earendil-works/pi-coding-agent/index.js"), "exports.DynamicBorder = class {};\n");
+await writeFile(join(stubs, "@earendil-works/pi-coding-agent/index.js"), "exports.DynamicBorder = class {}; exports.getAgentDir = () => process.env.PI_CODING_AGENT_DIR || process.env.TEST_PROJECT || process.cwd();\n");
 await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Container = class {}; exports.matchesKey = () => false; exports.SelectList = class {}; exports.Text = class {}; exports.truncateToWidth = value => value; exports.wrapTextWithAnsi = value => [value];\n");
 
 const source = `
@@ -179,7 +179,7 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	}
 	const toolCall = handlers.get("tool_call");
 	const modeContext = (mode: string) => ({
-		sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode } }] },
+		sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode } }], getSessionId: () => "session-test" },
 		ui: context.ui,
 	});
 	handlers.get("session_start")?.({}, modeContext("discuss"));
