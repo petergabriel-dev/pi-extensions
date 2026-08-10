@@ -6,6 +6,8 @@ declare module "node:buffer" {
 
 declare module "node:fs" {
 	export function writeSync(fd: number, text: string): number;
+	export function existsSync(path: string): boolean;
+	export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
 }
 
 declare module "node:fs/promises" {
@@ -17,6 +19,7 @@ declare module "node:fs/promises" {
 	export function mkdtemp(prefix: string): Promise<string>;
 	export function readdir(path: string): Promise<string[]>;
 	export function rename(oldPath: string, newPath: string): Promise<void>;
+	export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 }
 
 declare module "node:os" {
@@ -30,8 +33,12 @@ declare module "node:path" {
 	export function basename(path: string): string;
 }
 
+declare module "node:url" {
+	export function fileURLToPath(url: string | URL): string;
+}
+
 declare module "node:process" {
-	const process: { argv: string[] };
+	const process: { argv: string[]; env: Record<string, string | undefined>; once(event: string, listener: () => void): void };
 	export default process;
 }
 

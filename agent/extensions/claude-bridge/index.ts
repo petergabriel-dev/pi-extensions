@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { FSWatcher } from "node:fs";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { composeWorkflowPrompt, getWorkflowPolicySnapshot, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
@@ -702,7 +702,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 			...(workflowState.nextTask ? { nextTask: workflowState.nextTask } : {}),
 		}
 		: null;
-	const memoryDir = await resolveMemoryDir();
+	const memoryDir = resolveMemoryDir(getAgentDir());
 	await migrateFlatFile(memoryDir);
 	const personalIndex = await readMemoryIndex(memoryDir);
 	const personalBlock = formatMemoryIndexBlock(personalIndex) ?? "";
@@ -732,7 +732,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 async function handleRecallEntry(request: BridgeRequest): Promise<BridgeResponse> {
 	try {
 		const payload = normalizeRecallEntryPayload(request.payload);
-		const memoryDir = await resolveMemoryDir();
+		const memoryDir = resolveMemoryDir(getAgentDir());
 		await migrateFlatFile(memoryDir);
 		const entry = await readMemoryEntry(memoryDir, payload.slug);
 		return {
@@ -754,7 +754,7 @@ async function handleRecallEntry(request: BridgeRequest): Promise<BridgeResponse
 async function handleSaveMemory(request: BridgeRequest): Promise<BridgeResponse> {
 	try {
 		const payload = normalizeSaveMemoryPayload(request.payload);
-		const memoryDir = await resolveMemoryDir();
+		const memoryDir = resolveMemoryDir(getAgentDir());
 		await migrateFlatFile(memoryDir);
 		const result = await writeMemoryFact(payload, memoryDir);
 		return {

@@ -1,12 +1,33 @@
 import assert from "node:assert";
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
+import * as syncFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
-import personalMemory, { appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } from "../index.js";
+import { fileURLToPath } from "node:url";
 import { buildGlobalMemoryCurationPrompt, buildProjectNotesPromotionPrompt, dispatchCurationPrompt, formatDiscussionNotesPage, isPrintInvocation, MAX_CURATION_PROMPT_BYTES, MAX_LESSON_LIST_PAGE, MAX_TOOL_OUTPUT_BYTES, printCommandArgs, printNoticeLine, slashCommandArgs } from "../curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, rebuildIndex, resolveMemoryDir, slugify, validateSlug, writeMemoryFact } from "../store.js";
+
+const localNodeModules = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "node_modules");
+const hostScope = path.join(localNodeModules, "@earendil-works");
+const hostPackage = path.join(hostScope, "pi-coding-agent");
+const hadLocalNodeModules = syncFs.existsSync(localNodeModules);
+const hadHostScope = syncFs.existsSync(hostScope);
+const hadHostPackage = syncFs.existsSync(hostPackage);
+if (!hadHostPackage) {
+	await fs.mkdir(hostPackage, { recursive: true });
+	await fs.writeFile(path.join(hostPackage, "package.json"), '{"type":"commonjs"}\n', "utf8");
+	await fs.writeFile(path.join(hostPackage, "index.js"), 'exports.getAgentDir = () => process.env.PI_CODING_AGENT_DIR || process.cwd();\n', "utf8");
+}
+const cleanupHostStub = () => {
+	if (hadHostPackage) return;
+	syncFs.rmSync(hostPackage, { recursive: true, force: true });
+	if (!hadHostScope) syncFs.rmSync(hostScope, { recursive: true, force: true });
+	if (!hadLocalNodeModules) syncFs.rmSync(localNodeModules, { recursive: true, force: true });
+};
+process.once("exit", cleanupHostStub);
+const { default: personalMemory, appendPersonalMemory, formatPersonalMemoryBlock, normalizeRememberText, readPersonalMemory, resolvePersonalMemoryPath } = await import("../index.js");
 
 console.log("Running test_personal_memory...");
 
@@ -149,6 +170,27 @@ console.log("Running test_personal_memory...");
 	const rememberTool = tools.get("remember");
 	assert.equal(rememberTool?.promptSnippet, "Persist curated user-global memory; provide slug when replacing an existing indexed entry.");
 	assert.ok(rememberTool?.parameters.properties.slug);
+}
+
+{
+	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "personal-memory-agent-dir-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const tools = new Map<string, any>();
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		personalMemory({
+			on() {},
+			registerCommand() {},
+			registerTool(config: any) { tools.set(config.name, config); },
+		} as never);
+		const result = await tools.get("remember").execute("test-call", { text: "isolated fact" });
+		assert.match(result.content[0].text, /Remembered in/);
+		assert.ok(await readMemoryEntry(path.join(agentDir, "memory"), "isolated-fact"));
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await fs.rm(agentDir, { recursive: true, force: true });
+	}
 }
 
 {

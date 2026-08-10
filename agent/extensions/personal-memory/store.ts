@@ -31,9 +31,8 @@ interface StoredFact extends NormalizedFact {
 	fileName: string;
 }
 
-export async function resolveMemoryDir(agentDir?: string): Promise<string> {
-	const resolvedAgentDir = agentDir ?? await resolveAgentDir();
-	const globalDir = path.basename(resolvedAgentDir) === "agent" ? path.dirname(resolvedAgentDir) : resolvedAgentDir;
+export function resolveMemoryDir(agentDir: string): string {
+	const globalDir = path.basename(agentDir) === "agent" ? path.dirname(agentDir) : agentDir;
 	return path.join(globalDir, MEMORY_DIR);
 }
 
@@ -244,16 +243,4 @@ async function exists(target: string): Promise<boolean> {
 
 function errorCode(error: unknown): string | undefined {
 	return error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : undefined;
-}
-
-async function resolveAgentDir(): Promise<string> {
-	for (const specifier of ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"]) {
-		try {
-			const module = await import(specifier) as { getAgentDir?: () => string };
-			if (typeof module.getAgentDir === "function") return module.getAgentDir();
-		} catch {
-			// Try next package name; tests outside Pi fall back to ~/.pi/agent.
-		}
-	}
-	return path.join(os.homedir(), ".pi", "agent");
 }

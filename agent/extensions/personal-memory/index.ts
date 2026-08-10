@@ -1,6 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { buildGlobalMemoryCurationPrompt, dispatchCurationPrompt, printCommandArgs, slashCommandArgs, writePrintNotice } from "./curation.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, titleFromBody, writeMemoryFact } from "./store.js";
@@ -16,7 +15,7 @@ export interface PersonalMemoryOptions {
 }
 
 export default function personalMemory(pi: ExtensionAPI, options: PersonalMemoryOptions = {}) {
-	const memoryDirPromise = options.memoryDir ? Promise.resolve(options.memoryDir) : resolveMemoryDir();
+	const memoryDirPromise = options.memoryDir ? Promise.resolve(options.memoryDir) : Promise.resolve(resolveMemoryDir(getAgentDir()));
 	const migrationPromise = memoryDirPromise.then((memoryDir) => migrateFlatFile(memoryDir, options.legacyMemoryPath));
 
 	pi.on("before_agent_start", async (event: { systemPrompt: string }) => {
@@ -116,9 +115,8 @@ export default function personalMemory(pi: ExtensionAPI, options: PersonalMemory
 	});
 }
 
-export async function resolvePersonalMemoryPath(agentDir?: string): Promise<string> {
-	const resolvedAgentDir = agentDir ?? await resolveAgentDir();
-	const globalDir = path.basename(resolvedAgentDir) === "agent" ? path.dirname(resolvedAgentDir) : resolvedAgentDir;
+export function resolvePersonalMemoryPath(agentDir: string): string {
+	const globalDir = path.basename(agentDir) === "agent" ? path.dirname(agentDir) : agentDir;
 	return path.join(globalDir, MEMORY_FILE);
 }
 
@@ -176,18 +174,6 @@ function errorCode(error: unknown): string | undefined {
 
 function dateStamp(date: Date): string {
 	return date.toISOString().slice(0, 10);
-}
-
-async function resolveAgentDir(): Promise<string> {
-	for (const specifier of ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"]) {
-		try {
-			const module = await import(specifier) as { getAgentDir?: () => string };
-			if (typeof module.getAgentDir === "function") return module.getAgentDir();
-		} catch {
-			// Try next package name; tests outside Pi fall back to ~/.pi/agent.
-		}
-	}
-	return path.join(os.homedir(), ".pi", "agent");
 }
 
 function toolText(text: string): ToolResult {
