@@ -12,6 +12,7 @@
 
 - Version source/config/docs only. Ignore credentials, settings snapshots, sessions, plans, personal memory, bridge IPC, caches, DBs, logs, dependency trees, and CCC indexes.
 - Pi host owns auth, settings, model catalogs, and session persistence. Extensions resolve those through host APIs such as `getAgentDir()` or host defaults; do not copy them into repository.
+- Extension source reaches Pi host APIs only through static bare imports. Do not use `createRequire` or variable-specifier `import()` for `@earendil-works/pi-*` or `@mariozechner/pi-*`; `scripts/check-workspace.mjs` enforces this.
 - Project truth belongs in `docs/engineering/` and ADRs. Session discussion notes are handoff context. User-global preferences/lessons belong in indexed personal memory. Do not substitute one store for another.
 - Generated docs spokes/indexes are extension-owned outputs. Edit canonical docs or ADR inputs, then regenerate; do not hand-maintain generated summaries.
 

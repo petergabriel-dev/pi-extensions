@@ -8,6 +8,7 @@
 - Workspace launcher must disable global extension auto-discovery with `--no-extensions` and explicitly load repository package once.
 - Versioned `.pi/` content is limited to internal `agents` symlink. Credentials, trust/settings/model files, sessions, plans, personal memory, bridge IPC, caches, DBs, logs, dependency trees, and CCC indexes must never enter Git.
 - Global auth, settings, model catalogs, sessions, and personal memory remain Pi-owned outside repository. Package may reuse host state through Pi APIs/defaults but must not copy that state into workspace.
+- Extension source reaches Pi host APIs only through static bare imports. Host-owned directories are resolved at extension boundaries with `getAgentDir()` and passed as required arguments to pure stores; `createRequire` and variable-specifier host `import()` are forbidden.
 - Package-owned source/assets must resolve from repository/module location. No machine-specific absolute source path or dependency on active `~/.pi` source is allowed.
 - Every versioned symlink must resolve inside repository. External authored-resource symlinks are excluded until explicitly added to manifest and integrity checks.
 - Runtime bridge state under `.pi/memory/bridge/` is ephemeral and ignored. Shutdown may leave ignored directories, but no request, response, processed cache, lock, or policy file may be treated as source.

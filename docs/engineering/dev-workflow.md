@@ -43,6 +43,8 @@ PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
   pi --no-extensions -e "$PACKAGE_TEST_DIR/package" --list-models
 ```
 
+`PI_CODING_AGENT_DIR` is honored by workflow plan storage and personal memory. Plan files land under the disposable agent directory; personal-memory files land beside it under `memory/`.
+
 ## Bootstrap
 
 Requirements:
@@ -163,7 +165,7 @@ done
 
 ## Isolated live bridge protocol test
 
-Core protocol test writes discussion notes, saved-plan state, and personal memory. Never point it at normal user state or the current project bridge. Use two terminals and a disposable project marker.
+Core protocol test writes discussion notes, saved-plan state, and personal memory. Never point it at normal user state or the current project bridge. `PI_CODING_AGENT_DIR` is honored by workflow plan storage and personal memory, so use a disposable agent root. Use two terminals and a disposable project marker.
 
 Terminal A, from repository root:
 

@@ -11,13 +11,14 @@
 ## Source isolation versus runtime sharing
 
 - **Workspace isolates source, not Pi home.** Normal launcher reuses global auth, settings, model catalogs, sessions, context, and personal memory. `/login`, `/settings`, `/trust`, `/remember`, and bridge `save_memory` can change shared user state.
-- **`--no-session` is not full isolation.** It prevents parent session persistence only. Use secure temporary `PI_CODING_AGENT_DIR` for live tests that save memory or alter settings, then remove it.
+- **`--no-session` is not full isolation.** It prevents parent session persistence only. Use secure temporary `PI_CODING_AGENT_DIR` for live tests that save memory or alter settings, then remove it. Workflow plan storage and personal-memory writes honor this override.
 - **Provider overload is not source failure.** For live acceptance, retry a fresh disposable session or another suitable configured model before diagnosing code; keep all temporary auth and state isolated.
 - **Never copy runtime state into repository.** Temporary auth/settings copies belong in mode-protected OS temp directories and must be deleted after test.
 - **Only `.pi/agents` is tracked below `.pi/`.** Bridge creates ignored `.pi/memory/bridge/`; broad `rm -rf .pi` destroys project agent link.
 
 ## Duplicate loading and stale code
 
+- **Pi loader aliases are build-time only.** Static bare imports are required for Pi APIs. `createRequire` and variable-specifier `import()` bypass the alias; broad catches in plan-file host discovery or `gcSessionPlans()` can hide the failure as unavailable host state or an empty plan store. `scripts/check-workspace.mjs` guards shipped entrypoints.
 - **Extension auto-discovery ignores `settings.json` removal.** `loader.js:534-539` unconditionally discovers `cwd/.pi/extensions/` then `agentDir/extensions/` before configured paths. Removing `extensions` entries cannot disable either location. Keep retired global copies under `~/.pi/agent/extensions.disabled/`; use `./bin/pi-workspace` for source runs.
 - **`pi -e .` can load duplicate extensions.** Without `--no-extensions`, any project-local or restored global copies remain discoverable beside workspace package. Duplicate commands, event listeners, watchers, widgets, and notifications can result.
 - **`--no-extensions` disables extensions only.** Global context/settings and other Pi-owned state remain available. Do not describe launcher as fully hermetic.
@@ -41,7 +42,7 @@
 
 - **One active owner per project.** Fresh heartbeat from older Pi makes newer bridge passive. Stop old process before testing changed protocol.
 - **Bridge root follows nearest marker, not client config path.** MCP `cwd`, Pi cwd, and intended project marker must agree.
-- **Bridge protocol tests mutate state.** Core tests save notes, plan, and personal memory. Run against disposable `PI_CODING_AGENT_DIR`, not normal user memory.
+- **Bridge protocol tests mutate state.** Core tests save notes, plan, and personal memory. Run against disposable `PI_CODING_AGENT_DIR`, not normal user memory; workflow plans and personal-memory paths now use that injected root.
 - **Bridge uses `fs.watch` without polling fallback.** Missed request events become two-second client timeouts. Preserve watcher lifecycle/coalescing behavior and diagnose request files before changing protocol. Plan reads/ticks must remain live workflow-owner requests; never add a direct MCP plan-file fallback.
 - **Session lock may be enveloped.** Consumers should read `session.lock ?? session` for compatibility; assuming top-level heartbeat/status breaks against current bridge output.
 - **Do not import live owner state.** Earlier direct workflow/discussion module imports produced false plan success and clobbered Notes UI. Use event-bus request/result handoff.
