@@ -28,3 +28,4 @@
 | ADR-0024 | Active | Design mode and design docs root | changing Design prompts, design scaffolds, token parsing, preview themes, base-library guidance, build prompt composition, frontend component guidance, or bridge prompt recall |
 | ADR-0025 | Active | Workflow mode announcement channel | changing workflow-mode prompt composition, mode transitions, before_agent_start messages, tool block reasons, compaction behavior, or provider continuation/cache behavior |
 | ADR-0026 | Active | Session-scoped workflow plan files and task tracking | changing /plan save/select/view/clear, plan-file paths or retention, task seeding/ticking, workflow markers, bridge plan access, or session ancestry semantics |
+| ADR-0027 | Active | Static host access and agent-directory injection | changing Pi host imports, agent-directory or plan/memory path resolution, extension test isolation, or workspace package checks |
