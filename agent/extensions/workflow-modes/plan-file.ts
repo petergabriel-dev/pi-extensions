@@ -1,7 +1,6 @@
-import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 export const MAX_PLAN_BYTES = 256 * 1024;
 export const PLAN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -10,7 +9,6 @@ export interface PlanFileReference {
 	planId: string;
 }
 
-const runtimeRequire = createRequire(import.meta.url);
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
 function isMissing(error: unknown): boolean {
@@ -24,32 +22,18 @@ function validateSegment(value: unknown, label: string): string {
 	return value;
 }
 
-function getAgentDirectory(): string {
-	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
-	if (configured) return resolve(configured);
-
-	try {
-		const pi = runtimeRequire("@earendil-works/pi-coding-agent") as { getAgentDir?: () => string };
-		if (typeof pi.getAgentDir === "function") return resolve(pi.getAgentDir());
-	} catch {
-		// Tests can provide PI_CODING_AGENT_DIR without installing Pi peers.
-	}
-
-	throw new Error("Pi getAgentDir() unavailable");
+function plansDirectory(agentDir: string): string {
+	return join(agentDir, "plans");
 }
 
-function plansDirectory(): string {
-	return join(getAgentDirectory(), "plans");
-}
-
-export function getPlanFilePath(sessionId: string, planId: string): string {
+export function getPlanFilePath(agentDir: string, sessionId: string, planId: string): string {
 	const safeSessionId = validateSegment(sessionId, "sessionId");
 	const safePlanId = validateSegment(planId, "planId");
-	return join(plansDirectory(), safeSessionId, `${safePlanId}.md`);
+	return join(plansDirectory(agentDir), safeSessionId, `${safePlanId}.md`);
 }
 
-async function ensurePlanDirectory(sessionId: string): Promise<string> {
-	const root = plansDirectory();
+async function ensurePlanDirectory(agentDir: string, sessionId: string): Promise<string> {
+	const root = plansDirectory(agentDir);
 	await mkdir(root, { recursive: true });
 	const rootInfo = await lstat(root);
 	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("plan store root is not a directory");
@@ -61,11 +45,11 @@ async function ensurePlanDirectory(sessionId: string): Promise<string> {
 	return sessionDirectory;
 }
 
-export async function writePlanFile(sessionId: string, planId: string, text: string): Promise<string> {
+export async function writePlanFile(agentDir: string, sessionId: string, planId: string, text: string): Promise<string> {
 	if (typeof text !== "string" || text.length === 0) throw new Error("plan text is required");
 	if (Buffer.byteLength(text, "utf8") > MAX_PLAN_BYTES) throw new Error(`plan text exceeds ${MAX_PLAN_BYTES} bytes`);
 
-	const sessionDirectory = await ensurePlanDirectory(sessionId);
+	const sessionDirectory = await ensurePlanDirectory(agentDir, sessionId);
 	const safePlanId = validateSegment(planId, "planId");
 	const destination = join(sessionDirectory, `${safePlanId}.md`);
 	const temporary = join(sessionDirectory, `.${safePlanId}.tmp.${process.pid}.${randomUUID()}`);
@@ -89,8 +73,8 @@ export async function writePlanFile(sessionId: string, planId: string, text: str
 	}
 }
 
-export async function readPlanFile(sessionId: string, planId: string): Promise<string | undefined> {
-	const filePath = getPlanFilePath(sessionId, planId);
+export async function readPlanFile(agentDir: string, sessionId: string, planId: string): Promise<string | undefined> {
+	const filePath = getPlanFilePath(agentDir, sessionId, planId);
 	try {
 		const fileInfo = await lstat(filePath);
 		if (!fileInfo.isFile() || fileInfo.isSymbolicLink()) throw new Error("plan file is not a regular file");
@@ -123,13 +107,13 @@ export async function readPlanFile(sessionId: string, planId: string): Promise<s
 	}
 }
 
-export async function gcPlanFiles(sessionId: string, referencedPlans: Iterable<PlanFileReference>, now = Date.now()): Promise<string[]> {
+export async function gcPlanFiles(agentDir: string, sessionId: string, referencedPlans: Iterable<PlanFileReference>, now = Date.now()): Promise<string[]> {
 	if (!Number.isFinite(now)) throw new Error("now must be a finite timestamp");
 	const safeSessionId = validateSegment(sessionId, "sessionId");
 	const referenced = new Set<string>();
-	for (const plan of referencedPlans) referenced.add(getPlanFilePath(safeSessionId, plan.planId));
+	for (const plan of referencedPlans) referenced.add(getPlanFilePath(agentDir, safeSessionId, plan.planId));
 
-	const sessionDirectory = join(plansDirectory(), safeSessionId);
+	const sessionDirectory = join(plansDirectory(agentDir), safeSessionId);
 	try {
 		const rootInfo = await lstat(sessionDirectory);
 		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("plan session path is not a directory");

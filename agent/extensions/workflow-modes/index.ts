@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -151,7 +151,7 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		currentPlanId = active.planId;
 		currentPlanPath = active.path;
 		currentPlanSavedAt = active.savedAt;
-		const text = await readPlanFile(sessionIdFromContext(ctx), active.planId);
+		const text = await readPlanFile(getAgentDir(), sessionIdFromContext(ctx), active.planId);
 		if (text === undefined) throw new Error("plan file is missing");
 		currentPlan = text;
 		planReadNoticeKey = undefined;
@@ -354,7 +354,7 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	const savedAt = metadata.savedAt ?? new Date().toISOString();
 	if (Number.isNaN(Date.parse(savedAt))) throw new Error("savedAt must be an ISO date");
 
-	const path = await writePlanFile(sessionIdFromContext(ctx), planId, text);
+	const path = await writePlanFile(getAgentDir(), sessionIdFromContext(ctx), planId, text);
 	const tasks = parsePlanTasks(text);
 	const at = Date.now();
 	const entry = { event: "set" satisfies PlanEvent, planId, path, savedAt, at, tasks };
@@ -459,12 +459,8 @@ function planSelectItems(plans: readonly SavedPlan[], activePlanId: string | und
 }
 
 async function gcSessionPlans(ctx: ExtensionContext): Promise<void> {
-	try {
-		const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
-		await gcPlanFiles(sessionIdFromContext(ctx), state.plans.map((plan) => ({ planId: plan.planId })));
-	} catch {
-		// Missing or unavailable runtime plan storage must not block session start.
-	}
+	const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+	await gcPlanFiles(getAgentDir(), sessionIdFromContext(ctx), state.plans.map((plan) => ({ planId: plan.planId })));
 }
 
 async function selectPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext, requestedPlanId?: string): Promise<void> {
