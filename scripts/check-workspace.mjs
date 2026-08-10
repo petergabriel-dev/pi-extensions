@@ -21,6 +21,26 @@ const skills = [
   "agent/skills/grill-with-docs",
   "agent/skills/worker-orchestration",
 ];
+
+const HOST_PACKAGE_LITERAL = /["'`](?:@earendil-works\/pi-|@mariozechner\/pi-)[^"'`]*["'`]/;
+const VARIABLE_NAME = /[A-Za-z_$][\w$]*/;
+
+function hasVariableHostImport(source) {
+  for (const match of source.matchAll(new RegExp(`\\bimport\\s*\\(\\s*(${VARIABLE_NAME.source})\\s*\\)`, "g"))) {
+    const variable = match[1];
+    const beforeImport = source.slice(0, match.index);
+    const binding = new RegExp(
+      `(?:\\b(?:const|let|var)\\s+${variable}\\s*=\\s*|\\bfor\\s*\\(\\s*(?:const|let|var)\\s+${variable}\\s+of\\s*)`,
+      "g",
+    );
+    for (const bound of beforeImport.matchAll(binding)) {
+      const expressionStart = (bound.index ?? 0) + bound[0].length;
+      if (HOST_PACKAGE_LITERAL.test(source.slice(expressionStart, match.index))) return true;
+    }
+  }
+  return false;
+}
+
 const agents = ["agent/agents/explorer.md", "agent/agents/worker.md"];
 const publishedFiles = [
   "agent/extensions/ccc-search/index.ts",
@@ -65,6 +85,14 @@ assert.equal(manifest.scripts?.prepublishOnly, "npm test");
 assert.deepEqual(manifest.pi?.extensions, extensions.map((entry) => `./${entry}`));
 assert.deepEqual(manifest.pi?.skills, skills.map((entry) => `./${entry}`));
 for (const resource of [...extensions, ...skills, ...agents]) await access(relative(resource));
+
+const extensionSources = await Promise.all(
+  extensions.map(async (file) => ({ file, source: await readFile(relative(file), "utf8") })),
+);
+for (const { file, source } of extensionSources) {
+  assert.ok(!/\bcreateRequire\b/.test(source), `forbidden createRequire in ${file}`);
+  assert.ok(!hasVariableHostImport(source), `forbidden variable-specifier Pi host import in ${file}`);
+}
 
 const agentsLink = relative(".pi/agents");
 assert.ok((await lstat(agentsLink)).isSymbolicLink(), ".pi/agents must be an internal symlink");
