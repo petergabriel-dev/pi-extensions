@@ -201,7 +201,7 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if (!failed) throw new Error("Off send failure was not surfaced");
 	if ((operations[2]?.data as { mode?: string })?.mode !== "build") throw new Error("failed Off send did not restore durable mode");
 	const restored = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string } };
-	if (restored.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("failed Off send did not restore in-memory mode");
+	if (!restored.message?.content?.startsWith("[workflow-modes] Active workflow mode: Build.")) throw new Error("failed Off send did not restore in-memory mode");
 	for (const mode of ["discuss", "plan", "review", "design"] as const) {
 		const reason = formatModeBlockReason(mode, "operation was blocked.");
 		if (!reason.includes("Workflow mode was " + MODE_LABELS[mode] + " at tool-call time.")) throw new Error(mode + " block reason was not mode-stamped");

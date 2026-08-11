@@ -60,9 +60,17 @@ const marker = {
 	progress: { done: 2, total: 5 },
 	nextTask: { id: "task-a", title: "Next task" },
 };
-assert.deepEqual(composeModeMarker("build", marker)?.details, marker, "marker must carry O(1) plan identity and progress");
-assert.equal(JSON.stringify(composeModeMarker("build", marker)).includes("tasks"), false, "marker must not carry full task list");
+const markerMessage = composeModeMarker("build", marker);
+assert.deepEqual(markerMessage?.details, marker, "marker must carry O(1) plan identity and progress");
+assert.ok(markerMessage?.content.includes("plan-a") && markerMessage.content.includes("2/5") && markerMessage.content.includes("Next task") && markerMessage.content.includes("task-a"), "marker content must carry tracker position");
+assert.equal(markerMessage?.content.split("\n").length, 2, "marker must add one tracker line");
+assert.equal(JSON.stringify(markerMessage).includes("tasks"), false, "marker must not carry full task list");
 assert.equal(composeModeMarker("off", marker), undefined, "Off must not carry marker");
+
+const progressedMarker = composeModeMarker("build", { ...marker, progress: { done: 3, total: 5 }, nextTask: { id: "task-b", title: "Later task" } });
+assert.notEqual(progressedMarker?.content, markerMessage?.content, "marker content must reflect progress changes");
+const stablePrompt = composeWorkflowPrompt("build", true, prompts, "# Saved plan");
+assert.equal(composeWorkflowPrompt("build", true, prompts, "# Saved plan"), stablePrompt, "workflow prompt must ignore mutable marker progress");
 
 const longBranch = Array.from({ length: 10_000 }, (_, index) =>
 	index % 2 === 0 ? { type: "message" } : state(index === 9_999 ? false : true));

@@ -70,8 +70,11 @@ export interface WorkflowPlanMarker {
 
 export function composeModeMarker(mode: CavemanWorkflowMode, plan?: WorkflowPlanMarker): { content: string; details?: WorkflowPlanMarker } | undefined {
 	if (mode === "off") return undefined;
+	const planLine = plan
+		? `\n[workflow-modes] Plan ${plan.planId}: ${plan.progress.done}/${plan.progress.total}; next=${plan.nextTask ? `${plan.nextTask.title} (${plan.nextTask.id})` : "none"}.`
+		: "";
 	return {
-		content: `[workflow-modes] Active workflow mode: ${MODE_LABELS[mode]}.`,
+		content: `[workflow-modes] Active workflow mode: ${MODE_LABELS[mode]}.${planLine}`,
 		...(plan ? { details: plan } : {}),
 	};
 }
