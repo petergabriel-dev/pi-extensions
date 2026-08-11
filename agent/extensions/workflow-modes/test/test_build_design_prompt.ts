@@ -74,7 +74,8 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	process.env.PI_CODING_AGENT_DIR = cwd;
 	const planTool = tools.get("workflow_plan_save");
 	const tickTool = tools.get("workflow_plan_tick");
-	if (!planTool || !tickTool) throw new Error("plan tools were not registered");
+	const tasksTool = tools.get("workflow_plan_tasks");
+	if (!planTool || !tickTool || !tasksTool) throw new Error("plan tools were not registered");
 	operations.length = 0;
 	const saved = await planTool.execute("plan-call", { plan: "# Plan\\n\\n## Section 4 — Tasks\\n- [ ] Seed task\\n" }, undefined, undefined, context);
 	const savedDetails = saved.details as { path?: string; planId?: string; taskCount?: number };
@@ -91,6 +92,10 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	const activeTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { planId?: string; path?: string; progress?: { done: number; total: number }; nextTask?: { title?: string } } } };
 	const activeDetails = activeTurn.message?.details;
 	if (activeDetails?.planId !== savedDetails.planId || activeDetails.path !== savedDetails.path || activeDetails.progress?.total !== 1 || activeDetails.progress.done !== 0 || activeDetails.nextTask?.title !== "Seed task") throw new Error("active plan marker missing identity/progress");
+	const recovered = await tasksTool.execute("tasks-call", {}, undefined, undefined, context);
+	const recoveredDetails = recovered.details as { planId?: string; tasks?: Array<{ id?: string; title?: string }>; completedTaskIds?: string[]; progress?: { done: number; total: number }; nextTask?: { title?: string } };
+	const recoveredText = String(recovered.content?.[0]?.text);
+	if (recoveredDetails.planId !== savedDetails.planId || recoveredDetails.tasks?.[0]?.title !== "Seed task" || recoveredDetails.progress?.done !== 0 || recoveredDetails.progress?.total !== 1 || recoveredDetails.nextTask?.title !== "Seed task" || !recoveredText.includes("Seed task")) throw new Error("plan task recovery omitted live tracker state");
 	writeFileSync(savedDetails.path, "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n");
 	const editedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { systemPrompt?: string; message?: { details?: { planId?: string; progress?: { done: number; total: number }; nextTask?: { id?: string; title?: string } } } };
 	if (!editedTurn.systemPrompt?.includes("# Hand edited") || editedTurn.message?.details?.nextTask?.title !== "Seed task") throw new Error("tracker did not remain authoritative after plan hand-edit");
@@ -166,6 +171,15 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if (operations[0]?.action !== "user" || !String(operations[0]?.message).includes("workflow_plan_save")) throw new Error("/plan save did not start directive turn");
 	await handlers.get("turn_end")?.({ toolResults: [] }, context);
 	if (notifications.filter((message) => message.includes("Plan save tool was not called")).length !== 1) throw new Error("missed plan tool did not emit exactly one nudge");
+	branchEntries = [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }];
+	await handlers.get("session_tree")?.({}, context);
+	let noPlanError = "";
+	try {
+		await tasksTool.execute("tasks-no-plan", {}, undefined, undefined, context);
+	} catch (error) {
+		noPlanError = error instanceof Error ? error.message : String(error);
+	}
+	if (!noPlanError.includes("no active saved plan")) throw new Error("plan task recovery omitted no-plan error");
 	branchEntries = [
 		{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } },
 		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "missing-plan", path: "/missing/plan.md", savedAt: "2026-07-01T00:00:00.000Z" } },

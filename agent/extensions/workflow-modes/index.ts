@@ -17,6 +17,7 @@ export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 export type PlanEvent = "set" | "activate" | "clear" | "tick";
 export const PLAN_AUTHORING_TOOL = "workflow_plan_save";
 export const PLAN_TASK_TICK_TOOL = "workflow_plan_tick";
+export const PLAN_TASKS_TOOL = "workflow_plan_tasks";
 export const PLAN_SAVE_DIRECTIVE = "[workflow-modes] Plan save directive: call workflow_plan_save exactly once with complete plan text in plan only. Do not explain or add fields.";
 
 export const MODE_ENTRY = "workflow-mode-set";
@@ -341,6 +342,14 @@ export interface WorkflowPlanTaskTickResult {
 	outOfOrder: boolean;
 }
 
+export interface WorkflowPlanTasksResult {
+	planId: string;
+	tasks: PlanTask[];
+	completedTaskIds: string[];
+	progress: { done: number; total: number };
+	nextTask?: { id: string; title: string };
+}
+
 const MAX_PLAN_TASK_ID_LENGTH = 128;
 const MAX_PLAN_TASK_TITLE_LENGTH = 512;
 
@@ -470,12 +479,37 @@ const PLAN_TASK_TICK_PARAMETERS = {
 	additionalProperties: false,
 } as const;
 
+const PLAN_TASKS_PARAMETERS = {
+	type: "object",
+	properties: {},
+	additionalProperties: false,
+} as const;
+
 async function savePlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	requestPlanSave(pi, ctx);
 }
 
 function planState(ctx: ExtensionCommandContext | ExtensionContext) {
 	return resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+}
+
+function currentWorkflowPlanTasks(requestedPlanId?: string): WorkflowPlanTasksResult {
+	if (!currentPlanId) throw new Error("workflow-modes has no active saved plan");
+	if (requestedPlanId && requestedPlanId !== currentPlanId) throw new Error("workflow-modes task state is available only for active plan");
+	return {
+		planId: currentPlanId,
+		tasks: currentPlanTasks,
+		completedTaskIds: currentPlanCompletedTaskIds,
+		progress: currentPlanProgress,
+		...(currentPlanNextTask ? { nextTask: currentPlanNextTask } : {}),
+	};
+}
+
+function formatWorkflowPlanTasks(result: WorkflowPlanTasksResult): string {
+	const completed = result.completedTaskIds.length > 0 ? result.completedTaskIds.join(", ") : "none";
+	const next = result.nextTask ? `${result.nextTask.id} — ${result.nextTask.title}` : "none";
+	const tasks = result.tasks.length > 0 ? result.tasks.map((task) => `- ${task.id}: ${task.title}`).join("\n") : "(none)";
+	return [`Plan: ${result.planId}`, `Progress: ${result.progress.done}/${result.progress.total}`, `Completed: ${completed}`, `Next: ${next}`, "Tasks:", tasks].join("\n");
 }
 
 function formatPlanList(plans: readonly SavedPlan[], activePlanId: string | undefined): string {
@@ -670,6 +704,24 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: PLAN_TASKS_TOOL,
+		label: "Recover Plan Tasks",
+		description: "Read active workflow plan task ids, titles, progress, and next task.",
+		promptSnippet: "Recover active workflow plan task state after compaction",
+		promptGuidelines: [
+			"Use workflow_plan_tasks only when tracker context is missing or after compaction; prefer exact title ticks in normal flow.",
+		],
+		parameters: PLAN_TASKS_PARAMETERS as never,
+		async execute(_toolCallId, _params: Record<string, never>, _signal, _onUpdate, _ctx) {
+			const result = currentWorkflowPlanTasks();
+			return {
+				content: [{ type: "text", text: formatWorkflowPlanTasks(result) }],
+				details: result,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: PLAN_TASK_TICK_TOOL,
 		label: "Tick Plan Task",
 		description: "Mark one active workflow plan task complete in branch state.",
@@ -732,9 +784,11 @@ export default function (pi: ExtensionAPI) {
 		const emitResult = (result: Record<string, unknown>) => pi.events.emit("workflow-modes:get-plan-tasks-result", { requestId, ...result });
 		if (!requestId) return emitResult({ ok: false, error: "workflow-modes task read requestId is required" });
 		const requestedPlanId = typeof request.planId === "string" ? request.planId : undefined;
-		if (!currentPlanId) return emitResult({ ok: false, error: "workflow-modes has no active saved plan" });
-		if (requestedPlanId && requestedPlanId !== currentPlanId) return emitResult({ ok: false, error: "workflow-modes task state is available only for active plan" });
-		emitResult({ ok: true, planId: currentPlanId, tasks: currentPlanTasks, completedTaskIds: currentPlanCompletedTaskIds, progress: currentPlanProgress, ...(currentPlanNextTask ? { nextTask: currentPlanNextTask } : {}) });
+		try {
+			emitResult({ ok: true, ...currentWorkflowPlanTasks(requestedPlanId) });
+		} catch (error) {
+			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
+		}
 	});
 
 	pi.events.on("workflow-modes:tick-plan-task", async (data: unknown) => {
