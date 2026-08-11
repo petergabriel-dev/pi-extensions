@@ -17,6 +17,29 @@ export interface PlanTask {
 	metadata: PlanTaskMetadata;
 }
 
+export type PlanTaskReference = { taskId: string } | { title: string };
+
+export type PlanTaskReferenceResolution =
+	| { ok: true; task: PlanTask }
+	| { ok: false; reason: "unknown" | "ambiguous" };
+
+export function resolvePlanTaskReference(tasks: readonly PlanTask[], reference: PlanTaskReference): PlanTaskReferenceResolution {
+	const taskId = "taskId" in reference ? reference.taskId : undefined;
+	const title = "title" in reference ? reference.title.replace(/\s+/g, " ") : undefined;
+	let match: PlanTask | undefined;
+	let matches = 0;
+
+	for (let index = 0; index < Math.min(tasks.length, MAX_PLAN_TASKS); index += 1) {
+		const task = tasks[index];
+		if (!task || (taskId !== undefined ? task.id !== taskId : task.title.replace(/\s+/g, " ") !== title)) continue;
+		match = task;
+		matches += 1;
+		if (matches > 1) return { ok: false, reason: "ambiguous" };
+	}
+
+	return match ? { ok: true, task: match } : { ok: false, reason: "unknown" };
+}
+
 const SECTION_4_HEADING = /^##\s+Section\s+4(?:\s*[—-].*)?\s*$/i;
 const SECTION_HEADING = /^##\s+/;
 const FENCE = /^\s*(`{3,}|~{3,})/;
