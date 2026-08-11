@@ -15,7 +15,7 @@ readWhen: changing workflow-mode prompt composition, mode transitions, before_ag
 ## Decision
 
 - For Discuss, Plan, Build, Review, and Design, `before_agent_start` returns the composed system prompt and one hidden `workflow-mode-current` custom message naming the active mode on every user turn.
-- When an active saved plan exists, that same hidden message carries compact plan marker details: plan id, file path, savedAt, tracker progress, and next task; it never carries the full task list.
+- When an active saved plan exists, that same hidden message puts model-required marker content—plan id, tracker progress, and next task id/title—in `content`; structured details retain file path and savedAt for host consumers, but Pi drops `CustomMessage.details` during LLM conversion (`@earendil-works/pi-coding-agent/dist/core/messages.js:89-96`). It never carries the full task list.
 - Prefix custom-message content with `[workflow-modes]` because Pi converts custom messages to LLM role `user`; the marker identifies harness-authored state.
 - Open every active-mode system prompt with an authoritative header that supersedes earlier mode claims, forbids redundant switch requests, and requires one real tool attempt before refusing on a believed block.
 - For Off, which has no workflow prompt, append the durable `workflow-mode-set` entry before sending one `workflow-mode-transition` message. A send failure restores prior in-memory and durable mode state and surfaces the error.
@@ -48,7 +48,7 @@ Code:
 ## Consequences
 
 - Good: Active-mode belief self-heals on every user turn; Off transitions remain visible to the model.
-- Good: The marker is hidden from the TUI, O(1) to compose, keeps mode content compact while carrying only plan identity/progress details, and adds no provider round trip.
+- Good: The marker is hidden from the TUI, O(1) to compose, keeps model-visible content compact while carrying only plan identity/progress and next-task data, and adds no provider round trip.
 - Good: Mutation gates, Design surface checks, Review policy, and sandbox fallback keep the same allow/deny outcomes.
 - Good: Historical block results no longer claim a current mode or tell the user to switch.
 - Bad/risk: One hidden custom message is persisted per active-mode user turn, increasing session history slightly.
