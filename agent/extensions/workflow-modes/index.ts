@@ -792,15 +792,18 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.events.on("workflow-modes:tick-plan-task", async (data: unknown) => {
-		const request = data && typeof data === "object" ? data as { requestId?: unknown; planId?: unknown; taskId?: unknown } : {};
+		const request = data && typeof data === "object" ? data as { requestId?: unknown; planId?: unknown; taskId?: unknown; title?: unknown } : {};
 		const requestId = typeof request.requestId === "string" ? request.requestId : undefined;
 		const emitResult = (result: Record<string, unknown>) => pi.events.emit("workflow-modes:tick-plan-task-result", { requestId, ...result });
 		if (!requestId) return emitResult({ ok: false, error: "workflow-modes task tick requestId is required" });
-		if (typeof request.taskId !== "string" || request.taskId.trim().length === 0) return emitResult({ ok: false, error: "workflow-modes task tick taskId is required" });
+		const hasTaskId = Object.prototype.hasOwnProperty.call(request, "taskId");
+		const hasTitle = Object.prototype.hasOwnProperty.call(request, "title");
+		if (hasTaskId === hasTitle) return emitResult({ ok: false, error: "workflow-modes task tick requires exactly one of taskId or title" });
 		if (request.planId !== undefined && request.planId !== currentPlanId) return emitResult({ ok: false, error: "workflow-modes task state is available only for active plan" });
 		if (!latestContext) return emitResult({ ok: false, error: "workflow-modes has no active context" });
 		try {
-			const result = await tickWorkflowPlanTask(pi, latestContext, request.taskId);
+			const reference = hasTaskId ? { taskId: request.taskId } : { title: request.title };
+			const result = await tickWorkflowPlanTask(pi, latestContext, reference);
 			emitResult({ ok: true, ...result });
 		} catch (error) {
 			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });

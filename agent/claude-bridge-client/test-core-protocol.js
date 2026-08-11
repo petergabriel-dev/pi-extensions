@@ -136,12 +136,12 @@ test("capture accepts sessionId primary and lets it win over legacy alias", asyn
 
 test("save_plan is visible through recall duplicate response stable", async ({ projectRoot }) => {
 	const id = crypto.randomUUID();
-	const planText = `# Core Protocol Saved Plan ${id}\n\n## Section 4 — Tasks\n- [ ] Core protocol save visible`;
+	const planText = `# Core Protocol Saved Plan ${id}\n\n## Section 4 — Tasks\n- [ ] Core protocol save visible\n- [ ] Core protocol second task`;
 	const first = await sendRequest(projectRoot, "save_plan", { planText, planId: `core-${id}`, confirmed: true }, id);
 	assert(first.response.ok, `save_plan failed: ${JSON.stringify(first.response)}`);
 	assert(first.response.result.planId === `core-${id}`, "planId mismatch");
 	assert(typeof first.response.result.path === "string" && first.response.result.path.endsWith(`${first.response.result.planId}.md`), "save_plan missing plan path");
-	assert(first.response.result.taskCount === 1, "save_plan missing task count");
+	assert(first.response.result.taskCount === 2, "save_plan missing task count");
 
 	// Recall must see the saved plan after a successful save.
 	const recall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
@@ -151,21 +151,26 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	assert(sp.planId === `core-${id}`, `recall savedPlan.planId mismatch: got ${sp.planId}`);
 	assert(sp.planText === planText, `recall savedPlan.planText mismatch`);
 	assert(sp.path === first.response.result.path, "recall savedPlan path mismatch");
-	assert(sp.progress?.done === 0 && sp.progress?.total === 1, "recall savedPlan progress mismatch before tick");
+	assert(sp.progress?.done === 0 && sp.progress?.total === 2, "recall savedPlan progress mismatch before tick");
 	assert(typeof sp.savedAt === "string" && sp.savedAt.length > 0, "recall savedPlan missing savedAt");
 
 	const tasks = await sendRequest(projectRoot, "read_plan_tasks", { planId: `core-${id}` });
 	assert(tasks.response.ok, `read_plan_tasks failed: ${JSON.stringify(tasks.response)}`);
-	assert(tasks.response.result.planId === `core-${id}` && tasks.response.result.tasks?.length === 1, "read_plan_tasks result missing seeded task");
-	const taskId = tasks.response.result.tasks[0].id;
+	assert(tasks.response.result.planId === `core-${id}` && tasks.response.result.tasks?.length === 2, "read_plan_tasks result missing seeded tasks");
+	const titleTickId = crypto.randomUUID();
+	const titleTick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, titleTickId);
+	assert(titleTick.response.ok && titleTick.response.result.progress?.done === 1, `title tick_plan_task failed: ${JSON.stringify(titleTick.response)}`);
+	assert(titleTick.response.result.taskId === tasks.response.result.tasks[0].id, "title tick resolved wrong task");
+	await sleep(POLL_MS * 2);
+	const taskId = tasks.response.result.tasks[1].id;
 	const tickId = crypto.randomUUID();
 	const tick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId }, tickId);
-	assert(tick.response.ok && tick.response.result.progress?.done === 1, `tick_plan_task failed: ${JSON.stringify(tick.response)}`);
+	assert(tick.response.ok && tick.response.result.progress?.done === 2, `task-id tick_plan_task failed: ${JSON.stringify(tick.response)}`);
 	fs.unlinkSync(tick.responsePath);
 	const tickReplay = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId: "different" }, tickId);
 	assert(JSON.stringify(tickReplay.response) === JSON.stringify(tick.response), "duplicate tick response changed");
 	const recalledAfterTick = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
-	assert(recalledAfterTick.response.result.savedPlan?.progress?.done === 1, "recall did not return live tick progress");
+	assert(recalledAfterTick.response.result.savedPlan?.progress?.done === 2, "recall did not return live tick progress");
 
 	// Duplicate save_plan response must remain stable.
 	fs.unlinkSync(first.responsePath);
@@ -199,7 +204,7 @@ test("MCP exposes and dispatches memory entry tools", async ({ projectRoot }) =>
 	], projectRoot).find((response) => response.id === 4);
 	assert(!taskRead.error, `read_plan_tasks MCP error: ${JSON.stringify(taskRead)}`);
 	const taskResult = taskRead.result.structuredContent.result;
-	assert(taskResult.tasks?.length === 1 && taskResult.progress?.done === 1, "read_plan_tasks MCP result missing live task state");
+	assert(taskResult.tasks?.length === 2 && taskResult.progress?.done === 2, "read_plan_tasks MCP result missing live task state");
 	const taskTick = runMcp([
 		{ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "tick_plan_task", arguments: { taskId: taskResult.tasks[0].id, cwd: projectRoot } } },
 	], projectRoot).find((response) => response.id === 5);

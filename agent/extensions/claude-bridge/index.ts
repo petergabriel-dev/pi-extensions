@@ -97,10 +97,9 @@ interface ReadPlanTasksPayload {
 	planId?: string;
 }
 
-interface TickPlanTaskPayload {
-	taskId: string;
-	planId?: string;
-}
+type TickPlanTaskPayload =
+	| { taskId: string; planId?: string }
+	| { title: string; planId?: string };
 
 interface RecallEntryPayload {
 	slug: string;
@@ -506,12 +505,18 @@ function normalizeReadPlanTasksPayload(payload: Record<string, unknown>): ReadPl
 }
 
 function normalizeTickPlanTaskPayload(payload: Record<string, unknown>): TickPlanTaskPayload {
-	if (typeof payload.taskId !== "string" || payload.taskId.trim().length === 0 || payload.taskId.length > 128) throw new Error("tick_plan_task requires taskId string of at most 128 characters.");
+	if (Object.keys(payload).some((key) => !["taskId", "title", "planId"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, and planId.");
+	const hasTaskId = Object.prototype.hasOwnProperty.call(payload, "taskId");
+	const hasTitle = Object.prototype.hasOwnProperty.call(payload, "title");
+	if (hasTaskId === hasTitle) throw new Error("tick_plan_task requires exactly one of taskId or title.");
 	if (payload.planId !== undefined && (typeof payload.planId !== "string" || payload.planId.trim().length === 0)) throw new Error("tick_plan_task planId must be a non-empty string when provided.");
-	return {
-		taskId: payload.taskId.trim(),
-		...(typeof payload.planId === "string" ? { planId: payload.planId.trim() } : {}),
-	};
+	const planId = typeof payload.planId === "string" ? payload.planId.trim() : undefined;
+	if (hasTaskId) {
+		if (typeof payload.taskId !== "string" || payload.taskId.trim().length === 0 || payload.taskId.length > 128) throw new Error("tick_plan_task requires taskId string of at most 128 characters.");
+		return { taskId: payload.taskId.trim(), ...(planId ? { planId } : {}) };
+	}
+	if (typeof payload.title !== "string" || payload.title.trim().length === 0 || payload.title.length > 512) throw new Error("tick_plan_task requires title string of at most 512 characters.");
+	return { title: payload.title, ...(planId ? { planId } : {}) };
 }
 
 function normalizeRecallEntryPayload(payload: Record<string, unknown>): RecallEntryPayload {
@@ -665,10 +670,11 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 			result: {
 				requestId: request.id,
 				planId: result.planId ?? null,
-				taskId: result.taskId ?? payload.taskId,
+				taskId: result.taskId ?? ("taskId" in payload ? payload.taskId : null),
 				progress: result.progress ?? { done: 0, total: 0 },
 				...(result.nextTask ? { nextTask: result.nextTask } : {}),
 				idempotent: result.idempotent === true,
+				outOfOrder: result.outOfOrder === true,
 			},
 		};
 	} catch (error) {
