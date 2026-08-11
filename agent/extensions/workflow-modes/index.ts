@@ -9,7 +9,7 @@ import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js"
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
 import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
-import { parsePlanTasks, type PlanTask } from "./plan-tasks.js";
+import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -338,7 +338,11 @@ export interface WorkflowPlanTaskTickResult {
 	progress: { done: number; total: number };
 	nextTask?: { id: string; title: string };
 	idempotent: boolean;
+	outOfOrder: boolean;
 }
+
+const MAX_PLAN_TASK_ID_LENGTH = 128;
+const MAX_PLAN_TASK_TITLE_LENGTH = 512;
 
 function sessionIdFromContext(ctx: ExtensionContext): string {
 	const sessionId = (ctx.sessionManager as { getSessionId?: () => unknown }).getSessionId?.();
@@ -376,17 +380,24 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	return entry;
 }
 
-export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawTaskId: unknown): Promise<WorkflowPlanTaskTickResult> {
-	if (typeof rawTaskId !== "string" || rawTaskId.trim().length === 0 || rawTaskId.length > 128) throw new Error("taskId must be a non-empty string of at most 128 characters");
-	const taskId = rawTaskId.trim();
+export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawReference: unknown): Promise<WorkflowPlanTaskTickResult> {
+	const reference = normalizeTaskTickReference(rawReference);
 	const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
 	const planId = state.activePlanId;
 	if (!planId) throw new Error("no active saved plan");
 	const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId);
-	const task = taskState.tasks.find((candidate) => candidate.id === taskId);
-	if (!task) throw new Error(`unknown taskId ${taskId}`);
+	const resolution = resolvePlanTaskReference(taskState.tasks, reference);
+	if (!resolution.ok) {
+		const description = resolution.reason === "ambiguous" ? "ambiguous task reference" : "unknown task reference";
+		const expected = taskState.nextTask ? ` Expected next task: ${JSON.stringify(taskState.nextTask.title)} (${taskState.nextTask.id}).` : " No expected next task.";
+		const supplied = "taskId" in reference ? `taskId ${reference.taskId}` : `title ${JSON.stringify(reference.title)}`;
+		throw new Error(`${description} ${supplied}.${expected}`);
+	}
+
+	const taskId = resolution.task.id;
+	const outOfOrder = taskState.nextTask !== undefined && taskState.nextTask.id !== taskId;
 	if (taskState.completedTaskIds.includes(taskId)) {
-		return { planId, taskId, progress: taskState.progress, ...(taskState.nextTask ? { nextTask: taskState.nextTask } : {}), idempotent: true };
+		return { planId, taskId, progress: taskState.progress, ...(taskState.nextTask ? { nextTask: taskState.nextTask } : {}), idempotent: true, outOfOrder };
 	}
 
 	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, at: Date.now() };
@@ -398,7 +409,28 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanNextTask = nextState.nextTask;
 	updateStatus(ctx);
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
-	return { planId, taskId, progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false };
+	return { planId, taskId, progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
+}
+
+function normalizeTaskTickReference(rawReference: unknown): PlanTaskReference {
+	if (typeof rawReference === "string") return normalizeTaskId(rawReference);
+	if (!rawReference || typeof rawReference !== "object" || Array.isArray(rawReference)) throw new Error("exactly one of taskId or title is required");
+	const candidate = rawReference as { taskId?: unknown; title?: unknown };
+	const keys = Object.keys(candidate);
+	if (keys.some((key) => key !== "taskId" && key !== "title")) throw new Error("exactly one of taskId or title is required");
+	const hasTaskId = Object.prototype.hasOwnProperty.call(candidate, "taskId");
+	const hasTitle = Object.prototype.hasOwnProperty.call(candidate, "title");
+	if (hasTaskId === hasTitle) throw new Error("exactly one of taskId or title is required");
+	if (hasTaskId) return normalizeTaskId(candidate.taskId);
+	if (typeof candidate.title !== "string" || candidate.title.trim().length === 0 || candidate.title.length > MAX_PLAN_TASK_TITLE_LENGTH) {
+		throw new Error("title must be a non-empty string of at most 512 characters");
+	}
+	return { title: candidate.title };
+}
+
+function normalizeTaskId(rawTaskId: unknown): PlanTaskReference {
+	if (typeof rawTaskId !== "string" || rawTaskId.trim().length === 0 || rawTaskId.length > MAX_PLAN_TASK_ID_LENGTH) throw new Error("taskId must be a non-empty string of at most 128 characters");
+	return { taskId: rawTaskId.trim() };
 }
 
 async function savePlanLast(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -431,9 +463,10 @@ const PLAN_AUTHORING_PARAMETERS = {
 const PLAN_TASK_TICK_PARAMETERS = {
 	type: "object",
 	properties: {
-		taskId: { type: "string", minLength: 1, maxLength: 128 },
+		taskId: { type: "string", minLength: 1, maxLength: MAX_PLAN_TASK_ID_LENGTH },
+		title: { type: "string", minLength: 1, maxLength: MAX_PLAN_TASK_TITLE_LENGTH },
 	},
-	required: ["taskId"],
+	oneOf: [{ required: ["taskId"] }, { required: ["title"] }],
 	additionalProperties: false,
 } as const;
 
@@ -643,13 +676,14 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Tick exactly one completed workflow plan task",
 		promptGuidelines: [
 			"Call workflow_plan_tick once after completing and verifying exactly one tracker task.",
-			"Pass only taskId from the current tracker marker; never edit the saved plan file to record progress.",
+			"Pass exactly one of taskId or the task title copied verbatim from the current tracker; never edit the saved plan file.",
 		],
 		parameters: PLAN_TASK_TICK_PARAMETERS as never,
-		async execute(_toolCallId, params: { taskId: string }, _signal, _onUpdate, ctx) {
-			const result = await tickWorkflowPlanTask(pi, ctx, params.taskId);
+		async execute(_toolCallId, params: { taskId?: string; title?: string }, _signal, _onUpdate, ctx) {
+			const result = await tickWorkflowPlanTask(pi, ctx, params);
+			const orderNote = result.outOfOrder ? ` (out of order; ${result.nextTask ? `${result.nextTask.id} still open` : "earlier task still open"})` : "";
 			return {
-				content: [{ type: "text", text: `Ticked ${result.taskId}: ${result.progress.done}/${result.progress.total} task${result.progress.total === 1 ? "" : "s"} complete${result.idempotent ? " (already ticked)" : ""}.` }],
+				content: [{ type: "text", text: `Ticked ${result.taskId}${orderNote}: ${result.progress.done}/${result.progress.total} task${result.progress.total === 1 ? "" : "s"} complete${result.idempotent ? " (already ticked)" : ""}.` }],
 				details: result,
 			};
 		},

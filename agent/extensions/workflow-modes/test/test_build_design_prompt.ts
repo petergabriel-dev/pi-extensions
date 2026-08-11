@@ -118,6 +118,37 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	branchEntries = tickedBranch;
 	await handlers.get("session_tree")?.({}, context);
 	operations.length = 0;
+	const sequence = await planTool.execute("plan-call-sequence", { plan: "# Sequence\\n\\n## Section 4 — Tasks\\n- [ ] First task\\n- [ ] Second task\\n" }, undefined, undefined, context);
+	const sequenceTasks = ((operations[0]?.data as { tasks?: Array<{ id: string; title: string }> })?.tasks ?? []);
+	if (sequenceTasks.length !== 2) throw new Error("sequence plan did not seed two tasks");
+	const outOfOrder = await tickTool.execute("tick-sequence-title", { title: "Second task" }, undefined, undefined, context);
+	const outOfOrderDetails = outOfOrder.details as { taskId?: string; progress?: { done: number; total: number }; nextTask?: { id?: string; title?: string }; outOfOrder?: boolean };
+	if (!outOfOrderDetails.outOfOrder || outOfOrderDetails.taskId !== sequenceTasks[1]?.id || outOfOrderDetails.progress?.done !== 1 || outOfOrderDetails.nextTask?.id !== sequenceTasks[0]?.id) throw new Error("title tick did not flag out-of-order progress");
+	if (!String(outOfOrder.content?.[0]?.text).includes("out of order")) throw new Error("title tick result omitted out-of-order note");
+	const operationCountAfterOutOfOrder = operations.length;
+	const repeatedTitle = await tickTool.execute("tick-sequence-title-replay", { title: "Second task" }, undefined, undefined, context);
+	if (!(repeatedTitle.details as { idempotent?: boolean }).idempotent || operations.length !== operationCountAfterOutOfOrder) throw new Error("title re-tick was not idempotent");
+	let unknownError = "";
+	try {
+		await tickTool.execute("tick-sequence-unknown", { title: "Missing task" }, undefined, undefined, context);
+	} catch (error) {
+		unknownError = error instanceof Error ? error.message : String(error);
+	}
+	if (!unknownError.includes("First task") || !unknownError.includes(sequenceTasks[0]!.id)) throw new Error("unknown title error omitted expected next task");
+	const inOrder = await tickTool.execute("tick-sequence-id", { taskId: sequenceTasks[0]!.id }, undefined, undefined, context);
+	const inOrderDetails = inOrder.details as { progress?: { done: number; total: number }; outOfOrder?: boolean };
+	if (inOrderDetails.outOfOrder || inOrderDetails.progress?.done !== 2) throw new Error("task id tick did not finish sequence");
+	operations.length = 0;
+	await planTool.execute("plan-call-ambiguous", { plan: "# Ambiguous\\n\\n## Section 4 — Tasks\\n- [ ] Duplicate task\\n- [ ] Duplicate task\\n" }, undefined, undefined, context);
+	const ambiguousTasks = ((operations[0]?.data as { tasks?: Array<{ id: string; title: string }> })?.tasks ?? []);
+	let ambiguousError = "";
+	try {
+		await tickTool.execute("tick-ambiguous", { title: "Duplicate task" }, undefined, undefined, context);
+	} catch (error) {
+		ambiguousError = error instanceof Error ? error.message : String(error);
+	}
+	if (!ambiguousError.includes("ambiguous") || !ambiguousError.includes("Duplicate task") || !ambiguousError.includes(ambiguousTasks[0]!.id)) throw new Error("ambiguous title error omitted expected next task");
+	operations.length = 0;
 	const second = await planTool.execute("plan-call-2", { plan: "# Plan B\\n\\n## Section 4 — Tasks\\n- [ ] Second task\\n" }, undefined, undefined, context);
 	const secondDetails = second.details as { path?: string; planId?: string; taskCount?: number };
 	if (!secondDetails.planId || !secondDetails.path || secondDetails.taskCount !== 1) throw new Error("second plan save failed");
