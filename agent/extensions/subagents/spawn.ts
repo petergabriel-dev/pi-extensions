@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig, AgentRole } from "./agents.ts";
+import type { SubagentParentThinkingLevel } from "./effort.ts";
 import type { ProgressHandle } from "./progress.ts";
 import { createSubagentWatchdog, type SubagentTimeoutKind, type SubagentWatchdog } from "./timeout.ts";
 import type { SubagentTimeoutPolicy } from "./timeout-policy.ts";
@@ -81,6 +82,7 @@ export interface RunSubagentOptions {
 	signal?: AbortSignal;
 	timeoutPolicy: SubagentTimeoutPolicy;
 	modelOverride?: Model<any>;
+	thinkingLevel?: SubagentParentThinkingLevel;
 	customTools?: ToolDefinition[];
 	progress?: ProgressHandle;
 }
@@ -332,6 +334,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			agentDir,
 			model,
 			tools: options.agent.tools,
+			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			customTools: options.customTools,
 			resourceLoader,
 			sessionManager: SessionManager.create(options.ctx.cwd),
