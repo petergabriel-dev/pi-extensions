@@ -16,6 +16,12 @@ import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
 import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
+import {
+	parseEffortLevel,
+	resolveEffort,
+	type SubagentEffortLevel,
+	type SubagentParentThinkingLevel,
+} from "./effort.ts";
 import { getProgressSnapshot, startSubagentProgress } from "./progress.ts";
 import { runSubagent, type ExplorerParsedResult, type SubagentRunResult, type WorkerParsedResult } from "./spawn.ts";
 import { resolveSubagentTimeoutPolicy, type SubagentTimeoutPolicy, type SubagentTimeoutSettings } from "./timeout-policy.ts";
@@ -33,6 +39,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
 const AGENT_SCOPE_DESCRIPTION =
 	"Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.";
+const SUBAGENT_EFFORT_LEVELS: SubagentEffortLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+let extensionPi: ExtensionAPI | undefined;
 
 const SpikeParams = Type.Object({
 	path: Type.Optional(
@@ -157,6 +165,7 @@ interface SubagentsSettings extends SubagentTimeoutSettings {
 	concurrencyCap?: number;
 	explorerLaneCap?: number;
 	models?: Partial<Record<AgentRole, string>>;
+	effort?: Partial<Record<AgentRole, string>>;
 }
 
 const READ_ONLY_EXPLORER_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -423,13 +432,34 @@ function readSubagentsSettings(): SubagentsSettings {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as SubagentsSettings : {};
 }
 
-function writeSubagentModel(role: AgentRole, modelRef: string): void {
+function writeSubagentModel(role: AgentRole, modelRef?: string): void {
 	const settings = readSettings();
 	const subagents = readSubagentsSettings();
-	settings.subagents = {
-		...subagents,
-		models: { ...(subagents.models ?? {}), [role]: modelRef },
-	};
+	const models = { ...(subagents.models ?? {}) };
+	if (modelRef) models[role] = modelRef;
+	else delete models[role];
+
+	const nextSubagents = { ...subagents };
+	if (Object.keys(models).length > 0) nextSubagents.models = models;
+	else delete nextSubagents.models;
+	settings.subagents = nextSubagents;
+	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+}
+
+function writeSubagentEffort(role: AgentRole, effort: SubagentEffortLevel | "inherit"): void {
+	const settings = readSettings();
+	const subagents = readSubagentsSettings();
+	const configured =
+		subagents.effort && typeof subagents.effort === "object" && !Array.isArray(subagents.effort)
+			? { ...subagents.effort }
+			: {};
+	if (effort === "inherit") delete configured[role];
+	else configured[role] = effort;
+
+	const nextSubagents = { ...subagents };
+	if (Object.keys(configured).length > 0) nextSubagents.effort = configured;
+	else delete nextSubagents.effort;
+	settings.subagents = nextSubagents;
 	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 }
 
@@ -447,6 +477,14 @@ function resolveModelReference(reference: string | undefined, ctx: ExtensionCont
 
 function configuredModel(role: AgentRole, ctx: ExtensionContext): Model<any> | undefined {
 	return resolveModelReference(readSubagentsSettings().models?.[role], ctx);
+}
+
+function parentThinkingLevel(): SubagentParentThinkingLevel | undefined {
+	return extensionPi?.getThinkingLevel?.() as SubagentParentThinkingLevel | undefined;
+}
+
+function configuredEffort(role: AgentRole): SubagentParentThinkingLevel | undefined {
+	return resolveEffort(readSubagentsSettings(), role, parentThinkingLevel());
 }
 
 function resolveSubagentTimeouts(): SubagentTimeoutPolicy {
@@ -545,6 +583,7 @@ export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSign
 						signal: signal ?? parentSignal,
 						timeoutPolicy,
 						modelOverride: configuredModel("explorer", parentCtx),
+						thinkingLevel: configuredEffort("explorer"),
 						progress,
 					});
 					return {
@@ -606,18 +645,21 @@ async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise
 		: await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
 	if (!role) return;
 
+	const requestedModel = parts[0] === role ? parts[1] : parts[0];
+	if (requestedModel === "inherit") {
+		writeSubagentModel(role);
+		return ctx.ui.notify(`Subagent ${role} model: inherit`, "info");
+	}
+
 	const available = await Promise.resolve(ctx.modelRegistry.getAvailable());
 	if (available.length === 0) return ctx.ui.notify("No available models found.", "warning");
-	const requestedModel = parts[0] === role ? parts[1] : parts[0];
-	const selected = requestedModel
-		? resolveModelReference(requestedModel, ctx)
-		: resolveModelReference(
-				await ctx.ui.select(
-					`Model for ${role}`,
-					available.map((model) => modelReference(model)),
-				),
-				ctx,
-			);
+	const selectedReference = requestedModel ?? await ctx.ui.select(`Model for ${role}`, ["inherit", ...available.map((model) => modelReference(model))]);
+	if (selectedReference === "inherit") {
+		writeSubagentModel(role);
+		return ctx.ui.notify(`Subagent ${role} model: inherit`, "info");
+	}
+
+	const selected = selectedReference ? resolveModelReference(selectedReference, ctx) : undefined;
 	if (!selected) return ctx.ui.notify(`Unknown model${requestedModel ? `: ${requestedModel}` : ""}.`, "warning");
 
 	const reference = modelReference(selected);
@@ -625,10 +667,36 @@ async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise
 	ctx.ui.notify(`Subagent ${role} model: ${reference}`, "info");
 }
 
+async function chooseSubagentEffort(args: string, ctx: ExtensionContext): Promise<void> {
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+	const role = (parts[0] === "explorer" || parts[0] === "worker"
+		? parts[0]
+		: await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
+	if (!role) return ctx.ui.notify("Subagent effort selection cancelled.", "info");
+
+	const requestedEffort = parts[0] === role ? parts[1] : parts[0];
+	const selectedEffort = requestedEffort ?? await ctx.ui.select(`Effort for ${role}`, ["inherit", ...SUBAGENT_EFFORT_LEVELS]);
+	if (!selectedEffort) return ctx.ui.notify("Subagent effort selection cancelled.", "info");
+	const effort = parseEffortLevel(selectedEffort);
+	if (!effort) return ctx.ui.notify(`Unknown effort${selectedEffort ? `: ${selectedEffort}` : ""}.`, "warning");
+
+	writeSubagentEffort(role, effort);
+	if (effort === "inherit") {
+		return ctx.ui.notify(`Subagent ${role} effort: inherit (effective parent: ${parentThinkingLevel() ?? "unknown"})`, "info");
+	}
+	ctx.ui.notify(`Subagent ${role} effort: ${effort}`, "info");
+}
+
 export default function subagentsSpikeExtension(pi: ExtensionAPI) {
+	if (!extensionPi) extensionPi = pi;
+
 	pi.registerCommand("subagent-model", {
 		description: "Choose per-role subagent model defaults for explorer and worker.",
 		handler: chooseSubagentModel,
+	});
+	pi.registerCommand("subagent-effort", {
+		description: "Choose per-role subagent thinking levels for explorer and worker.",
+		handler: chooseSubagentEffort,
 	});
 
 	pi.registerTool({
@@ -668,6 +736,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 					signal,
 					timeoutPolicy,
 					modelOverride: configuredModel("explorer", ctx),
+					thinkingLevel: configuredEffort("explorer"),
 					progress,
 				});
 
@@ -747,6 +816,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 						signal,
 						timeoutPolicy,
 						modelOverride: configuredModel("worker", ctx),
+						thinkingLevel: configuredEffort("worker"),
 						customTools: [createNestedExplorerTool(ctx, signal, 1)],
 						progress,
 					});
