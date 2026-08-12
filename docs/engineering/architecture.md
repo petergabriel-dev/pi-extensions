@@ -184,7 +184,7 @@ Subagents run as persisted in-process child `AgentSession`s with a fresh `Sessio
 - Concurrent worker ownership paths may not overlap.
 - Progress widget is keyed/throttled and clears after all runs.
 - Idle watchdog resets on every child event; absolute max-total timer does not reset. Timeout failures preserve partial output metadata.
-- `/subagent-model` manages per-role model defaults; debug tools expose progress, graph, concurrency, discovery, direct run, and in-process spike diagnostics.
+- `/subagent-model` and `/subagent-effort` manage per-role model and thinking-level defaults; debug tools expose progress, graph, concurrency, discovery, direct run, and in-process spike diagnostics.
 
 ## Engineering docs
 

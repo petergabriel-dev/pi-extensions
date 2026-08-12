@@ -98,6 +98,7 @@
 - Subagent `maxTotalMs` is an absolute backstop and must not be reset by child events. `createSubagentWatchdog()` in `agent/extensions/subagents/timeout.ts` arms it once and only resets the idle timer from `touch()`.
 - Role-agent timeouts are global-only: explorer, nested explorer, worker, and debug-run resolve the same validated `subagents` policy. Public role-agent schemas expose no `timeoutMs`, `idleTimeoutMs`, or `maxTotalMs`; invalid, out-of-range, or inverted settings fall back together to 600,000ms idle / 1,200,000ms max-total (`agent/extensions/subagents/timeout-policy.ts`, `agent/extensions/subagents/index.ts`).
 - Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `hasPartialWork()` in `agent/extensions/subagents/spawn.ts` becomes true once any child tool execution has started.
+- Per-role subagent effort is settings-only: public spawn tool schemas expose no effort or thinking-level parameter; an absent `subagents.effort[role]` inherits the parent session level, while invalid values fall back to inherit (`agent/extensions/subagents/effort.ts`, `agent/extensions/subagents/index.ts`).
 
 ## Engineering docs extension
 
