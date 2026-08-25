@@ -86,9 +86,25 @@ workflow-modes ──state/events──> engineering-docs write gating
 
 edit/write lifecycle ───────────> filechanges + engineering-docs tracking
 agent_end ──────────────────────> notify + engineering-docs reminder
+
+static imports:
+claude-bridge ──3 sibling imports──> workflow-modes + engineering-docs + personal-memory
+workflow-modes ──2 sibling imports──> engineering-docs
 ```
 
 Live mutable extension state has one owner. Cross-extension mutation uses namespaced `pi.events` request/result pairs. Direct imports from the bridge are limited to pure prompt composition, docs validation, and personal-memory store functions; the bridge does not import mutable discussion-note or workflow session state.
+
+Static coupling totals five imports: `claude-bridge` imports `workflow-modes`, `engineering-docs`, and `personal-memory` (`agent/extensions/claude-bridge/index.ts:6-8`), while `workflow-modes` imports `engineering-docs` from its entrypoint and policy helper (`agent/extensions/workflow-modes/index.ts:8`, `agent/extensions/workflow-modes/policy.ts:1`). `claude-bridge` is therefore the only consumer spanning multiple sibling extensions; both `workflow-modes` imports target the same sibling.
+
+Four extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
+
+Build topology keeps nine runtime entrypoints (`package.json:37-47`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
+
+- six nested manifests (`agent/extensions/ccc-search/package.json:1`, `agent/extensions/engineering-docs/package.json:1`, `agent/extensions/filechanges/package.json:1`, `agent/extensions/personal-memory/package.json:1`, `agent/extensions/subagents/package.json:1`, `agent/extensions/workflow-modes/package.json:1`);
+- four nested lockfiles (`agent/extensions/ccc-search/package-lock.json:1`, `agent/extensions/filechanges/package-lock.json:1`, `agent/extensions/subagents/package-lock.json:1`, `agent/extensions/workflow-modes/package-lock.json:1`); and
+- four nested TypeScript configs (`agent/extensions/ccc-search/tsconfig.json:1`, `agent/extensions/personal-memory/tsconfig.json:1`, `agent/extensions/subagents/tsconfig.json:1`, `agent/extensions/workflow-modes/tsconfig.json:1`).
+
+Root scripts install the four lockfile-backed packages, then aggregate five extension suites and four typechecks (`package.json:55-62`).
 
 ## Pi ↔ multi-harness bridge
 
