@@ -94,6 +94,20 @@ for (const { file, source } of extensionSources) {
   assert.ok(!hasVariableHostImport(source), `forbidden variable-specifier Pi host import in ${file}`);
 }
 
+const modeSites = [["agent/extensions/workflow-modes/index.ts", /export type Mode = ([^;]+);/],
+  ["agent/extensions/workflow-modes/caveman.ts", /export type CavemanWorkflowMode = ([^;]+);/],
+  ["agent/extensions/engineering-docs/constants.ts", /export type WorkflowMode = ([^;]+);/],
+  ["agent/extensions/subagents/index.ts", /type WorkflowMode = ([^;]+);/],
+  ["agent/extensions/subagents/index.ts", /function isWorkflowMode\([^)]*\)[^{]*\{\s*return ([^;]+);/]];
+const parsedModeSites = await Promise.all(modeSites.map(async ([file, pattern]) => {
+  const match = (await readFile(relative(file), "utf8")).match(pattern);
+  assert.ok(match?.[1], `workflow mode site not found in ${file}`);
+  const modes = [...new Set([...match[1].matchAll(/"([^"]+)"/g)].map((literal) => literal[1]))].sort();
+  assert.ok(modes.length > 0, `workflow modes not parsed in ${file}`);
+  return { file, modes };
+}));
+for (const site of parsedModeSites.slice(1)) assert.deepEqual(site.modes, parsedModeSites[0].modes, `workflow mode union drift: ${site.file} vs ${parsedModeSites[0].file}`);
+
 const agentsLink = relative(".pi/agents");
 assert.ok((await lstat(agentsLink)).isSymbolicLink(), ".pi/agents must be an internal symlink");
 assert.equal(await realpath(agentsLink), await realpath(relative("agent/agents")));
