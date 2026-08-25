@@ -3,7 +3,6 @@
 // and reminds at agent_end if docs weren't touched.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { DOCS_DIR, IGNORE_PATTERNS, ENTRY_DOCS_REMINDER_SNOOZE } from "./constants.js";
 import { isWriteAllowed } from "./mode.js";
 
@@ -59,25 +58,8 @@ export function reconstructTrackingState(ctx: ExtensionContext): void {
 	}
 }
 
-// Register tool_call and tool_result hooks
+// Register tool_result hook
 export function registerTrackingHooks(pi: ExtensionAPI): void {
-	pi.on("tool_call", async (event) => {
-		// Track edits/writes to docs-relevant paths
-		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-			const rawPath = String((event.input as { path?: unknown })?.path ?? "");
-			if (!rawPath) return;
-
-			// Normalize path relative to cwd (not available in tool_call, but we store raw)
-			const normalized = rawPath.replace(/\\/g, "/");
-			if (isDocsRelevantPath(normalized)) {
-				// Will be confirmed in tool_result; for now note the path
-			}
-			if (isDocsPath(normalized)) {
-				// Mark docs as touched
-			}
-		}
-	});
-
 	pi.on("tool_result", async (event) => {
 		if (event.isError) return;
 
