@@ -153,7 +153,7 @@ const SpawnWorkerParams = Type.Object({
 
 type SpawnWorkerParams = Static<typeof SpawnWorkerParams>;
 
-type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review";
+type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 
 interface WorkflowModeQueryResult {
 	ok: boolean;
@@ -492,7 +492,7 @@ function resolveSubagentTimeouts(): SubagentTimeoutPolicy {
 }
 
 function isWorkflowMode(value: unknown): value is WorkflowMode {
-	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review";
+	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review" || value === "design";
 }
 
 const runningWorkerOwnership = new Map<string, Set<string>>();
