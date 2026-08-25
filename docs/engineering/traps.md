@@ -59,7 +59,8 @@
 
 ## Workflow modes and review
 
-- **Mode union is mirrored.** Keep `workflow-modes/index.ts`, `workflow-modes/caveman.ts`, `subagents/index.ts`, and `engineering-docs/constants.ts` aligned when adding/changing modes.
+- **Mode union is mirrored and has drifted before.** Keep the owner, Caveman union, engineering-docs union, subagents union, and subagents boolean guard aligned (`agent/extensions/workflow-modes/index.ts:16`, `agent/extensions/workflow-modes/caveman.ts:1`, `agent/extensions/engineering-docs/constants.ts:33`, `agent/extensions/subagents/index.ts:156`, `agent/extensions/subagents/index.ts:494-495`). The prose rule alone failed; `scripts/check-workspace.mjs:97-110` now parses all five sites, and the root check runs that guard (`package.json:56-58`).
+- **Mode label maps retain a residual gap.** The guard does not parse either typed label record (`agent/extensions/workflow-modes/caveman.ts:5-12`, `agent/extensions/engineering-docs/mode.ts:28-35`). Workflow-modes runs `tsc` (`agent/extensions/workflow-modes/package.json:10-12`), but engineering-docs declares tests only and the root typecheck omits it (`agent/extensions/engineering-docs/package.json:5-7`, `package.json:62`); keep that label map aligned manually.
 - **Review confirmation is prompt-enforced.** No structural hook proves user confirmed posting. Keep never-auto-post instruction and perform one explicit confirmation immediately before `gh pr review`.
 - **Review body must be inline.** Read-only filesystem rules exclude body-file workflows.
 - **Live GitHub checks require installed/authenticated `gh`.** Unit and typecheck success do not validate GitHub access.
@@ -79,6 +80,7 @@
 - **ADR filenames carry descriptive suffixes.** Do not guess `ADR-0021.md`; discover exact paths with `find docs/engineering/decisions -maxdepth 1 -type f -print` before reading or editing.
 - **Tag validator sees literal bracketed examples.** Plan boilerplate containing bare docs tags can be interpreted as real tags. Use exact valid area/action pairs in plan tasks.
 - **Docs writes fail closed before workflow state arrives.** If workflow extension is absent/stale, docs extension reports Unknown and blocks writes.
+- **Edit/write observers disagree on path identity.** `filechanges` resolves paths against `ctx.cwd` and captures at `tool_call` (`agent/extensions/filechanges/index.ts:51-56`, `agent/extensions/filechanges/index.ts:530-533`); engineering-docs observes successful `tool_result` without `ctx`, slash-normalizes the raw input, then uses substring checks (`agent/extensions/engineering-docs/tracking.ts:15-34`, `agent/extensions/engineering-docs/tracking.ts:63-82`). Their tracked sets can differ; inspect both paths when file-change UI and docs reminders disagree.
 
 ## File changes
 

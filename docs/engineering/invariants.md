@@ -73,6 +73,10 @@
 
 - State enforced at the tool boundary must be announced in the same LLM message channel where enforcement errors appear: `agent/extensions/workflow-modes/index.ts` `before_agent_start` regenerates a hidden active-mode message every user turn, while `setMode` sends one transition message for Off, which has no per-turn prompt.
 
+## Workflow modes state channel
+
+- `workflow-modes:get` / `workflow-modes:state` is a caller-independent read broadcast: its state payload must not require a correlation ID or contain caller-specific data, so one response can serve every listener (`agent/extensions/workflow-modes/index.ts:763-779`). This does not relax correlation for mutations; save-plan and task-tick request/result channels still require `requestId` (`agent/extensions/workflow-modes/index.ts:744-752`, `agent/extensions/workflow-modes/index.ts:794-798`; `docs/engineering/conventions.md:22`).
+
 ## Workflow modes read-only Bash
 
 - Discuss/Plan/Design Bash must prefer structural sandbox wrapping over regex gating. Regex allow/deny policy is fallback only when no launcher exists or wrapping fails.
