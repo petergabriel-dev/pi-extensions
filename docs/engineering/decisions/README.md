@@ -30,3 +30,4 @@
 | ADR-0026 | Active | Session-scoped workflow plan files and task tracking | changing /plan save/select/view/clear, plan-file paths or retention, task seeding/ticking, workflow markers, bridge plan access, or session ancestry semantics |
 | ADR-0027 | Active | Static host access and agent-directory injection | changing Pi host imports, agent-directory or plan/memory path resolution, extension test isolation, or workspace package checks |
 | ADR-0028 | Active | Title-addressable workflow plan task ticks | changing workflow_plan_tick, task reference resolution, tracker recovery, workflow markers, CustomMessage conversion, prompt-cache behavior, or bridge plan tools |
+| ADR-0029 | Active | Consolidated extension dev tooling | changing runtime extension boundaries, root or nested package tooling, bootstrap, extension tests/typechecks, Pi host development dependency versions, or workspace manifest checks |
