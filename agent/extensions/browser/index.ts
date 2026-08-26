@@ -11,6 +11,12 @@ export const MIN_BROWSER_TIMEOUT_MS = 100;
 export const MAX_BROWSER_TIMEOUT_MS = 120_000;
 export const MAX_BROWSER_URL_LENGTH = 2_048;
 export const MAX_BROWSER_EXPRESSION_LENGTH = 10_000;
+export const MAX_BROWSER_BUFFER_ENTRIES = 1_000;
+export const DEFAULT_BROWSER_OUTPUT_LIMIT = 100;
+export const MAX_BROWSER_OUTPUT_LIMIT = 1_000;
+export const MAX_BROWSER_FILTER_LENGTH = 1_000;
+export const MAX_BROWSER_HEADER_NAMES = 50;
+export const MAX_BROWSER_HEADER_NAME_LENGTH = 100;
 export const BROWSER_EVAL_GUIDANCE = "Use a single expression, function source, or IIFE. Wrap top-level return and multiple statements as `(() => { ... })()`.";
 export const BROWSER_TOOL_NAMES = [
 	"browser_goto",
@@ -26,6 +32,76 @@ export const BROWSER_TOOL_NAMES = [
 
 type BrowserContext = import("playwright-core").BrowserContext;
 type BrowserPage = import("playwright-core").Page;
+type BrowserConsoleMessage = import("playwright-core").ConsoleMessage;
+type BrowserRequest = import("playwright-core").Request;
+
+export class RingBuffer<T> {
+	private readonly values: Array<T | undefined>;
+	private start = 0;
+	private size = 0;
+
+	constructor(readonly capacity = MAX_BROWSER_BUFFER_ENTRIES) {
+		if (!Number.isInteger(capacity) || capacity < 1) throw new Error("ring buffer capacity must be a positive integer");
+		this.values = new Array<T | undefined>(capacity);
+	}
+
+	get length(): number {
+		return this.size;
+	}
+
+	push(value: T): void {
+		const index = (this.start + this.size) % this.capacity;
+		this.values[index] = value;
+		if (this.size < this.capacity) this.size += 1;
+		else this.start = (this.start + 1) % this.capacity;
+	}
+
+	peek(): T[] {
+		const output = new Array<T>(this.size);
+		for (let index = 0; index < this.size; index += 1) output[index] = this.values[(this.start + index) % this.capacity] as T;
+		return output;
+	}
+
+	drain(): T[] {
+		const output = this.peek();
+		this.values.fill(undefined);
+		this.start = 0;
+		this.size = 0;
+		return output;
+	}
+}
+
+export type ConsoleEntry = {
+	ts: number;
+	type: string;
+	text: string;
+	location?: string;
+};
+
+export type NetworkEntry = {
+	ts: number;
+	method: string;
+	url: string;
+	status?: number;
+	statusText?: string;
+	resourceType: string;
+	requestHeaders?: Record<string, string>;
+	responseHeaders?: Record<string, string>;
+	failure?: string;
+};
+
+export const KEEP_HEADERS = new Set([
+	"authorization",
+	"apikey",
+	"content-type",
+	"x-client-info",
+	"accept-profile",
+	"content-profile",
+	"prefer",
+	"location",
+	"www-authenticate",
+	"retry-after",
+]);
 
 type BrowserStateEntry = {
 	enabled?: unknown;
@@ -41,10 +117,12 @@ let browserEnabled = false;
 let browserContext: BrowserContext | undefined;
 let browserPage: BrowserPage | undefined;
 let launchPromise: Promise<{ context: BrowserContext; page: BrowserPage }> | undefined;
+const consoleBuffer = new RingBuffer<ConsoleEntry>();
+const networkBuffer = new RingBuffer<NetworkEntry>();
 
 export function resolveBrowserProfilePath(agentDir = getAgentDir(), env: NodeJS.ProcessEnv = process.env): string {
 	const configured = env.PI_BROWSER_PROFILE?.trim();
-	return configured ? resolve(configured) : join(agentDir, "browser", "profile");
+	return configured ? resolve(configured) : join(agentDir, "extensions", "browser", ".profile");
 }
 
 export function isBrowserHeadful(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -69,6 +147,52 @@ export function resolveBrowserEnabled(branch: readonly unknown[]): boolean {
 
 export function browserStatus(enabled: boolean): string {
 	return `Browser: ${enabled ? "ON" : "OFF"}`;
+}
+
+export function validateBrowserOutputLimit(limit: unknown): number {
+	if (limit === undefined) return DEFAULT_BROWSER_OUTPUT_LIMIT;
+	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_BROWSER_OUTPUT_LIMIT) {
+		throw new Error(`limit must be an integer from 1 to ${MAX_BROWSER_OUTPUT_LIMIT}`);
+	}
+	return limit;
+}
+
+export function validateBrowserFilter(filter: unknown, name: string): string | undefined {
+	if (filter === undefined) return undefined;
+	if (typeof filter !== "string" || filter.length > MAX_BROWSER_FILTER_LENGTH) throw new Error(`${name} must be at most ${MAX_BROWSER_FILTER_LENGTH} characters`);
+	if (filter.includes("\0")) throw new Error(`${name} must not contain null bytes`);
+	return filter;
+}
+
+export function normalizeHeaderNames(includeHeaders: unknown): string[] {
+	if (includeHeaders === undefined) return [];
+	if (!Array.isArray(includeHeaders) || includeHeaders.length > MAX_BROWSER_HEADER_NAMES) {
+		throw new Error(`includeHeaders must contain at most ${MAX_BROWSER_HEADER_NAMES} names`);
+	}
+	return includeHeaders.map((header, index) => {
+		if (typeof header !== "string" || header.trim().length === 0 || header.length > MAX_BROWSER_HEADER_NAME_LENGTH || header.includes("\0")) {
+			throw new Error(`includeHeaders[${index}] must be a non-empty header name of at most ${MAX_BROWSER_HEADER_NAME_LENGTH} characters`);
+		}
+		return header.trim().toLowerCase();
+	});
+}
+
+export function headersToShow(includeHeaders: unknown, verbose: unknown): Set<string> {
+	const extra = normalizeHeaderNames(includeHeaders);
+	return verbose === true || extra.length > 0 ? new Set([...KEEP_HEADERS, ...extra]) : new Set();
+}
+
+export function filterHeaders(headers: Record<string, string> | undefined, allow: ReadonlySet<string>): Record<string, string> {
+	if (!headers || allow.size === 0) return {};
+	const output: Record<string, string> = {};
+	for (const [key, value] of Object.entries(headers)) if (allow.has(key.toLowerCase())) output[key] = value;
+	return output;
+}
+
+export function validateBrowserStatus(status: unknown): number | undefined {
+	if (status === undefined) return undefined;
+	if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599) throw new Error("status must be an HTTP integer from 100 to 599");
+	return status;
 }
 
 export function validateBrowserTimeout(timeout: unknown): number {
@@ -234,6 +358,48 @@ async function browserEvalTool(_toolCallId: string, params: BrowserEvalInput) {
 	};
 }
 
+type BrowserConsoleInput = { limit?: number; filter?: string; clear?: boolean };
+type BrowserNetworkInput = { limit?: number; urlFilter?: string; status?: number; verbose?: boolean; includeHeaders?: string[]; clear?: boolean };
+
+function validateOptionalBoolean(value: unknown, name: string): boolean | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+	return value;
+}
+
+async function browserConsoleTool(_toolCallId: string, params: BrowserConsoleInput) {
+	const limit = validateBrowserOutputLimit(params.limit);
+	const filter = validateBrowserFilter(params.filter, "filter");
+	const clear = validateOptionalBoolean(params.clear, "clear") ?? true;
+	const entries = clear ? consoleBuffer.drain() : consoleBuffer.peek();
+	const filtered = filter ? entries.filter((entry) => entry.text.includes(filter) || (entry.location ?? "").includes(filter)) : entries;
+	const output = filtered.slice(-limit);
+	const text = output.map((entry) => `[${new Date(entry.ts).toISOString()}] ${entry.type}: ${entry.text}${entry.location ? `  @ ${entry.location}` : ""}`).join("\n") || "(empty)";
+	return { content: [{ type: "text" as const, text }], details: { entries: output } };
+}
+
+async function browserNetworkTool(_toolCallId: string, params: BrowserNetworkInput) {
+	const limit = validateBrowserOutputLimit(params.limit);
+	const urlFilter = validateBrowserFilter(params.urlFilter, "urlFilter");
+	const status = validateBrowserStatus(params.status);
+	const verbose = validateOptionalBoolean(params.verbose, "verbose") ?? false;
+	const clear = validateOptionalBoolean(params.clear, "clear") ?? true;
+	const extraHeaders = normalizeHeaderNames(params.includeHeaders);
+	const entries = clear ? networkBuffer.drain() : networkBuffer.peek();
+	const filtered = entries.filter((entry) => (!urlFilter || entry.url.includes(urlFilter)) && (status === undefined || entry.status === status));
+	const output = filtered.slice(-limit);
+	const allow = verbose || extraHeaders.length > 0 ? new Set([...KEEP_HEADERS, ...extraHeaders]) : new Set<string>();
+	const lines: string[] = [];
+	for (const entry of output) {
+		lines.push(`${entry.status ?? "ERR"} ${entry.method} ${entry.url}${entry.failure ? `  (${entry.failure})` : ""}`);
+		if (allow.size > 0) {
+			for (const [key, value] of Object.entries(filterHeaders(entry.requestHeaders, allow))) lines.push(`  → ${key}: ${value}`);
+			for (const [key, value] of Object.entries(filterHeaders(entry.responseHeaders, allow))) lines.push(`  ← ${key}: ${value}`);
+		}
+	}
+	return { content: [{ type: "text" as const, text: lines.join("\n") || "(empty)" }], details: { entries: output } };
+}
+
 const BROWSER_GOTO_PARAMETERS = Type.Object({
 	url: Type.String({ minLength: 1, maxLength: MAX_BROWSER_URL_LENGTH }),
 	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
@@ -243,6 +409,67 @@ const BROWSER_EVAL_PARAMETERS = Type.Object({
 	expression: Type.String({ minLength: 1, maxLength: MAX_BROWSER_EXPRESSION_LENGTH }),
 	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
 });
+
+const BROWSER_CONSOLE_PARAMETERS = Type.Object({
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_BROWSER_OUTPUT_LIMIT })),
+	filter: Type.Optional(Type.String({ maxLength: MAX_BROWSER_FILTER_LENGTH })),
+	clear: Type.Optional(Type.Boolean()),
+});
+
+const BROWSER_NETWORK_PARAMETERS = Type.Object({
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_BROWSER_OUTPUT_LIMIT })),
+	urlFilter: Type.Optional(Type.String({ maxLength: MAX_BROWSER_FILTER_LENGTH })),
+	status: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })),
+	verbose: Type.Optional(Type.Boolean()),
+	includeHeaders: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: MAX_BROWSER_HEADER_NAME_LENGTH }), { maxItems: MAX_BROWSER_HEADER_NAMES })),
+	clear: Type.Optional(Type.Boolean()),
+});
+
+function attachBrowserListeners(page: BrowserPage): void {
+	page.on("console", (message: BrowserConsoleMessage) => {
+		const location = message.location();
+		consoleBuffer.push({
+			ts: Date.now(),
+			type: message.type(),
+			text: message.text(),
+			...(location.url ? { location: `${location.url}:${location.lineNumber}` } : {}),
+		});
+	});
+	page.on("pageerror", (error) => {
+		consoleBuffer.push({ ts: Date.now(), type: "pageerror", text: `${error.name}: ${error.message}` });
+	});
+	page.on("requestfinished", (request: BrowserRequest) => {
+		void captureNetworkRequest(request);
+	});
+	page.on("requestfailed", (request: BrowserRequest) => {
+		const failure = request.failure()?.errorText;
+		networkBuffer.push({
+			ts: Date.now(),
+			method: request.method(),
+			url: request.url(),
+			resourceType: request.resourceType(),
+			...(failure ? { failure } : {}),
+		});
+	});
+}
+
+async function captureNetworkRequest(request: BrowserRequest): Promise<void> {
+	try {
+		const response = await request.response();
+		networkBuffer.push({
+			ts: Date.now(),
+			method: request.method(),
+			url: request.url(),
+			status: response?.status(),
+			statusText: response?.statusText(),
+			resourceType: request.resourceType(),
+			requestHeaders: await request.allHeaders(),
+			...(response ? { responseHeaders: await response.allHeaders() } : {}),
+		});
+	} catch {
+		// Request may have been aborted while headers were being collected.
+	}
+}
 
 async function launchBrowser(): Promise<{ context: BrowserContext; page: BrowserPage }> {
 	const profileDir = resolveBrowserProfilePath();
@@ -254,6 +481,7 @@ async function launchBrowser(): Promise<{ context: BrowserContext; page: Browser
 		const pages = context.pages();
 		const page = pages.find((candidate) => !candidate.isClosed()) ?? await context.newPage();
 		await Promise.allSettled(pages.filter((candidate) => candidate !== page).map((candidate) => candidate.close()));
+		attachBrowserListeners(page);
 		browserContext = context;
 		browserPage = page;
 		return { context, page };
@@ -349,6 +577,22 @@ export default function browserExtension(pi: ExtensionAPI): void {
 		description: "Evaluate a bounded expression, function source, or IIFE in the current browser page.",
 		parameters: BROWSER_EVAL_PARAMETERS,
 		execute: browserEvalTool,
+	});
+
+	pi.registerTool({
+		name: "browser_console",
+		label: "Browser Console",
+		description: "Read buffered console and page-error entries. Reads drain the full buffer by default; clear=false peeks.",
+		parameters: BROWSER_CONSOLE_PARAMETERS,
+		execute: browserConsoleTool,
+	});
+
+	pi.registerTool({
+		name: "browser_network",
+		label: "Browser Network",
+		description: "Read buffered network requests. Default output is status method URL; verbose/includeHeaders surfaces curated headers without bodies.",
+		parameters: BROWSER_NETWORK_PARAMETERS,
+		execute: browserNetworkTool,
 	});
 
 	for (const name of ["browser_close", "browser_kill"] as const) {
