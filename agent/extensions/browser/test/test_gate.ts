@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import browserExtension, { BROWSER_EVAL_GUIDANCE, BROWSER_STATE_ENTRY, BROWSER_TOOL_NAMES, BrowserPageRegistry, MAX_BROWSER_PAGES, PARENT_BROWSER_OWNER, RingBuffer, browserStatus, buildBrowserEvalScript, buildBrowserScreenshotPath, classifyBrowserEval, createBrowserPageState, ensureBrowserPage, filterHeaders, formatBrowserLaunchError, headersToShow, isBrowserHeadful, locateBrowserSelector, normalizeHeaderNames, parseBrowserSelector, resolveBrowserEnabled, resolveBrowserProfilePath, runBrowserOperation, serializeBrowserEvalResult, validateBrowserFillValue, validateBrowserOwner, validateBrowserSelector, validateBrowserTimeout, validateBrowserUrl } from "../index.ts";
+import browserExtension, { BROWSER_EVAL_GUIDANCE, BROWSER_REQUEST_EVENT, BROWSER_RESULT_EVENT, BROWSER_STATE_ENTRY, BROWSER_TOOL_NAMES, BrowserEventBus, BrowserPageRegistry, MAX_BROWSER_PAGES, PARENT_BROWSER_OWNER, RingBuffer, browserStatus, buildBrowserEvalScript, buildBrowserScreenshotPath, classifyBrowserEval, createBrowserPageState, ensureBrowserPage, filterHeaders, formatBrowserLaunchError, headersToShow, isBrowserHeadful, locateBrowserSelector, normalizeHeaderNames, parseBrowserChannelRequest, parseBrowserSelector, requestBrowserTool, resolveBrowserEnabled, resolveBrowserProfilePath, runBrowserOperation, serializeBrowserEvalResult, validateBrowserChannelTimeout, validateBrowserFillValue, validateBrowserOwner, validateBrowserSelector, validateBrowserTimeout, validateBrowserUrl } from "../index.ts";
 
 assert.equal(browserStatus(false), "Browser: OFF");
 assert.equal(browserStatus(true), "Browser: ON");
@@ -119,6 +119,12 @@ assert.equal(resolveBrowserEnabled([
 
 let command: { handler: (args: string, ctx: unknown) => Promise<void> } | undefined;
 const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+const eventHandlers = new Map<string, Set<(data: unknown) => void>>();
+const eventBus: BrowserEventBus = {
+	on: (event, handler) => { const listeners = eventHandlers.get(event) ?? new Set(); listeners.add(handler); eventHandlers.set(event, listeners); },
+	off: (event, handler) => { eventHandlers.get(event)?.delete(handler); },
+	emit: (event, data) => { for (const handler of eventHandlers.get(event) ?? []) handler(data); },
+};
 const entries: Array<{ type: string; data: unknown }> = [];
 const branch: unknown[] = [];
 const notices: string[] = [];
@@ -140,6 +146,7 @@ browserExtension({
 	getAllTools: () => registeredTools.map((name) => ({ name })),
 	setActiveTools: (names: string[]) => { activeTools = names; },
 	on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => { handlers.set(event, handler); },
+	events: eventBus,
 	appendEntry: (type: string, data: unknown) => {
 		entries.push({ type, data });
 		branch.push({ type: "custom", customType: type, data });
@@ -152,6 +159,38 @@ assert.equal(BROWSER_TOOL_NAMES.includes("browser_network"), true);
 assert.equal(BROWSER_TOOL_NAMES.includes("browser_screenshot"), true);
 await command.handler("on", ctx);
 assert.deepEqual(activeTools, ["read", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close", "browser_kill"]);
+assert.equal(validateBrowserChannelTimeout(undefined), 1_500);
+assert.throws(() => validateBrowserChannelTimeout(0), /integer from 1 to 10000/);
+assert.throws(() => parseBrowserChannelRequest({ owner: "child", tool: "browser_console", params: {} }), /requestId/);
+assert.throws(() => parseBrowserChannelRequest({ requestId: "bad-tool", owner: "child", tool: "unknown", params: {} }), /unknown/);
+const mismatchedResult = (data: unknown) => {
+	if ((data as { requestId?: unknown })?.requestId === "channel-match") eventBus.emit(BROWSER_RESULT_EVENT, { requestId: "wrong-id", owner: "child", ok: true, result: "wrong" });
+};
+eventBus.on(BROWSER_REQUEST_EVENT, mismatchedResult);
+const channelResponse = await requestBrowserTool(eventBus, { requestId: "channel-match", owner: "child", tool: "browser_console", params: {} }, 100);
+eventBus.off?.(BROWSER_REQUEST_EVENT, mismatchedResult);
+assert.equal(channelResponse.requestId, "channel-match");
+assert.equal(channelResponse.owner, "child");
+assert.equal(channelResponse.ok, true);
+const malformedResultPromise = new Promise<Record<string, unknown>>((resolve) => {
+	const listener = (data: unknown) => {
+		if ((data as { requestId?: unknown })?.requestId !== "malformed-tool") return;
+		eventBus.off?.(BROWSER_RESULT_EVENT, listener);
+		resolve(data as Record<string, unknown>);
+	};
+	eventBus.on(BROWSER_RESULT_EVENT, listener);
+	eventBus.emit(BROWSER_REQUEST_EVENT, { requestId: "malformed-tool", owner: "child", tool: "unknown", params: {} });
+});
+const malformedResult = await malformedResultPromise;
+assert.equal(malformedResult.ok, false);
+assert.match(String(malformedResult.error), /Malformed browser request/);
+await command.handler("off", ctx);
+const gateOffResponse = await requestBrowserTool(eventBus, { requestId: "gate-off", owner: "child", tool: "browser_console", params: {} }, 100);
+assert.equal(gateOffResponse.ok, false);
+assert.match(gateOffResponse.error ?? "", /Browser gate is off/);
+const silentBus: BrowserEventBus = { on: () => undefined, off: () => undefined, emit: () => undefined };
+await assert.rejects(requestBrowserTool(silentBus, { requestId: "channel-timeout", owner: "child", tool: "browser_console", params: {} }, 10), /timed out after 10 milliseconds/);
+await command.handler("on", ctx);
 assert.equal(entries[0]?.type, BROWSER_STATE_ENTRY);
 assert.equal((entries[0]?.data as { enabled?: unknown }).enabled, true);
 assert.equal(typeof (entries[0]?.data as { at?: unknown }).at, "number");

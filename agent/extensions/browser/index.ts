@@ -42,7 +42,31 @@ export const PARENT_BROWSER_OWNER = "parent";
 export const MAX_BROWSER_OWNER_KEY_LENGTH = 256;
 export const DEFAULT_BROWSER_CONCURRENCY_CAP = 3;
 export const MAX_BROWSER_PAGES = DEFAULT_BROWSER_CONCURRENCY_CAP + 1;
+export const BROWSER_REQUEST_EVENT = "browser:request";
+export const BROWSER_RESULT_EVENT = "browser:result";
+export const DEFAULT_BROWSER_CHANNEL_TIMEOUT_MS = 1_500;
+export const MAX_BROWSER_CHANNEL_TIMEOUT_MS = 10_000;
+export const MAX_BROWSER_REQUEST_ID_LENGTH = 256;
 export type BrowserOwner = string;
+export type BrowserToolName = typeof BROWSER_TOOL_NAMES[number];
+export type BrowserChannelRequest = {
+	requestId: string;
+	owner: BrowserOwner;
+	tool: BrowserToolName;
+	params: Record<string, unknown>;
+};
+export type BrowserChannelResult = {
+	requestId: string;
+	owner?: BrowserOwner;
+	ok: boolean;
+	result?: unknown;
+	error?: string;
+};
+export type BrowserEventBus = {
+	on: (event: string, handler: (data: unknown) => void) => void;
+	off?: (event: string, handler: (data: unknown) => void) => void;
+	emit: (event: string, data: unknown) => void;
+};
 
 export class RingBuffer<T> {
 	private readonly values: Array<T | undefined>;
@@ -194,6 +218,79 @@ export function validateBrowserOwner(owner: unknown): BrowserOwner {
 	if (normalized.length > MAX_BROWSER_OWNER_KEY_LENGTH) throw new Error(`owner must be at most ${MAX_BROWSER_OWNER_KEY_LENGTH} characters`);
 	if (normalized.includes("\0")) throw new Error("owner must not contain null bytes");
 	return normalized;
+}
+
+export function validateBrowserRequestId(requestId: unknown): string {
+	if (typeof requestId !== "string" || requestId.trim().length === 0) throw new Error("requestId must be a non-empty string");
+	const normalized = requestId.trim();
+	if (normalized.length > MAX_BROWSER_REQUEST_ID_LENGTH) throw new Error(`requestId must be at most ${MAX_BROWSER_REQUEST_ID_LENGTH} characters`);
+	if (normalized.includes("\0")) throw new Error("requestId must not contain null bytes");
+	return normalized;
+}
+
+export function validateBrowserChannelTimeout(timeout: unknown): number {
+	if (timeout === undefined) return DEFAULT_BROWSER_CHANNEL_TIMEOUT_MS;
+	if (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 1 || timeout > MAX_BROWSER_CHANNEL_TIMEOUT_MS) {
+		throw new Error(`channel timeout must be an integer from 1 to ${MAX_BROWSER_CHANNEL_TIMEOUT_MS} milliseconds`);
+	}
+	return timeout;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function parseBrowserChannelRequest(value: unknown): BrowserChannelRequest {
+	if (!isRecord(value)) throw new Error("browser request must be an object");
+	const requestId = validateBrowserRequestId(value.requestId);
+	const owner = validateBrowserOwner(value.owner);
+	if (typeof value.tool !== "string" || !BROWSER_TOOL_NAMES.includes(value.tool as BrowserToolName)) throw new Error("browser request tool is unknown");
+	if (value.params !== undefined && !isRecord(value.params)) throw new Error("browser request params must be an object");
+	return {
+		requestId,
+		owner,
+		tool: value.tool as BrowserToolName,
+		params: (value.params ?? {}) as Record<string, unknown>,
+	};
+}
+
+export function requestBrowserTool(events: BrowserEventBus, value: unknown, timeout?: unknown): Promise<BrowserChannelResult> {
+	const request = parseBrowserChannelRequest(value);
+	const waitMs = validateBrowserChannelTimeout(timeout);
+	return new Promise((resolve, reject) => {
+		let timer: NodeJS.Timeout | undefined;
+		const onResult = (value: unknown) => {
+			if (!isRecord(value) || value.requestId !== request.requestId) return;
+			if (value.owner !== undefined && value.owner !== request.owner) return;
+			if (value.ok === true && value.owner !== request.owner) return;
+			if (value.ok !== true && value.ok !== false) {
+				finish(() => reject(new Error("Malformed browser result: ok must be boolean.")));
+				return;
+			}
+			if (value.ok === false && typeof value.error !== "string") {
+				finish(() => reject(new Error("Malformed browser result: error is required.")));
+				return;
+			}
+			finish(() => resolve({
+				requestId: request.requestId,
+				...(typeof value.owner === "string" ? { owner: value.owner } : {}),
+				ok: value.ok as boolean,
+				...(value.ok === true ? { result: value.result } : { error: value.error as string }),
+			}));
+		};
+		const finish = (action: () => void) => {
+			if (timer) clearTimeout(timer);
+			events.off?.(BROWSER_RESULT_EVENT, onResult);
+			action();
+		};
+		timer = setTimeout(() => finish(() => reject(new Error(`browser request ${request.requestId} timed out after ${waitMs} milliseconds.`))), waitMs);
+		events.on(BROWSER_RESULT_EVENT, onResult);
+		try {
+			events.emit(BROWSER_REQUEST_EVENT, request);
+		} catch (error) {
+			finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+		}
+	});
 }
 
 export function resolveBrowserProfilePath(agentDir = getAgentDir(), env: NodeJS.ProcessEnv = process.env): string {
@@ -784,6 +881,64 @@ async function closeBrowserTool(_toolCallId?: string, _params?: unknown, _signal
 	return { content: [{ type: "text" as const, text: "Browser page closed." }], details: { closed: true, owner } };
 }
 
+function optionalChannelRequestId(value: unknown): string | undefined {
+	if (!isRecord(value) || value.requestId === undefined) return undefined;
+	try {
+		return validateBrowserRequestId(value.requestId);
+	} catch {
+		return undefined;
+	}
+}
+
+function optionalChannelOwner(value: unknown): BrowserOwner | undefined {
+	if (!isRecord(value) || value.owner === undefined) return undefined;
+	try {
+		return validateBrowserOwner(value.owner);
+	} catch {
+		return undefined;
+	}
+}
+
+function emitBrowserChannelError(pi: ExtensionAPI, requestId: string, error: string, owner?: BrowserOwner): void {
+	pi.events.emit(BROWSER_RESULT_EVENT, { requestId, ...(owner ? { owner } : {}), ok: false, error });
+}
+
+async function executeBrowserChannelRequest(request: BrowserChannelRequest): Promise<unknown> {
+	const params = request.params;
+	switch (request.tool) {
+		case "browser_goto": return browserGotoTool(request.requestId, params as BrowserGotoInput, undefined, undefined, undefined, request.owner);
+		case "browser_eval": return browserEvalTool(request.requestId, params as BrowserEvalInput, undefined, undefined, undefined, request.owner);
+		case "browser_console": return browserConsoleTool(request.requestId, params as BrowserConsoleInput, undefined, undefined, undefined, request.owner);
+		case "browser_network": return browserNetworkTool(request.requestId, params as BrowserNetworkInput, undefined, undefined, undefined, request.owner);
+		case "browser_fill": return browserFillTool(request.requestId, params as BrowserFillInput, undefined, undefined, undefined, request.owner);
+		case "browser_click": return browserClickTool(request.requestId, params as BrowserClickInput, undefined, undefined, undefined, request.owner);
+		case "browser_screenshot": return browserScreenshotTool(request.requestId, params as BrowserScreenshotInput, undefined, undefined, undefined, request.owner);
+		case "browser_close": return closeBrowserTool(request.requestId, params, undefined, undefined, undefined, request.owner);
+		case "browser_kill": return closeBrowserTool(request.requestId, params, undefined, undefined, undefined, request.owner);
+	}
+}
+
+async function handleBrowserChannelRequest(pi: ExtensionAPI, value: unknown): Promise<void> {
+	let request: BrowserChannelRequest;
+	try {
+		request = parseBrowserChannelRequest(value);
+	} catch (error) {
+		const requestId = optionalChannelRequestId(value);
+		if (requestId) emitBrowserChannelError(pi, requestId, `Malformed browser request: ${error instanceof Error ? error.message : String(error)}`, optionalChannelOwner(value));
+		return;
+	}
+	if (!browserEnabled) {
+		emitBrowserChannelError(pi, request.requestId, "Browser gate is off. Run /browser on first.", request.owner);
+		return;
+	}
+	try {
+		const result = await executeBrowserChannelRequest(request);
+		pi.events.emit(BROWSER_RESULT_EVENT, { requestId: request.requestId, owner: request.owner, ok: true, result });
+	} catch (error) {
+		emitBrowserChannelError(pi, request.requestId, error instanceof Error ? error.message : String(error), request.owner);
+	}
+}
+
 function syncBrowserTools(pi: ExtensionAPI): void {
 	const registered = new Set(pi.getAllTools().map((tool) => tool.name));
 	const active = pi.getActiveTools().filter((name) => !BROWSER_TOOL_NAMES.includes(name as typeof BROWSER_TOOL_NAMES[number]));
@@ -891,6 +1046,10 @@ export default function browserExtension(pi: ExtensionAPI): void {
 			execute: closeBrowserTool,
 		});
 	}
+
+	pi.events.on(BROWSER_REQUEST_EVENT, (value: unknown) => {
+		void handleBrowserChannelRequest(pi, value);
+	});
 
 	pi.registerCommand("browser", {
 		description: "Enable, disable, or show browser verification status",
