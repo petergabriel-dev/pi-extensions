@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import browserExtension, { BROWSER_EVAL_GUIDANCE, BROWSER_STATE_ENTRY, BROWSER_TOOL_NAMES, RingBuffer, browserStatus, buildBrowserEvalScript, buildBrowserScreenshotPath, classifyBrowserEval, ensureBrowserPage, filterHeaders, formatBrowserLaunchError, headersToShow, isBrowserHeadful, locateBrowserSelector, normalizeHeaderNames, parseBrowserSelector, resolveBrowserEnabled, resolveBrowserProfilePath, serializeBrowserEvalResult, validateBrowserFillValue, validateBrowserSelector, validateBrowserTimeout, validateBrowserUrl } from "../index.ts";
+import browserExtension, { BROWSER_EVAL_GUIDANCE, BROWSER_STATE_ENTRY, BROWSER_TOOL_NAMES, BrowserPageRegistry, MAX_BROWSER_PAGES, PARENT_BROWSER_OWNER, RingBuffer, browserStatus, buildBrowserEvalScript, buildBrowserScreenshotPath, classifyBrowserEval, createBrowserPageState, ensureBrowserPage, filterHeaders, formatBrowserLaunchError, headersToShow, isBrowserHeadful, locateBrowserSelector, normalizeHeaderNames, parseBrowserSelector, resolveBrowserEnabled, resolveBrowserProfilePath, runBrowserOperation, serializeBrowserEvalResult, validateBrowserFillValue, validateBrowserOwner, validateBrowserSelector, validateBrowserTimeout, validateBrowserUrl } from "../index.ts";
 
 assert.equal(browserStatus(false), "Browser: OFF");
 assert.equal(browserStatus(true), "Browser: ON");
@@ -38,6 +38,49 @@ const fullRing = new RingBuffer<number>();
 for (let index = 0; index <= 1_000; index += 1) fullRing.push(index);
 assert.equal(fullRing.length, 1_000);
 assert.deepEqual(fullRing.peek().slice(0, 2), [1, 2]);
+assert.equal(validateBrowserOwner(PARENT_BROWSER_OWNER), PARENT_BROWSER_OWNER);
+assert.throws(() => validateBrowserOwner(""), /non-empty string/);
+assert.throws(() => validateBrowserOwner("x".repeat(257)), /at most 256/);
+assert.equal(MAX_BROWSER_PAGES, 4);
+const fakePages = new Map<string, { closed: boolean; closeCount: number }>();
+function fakePage(name: string) {
+	const state = { closed: false, closeCount: 0 };
+	fakePages.set(name, state);
+	return { isClosed: () => state.closed, close: async () => { state.closed = true; state.closeCount += 1; } } as never;
+}
+const pageRegistry = new BrowserPageRegistry(2);
+const firstPage = createBrowserPageState(fakePage("first"));
+const secondPage = createBrowserPageState(fakePage("second"));
+firstPage.consoleBuffer.push({ ts: 1, type: "log", text: "first" });
+firstPage.networkBuffer.push({ ts: 1, method: "GET", url: "https://first.test", resourceType: "document" });
+secondPage.consoleBuffer.push({ ts: 2, type: "log", text: "second" });
+secondPage.networkBuffer.push({ ts: 2, method: "GET", url: "https://second.test", resourceType: "document" });
+pageRegistry.set("first", firstPage);
+pageRegistry.set("second", secondPage);
+assert.equal(pageRegistry.size, 2);
+assert.throws(() => pageRegistry.set("third", createBrowserPageState(fakePage("third"))), /cap reached/);
+assert.deepEqual(firstPage.consoleBuffer.drain().map((entry) => entry.text), ["first"]);
+assert.deepEqual(firstPage.networkBuffer.drain().map((entry) => entry.url), ["https://first.test"]);
+assert.deepEqual(secondPage.consoleBuffer.drain().map((entry) => entry.text), ["second"]);
+assert.deepEqual(secondPage.networkBuffer.drain().map((entry) => entry.url), ["https://second.test"]);
+await pageRegistry.close("first");
+assert.equal(pageRegistry.size, 1);
+assert.equal(fakePages.get("first")?.closeCount, 1);
+await pageRegistry.close("second");
+assert.equal(pageRegistry.size, 0);
+assert.equal(fakePages.get("second")?.closeCount, 1);
+const timedOutOwners: string[] = [];
+await assert.rejects(
+	runBrowserOperation("child-timeout", "browser_eval", 10, () => new Promise<never>(() => undefined), undefined, async () => { timedOutOwners.push("child-timeout"); }),
+	/browser_eval timed out after 10 milliseconds/,
+);
+assert.deepEqual(timedOutOwners, ["child-timeout"]);
+const abortController = new AbortController();
+const abortedOwners: string[] = [];
+const aborted = runBrowserOperation("child-abort", "browser_eval", 10_000, () => new Promise<never>(() => undefined), abortController.signal, async () => { abortedOwners.push("child-abort"); });
+abortController.abort();
+await assert.rejects(aborted, /browser_eval aborted/);
+assert.deepEqual(abortedOwners, ["child-abort"]);
 assert.deepEqual(normalizeHeaderNames([" Cookie ", "AUTHORIZATION"]), ["cookie", "authorization"]);
 assert.equal(headersToShow(["Cookie"], false).has("authorization"), true);
 assert.equal(headersToShow(["Cookie"], false).has("cookie"), true);

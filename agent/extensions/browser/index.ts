@@ -38,6 +38,12 @@ type BrowserPage = import("playwright-core").Page;
 type BrowserConsoleMessage = import("playwright-core").ConsoleMessage;
 type BrowserRequest = import("playwright-core").Request;
 
+export const PARENT_BROWSER_OWNER = "parent";
+export const MAX_BROWSER_OWNER_KEY_LENGTH = 256;
+export const DEFAULT_BROWSER_CONCURRENCY_CAP = 3;
+export const MAX_BROWSER_PAGES = DEFAULT_BROWSER_CONCURRENCY_CAP + 1;
+export type BrowserOwner = string;
+
 export class RingBuffer<T> {
 	private readonly values: Array<T | undefined>;
 	private start = 0;
@@ -116,12 +122,79 @@ type CustomEntry = {
 	data?: unknown;
 };
 
+export type BrowserPageState = {
+	page: BrowserPage;
+	consoleBuffer: RingBuffer<ConsoleEntry>;
+	networkBuffer: RingBuffer<NetworkEntry>;
+};
+type BrowserPageEntry = BrowserPageState | Promise<BrowserPageState>;
+
+export function createBrowserPageState(page: BrowserPage): BrowserPageState {
+	return {
+		page,
+		consoleBuffer: new RingBuffer<ConsoleEntry>(),
+		networkBuffer: new RingBuffer<NetworkEntry>(),
+	};
+}
+
+export class BrowserPageRegistry {
+	private readonly entries = new Map<BrowserOwner, BrowserPageEntry>();
+
+	constructor(readonly capacity = MAX_BROWSER_PAGES) {
+		if (!Number.isInteger(capacity) || capacity < 1) throw new Error("browser page capacity must be a positive integer");
+	}
+
+	get size(): number {
+		return this.entries.size;
+	}
+
+	get(owner: BrowserOwner): BrowserPageEntry | undefined {
+		return this.entries.get(owner);
+	}
+
+	set(owner: BrowserOwner, entry: BrowserPageEntry): void {
+		if (!this.entries.has(owner) && this.entries.size >= this.capacity) throw new Error(`Browser page cap reached (${this.capacity} pages maximum).`);
+		this.entries.set(owner, entry);
+	}
+
+	delete(owner: BrowserOwner): void {
+		this.entries.delete(owner);
+	}
+
+	clear(): void {
+		this.entries.clear();
+	}
+
+	async close(owner: BrowserOwner): Promise<void> {
+		const entry = this.entries.get(owner);
+		if (!entry) return;
+		this.entries.delete(owner);
+		let state: BrowserPageState;
+		try {
+			state = await entry;
+		} catch {
+			return;
+		}
+		await state.page.close();
+	}
+}
+
 let browserEnabled = false;
 let browserContext: BrowserContext | undefined;
-let browserPage: BrowserPage | undefined;
-let launchPromise: Promise<{ context: BrowserContext; page: BrowserPage }> | undefined;
-const consoleBuffer = new RingBuffer<ConsoleEntry>();
-const networkBuffer = new RingBuffer<NetworkEntry>();
+let browserPages: BrowserPageRegistry | undefined;
+let launchPromise: Promise<BrowserContext> | undefined;
+
+function pageEntries(): BrowserPageRegistry {
+	return browserPages ??= new BrowserPageRegistry();
+}
+
+export function validateBrowserOwner(owner: unknown): BrowserOwner {
+	if (typeof owner !== "string" || owner.trim().length === 0) throw new Error("owner must be a non-empty string");
+	const normalized = owner.trim();
+	if (normalized.length > MAX_BROWSER_OWNER_KEY_LENGTH) throw new Error(`owner must be at most ${MAX_BROWSER_OWNER_KEY_LENGTH} characters`);
+	if (normalized.includes("\0")) throw new Error("owner must not contain null bytes");
+	return normalized;
+}
 
 export function resolveBrowserProfilePath(agentDir = getAgentDir(), env: NodeJS.ProcessEnv = process.env): string {
 	const configured = env.PI_BROWSER_PROFILE?.trim();
@@ -326,11 +399,28 @@ export function serializeBrowserEvalResult(value: unknown): unknown {
 	return visit(value);
 }
 
-async function runBrowserOperation<T>(label: string, timeout: number, operation: () => Promise<T>): Promise<T> {
+export async function runBrowserOperation<T>(owner: BrowserOwner, label: string, timeout: number, operation: () => Promise<T>, signal?: AbortSignal, reap?: () => Promise<void>): Promise<T> {
+	const ownerKey = validateBrowserOwner(owner);
+	const reapPage = reap ?? (() => closeBrowser(ownerKey));
 	let timer: NodeJS.Timeout | undefined;
+	let abortHandler: (() => void) | undefined;
 	let timedOut = false;
+	let aborted = false;
+	if (signal?.aborted) {
+		await reapPage().catch(() => undefined);
+		throw new Error(`${label} aborted`);
+	}
 	try {
-		return await Promise.race([
+		const cancellation = signal
+			? new Promise<T>((_, reject) => {
+				abortHandler = () => {
+					aborted = true;
+					reject(new Error("browser-operation-aborted"));
+				};
+				signal.addEventListener("abort", abortHandler, { once: true });
+			})
+			: undefined;
+		const result = await Promise.race([
 			operation(),
 			new Promise<T>((_, reject) => {
 				timer = setTimeout(() => {
@@ -338,16 +428,23 @@ async function runBrowserOperation<T>(label: string, timeout: number, operation:
 					reject(new Error("browser-operation-timeout"));
 				}, timeout);
 			}),
+			...(cancellation ? [cancellation] : []),
 		]);
+		return result;
 	} catch (error) {
 		if (timedOut) {
-			await closeBrowser().catch(() => undefined);
+			await reapPage().catch(() => undefined);
 			throw new Error(`${label} timed out after ${timeout} milliseconds`);
+		}
+		if (aborted) {
+			await reapPage().catch(() => undefined);
+			throw new Error(`${label} aborted`);
 		}
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(`${label} failed: ${detail}`);
 	} finally {
 		if (timer) clearTimeout(timer);
+		if (abortHandler) signal?.removeEventListener("abort", abortHandler);
 	}
 }
 
@@ -382,27 +479,27 @@ export function buildBrowserEvalScript(expression: unknown): string {
 type BrowserGotoInput = { url: string; timeout?: number };
 type BrowserEvalInput = { expression: string; timeout?: number };
 
-async function browserGotoTool(_toolCallId: string, params: BrowserGotoInput) {
+async function browserGotoTool(_toolCallId: string, params: BrowserGotoInput, signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const url = validateBrowserUrl(params.url);
 	const timeout = validateBrowserTimeout(params.timeout);
-	const result = await runBrowserOperation("browser_goto", timeout, async () => {
-		const page = await ensureBrowserPage();
+	const result = await runBrowserOperation(owner, "browser_goto", timeout, async () => {
+		const page = await ensureBrowserPage(owner);
 		const response = await page.goto(url, { timeout, waitUntil: "domcontentloaded" });
 		return { status: response?.status() ?? 0, finalUrl: page.url() };
-	});
+	}, signal);
 	return {
 		content: [{ type: "text" as const, text: JSON.stringify(result) }],
 		details: result,
 	};
 }
 
-async function browserEvalTool(_toolCallId: string, params: BrowserEvalInput) {
+async function browserEvalTool(_toolCallId: string, params: BrowserEvalInput, signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const timeout = validateBrowserTimeout(params.timeout);
 	const script = buildBrowserEvalScript(params.expression);
-	const result = await runBrowserOperation("browser_eval", timeout, async () => {
-		const page = await ensureBrowserPage();
+	const result = await runBrowserOperation(owner, "browser_eval", timeout, async () => {
+		const page = await ensureBrowserPage(owner);
 		return page.evaluate(script);
-	});
+	}, signal);
 	const serialized = serializeBrowserEvalResult(result);
 	return {
 		content: [{ type: "text" as const, text: JSON.stringify(serialized) }],
@@ -422,25 +519,37 @@ function validateOptionalBoolean(value: unknown, name: string): boolean | undefi
 	return value;
 }
 
-async function browserConsoleTool(_toolCallId: string, params: BrowserConsoleInput) {
+function pageState(owner: BrowserOwner): BrowserPageState | undefined {
+	const entry = browserPages?.get(owner);
+	if (!entry || entry instanceof Promise) return undefined;
+	if (entry.page.isClosed()) {
+		if (browserPages?.get(owner) === entry) browserPages.delete(owner);
+		return undefined;
+	}
+	return entry;
+}
+
+async function browserConsoleTool(_toolCallId: string, params: BrowserConsoleInput, _signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const limit = validateBrowserOutputLimit(params.limit);
 	const filter = validateBrowserFilter(params.filter, "filter");
 	const clear = validateOptionalBoolean(params.clear, "clear") ?? true;
-	const entries = clear ? consoleBuffer.drain() : consoleBuffer.peek();
+	const state = pageState(validateBrowserOwner(owner));
+	const entries = clear ? state?.consoleBuffer.drain() ?? [] : state?.consoleBuffer.peek() ?? [];
 	const filtered = filter ? entries.filter((entry) => entry.text.includes(filter) || (entry.location ?? "").includes(filter)) : entries;
 	const output = filtered.slice(-limit);
 	const text = output.map((entry) => `[${new Date(entry.ts).toISOString()}] ${entry.type}: ${entry.text}${entry.location ? `  @ ${entry.location}` : ""}`).join("\n") || "(empty)";
 	return { content: [{ type: "text" as const, text }], details: { entries: output } };
 }
 
-async function browserNetworkTool(_toolCallId: string, params: BrowserNetworkInput) {
+async function browserNetworkTool(_toolCallId: string, params: BrowserNetworkInput, _signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const limit = validateBrowserOutputLimit(params.limit);
 	const urlFilter = validateBrowserFilter(params.urlFilter, "urlFilter");
 	const status = validateBrowserStatus(params.status);
 	const verbose = validateOptionalBoolean(params.verbose, "verbose") ?? false;
 	const clear = validateOptionalBoolean(params.clear, "clear") ?? true;
 	const extraHeaders = normalizeHeaderNames(params.includeHeaders);
-	const entries = clear ? networkBuffer.drain() : networkBuffer.peek();
+	const state = pageState(validateBrowserOwner(owner));
+	const entries = clear ? state?.networkBuffer.drain() ?? [] : state?.networkBuffer.peek() ?? [];
 	const filtered = entries.filter((entry) => (!urlFilter || entry.url.includes(urlFilter)) && (status === undefined || entry.status === status));
 	const output = filtered.slice(-limit);
 	const allow = verbose || extraHeaders.length > 0 ? new Set([...KEEP_HEADERS, ...extraHeaders]) : new Set<string>();
@@ -455,37 +564,37 @@ async function browserNetworkTool(_toolCallId: string, params: BrowserNetworkInp
 	return { content: [{ type: "text" as const, text: lines.join("\n") || "(empty)" }], details: { entries: output } };
 }
 
-async function browserClickTool(_toolCallId: string, params: BrowserClickInput) {
+async function browserClickTool(_toolCallId: string, params: BrowserClickInput, signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const selector = validateBrowserSelector(params.selector);
 	const timeout = validateBrowserTimeout(params.timeout);
-	await runBrowserOperation("browser_click", timeout, async () => {
-		const page = await ensureBrowserPage();
+	await runBrowserOperation(owner, "browser_click", timeout, async () => {
+		const page = await ensureBrowserPage(owner);
 		await locateBrowserSelector(page, selector).click({ timeout });
-	});
+	}, signal);
 	return { content: [{ type: "text" as const, text: `Clicked ${selector}.` }], details: { selector } };
 }
 
-async function browserFillTool(_toolCallId: string, params: BrowserFillInput) {
+async function browserFillTool(_toolCallId: string, params: BrowserFillInput, signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const selector = validateBrowserSelector(params.selector);
 	const value = validateBrowserFillValue(params.value);
 	const timeout = validateBrowserTimeout(params.timeout);
-	await runBrowserOperation("browser_fill", timeout, async () => {
-		const page = await ensureBrowserPage();
+	await runBrowserOperation(owner, "browser_fill", timeout, async () => {
+		const page = await ensureBrowserPage(owner);
 		await locateBrowserSelector(page, selector).fill(value, { timeout });
-	});
+	}, signal);
 	return { content: [{ type: "text" as const, text: `Filled ${selector}.` }], details: { selector } };
 }
 
-async function browserScreenshotTool(_toolCallId: string, params: BrowserScreenshotInput) {
+async function browserScreenshotTool(_toolCallId: string, params: BrowserScreenshotInput, signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
 	const timeout = validateBrowserTimeout(params.timeout);
 	const fullPage = validateOptionalBoolean(params.fullPage, "fullPage") ?? false;
-	const path = await runBrowserOperation("browser_screenshot", timeout, async () => {
-		const page = await ensureBrowserPage();
+	const path = await runBrowserOperation(owner, "browser_screenshot", timeout, async () => {
+		const page = await ensureBrowserPage(owner);
 		const directory = await mkdtemp(join(tmpdir(), "pi-browser-"));
 		const screenshotPath = buildBrowserScreenshotPath(directory);
 		await page.screenshot({ path: screenshotPath, fullPage, type: "png" });
 		return screenshotPath;
-	});
+	}, signal);
 	return { content: [{ type: "text" as const, text: path }], details: { path } };
 }
 
@@ -530,7 +639,8 @@ const BROWSER_SCREENSHOT_PARAMETERS = Type.Object({
 	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
 });
 
-function attachBrowserListeners(page: BrowserPage): void {
+function attachBrowserListeners(state: BrowserPageState): void {
+	const { page, consoleBuffer, networkBuffer } = state;
 	page.on("console", (message: BrowserConsoleMessage) => {
 		const location = message.location();
 		consoleBuffer.push({
@@ -544,7 +654,7 @@ function attachBrowserListeners(page: BrowserPage): void {
 		consoleBuffer.push({ ts: Date.now(), type: "pageerror", text: `${error.name}: ${error.message}` });
 	});
 	page.on("requestfinished", (request: BrowserRequest) => {
-		void captureNetworkRequest(request);
+		void captureNetworkRequest(request, networkBuffer);
 	});
 	page.on("requestfailed", (request: BrowserRequest) => {
 		const failure = request.failure()?.errorText;
@@ -558,7 +668,7 @@ function attachBrowserListeners(page: BrowserPage): void {
 	});
 }
 
-async function captureNetworkRequest(request: BrowserRequest): Promise<void> {
+async function captureNetworkRequest(request: BrowserRequest, networkBuffer: RingBuffer<NetworkEntry>): Promise<void> {
 	try {
 		const response = await request.response();
 		networkBuffer.push({
@@ -576,44 +686,85 @@ async function captureNetworkRequest(request: BrowserRequest): Promise<void> {
 	}
 }
 
-async function launchBrowser(): Promise<{ context: BrowserContext; page: BrowserPage }> {
+async function launchBrowser(): Promise<BrowserContext> {
 	const profileDir = resolveBrowserProfilePath();
 	await mkdir(profileDir, { recursive: true });
 	let context: BrowserContext | undefined;
 	try {
 		const { chromium } = await import("playwright-core");
 		context = await chromium.launchPersistentContext(profileDir, { headless: !isBrowserHeadful() });
-		const pages = context.pages();
-		const page = pages.find((candidate) => !candidate.isClosed()) ?? await context.newPage();
-		await Promise.allSettled(pages.filter((candidate) => candidate !== page).map((candidate) => candidate.close()));
-		attachBrowserListeners(page);
 		browserContext = context;
-		browserPage = page;
-		return { context, page };
+		return context;
 	} catch (error) {
 		await context?.close().catch(() => undefined);
 		throw new Error(formatBrowserLaunchError(error));
 	}
 }
 
-export async function ensureBrowserPage(): Promise<BrowserPage> {
-	if (!browserEnabled) throw new Error("Browser gate is off. Run /browser on first.");
-	if (browserContext && browserPage && !browserPage.isClosed()) return browserPage;
-	if (browserContext) await closeBrowser();
+async function ensureBrowserContext(): Promise<BrowserContext> {
+	if (browserContext) return browserContext;
 	if (!launchPromise) {
 		launchPromise = launchBrowser().finally(() => {
 			launchPromise = undefined;
 		});
 	}
-	return (await launchPromise).page;
+	return launchPromise;
 }
 
-export async function closeBrowser(): Promise<void> {
+export async function ensureBrowserPage(owner = PARENT_BROWSER_OWNER): Promise<BrowserPage> {
+	if (!browserEnabled) throw new Error("Browser gate is off. Run /browser on first.");
+	const ownerKey = validateBrowserOwner(owner);
+	const pages = pageEntries();
+	const existing = pages.get(ownerKey);
+	if (existing) {
+		const state = await existing;
+		if (!state.page.isClosed()) return state.page;
+		if (pages.get(ownerKey) === existing) pages.delete(ownerKey);
+	}
+	const context = await ensureBrowserContext();
+	if (browserContext !== context) throw new Error("Browser context closed while opening page.");
+	const current = pages.get(ownerKey);
+	if (current) {
+		const state = await current;
+		if (!state.page.isClosed()) return state.page;
+		if (pages.get(ownerKey) === current) pages.delete(ownerKey);
+	}
+	if (pages.size >= pages.capacity) throw new Error(`Browser page cap reached (${pages.capacity} pages maximum).`);
+	let pending!: Promise<BrowserPageState>;
+	pending = (async () => {
+		const page = await context.newPage();
+		const state = createBrowserPageState(page);
+		if (browserPages !== pages || browserContext !== context || pages.get(ownerKey) !== pending) {
+			await page.close().catch(() => undefined);
+			throw new Error("Browser page reaped while opening.");
+		}
+		attachBrowserListeners(state);
+		pages.set(ownerKey, state);
+		return state;
+	})().catch((error) => {
+		if (browserPages === pages && pages.get(ownerKey) === pending) pages.delete(ownerKey);
+		throw error;
+	});
+	pages.set(ownerKey, pending);
+	return (await pending).page;
+}
+
+async function closeBrowserPage(owner: BrowserOwner): Promise<void> {
+	const pages = browserPages;
+	if (!pages) return;
+	try {
+		await pages.close(owner);
+	} catch (error) {
+		throw new Error(`Could not close browser page for ${owner}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+async function closeBrowserContext(): Promise<void> {
 	const pending = launchPromise;
 	if (pending) await pending.catch(() => undefined);
 	const context = browserContext;
 	browserContext = undefined;
-	browserPage = undefined;
+	browserPages = undefined;
 	if (!context) return;
 	try {
 		await context.close();
@@ -623,9 +774,14 @@ export async function closeBrowser(): Promise<void> {
 	}
 }
 
-async function closeBrowserTool() {
-	await closeBrowser();
-	return { content: [{ type: "text" as const, text: "Browser closed." }], details: { closed: true } };
+export async function closeBrowser(owner?: BrowserOwner): Promise<void> {
+	if (owner === undefined) return closeBrowserContext();
+	return closeBrowserPage(validateBrowserOwner(owner));
+}
+
+async function closeBrowserTool(_toolCallId?: string, _params?: unknown, _signal?: AbortSignal, _onUpdate?: unknown, _ctx?: unknown, owner = PARENT_BROWSER_OWNER) {
+	await closeBrowser(owner);
+	return { content: [{ type: "text" as const, text: "Browser page closed." }], details: { closed: true, owner } };
 }
 
 function syncBrowserTools(pi: ExtensionAPI): void {
@@ -645,8 +801,10 @@ function showStatus(ctx: ExtensionContext): void {
 	else console.log(status);
 }
 
-function reconstructFromBranch(ctx: ExtensionContext): void {
-	browserEnabled = resolveBrowserEnabled(ctx.sessionManager.getBranch());
+async function reconstructFromBranch(ctx: ExtensionContext): Promise<void> {
+	const enabled = resolveBrowserEnabled(ctx.sessionManager.getBranch());
+	if (!enabled) await closeBrowser();
+	browserEnabled = enabled;
 	updateStatus(ctx);
 }
 
@@ -749,17 +907,18 @@ export default function browserExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		if (event.reason === "new") {
+			await closeBrowser();
 			browserEnabled = false;
 			syncBrowserTools(pi);
 			updateStatus(ctx);
 			return;
 		}
-		reconstructFromBranch(ctx);
+		await reconstructFromBranch(ctx);
 		syncBrowserTools(pi);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		reconstructFromBranch(ctx);
+		await reconstructFromBranch(ctx);
 		syncBrowserTools(pi);
 	});
 

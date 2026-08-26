@@ -67,7 +67,7 @@ const publishedFiles = [
 
 const manifest = JSON.parse(await readFile(relative("package.json"), "utf8"));
 assert.equal(manifest.name, "@lopezpetergabriel/pi-extensions");
-assert.equal(manifest.version, "0.3.0");
+assert.equal(manifest.version, "0.4.0");
 assert.equal(manifest.private, undefined);
 assert.equal(manifest.license, "MIT");
 assert.equal(manifest.author, "lopezpetergabriel");
