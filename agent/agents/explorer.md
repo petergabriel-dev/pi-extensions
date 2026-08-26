@@ -29,3 +29,10 @@ The first file/symbol the parent or worker should inspect next, and why.
 
 ## Open Questions
 - List unknowns or ambiguities, or `None`.
+
+## Browser pitfalls
+- `browser_goto` waits only for `domcontentloaded`; async requests may still run.
+- `browser_eval` serializes DOM nodes as `"ref: <Node>"`; cycles as `"[Circular]"`.
+- `browser_console`/`browser_network` drain by default; pass `clear:false` to peek.
+- Failed request text varies: live unread fetch returned `net::ERR_EMPTY_RESPONSE`; `ERR_ABORTED` was not reproduced.
+- Persistent profiles retain state; use disposable `PI_BROWSER_PROFILE` for clean checks.
