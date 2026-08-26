@@ -6,6 +6,7 @@ import path from "node:path";
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const relative = (value) => path.join(root, value);
 const extensions = [
+  "agent/extensions/browser/index.ts",
   "agent/extensions/ccc-search/index.ts",
   "agent/extensions/claude-bridge/index.ts",
   "agent/extensions/discussion-notes.ts",
@@ -43,6 +44,7 @@ function hasVariableHostImport(source) {
 
 const agents = ["agent/agents/explorer.md", "agent/agents/worker.md"];
 const publishedFiles = [
+  "agent/extensions/browser/index.ts",
   "agent/extensions/ccc-search/index.ts",
   "agent/extensions/claude-bridge/index.ts",
   "agent/extensions/discussion-notes.ts",
@@ -65,7 +67,7 @@ const publishedFiles = [
 
 const manifest = JSON.parse(await readFile(relative("package.json"), "utf8"));
 assert.equal(manifest.name, "@lopezpetergabriel/pi-extensions");
-assert.equal(manifest.version, "0.2.6");
+assert.equal(manifest.version, "0.3.0");
 assert.equal(manifest.private, undefined);
 assert.equal(manifest.license, "MIT");
 assert.equal(manifest.author, "lopezpetergabriel");
