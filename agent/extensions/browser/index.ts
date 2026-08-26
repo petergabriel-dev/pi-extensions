@@ -255,7 +255,7 @@ export function normalizeHeaderNames(includeHeaders: unknown): string[] {
 
 export function headersToShow(includeHeaders: unknown, verbose: unknown): Set<string> {
 	const extra = normalizeHeaderNames(includeHeaders);
-	return verbose === true || extra.length > 0 ? new Set([...KEEP_HEADERS, ...extra]) : new Set();
+	return new Set([...(verbose === true ? KEEP_HEADERS : []), ...extra]);
 }
 
 export function filterHeaders(headers: Record<string, string> | undefined, allow: ReadonlySet<string>): Record<string, string> {
@@ -552,7 +552,7 @@ async function browserNetworkTool(_toolCallId: string, params: BrowserNetworkInp
 	const entries = clear ? state?.networkBuffer.drain() ?? [] : state?.networkBuffer.peek() ?? [];
 	const filtered = entries.filter((entry) => (!urlFilter || entry.url.includes(urlFilter)) && (status === undefined || entry.status === status));
 	const output = filtered.slice(-limit);
-	const allow = verbose || extraHeaders.length > 0 ? new Set([...KEEP_HEADERS, ...extraHeaders]) : new Set<string>();
+	const allow = headersToShow(extraHeaders, verbose);
 	const lines: string[] = [];
 	for (const entry of output) {
 		lines.push(`${entry.status ?? "ERR"} ${entry.method} ${entry.url}${entry.failure ? `  (${entry.failure})` : ""}`);
