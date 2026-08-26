@@ -17,6 +17,9 @@
 - **Timeout scope matters.** Browser operation timeout or abort reaps only caller's page, not the shared context or sibling pages. Channel requests also have bounded waits and require matching `requestId` and owner.
 - **Explorer browser access follows parent mode.** Build injects all eight browser proxies; Discuss/Plan/Review/Design inject only `browser_console`, `browser_screenshot`, and `browser_network`. Restricted explorers cannot retry mutation proxies; browser mutations are workflow-gated in the parent.
 - **Persistent profiles retain site state.** Cookies and storage survive browser relaunches by default; set `PI_BROWSER_PROFILE` to a disposable temp directory when testing clean state.
+- **Navigation waits only for DOM readiness.** `browser_goto` uses `waitUntil: "domcontentloaded"`; async requests may still be pending (`agent/extensions/browser/index.ts:579-585`).
+- **Eval returns node placeholders.** DOM nodes serialize as exact `"ref: <Node>"`; Task 1 live output matched (`agent/extensions/browser/index.ts:474-496`).
+- **Network failures expose Chromium error text.** `requestfailed` stores `request.failure()?.errorText`; Task 1 recorded exact `net::ERR_EMPTY_RESPONSE` for an unread fetch (`agent/extensions/browser/index.ts:756-763`).
 - **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or esbuild bundling with Pi peers externalized for syntax-only checks; live behavior still needs a real Pi session.
 
 ## Source isolation versus runtime sharing
