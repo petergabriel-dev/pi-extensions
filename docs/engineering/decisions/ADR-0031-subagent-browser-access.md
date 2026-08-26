@@ -5,7 +5,7 @@ status: Active
 date: 2026-08-26
 decision: Give subagents owner-scoped browser pages through parent-injected browser:* request/result proxies, with Build-only explorer mutation capability.
 why: Child sessions load no extensions, so parent-owned proxies provide browser verification without importing browser state or launching a second persistent context; owner keys, bounded pages, and mode-scoped tool sets preserve isolation and safety.
-affects: agent/extensions/browser/index.ts, agent/extensions/subagents/index.ts, agent/extensions/workflow-modes/index.ts, agent/agents/explorer.md, agent/agents/worker.md, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0004-pi-subagents.md, docs/engineering/decisions/ADR-0030-agent-driven-browser-verification.md, docs/engineering/decisions/ADR-0031-subagent-browser-access.md, docs/engineering/decisions/README.md
+affects: agent/extensions/browser/index.ts, agent/extensions/subagents/index.ts, agent/extensions/workflow-modes/index.ts, agent/agents/explorer.md, agent/agents/worker.md, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/traps.md, agent/skills/web-debug/SKILL.md, docs/engineering/decisions/ADR-0004-pi-subagents.md, docs/engineering/decisions/ADR-0030-agent-driven-browser-verification.md, docs/engineering/decisions/ADR-0031-subagent-browser-access.md, docs/engineering/decisions/README.md
 consequences: Workers and explorers can verify live pages without sharing parent page state; Build receives all eight browser proxies while other modes receive three read-only proxies; browser page count and buffers remain bounded, but explorers may affect external web state in Build.
 readWhen: changing browser page ownership, browser:* proxy events, subagent browser tools, explorer capability validation, or workflow-mode browser gating
 supersedes: None
@@ -35,6 +35,7 @@ Docs:
 - [architecture.md](../architecture.md)
 - [invariants.md](../invariants.md)
 - [traps.md](../traps.md)
+- [web-debug/SKILL.md](../../../agent/skills/web-debug/SKILL.md)
 - [ADR-0004-pi-subagents.md](ADR-0004-pi-subagents.md)
 - [ADR-0030-agent-driven-browser-verification.md](ADR-0030-agent-driven-browser-verification.md)
 - [ADR-0031-subagent-browser-access.md](ADR-0031-subagent-browser-access.md)
