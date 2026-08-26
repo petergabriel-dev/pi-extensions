@@ -31,3 +31,4 @@
 | ADR-0027 | Active | Static host access and agent-directory injection | changing Pi host imports, agent-directory or plan/memory path resolution, extension test isolation, or workspace package checks |
 | ADR-0028 | Active | Title-addressable workflow plan task ticks | changing workflow_plan_tick, task reference resolution, tracker recovery, workflow markers, CustomMessage conversion, prompt-cache behavior, or bridge plan tools |
 | ADR-0029 | Active | Consolidated extension dev tooling | changing runtime extension boundaries, root or nested package tooling, bootstrap, extension tests/typechecks, Pi host development dependency versions, or workspace manifest checks |
+| ADR-0030 | Active | Agent-driven browser verification | changing browser tools, Chromium or playwright-core setup, browser profile/lifecycle, console/network capture, page actions, screenshot handling, or browser package tests |
