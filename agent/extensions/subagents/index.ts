@@ -12,7 +12,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Type, type Static } from "typebox";
+import { Type, type Static, type TSchema } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
 import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
@@ -548,7 +548,7 @@ function subagentFailureMessage(result: SubagentRunResult): string {
 	return "error" in result ? result.error : "unknown subagent failure";
 }
 
-export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number) {
+export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number, parentPi?: ExtensionAPI) {
 	return defineTool<typeof SpawnExplorerParams, unknown>({
 		name: SPAWN_EXPLORER_TOOL_NAME,
 		label: "Spawn Explorer",
@@ -579,6 +579,11 @@ export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSign
 				};
 			}
 
+			const browserPi = parentPi ?? extensionPi;
+			const browserMode: WorkflowModeQueryResult = browserPi ? await queryWorkflowMode(browserPi, signal ?? parentSignal) : { ok: false, error: "No parent extension event bus." };
+			const browserNames = browserProxyToolNames(browserMode.mode);
+			const browserOwner = nextBrowserOwner("explorer");
+			const browserTools = browserPi ? createBrowserProxyTools(browserPi, browserOwner, browserNames, browserNames.length !== BROWSER_PROXY_BUILD_TOOLS.length) : [];
 			return withSubagentSlot(
 				"explorer",
 				parentCtx.cwd,
@@ -586,20 +591,27 @@ export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSign
 				async (slot) => {
 					const progress = startSubagentProgress(parentCtx, "explorer", { depth });
 					const timeoutPolicy = resolveSubagentTimeouts();
-					const result = await runSubagent({
-						agent: { ...agent, tools: agent.tools ?? DEFAULT_EXPLORER_TOOLS },
-						role: "explorer",
-						task: params.task,
-						ctx: parentCtx,
-						signal: signal ?? parentSignal,
-						timeoutPolicy,
-						modelOverride: configuredModel("explorer", parentCtx),
-						thinkingLevel: configuredEffort("explorer"),
-						progress,
-					});
+					const result = await (async () => {
+						try {
+							return await runSubagent({
+								agent: { ...agent, tools: augmentBrowserProxyTools(agent.tools, browserNames) },
+								role: "explorer",
+								task: browserTask(params.task, browserNames, browserMode.mode),
+								ctx: parentCtx,
+								signal: signal ?? parentSignal,
+								timeoutPolicy,
+								modelOverride: configuredModel("explorer", parentCtx),
+								thinkingLevel: configuredEffort("explorer"),
+								customTools: browserTools,
+								progress,
+							});
+						} finally {
+							if (browserPi) await reapBrowserOwner(browserPi, browserOwner, undefined);
+						}
+					})();
 					return {
 						content: [{ type: "text", text: result.ok ? `Nested explorer summary: ${(result.parsed as ExplorerParsedResult).summary}` : `Nested explorer failed: ${subagentFailureMessage(result)}` }],
-						details: addConcurrencyDetails(result, slot, { depth: depth + 1 }),
+						details: addConcurrencyDetails(result, slot, { depth: depth + 1, browserMode: browserMode.mode ?? "unknown", browserTools: browserNames }),
 					};
 				},
 				{ explorerLane: true },
@@ -647,6 +659,138 @@ function queryWorkflowMode(pi: ExtensionAPI, signal: AbortSignal | undefined, ti
 			settle({ ok: false, error: error instanceof Error ? error.message : String(error) });
 		}
 	});
+}
+
+const BROWSER_REQUEST_EVENT = "browser:request";
+const BROWSER_RESULT_EVENT = "browser:result";
+export const BROWSER_PROXY_BUILD_TOOLS = [
+	"browser_goto",
+	"browser_eval",
+	"browser_console",
+	"browser_network",
+	"browser_fill",
+	"browser_click",
+	"browser_screenshot",
+	"browser_close",
+] as const;
+export const BROWSER_PROXY_READ_ONLY_TOOLS = ["browser_console", "browser_screenshot", "browser_network"] as const;
+export type BrowserProxyName = typeof BROWSER_PROXY_BUILD_TOOLS[number];
+let nextBrowserOwnerId = 0;
+let nextBrowserRequestId = 0;
+
+export function browserProxyToolNames(mode: WorkflowMode | undefined): BrowserProxyName[] {
+	return [...(mode === "build" ? BROWSER_PROXY_BUILD_TOOLS : BROWSER_PROXY_READ_ONLY_TOOLS)];
+}
+
+export function augmentBrowserProxyTools(tools: string[] | undefined, names: readonly BrowserProxyName[]): string[] {
+	return [...new Set([...(tools ?? DEFAULT_EXPLORER_TOOLS), ...names])];
+}
+
+function browserProxyGuidance(names: readonly BrowserProxyName[], mode: WorkflowMode | undefined): string {
+	if (names.length === BROWSER_PROXY_BUILD_TOOLS.length) return "Browser verification tools available: browser_goto, browser_eval, browser_console, browser_network, browser_fill, browser_click, browser_screenshot, browser_close.";
+	return `Browser access restricted because parent workflow mode is ${mode ?? "unknown"}. Available browser tools: ${names.join(", ")}. Console/network clear is forced false.`;
+}
+
+function browserTask(task: string, names: readonly BrowserProxyName[], mode: WorkflowMode | undefined): string {
+	return `${task}\n\n${browserProxyGuidance(names, mode)}`;
+}
+
+function nextBrowserOwner(role: AgentRole): string {
+	return `subagent-${role}-${++nextBrowserOwnerId}`;
+}
+
+function browserProxyParameters(name: BrowserProxyName): TSchema {
+	const timeout = Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 }));
+	switch (name) {
+		case "browser_goto": return Type.Object({ url: Type.String({ minLength: 1, maxLength: 2_048 }), timeout });
+		case "browser_eval": return Type.Object({ expression: Type.String({ minLength: 1, maxLength: 10_000 }), timeout });
+		case "browser_console": return Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })), filter: Type.Optional(Type.String({ maxLength: 1_000 })), clear: Type.Optional(Type.Boolean()) });
+		case "browser_network": return Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })), urlFilter: Type.Optional(Type.String({ maxLength: 1_000 })), status: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })), verbose: Type.Optional(Type.Boolean()), includeHeaders: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })), clear: Type.Optional(Type.Boolean()) });
+		case "browser_fill": return Type.Object({ selector: Type.String({ minLength: 1, maxLength: 2_048 }), value: Type.String({ maxLength: 100_000 }), timeout });
+		case "browser_click": return Type.Object({ selector: Type.String({ minLength: 1, maxLength: 2_048 }), timeout });
+		case "browser_screenshot": return Type.Object({ fullPage: Type.Optional(Type.Boolean()), timeout });
+		case "browser_close": return Type.Object({});
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requestBrowserProxy(pi: ExtensionAPI, owner: string, tool: BrowserProxyName, params: Record<string, unknown>, signal: AbortSignal | undefined): Promise<unknown> {
+	const requestId = `${owner}-${tool}-${++nextBrowserRequestId}`;
+	return new Promise((resolve, reject) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let unsubscribe: (() => void) | undefined;
+		let removeAbort: (() => void) | undefined;
+		let settled = false;
+		const finish = (action: () => void) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			unsubscribe?.();
+			removeAbort?.();
+			action();
+		};
+		const onResult = (value: unknown) => {
+			if (!isRecord(value) || value.requestId !== requestId || value.owner !== owner) return;
+			if (value.ok === true) return finish(() => resolve(value.result));
+			if (value.ok === false && typeof value.error === "string") return finish(() => reject(new Error(String(value.error))));
+			finish(() => reject(new Error("Malformed browser result.")));
+		};
+		const abort = () => finish(() => reject(new Error(`${tool} browser request aborted.`)));
+		if (signal?.aborted) return abort();
+		if (signal) {
+			signal.addEventListener("abort", abort, { once: true });
+			removeAbort = () => signal.removeEventListener("abort", abort);
+		}
+		unsubscribe = pi.events.on(BROWSER_RESULT_EVENT, onResult);
+		timer = setTimeout(() => finish(() => reject(new Error(`${tool} browser request timed out after 1,500 milliseconds.`))), 1_500);
+		try {
+			pi.events.emit(BROWSER_REQUEST_EVENT, { requestId, owner, tool, params });
+		} catch (error) {
+			finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+		}
+	});
+}
+
+type BrowserProxyToolResult = { content: Array<{ type: "text"; text: string }>; details: unknown };
+
+function browserProxyResult(value: unknown): BrowserProxyToolResult {
+	if (isRecord(value) && Array.isArray(value.content) && value.content.every((item) => isRecord(item) && item.type === "text" && typeof item.text === "string")) {
+		return { content: value.content as Array<{ type: "text"; text: string }>, details: value.details };
+	}
+	return { content: [{ type: "text", text: JSON.stringify(value) }], details: value };
+}
+
+function createBrowserProxyTools(pi: ExtensionAPI, owner: string, names: readonly BrowserProxyName[], restricted: boolean) {
+	return names.map((name) => defineTool<TSchema, unknown>({
+		name,
+		label: name.replaceAll("_", " "),
+		description: restricted && (name === "browser_console" || name === "browser_network")
+			? `${name} browser inspection; buffer clear is forced false in read-only workflow modes.`
+			: `Proxy ${name} to the parent browser page owned by this subagent.`,
+		parameters: browserProxyParameters(name) as never,
+		async execute(_toolCallId, rawParams, signal) {
+			const params = (isRecord(rawParams) ? rawParams : {}) as Record<string, unknown>;
+			const forwarded = restricted && (name === "browser_console" || name === "browser_network") ? { ...params, clear: false } : params;
+			try {
+				const result = await requestBrowserProxy(pi, owner, name, forwarded, signal);
+				return browserProxyResult(result);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return { content: [{ type: "text", text: `${name} failed: ${message}` }], details: { ok: false, error: message, owner, tool: name } };
+			}
+		},
+	}));
+}
+
+async function reapBrowserOwner(pi: ExtensionAPI, owner: string, signal: AbortSignal | undefined): Promise<void> {
+	try {
+		await requestBrowserProxy(pi, owner, "browser_close", {}, signal);
+	} catch {
+		// Browser gate-off, timeout, or already-reaped pages need no further cleanup.
+	}
 }
 
 async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise<void> {
@@ -736,20 +880,31 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 				};
 			}
 
+			const browserMode = await queryWorkflowMode(pi, signal);
+			const browserNames = browserProxyToolNames(browserMode.mode);
+			const browserOwner = nextBrowserOwner("explorer");
+			const browserTools = createBrowserProxyTools(pi, browserOwner, browserNames, browserNames.length !== BROWSER_PROXY_BUILD_TOOLS.length);
 			return withSubagentSlot("explorer", ctx.cwd, signal, async (slot) => {
 				const progress = startSubagentProgress(ctx, "explorer");
 				const timeoutPolicy = resolveSubagentTimeouts();
-				const result = await runSubagent({
-					agent: { ...agent, tools: agent.tools ?? DEFAULT_EXPLORER_TOOLS },
-					role: "explorer",
-					task: params.task,
-					ctx,
-					signal,
-					timeoutPolicy,
-					modelOverride: configuredModel("explorer", ctx),
-					thinkingLevel: configuredEffort("explorer"),
-					progress,
-				});
+				const result = await (async () => {
+					try {
+						return await runSubagent({
+							agent: { ...agent, tools: augmentBrowserProxyTools(agent.tools, browserNames) },
+							role: "explorer",
+							task: browserTask(params.task, browserNames, browserMode.mode),
+							ctx,
+							signal,
+							timeoutPolicy,
+							modelOverride: configuredModel("explorer", ctx),
+							thinkingLevel: configuredEffort("explorer"),
+							customTools: browserTools,
+							progress,
+						});
+					} finally {
+						await reapBrowserOwner(pi, browserOwner, undefined);
+					}
+				})();
 
 				if (!result.ok) {
 					return {
@@ -816,21 +971,29 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 
 			return withWorkerOwnership(ownership, (workerRunId) =>
 				withSubagentSlot("worker", ctx.cwd, signal, async (slot) => {
-					const workerTools = [...new Set([...(agent.tools ?? []), SPAWN_EXPLORER_TOOL_NAME])];
+					const browserNames = [...BROWSER_PROXY_BUILD_TOOLS];
+					const browserTools = createBrowserProxyTools(pi, workerRunId, browserNames, false);
+					const workerTools = augmentBrowserProxyTools([...(agent.tools ?? []), SPAWN_EXPLORER_TOOL_NAME], browserNames);
 					const progress = startSubagentProgress(ctx, "worker");
 					const timeoutPolicy = resolveSubagentTimeouts();
-					const result = await runSubagent({
-						agent: { ...agent, tools: workerTools },
-						role: "worker",
-						task: params.task,
-						ctx,
-						signal,
-						timeoutPolicy,
-						modelOverride: configuredModel("worker", ctx),
-						thinkingLevel: configuredEffort("worker"),
-						customTools: [createNestedExplorerTool(ctx, signal, 1)],
-						progress,
-					});
+					const result = await (async () => {
+						try {
+							return await runSubagent({
+								agent: { ...agent, tools: workerTools },
+								role: "worker",
+								task: browserTask(params.task, browserNames, workflowMode.mode),
+								ctx,
+								signal,
+								timeoutPolicy,
+								modelOverride: configuredModel("worker", ctx),
+								thinkingLevel: configuredEffort("worker"),
+								customTools: [createNestedExplorerTool(ctx, signal, 1, pi), ...browserTools],
+								progress,
+							});
+						} finally {
+							await reapBrowserOwner(pi, workerRunId, undefined);
+						}
+					})();
 
 					if (!result.ok) {
 						return {

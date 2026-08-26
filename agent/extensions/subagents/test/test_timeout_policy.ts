@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import subagentsExtension, { createNestedExplorerTool } from "../index.ts";
+import subagentsExtension, { BROWSER_PROXY_BUILD_TOOLS, BROWSER_PROXY_READ_ONLY_TOOLS, augmentBrowserProxyTools, browserProxyToolNames, createNestedExplorerTool } from "../index.ts";
 import {
 	DEFAULT_IDLE_TIMEOUT_MS,
 	DEFAULT_MAX_TOTAL_MS,
@@ -11,6 +11,12 @@ type ToolSchema = { properties?: Record<string, unknown> };
 type RegisteredTool = { name: string; parameters: ToolSchema };
 
 const defaults = { idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS, maxTotalMs: DEFAULT_MAX_TOTAL_MS };
+
+assert.deepEqual(browserProxyToolNames("build"), [...BROWSER_PROXY_BUILD_TOOLS]);
+assert.deepEqual(browserProxyToolNames("discuss"), [...BROWSER_PROXY_READ_ONLY_TOOLS]);
+assert.deepEqual(browserProxyToolNames(undefined), [...BROWSER_PROXY_READ_ONLY_TOOLS]);
+assert.deepEqual(augmentBrowserProxyTools(["read", "browser_console"], BROWSER_PROXY_READ_ONLY_TOOLS), ["read", "browser_console", "browser_screenshot", "browser_network"]);
+assert.deepEqual(augmentBrowserProxyTools(undefined, BROWSER_PROXY_BUILD_TOOLS), ["read", "grep", "find", "ls", ...BROWSER_PROXY_BUILD_TOOLS]);
 
 assert.deepEqual(resolveSubagentTimeoutPolicy(undefined), defaults);
 assert.deepEqual(resolveSubagentTimeoutPolicy({ idleTimeoutMs: 900_000, maxTotalMs: 1_800_000 }), {
