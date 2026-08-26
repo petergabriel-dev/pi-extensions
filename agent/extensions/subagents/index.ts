@@ -168,7 +168,18 @@ interface SubagentsSettings extends SubagentTimeoutSettings {
 	effort?: Partial<Record<AgentRole, string>>;
 }
 
-const READ_ONLY_EXPLORER_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const DEFAULT_EXPLORER_TOOLS = ["read", "grep", "find", "ls"];
+export const READ_ONLY_EXPLORER_TOOLS = new Set([
+	...DEFAULT_EXPLORER_TOOLS,
+	"browser_goto",
+	"browser_eval",
+	"browser_console",
+	"browser_network",
+	"browser_fill",
+	"browser_click",
+	"browser_screenshot",
+	"browser_close",
+]);
 
 interface ParentSnapshot {
 	sessionFile: string | undefined;
@@ -407,10 +418,10 @@ function formatToolResult(details: SpikeDetails): string {
 	return lines.join("\n");
 }
 
-function validateExplorerTools(tools: string[] | undefined): string | undefined {
-	const activeTools = tools ?? [...READ_ONLY_EXPLORER_TOOLS];
+export function validateExplorerTools(tools: string[] | undefined): string | undefined {
+	const activeTools = tools ?? DEFAULT_EXPLORER_TOOLS;
 	const unsafeTools = activeTools.filter((tool) => !READ_ONLY_EXPLORER_TOOLS.has(tool));
-	if (unsafeTools.length > 0) return `Explorer agent includes non-read-only tool(s): ${unsafeTools.join(", ")}.`;
+	if (unsafeTools.length > 0) return `Explorer agent includes non-repository-read-only tool(s): ${unsafeTools.join(", ")}.`;
 	return undefined;
 }
 
@@ -576,7 +587,7 @@ export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSign
 					const progress = startSubagentProgress(parentCtx, "explorer", { depth });
 					const timeoutPolicy = resolveSubagentTimeouts();
 					const result = await runSubagent({
-						agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
+						agent: { ...agent, tools: agent.tools ?? DEFAULT_EXPLORER_TOOLS },
 						role: "explorer",
 						task: params.task,
 						ctx: parentCtx,
@@ -729,7 +740,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 				const progress = startSubagentProgress(ctx, "explorer");
 				const timeoutPolicy = resolveSubagentTimeouts();
 				const result = await runSubagent({
-					agent: { ...agent, tools: agent.tools ?? [...READ_ONLY_EXPLORER_TOOLS] },
+					agent: { ...agent, tools: agent.tools ?? DEFAULT_EXPLORER_TOOLS },
 					role: "explorer",
 					task: params.task,
 					ctx,

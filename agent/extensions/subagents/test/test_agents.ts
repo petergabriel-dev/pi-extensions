@@ -4,8 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { discoverAgents, formatAgentList } from "../agents.ts";
+import { READ_ONLY_EXPLORER_TOOLS, validateExplorerTools } from "../index.ts";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agents-"));
+
+assert.equal(validateExplorerTools(["read", "grep", "find", "ls", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close"]), undefined);
+assert.equal(READ_ONLY_EXPLORER_TOOLS.has("browser_close"), true);
+assert.equal(READ_ONLY_EXPLORER_TOOLS.has("browser_kill"), false);
+assert.match(validateExplorerTools(["edit", "write", "bash"]) ?? "", /non-repository-read-only tool\(s\): edit, write, bash/);
+assert.match(validateExplorerTools(["browser_kill"]) ?? "", /browser_kill/);
 
 function writeAgent(dir: string, name: string, description = name, tools?: string): void {
 	fs.mkdirSync(dir, { recursive: true });
