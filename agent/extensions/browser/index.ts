@@ -1,5 +1,6 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
@@ -11,6 +12,8 @@ export const MIN_BROWSER_TIMEOUT_MS = 100;
 export const MAX_BROWSER_TIMEOUT_MS = 120_000;
 export const MAX_BROWSER_URL_LENGTH = 2_048;
 export const MAX_BROWSER_EXPRESSION_LENGTH = 10_000;
+export const MAX_BROWSER_SELECTOR_LENGTH = 2_048;
+export const MAX_BROWSER_FILL_VALUE_LENGTH = 100_000;
 export const MAX_BROWSER_BUFFER_ENTRIES = 1_000;
 export const DEFAULT_BROWSER_OUTPUT_LIMIT = 100;
 export const MAX_BROWSER_OUTPUT_LIMIT = 1_000;
@@ -203,6 +206,55 @@ export function validateBrowserTimeout(timeout: unknown): number {
 	return timeout;
 }
 
+export function validateBrowserSelector(selector: unknown): string {
+	if (typeof selector !== "string" || selector.trim().length === 0) throw new Error("selector must not be empty");
+	if (selector.length > MAX_BROWSER_SELECTOR_LENGTH) throw new Error(`selector must be at most ${MAX_BROWSER_SELECTOR_LENGTH} characters`);
+	if (selector.includes("\0")) throw new Error("selector must not contain null bytes");
+	return selector;
+}
+
+export function validateBrowserFillValue(value: unknown): string {
+	if (typeof value !== "string") throw new Error("value must be a string");
+	if (value.length > MAX_BROWSER_FILL_VALUE_LENGTH) throw new Error(`value must be at most ${MAX_BROWSER_FILL_VALUE_LENGTH} characters`);
+	if (value.includes("\0")) throw new Error("value must not contain null bytes");
+	return value;
+}
+
+export type BrowserSelectorKind = "css" | "text" | "role";
+export type BrowserSelector = { kind: BrowserSelectorKind; value: string };
+
+export function parseBrowserSelector(selector: unknown): BrowserSelector {
+	const source = validateBrowserSelector(selector);
+	if (source.startsWith("text=")) {
+		const value = source.slice("text=".length).trim();
+		if (!value) throw new Error("text selector must not be empty");
+		return { kind: "text", value };
+	}
+	if (source.startsWith("role=")) {
+		const value = source.slice("role=".length).trim();
+		if (!value) throw new Error("role selector must not be empty");
+		return { kind: "role", value };
+	}
+	return { kind: "css", value: source };
+}
+
+export type BrowserLocator = Pick<import("playwright-core").Locator, "click" | "fill">;
+export type BrowserSelectorPage = {
+	locator: (selector: string) => BrowserLocator;
+	getByText: (text: string) => BrowserLocator;
+};
+
+export function locateBrowserSelector(page: BrowserSelectorPage, selector: unknown): BrowserLocator {
+	const parsed = parseBrowserSelector(selector);
+	if (parsed.kind === "text") return page.getByText(parsed.value);
+	if (parsed.kind === "role") return page.locator(`role=${parsed.value}`);
+	return page.locator(parsed.value);
+}
+
+export function buildBrowserScreenshotPath(directory: string): string {
+	return join(directory, "screenshot.png");
+}
+
 export function validateBrowserUrl(url: unknown): string {
 	if (typeof url !== "string" || url.trim().length === 0) throw new Error("url must not be empty");
 	if (url.length > MAX_BROWSER_URL_LENGTH) throw new Error(`url must be at most ${MAX_BROWSER_URL_LENGTH} characters`);
@@ -360,6 +412,9 @@ async function browserEvalTool(_toolCallId: string, params: BrowserEvalInput) {
 
 type BrowserConsoleInput = { limit?: number; filter?: string; clear?: boolean };
 type BrowserNetworkInput = { limit?: number; urlFilter?: string; status?: number; verbose?: boolean; includeHeaders?: string[]; clear?: boolean };
+type BrowserClickInput = { selector: string; timeout?: number };
+type BrowserFillInput = { selector: string; value: string; timeout?: number };
+type BrowserScreenshotInput = { fullPage?: boolean; timeout?: number };
 
 function validateOptionalBoolean(value: unknown, name: string): boolean | undefined {
 	if (value === undefined) return undefined;
@@ -400,6 +455,40 @@ async function browserNetworkTool(_toolCallId: string, params: BrowserNetworkInp
 	return { content: [{ type: "text" as const, text: lines.join("\n") || "(empty)" }], details: { entries: output } };
 }
 
+async function browserClickTool(_toolCallId: string, params: BrowserClickInput) {
+	const selector = validateBrowserSelector(params.selector);
+	const timeout = validateBrowserTimeout(params.timeout);
+	await runBrowserOperation("browser_click", timeout, async () => {
+		const page = await ensureBrowserPage();
+		await locateBrowserSelector(page, selector).click({ timeout });
+	});
+	return { content: [{ type: "text" as const, text: `Clicked ${selector}.` }], details: { selector } };
+}
+
+async function browserFillTool(_toolCallId: string, params: BrowserFillInput) {
+	const selector = validateBrowserSelector(params.selector);
+	const value = validateBrowserFillValue(params.value);
+	const timeout = validateBrowserTimeout(params.timeout);
+	await runBrowserOperation("browser_fill", timeout, async () => {
+		const page = await ensureBrowserPage();
+		await locateBrowserSelector(page, selector).fill(value, { timeout });
+	});
+	return { content: [{ type: "text" as const, text: `Filled ${selector}.` }], details: { selector } };
+}
+
+async function browserScreenshotTool(_toolCallId: string, params: BrowserScreenshotInput) {
+	const timeout = validateBrowserTimeout(params.timeout);
+	const fullPage = validateOptionalBoolean(params.fullPage, "fullPage") ?? false;
+	const path = await runBrowserOperation("browser_screenshot", timeout, async () => {
+		const page = await ensureBrowserPage();
+		const directory = await mkdtemp(join(tmpdir(), "pi-browser-"));
+		const screenshotPath = buildBrowserScreenshotPath(directory);
+		await page.screenshot({ path: screenshotPath, fullPage, type: "png" });
+		return screenshotPath;
+	});
+	return { content: [{ type: "text" as const, text: path }], details: { path } };
+}
+
 const BROWSER_GOTO_PARAMETERS = Type.Object({
 	url: Type.String({ minLength: 1, maxLength: MAX_BROWSER_URL_LENGTH }),
 	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
@@ -423,6 +512,22 @@ const BROWSER_NETWORK_PARAMETERS = Type.Object({
 	verbose: Type.Optional(Type.Boolean()),
 	includeHeaders: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: MAX_BROWSER_HEADER_NAME_LENGTH }), { maxItems: MAX_BROWSER_HEADER_NAMES })),
 	clear: Type.Optional(Type.Boolean()),
+});
+
+const BROWSER_SELECTOR_PARAMETERS = Type.Object({
+	selector: Type.String({ minLength: 1, maxLength: MAX_BROWSER_SELECTOR_LENGTH }),
+	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
+});
+
+const BROWSER_FILL_PARAMETERS = Type.Object({
+	selector: Type.String({ minLength: 1, maxLength: MAX_BROWSER_SELECTOR_LENGTH }),
+	value: Type.String({ maxLength: MAX_BROWSER_FILL_VALUE_LENGTH }),
+	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
+});
+
+const BROWSER_SCREENSHOT_PARAMETERS = Type.Object({
+	fullPage: Type.Optional(Type.Boolean()),
+	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
 });
 
 function attachBrowserListeners(page: BrowserPage): void {
@@ -593,6 +698,30 @@ export default function browserExtension(pi: ExtensionAPI): void {
 		description: "Read buffered network requests. Default output is status method URL; verbose/includeHeaders surfaces curated headers without bodies.",
 		parameters: BROWSER_NETWORK_PARAMETERS,
 		execute: browserNetworkTool,
+	});
+
+	pi.registerTool({
+		name: "browser_fill",
+		label: "Browser Fill",
+		description: "Fill an input matched by CSS, text=, or role= selector.",
+		parameters: BROWSER_FILL_PARAMETERS,
+		execute: browserFillTool,
+	});
+
+	pi.registerTool({
+		name: "browser_click",
+		label: "Browser Click",
+		description: "Click an element matched by CSS, text=, or role= selector.",
+		parameters: BROWSER_SELECTOR_PARAMETERS,
+		execute: browserClickTool,
+	});
+
+	pi.registerTool({
+		name: "browser_screenshot",
+		label: "Browser Screenshot",
+		description: "Save current page as a PNG in a temporary directory and return its path for read.",
+		parameters: BROWSER_SCREENSHOT_PARAMETERS,
+		execute: browserScreenshotTool,
 	});
 
 	for (const name of ["browser_close", "browser_kill"] as const) {

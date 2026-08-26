@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import browserExtension, { BROWSER_EVAL_GUIDANCE, BROWSER_STATE_ENTRY, BROWSER_TOOL_NAMES, RingBuffer, browserStatus, buildBrowserEvalScript, classifyBrowserEval, ensureBrowserPage, filterHeaders, formatBrowserLaunchError, headersToShow, isBrowserHeadful, normalizeHeaderNames, resolveBrowserEnabled, resolveBrowserProfilePath, serializeBrowserEvalResult, validateBrowserTimeout, validateBrowserUrl } from "../index.ts";
+import browserExtension, { BROWSER_EVAL_GUIDANCE, BROWSER_STATE_ENTRY, BROWSER_TOOL_NAMES, RingBuffer, browserStatus, buildBrowserEvalScript, buildBrowserScreenshotPath, classifyBrowserEval, ensureBrowserPage, filterHeaders, formatBrowserLaunchError, headersToShow, isBrowserHeadful, locateBrowserSelector, normalizeHeaderNames, parseBrowserSelector, resolveBrowserEnabled, resolveBrowserProfilePath, serializeBrowserEvalResult, validateBrowserFillValue, validateBrowserSelector, validateBrowserTimeout, validateBrowserUrl } from "../index.ts";
 
 assert.equal(browserStatus(false), "Browser: OFF");
 assert.equal(browserStatus(true), "Browser: ON");
@@ -42,6 +42,23 @@ assert.deepEqual(normalizeHeaderNames([" Cookie ", "AUTHORIZATION"]), ["cookie",
 assert.equal(headersToShow(["Cookie"], false).has("authorization"), true);
 assert.equal(headersToShow(["Cookie"], false).has("cookie"), true);
 assert.deepEqual(filterHeaders({ Authorization: "secret", Cookie: "session" }, headersToShow(["cookie"], false)), { Authorization: "secret", Cookie: "session" });
+assert.equal(validateBrowserSelector("#submit"), "#submit");
+assert.throws(() => validateBrowserSelector("x".repeat(2_049)), /at most 2048/);
+assert.equal(validateBrowserFillValue("hello"), "hello");
+assert.equal(parseBrowserSelector("#submit").kind, "css");
+assert.deepEqual(parseBrowserSelector("text=Submit"), { kind: "text", value: "Submit" });
+assert.deepEqual(parseBrowserSelector("role=button[name=Submit]"), { kind: "role", value: "button[name=Submit]" });
+assert.equal(buildBrowserScreenshotPath("/tmp/pi-browser-test"), "/tmp/pi-browser-test/screenshot.png");
+const selectorCalls: string[] = [];
+const locator = { click: async () => undefined, fill: async () => undefined };
+const selectorPage = {
+	locator: (selector: string) => { selectorCalls.push(`locator:${selector}`); return locator; },
+	getByText: (text: string) => { selectorCalls.push(`text:${text}`); return locator; },
+};
+assert.equal(locateBrowserSelector(selectorPage, "#submit"), locator);
+assert.equal(locateBrowserSelector(selectorPage, "text=Submit"), locator);
+assert.equal(locateBrowserSelector(selectorPage, "role=button"), locator);
+assert.deepEqual(selectorCalls, ["locator:#submit", "text:Submit", "locator:role=button"]);
 assert.equal(resolveBrowserEnabled([]), false);
 assert.equal(resolveBrowserEnabled([
 	{ type: "custom", customType: BROWSER_STATE_ENTRY, data: { enabled: true } },
@@ -82,10 +99,11 @@ browserExtension({
 } as never);
 
 assert.ok(command);
-assert.deepEqual(registeredTools.sort(), ["browser_close", "browser_console", "browser_eval", "browser_goto", "browser_kill", "browser_network"]);
+assert.deepEqual(registeredTools.sort(), ["browser_click", "browser_close", "browser_console", "browser_eval", "browser_fill", "browser_goto", "browser_kill", "browser_network", "browser_screenshot"]);
 assert.equal(BROWSER_TOOL_NAMES.includes("browser_network"), true);
+assert.equal(BROWSER_TOOL_NAMES.includes("browser_screenshot"), true);
 await command.handler("on", ctx);
-assert.deepEqual(activeTools, ["read", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_close", "browser_kill"]);
+assert.deepEqual(activeTools, ["read", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close", "browser_kill"]);
 assert.equal(entries[0]?.type, BROWSER_STATE_ENTRY);
 assert.equal((entries[0]?.data as { enabled?: unknown }).enabled, true);
 assert.equal(typeof (entries[0]?.data as { at?: unknown }).at, "number");
