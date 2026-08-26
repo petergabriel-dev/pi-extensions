@@ -6,6 +6,13 @@
 - **Bootstrap does not eliminate all network use.** Engineering-docs and personal-memory scripts invoke `npx --yes`; uncached TypeScript/tsx packages still require npm registry access during tests/typecheck.
 - **Extension dependencies are split.** A test passing in one package does not prove another package is installed. After cloning or lock changes, run root `npm ci --ignore-scripts --legacy-peer-deps`, nested `npm run bootstrap`, then root gate. If nested workflow tests fail before source execution because `node_modules/.bin/tsx`, `tsc`, or `@types/node` is absent, bootstrap first; a temporary ignored `tsx` shim may unblock tests, but remove it afterward.
 - **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other. Missing nested `tsc` is a dependency/bootstrap failure, not proof of source failure.
+
+## Browser verification
+
+- **Chromium is a separate prerequisite.** `playwright-core` does not download a browser; the first browser tool call fails until `cd agent/extensions/browser && npx playwright install chromium` completes.
+- **Playwright and Chromium versions can mismatch.** Browser launch errors name `npx playwright install chromium`; reinstall the managed Chromium binary before diagnosing extension behavior.
+- **Browser lifecycle is session-scoped.** `/browser off`, `browser_close`/`browser_kill`, and `session_shutdown` close the persistent context; verify no Chromium child remains after live tests.
+- **Persistent profiles retain site state.** Cookies and storage survive browser relaunches by default; set `PI_BROWSER_PROFILE` to a disposable temp directory when testing clean state.
 - **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or esbuild bundling with Pi peers externalized for syntax-only checks; live behavior still needs a real Pi session.
 
 ## Source isolation versus runtime sharing

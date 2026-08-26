@@ -2,7 +2,7 @@
 
 ## Workspace and package boundary
 
-This repository publishes as `@lopezpetergabriel/pi-extensions@0.2.6`, one Pi package containing nine extensions, three skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
+This repository publishes as `@lopezpetergabriel/pi-extensions@0.3.0`, one Pi package containing ten extensions, three skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
 
 - The npm allowlist ships runtime TS/helpers, workflow plan template, agent/skill Markdown, `docs/engineering/**`, README/LICENSE, and npm-mandatory nested READMEs under engineering-docs/filechanges. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state; package gates enforce <=512 KiB packed and <=1 MiB unpacked.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
@@ -18,15 +18,16 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.2.6`, one Pi pa
 
 | # | Entrypoint | Surface | Owned state / role |
 |---|---|---|---|
-| 1 | `agent/extensions/ccc-search/index.ts` | `ccc_search` tool | Validates bounded semantic-search input and invokes fixed `ccc search` argv without a shell. |
-| 2 | `agent/extensions/claude-bridge/index.ts` | `/claude-bridge` command | Owns live project bridge watcher, lock, heartbeat, request processing, response cache, and event-bus adapters. |
-| 3 | `agent/extensions/discussion-notes.ts` | `discussion_notes` tool, `/notes` command, Notes UI | Owns typed notes for selected Pi session branch and reconstructs them from branch entries. |
-| 4 | `agent/extensions/engineering-docs/index.ts` | `docs_validate_tags` tool, `/docs` command | Owns managed engineering-doc operations, tag validation, generated spokes/indexes, and branch-local reminder tracking. |
-| 5 | `agent/extensions/filechanges/index.ts` | `/filechanges`, `/filechanges-accept`, `/filechanges-decline` | Tracks successful Pi `edit`/`write` mutations against branch-local first-write baselines and can keep or revert them. |
-| 6 | `agent/extensions/notify.ts` | `agent_end` lifecycle hook | Emits terminal-native “Ready for input” notification; no persistent state. |
-| 7 | `agent/extensions/personal-memory/index.ts` | `remember`, `recall_memory_entry`, `/remember` | Owns user-global indexed personal-memory reads, writes, and one-time legacy migration. |
-| 8 | `agent/extensions/subagents/index.ts` | `spawn_explorer`, `spawn_worker`, model command, debug tools | Discovers role definitions, enforces spawn policy/concurrency/ownership, and runs isolated persisted child sessions. |
-| 9 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
+| 1 | `agent/extensions/browser/index.ts` | `/browser`; `browser_goto`, `browser_eval`, `browser_console`, `browser_network`, `browser_fill`, `browser_click`, `browser_screenshot`, `browser_close`/`browser_kill` | Owns gated persistent Chromium lifecycle, page actions, bounded console/network buffers, and browser-free unit-test helpers. |
+| 2 | `agent/extensions/ccc-search/index.ts` | `ccc_search` tool | Validates bounded semantic-search input and invokes fixed `ccc search` argv without a shell. |
+| 3 | `agent/extensions/claude-bridge/index.ts` | `/claude-bridge` command | Owns live project bridge watcher, lock, heartbeat, request processing, response cache, and event-bus adapters. |
+| 4 | `agent/extensions/discussion-notes.ts` | `discussion_notes` tool, `/notes` command, Notes UI | Owns typed notes for selected Pi session branch and reconstructs them from branch entries. |
+| 5 | `agent/extensions/engineering-docs/index.ts` | `docs_validate_tags` tool, `/docs` command | Owns managed engineering-doc operations, tag validation, generated spokes/indexes, and branch-local reminder tracking. |
+| 6 | `agent/extensions/filechanges/index.ts` | `/filechanges`, `/filechanges-accept`, `/filechanges-decline` | Tracks successful Pi `edit`/`write` mutations against branch-local first-write baselines and can keep or revert them. |
+| 7 | `agent/extensions/notify.ts` | `agent_end` lifecycle hook | Emits terminal-native “Ready for input” notification; no persistent state. |
+| 8 | `agent/extensions/personal-memory/index.ts` | `remember`, `recall_memory_entry`, `/remember` | Owns user-global indexed personal-memory reads, writes, and one-time legacy migration. |
+| 9 | `agent/extensions/subagents/index.ts` | `spawn_explorer`, `spawn_worker`, model command, debug tools | Discovers role definitions, enforces spawn policy/concurrency/ownership, and runs isolated persisted child sessions. |
+| 10 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
 
 ### Agent definitions
 
@@ -96,15 +97,15 @@ Live mutable extension state has one owner. Cross-extension mutation uses namesp
 
 Static coupling totals five imports: `claude-bridge` imports `workflow-modes`, `engineering-docs`, and `personal-memory` (`agent/extensions/claude-bridge/index.ts:6-8`), while `workflow-modes` imports `engineering-docs` from its entrypoint and policy helper (`agent/extensions/workflow-modes/index.ts:8`, `agent/extensions/workflow-modes/policy.ts:1`). `claude-bridge` is therefore the only consumer spanning multiple sibling extensions; both `workflow-modes` imports target the same sibling.
 
-Four extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
+Five extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `browser` (`agent/extensions/browser/index.ts`), `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
 
-Build topology keeps nine runtime entrypoints (`package.json:37-47`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
+Build topology keeps ten runtime entrypoints (`package.json:37-47`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
 
-- six nested manifests (`agent/extensions/ccc-search/package.json:1`, `agent/extensions/engineering-docs/package.json:1`, `agent/extensions/filechanges/package.json:1`, `agent/extensions/personal-memory/package.json:1`, `agent/extensions/subagents/package.json:1`, `agent/extensions/workflow-modes/package.json:1`);
-- four nested lockfiles (`agent/extensions/ccc-search/package-lock.json:1`, `agent/extensions/filechanges/package-lock.json:1`, `agent/extensions/subagents/package-lock.json:1`, `agent/extensions/workflow-modes/package-lock.json:1`); and
-- four nested TypeScript configs (`agent/extensions/ccc-search/tsconfig.json:1`, `agent/extensions/personal-memory/tsconfig.json:1`, `agent/extensions/subagents/tsconfig.json:1`, `agent/extensions/workflow-modes/tsconfig.json:1`).
+- seven nested manifests (`agent/extensions/browser/package.json:1`, `agent/extensions/ccc-search/package.json:1`, `agent/extensions/engineering-docs/package.json:1`, `agent/extensions/filechanges/package.json:1`, `agent/extensions/personal-memory/package.json:1`, `agent/extensions/subagents/package.json:1`, `agent/extensions/workflow-modes/package.json:1`);
+- five nested lockfiles (`agent/extensions/browser/package-lock.json:1`, `agent/extensions/ccc-search/package-lock.json:1`, `agent/extensions/filechanges/package-lock.json:1`, `agent/extensions/subagents/package-lock.json:1`, `agent/extensions/workflow-modes/package-lock.json:1`); and
+- five nested TypeScript configs (`agent/extensions/browser/tsconfig.json:1`, `agent/extensions/ccc-search/tsconfig.json:1`, `agent/extensions/personal-memory/tsconfig.json:1`, `agent/extensions/subagents/tsconfig.json:1`, `agent/extensions/workflow-modes/tsconfig.json:1`).
 
-Root scripts install the four lockfile-backed packages, then aggregate five extension suites and four typechecks (`package.json:55-62`).
+Root scripts install the five lockfile-backed packages, then aggregate six extension suites and five typechecks (`package.json:55-62`).
 
 ## Pi ↔ multi-harness bridge
 

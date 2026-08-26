@@ -1,6 +1,6 @@
 # Pi Extensions Workspace
 
-Independent development workspace for nine Pi extensions, three authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
+Independent development workspace for ten Pi extensions, three authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
 
 This repository isolates **source**, not Pi user state. Launcher reuses current Pi auth/settings/models/sessions/personal memory while disabling global extension discovery.
 
@@ -10,21 +10,22 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 - Node.js `>=22.19.0`
 - npm with network access for first bootstrap and uncached `npx` test dependencies
 - Optional: `ccc` for semantic search/indexing, `gh` for live Review-mode GitHub checks
+- Browser verification: Chromium installed with `cd agent/extensions/browser && npx playwright install chromium`
 
 ## Install
 
-Public package `@lopezpetergabriel/pi-extensions@0.2.6` ships nine extensions, three skills, and two package-owned bundled agent definitions.
+Public package `@lopezpetergabriel/pi-extensions@0.3.0` ships ten extensions, three skills, and two package-owned bundled agent definitions.
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.2.6
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.6   # install for this project
-pi -e npm:@lopezpetergabriel/pi-extensions@0.2.6   # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.3.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.3.0   # install for this project
+pi -e npm:@lopezpetergabriel/pi-extensions@0.3.0   # temporary try
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.2.6` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.3.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 `ccc` remains an external prerequisite for `ccc_search` (`ccc --version`). Existing raw or global copies can double-load; inspect `pi list` and `pi config`, then remove or disable duplicates.
 
@@ -41,7 +42,7 @@ npm run check
 ./bin/pi-workspace
 ```
 
-Review any Pi project-trust prompt before approving local resources. Startup header should list exactly nine extensions from this repository and no global extension paths. Exit with `/quit`.
+Review any Pi project-trust prompt before approving local resources. Startup header should list exactly ten extensions from this repository and no global extension paths. Exit with `/quit`.
 
 `bin/pi-workspace` executes `pi --no-extensions -e <repository-root>`. Do not replace it with `pi -e .`: without `--no-extensions`, active global copies may load beside workspace copies.
 
@@ -49,7 +50,7 @@ Review any Pi project-trust prompt before approving local resources. Startup hea
 
 ```bash
 npm ci --ignore-scripts --legacy-peer-deps # install root published runtime dependency
-npm run bootstrap       # npm ci in four lockfile-backed development packages
+npm run bootstrap       # npm ci in five lockfile-backed development packages
 npm run check           # verify workspace plus npm artifact inventory/size
 npm test                # extension tests, typechecks, Cursor hook tests
 npm run test:extensions # focused extension tests
@@ -61,7 +62,7 @@ Normal launch may write Pi-owned runtime state outside repository and ignored br
 
 ## Repository map
 
-- `agent/extensions/` — nine package entrypoints and supporting code
+- `agent/extensions/` — ten package entrypoints and supporting code
 - `agent/agents/` — explorer and worker definitions
 - `agent/skills/` — grill, grill-with-docs, worker-orchestration
 - `agent/claude-bridge-client/` — shared MCP client and Claude read-only hook

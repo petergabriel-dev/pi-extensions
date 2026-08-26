@@ -5,17 +5,17 @@
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.2.6
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.2.6
-pi -e npm:@lopezpetergabriel/pi-extensions@0.2.6
+pi install npm:@lopezpetergabriel/pi-extensions@0.3.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.3.0
+pi -e npm:@lopezpetergabriel/pi-extensions@0.3.0
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.2.6` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.3.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
-The package provides nine extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
+The package provides ten extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
 The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
@@ -36,7 +36,7 @@ PACKAGE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-package.XXXXXX")"
 trap 'rm -rf "$PACKAGE_TEST_DIR"' EXIT INT TERM
 npm pack --ignore-scripts --pack-destination "$PACKAGE_TEST_DIR"
 mkdir -p "$PACKAGE_TEST_DIR/package" "$PACKAGE_TEST_DIR/agent"
-tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.2.6.tgz" \
+tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.3.0.tgz" \
   -C "$PACKAGE_TEST_DIR/package" --strip-components=1
 npm install --prefix "$PACKAGE_TEST_DIR/package" --omit=dev --omit=peer --ignore-scripts
 PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
@@ -64,8 +64,9 @@ npm run bootstrap
 npm run check
 ```
 
-`npm run bootstrap` runs nested `npm ci` only in lockfile-backed development packages:
+`npm run bootstrap` runs nested `npm ci` only in five lockfile-backed development packages:
 
+- `agent/extensions/browser`
 - `agent/extensions/ccc-search`
 - `agent/extensions/filechanges`
 - `agent/extensions/subagents`
@@ -84,7 +85,7 @@ Launcher resolves repository root from its own path and executes `pi --no-extens
 On first startup:
 
 1. Review project trust prompt before approval.
-2. Inspect `[Extensions]` header: exactly nine paths should resolve inside this repository.
+2. Inspect `[Extensions]` header: exactly ten paths should resolve inside this repository.
 3. Confirm no global extension path appears.
 4. Confirm `.pi/agents` resolves to `agent/agents`.
 5. Exit with `/quit` when done.
@@ -140,7 +141,8 @@ done
 
 | Component | Automated gate | Live/manual acceptance |
 |---|---|---|
-| Root package, nine entrypoints, three skills, two agents | `npm run check` | Source header lists nine extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
+| Root package, ten entrypoints, three skills, two agents | `npm run check` | Source header lists ten extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
+| `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
 | `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |
 | `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |
