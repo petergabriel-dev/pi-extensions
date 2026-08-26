@@ -5,7 +5,7 @@
 | ADR-0001 | Active | Pi Claude Code bridge boundary |  |
 | ADR-0002 | Superseded | Reliable Persistent-Memory Reconciliation |  |
 | ADR-0003 | Superseded | Non-Blocking Reason-Aware Persistent-Memory Consolidation |  |
-| ADR-0004 | Active | Pi Subagents | changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, or parent/child isolation |
+| ADR-0004 | Active | Pi Subagents | changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, browser proxies, or parent/child isolation |
 | ADR-0005 | Superseded | Pinned Default Persistent-Memory Model Resolution |  |
 | ADR-0006 | Superseded | Chunked Persistent-Memory Reconciliation |  |
 | ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
@@ -32,3 +32,4 @@
 | ADR-0028 | Active | Title-addressable workflow plan task ticks | changing workflow_plan_tick, task reference resolution, tracker recovery, workflow markers, CustomMessage conversion, prompt-cache behavior, or bridge plan tools |
 | ADR-0029 | Active | Consolidated extension dev tooling | changing runtime extension boundaries, root or nested package tooling, bootstrap, extension tests/typechecks, Pi host development dependency versions, or workspace manifest checks |
 | ADR-0030 | Active | Agent-driven browser verification | changing browser tools, Chromium or playwright-core setup, browser profile/lifecycle, console/network capture, page actions, screenshot handling, or browser package tests |
+| ADR-0031 | Active | Subagent browser access | changing browser page ownership, browser:* proxy events, subagent browser tools, explorer capability validation, or workflow-mode browser gating |
