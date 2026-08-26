@@ -20,6 +20,7 @@ const extensions = [
 const skills = [
   "agent/skills/grill",
   "agent/skills/grill-with-docs",
+  "agent/skills/web-debug",
   "agent/skills/worker-orchestration",
 ];
 

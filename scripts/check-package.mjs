@@ -72,7 +72,7 @@ assert.deepEqual(
   [...files].filter((file) => file.startsWith("agent/agents/")).sort(),
   expectedAgents,
 );
-const expectedSkillRoots = ["grill", "grill-with-docs", "worker-orchestration"];
+const expectedSkillRoots = ["grill", "grill-with-docs", "web-debug", "worker-orchestration"];
 assert.deepEqual(
   [...new Set([...files].flatMap((file) => file.match(/^agent\/skills\/([^/]+)\//)?.slice(1) ?? []))].sort(),
   expectedSkillRoots,
