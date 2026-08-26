@@ -25,7 +25,8 @@ export const PLAN_ENTRY = "workflow-plan";
 export const STATUS_KEY = "workflow-modes";
 export const MODE_MESSAGE_TYPE = "workflow-mode-current";
 export const MODE_TRANSITION_MESSAGE_TYPE = "workflow-mode-transition";
-export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
+export const BROWSER_MUTATION_TOOLS: ReadonlySet<string> = new Set(["browser_goto", "browser_eval", "browser_click", "browser_fill", "browser_close", "browser_kill"]);
+export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit", ...BROWSER_MUTATION_TOOLS]);
 
 export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_ALLOW, REVIEW_BASH_DENY } from "./policy.js";

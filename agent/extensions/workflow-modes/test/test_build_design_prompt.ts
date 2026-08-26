@@ -230,6 +230,23 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	handlers.get("session_start")?.({}, modeContext("discuss"));
 	const mutationBlock = await toolCall?.({ toolName: "edit", input: { path: "README.md" } }) as { reason?: string };
 	if (!mutationBlock.reason?.startsWith("edit was blocked.")) throw new Error("mutation block reason was not past-tense");
+	const browserMutationTools = ["browser_goto", "browser_eval", "browser_click", "browser_fill", "browser_close", "browser_kill"];
+	const browserReadTools = ["browser_console", "browser_screenshot", "browser_network"];
+	for (const mode of ["discuss", "plan", "review"] as const) {
+		handlers.get("session_start")?.({}, modeContext(mode));
+		for (const toolName of browserMutationTools) {
+			const blocked = await toolCall?.({ toolName, input: {} }) as { reason?: string };
+			if (!blocked.reason?.startsWith(toolName + " was blocked.")) throw new Error(mode + " " + toolName + " was not blocked");
+		}
+		for (const toolName of browserReadTools) {
+			if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error(mode + " " + toolName + " was blocked");
+		}
+	}
+	handlers.get("session_start")?.({}, modeContext("build"));
+	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
+		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");
+	}
+	handlers.get("session_start")?.({}, modeContext("discuss"));
 	const readEvent = { toolName: "bash", input: { command: "rg workflow-mode-no-match" } };
 	if (await toolCall?.(readEvent) !== undefined) throw new Error("Discuss read command was blocked");
 	const expectedWrap = wrapCommand("rg workflow-mode-no-match", { cwd: process.cwd() });
