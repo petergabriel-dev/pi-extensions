@@ -65,7 +65,8 @@
     "test:cursor": "node agent/cursor-bridge-client/test-cursor-readonly-hook.js"
   },
   "dependencies": {
-    "diff": "^5.2.0"
+    "diff": "^5.2.0",
+    "playwright-core": "^1.62.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

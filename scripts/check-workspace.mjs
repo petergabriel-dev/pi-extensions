@@ -74,7 +74,7 @@ assert.equal(manifest.author, "lopezpetergabriel");
 assert.equal(manifest.engines?.node, ">=22.19.0");
 assert.deepEqual(manifest.publishConfig, { access: "public" });
 assert.deepEqual(manifest.files, publishedFiles);
-assert.deepEqual(manifest.dependencies, { diff: "^5.2.0" });
+assert.deepEqual(manifest.dependencies, { diff: "^5.2.0", "playwright-core": "^1.62.1" });
 assert.deepEqual(manifest.peerDependencies, {
   "@earendil-works/pi-ai": "*",
   "@earendil-works/pi-coding-agent": "*",
