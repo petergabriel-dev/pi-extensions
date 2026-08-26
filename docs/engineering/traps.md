@@ -11,7 +11,11 @@
 
 - **Chromium is a separate prerequisite.** `playwright-core` does not download a browser; the first browser tool call fails until `cd agent/extensions/browser && npx playwright install chromium` completes.
 - **Playwright and Chromium versions can mismatch.** Browser launch errors name `npx playwright install chromium`; reinstall the managed Chromium binary before diagnosing extension behavior.
-- **Browser lifecycle is session-scoped.** `/browser off`, `browser_close`/`browser_kill`, and `session_shutdown` close the persistent context; verify no Chromium child remains after live tests.
+- **Browser lifecycle has page and context scopes.** `browser_close`/`browser_kill` close only caller's owner page; `/browser off`, `/new`, tree reconstruction to disabled, and `session_shutdown` close the shared persistent context. Verify no Chromium child remains after live tests.
+- **Pages are lazy but explicitly capped.** Parent plus `DEFAULT_BROWSER_CONCURRENCY_CAP` child pages are allowed (four pages currently). An agent that never calls a browser tool creates no page; a fifth owner fails with page-cap exhaustion instead of silently sharing a page.
+- **Buffers are per-page.** Console and network output belongs to its owner and is capped at 1,000 entries. Parent inspection cannot see child output; restricted explorer proxies force `clear:false` so read-only discovery does not drain buffers.
+- **Timeout scope matters.** Browser operation timeout or abort reaps only caller's page, not the shared context or sibling pages. Channel requests also have bounded waits and require matching `requestId` and owner.
+- **Explorer browser access follows parent mode.** Build injects all eight browser proxies; Discuss/Plan/Review/Design inject only `browser_console`, `browser_screenshot`, and `browser_network`. Restricted explorers cannot retry mutation proxies; browser mutations are workflow-gated in the parent.
 - **Persistent profiles retain site state.** Cookies and storage survive browser relaunches by default; set `PI_BROWSER_PROFILE` to a disposable temp directory when testing clean state.
 - **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or esbuild bundling with Pi peers externalized for syntax-only checks; live behavior still needs a real Pi session.
 

@@ -18,7 +18,7 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.4.0`, one Pi pa
 
 | # | Entrypoint | Surface | Owned state / role |
 |---|---|---|---|
-| 1 | `agent/extensions/browser/index.ts` | `/browser`; `browser_goto`, `browser_eval`, `browser_console`, `browser_network`, `browser_fill`, `browser_click`, `browser_screenshot`, `browser_close`/`browser_kill` | Owns gated persistent Chromium lifecycle, page actions, bounded console/network buffers, and browser-free unit-test helpers. |
+| 1 | `agent/extensions/browser/index.ts` | `/browser`; `browser_goto`, `browser_eval`, `browser_console`, `browser_network`, `browser_fill`, `browser_click`, `browser_screenshot`, `browser_close`/`browser_kill` | Owns gated persistent Chromium context, lazy owner-keyed pages, per-page bounded console/network buffers, browser:* request/result events, and browser-free unit-test helpers. |
 | 2 | `agent/extensions/ccc-search/index.ts` | `ccc_search` tool | Validates bounded semantic-search input and invokes fixed `ccc search` argv without a shell. |
 | 3 | `agent/extensions/claude-bridge/index.ts` | `/claude-bridge` command | Owns live project bridge watcher, lock, heartbeat, request processing, response cache, and event-bus adapters. |
 | 4 | `agent/extensions/discussion-notes.ts` | `discussion_notes` tool, `/notes` command, Notes UI | Owns typed notes for selected Pi session branch and reconstructs them from branch entries. |
@@ -33,7 +33,7 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.4.0`, one Pi pa
 
 | Definition | Contract | Discovery |
 |---|---|---|
-| `agent/agents/explorer.md` | Read-only discovery using `read`, `grep`, `find`, and `ls`; returns compressed files/code/architecture/open-question output. | Bundled module-relative definition; user/project overrides follow explicit scope. |
+| `agent/agents/explorer.md` | Repository-read-only discovery using `read`, `grep`, `find`, `ls`, and parent-injected browser proxies; returns compressed files/code/architecture/open-question output. | Bundled module-relative definition; user/project overrides follow explicit scope. |
 | `agent/agents/worker.md` | Build-mode scoped implementation using coding tools; returns summary, touched files, commands, follow-ups, and questions. | Bundled module-relative definition; user/project overrides follow explicit scope. |
 
 Subagent discovery is module-relative for bundled definitions. Scope defaults to bundled+user; project is bundled+nearest project; both is bundled, then user, then project, with later same-name definitions winning. A selected valid-but-unsafe explorer override remains selected for validation and is rejected rather than silently replaced.
@@ -65,6 +65,7 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 | File-change baselines and clear/untrack events | Selected Pi session branch custom entries | `filechanges` | Host session storage |
 | Docs changed-file/touched/snooze markers | Selected Pi session branch custom entries | `engineering-docs` | Host session storage |
 | Parent and child session files | Pi user-global agent session storage | Pi host / `SessionManager` | Excluded |
+| Browser gate, shared Chromium context, owner-keyed pages, per-page buffers | Selected session branch `browser:state` plus live Playwright state; profile defaults to `<agentDir>/extensions/browser/.profile` or `PI_BROWSER_PROFILE` | `browser` | Gate is branch-persisted; context, pages, and buffers are process runtime state; profile is user-global runtime state |
 | Auth, settings, model catalogs | Pi user-global agent directory | Pi host | Reused, never copied into Git |
 | Personal memory entries and generated index | `~/.pi/memory/*.md`, `~/.pi/memory/MEMORY.md` | `personal-memory/store.ts` | User-global, excluded |
 | Bridge requests, responses, processed cache, policy, heartbeat | `<project>/.pi/memory/bridge/` | `claude-bridge` | Ephemeral, ignored |
@@ -75,10 +76,12 @@ Project truth belongs in `docs/engineering/` and ADRs. Discussion notes are sess
 ## Extension interaction map
 
 ```text
-workflow-modes ──state/events──> engineering-docs write gating
+subagents ──browser:request──> browser-owned page operations
+browser ──browser:result──> subagents browser proxies
+workflow-modes ──tool-call gate──> browser mutation tools
        │
+       ├──state/events──> engineering-docs write gating
        ├──state/build gate──────> subagents spawn_worker
-       │
        └──state/save-plan───────> claude-bridge <──file IPC── bridge clients
                                       │
                                       ├──add event────> discussion-notes
@@ -97,7 +100,7 @@ Live mutable extension state has one owner. Cross-extension mutation uses namesp
 
 Static coupling totals five imports: `claude-bridge` imports `workflow-modes`, `engineering-docs`, and `personal-memory` (`agent/extensions/claude-bridge/index.ts:6-8`), while `workflow-modes` imports `engineering-docs` from its entrypoint and policy helper (`agent/extensions/workflow-modes/index.ts:8`, `agent/extensions/workflow-modes/policy.ts:1`). `claude-bridge` is therefore the only consumer spanning multiple sibling extensions; both `workflow-modes` imports target the same sibling.
 
-Five extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `browser` (`agent/extensions/browser/index.ts`), `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
+Four extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Browser uses the namespaced `browser:request`/`browser:result` event channel; incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
 
 Build topology keeps ten runtime entrypoints (`package.json:37-47`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
 
@@ -153,7 +156,7 @@ Only one fresh bridge session processes a project. Another watcher becomes passi
 
 Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus the active saved-plan body when present (`workflow-modes/caveman.ts`), then Caveman or normal-style override. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
 
-Discuss, Plan, and Review block mutation tools. Design allows `write`/`edit` only inside `docs/design/**` or manifest-declared token files, failing closed to `docs/design/**` when manifest is missing or invalid. Design Bash reuses Plan's sandboxed read/test policy. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
+Discuss, Plan, and Review block mutation tools, including browser navigation, evaluation, actions, and page close. Design allows `write`/`edit` only inside `docs/design/**` or manifest-declared token files, failing closed to `docs/design/**` when manifest is missing or invalid; browser mutation tools remain blocked there. Design Bash reuses Plan's sandboxed read/test policy. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
 
 The extension publishes `workflow-modes:get/state`, `workflow-modes:changed`, and `workflow-modes:save-plan/result` events. Engineering docs consumes state for write gating; subagents queries it before worker spawn; bridge uses it for recall and plan save.
 
@@ -194,7 +197,8 @@ Search may use daemon state under `~/.cocoindex_code/`, ignored project `.cocoin
 
 Subagents run as persisted in-process child `AgentSession`s with a fresh `SessionManager.create(ctx.cwd)`. Child resource loaders disable extension, theme, skill, and context-file discovery; parent receives only parsed final structured output, while child transcript remains in host session storage.
 
-- Explorer definitions must contain only `read`, `grep`, `find`, and `ls`.
+- Explorer definitions must contain only repository-read tools (`read`, `grep`, `find`, `ls`) plus the browser verification proxy set. Browser proxies are injected by the parent at spawn time; they do not grant repository mutation tools.
+- Browser proxy selection uses parent mode at spawn time: Build receives the eight browser tools; other modes receive only `browser_console`, `browser_screenshot`, and `browser_network`, with buffer clearing disabled for restricted explorers. Each worker/explorer run receives a distinct browser owner and its page is reaped on exit.
 - Worker spawn queries live workflow mode and refuses outside Build.
 - Spawn graph is bounded to parent → worker → explorer. Workers receive nested explorer only; explorers receive no spawn tools.
 - Default concurrency lane cap is three; reserved nested-explorer lane cap is one. Global settings may be overridden by nearest project `.pi/settings.json`.
@@ -202,6 +206,12 @@ Subagents run as persisted in-process child `AgentSession`s with a fresh `Sessio
 - Progress widget is keyed/throttled and clears after all runs.
 - Idle watchdog resets on every child event; absolute max-total timer does not reset. Timeout failures preserve partial output metadata.
 - `/subagent-model` and `/subagent-effort` manage per-role model and thinking-level defaults; debug tools expose progress, graph, concurrency, discovery, direct run, and in-process spike diagnostics.
+
+### Browser page state model
+
+`browser` launches one persistent Chromium context, then creates pages lazily with `context.newPage()` for validated owners. The parent owns one page; concurrent subagents may own up to `DEFAULT_BROWSER_CONCURRENCY_CAP` additional pages, so `MAX_BROWSER_PAGES` is currently four. The explicit registry rejects new owners at that cap.
+
+Each owner has independent console and network ring buffers capped at 1,000 entries. Reading one owner's buffers cannot drain another owner's output. Owner close, timeout, or abort removes only that page; `/browser off`, `/new`, tree reconstruction to disabled, and `session_shutdown` close the shared context and all pages. Browser proxy calls use `browser:request`/`browser:result` with request and owner correlation plus bounded waits.
 
 ## Engineering docs
 
