@@ -6,6 +6,12 @@ import { Type } from "typebox";
 export const BROWSER_STATE_ENTRY = "browser:state";
 export const BROWSER_STATUS_KEY = "browser";
 export const BROWSER_INSTALL_COMMAND = "npx playwright install chromium";
+export const DEFAULT_BROWSER_TIMEOUT_MS = 30_000;
+export const MIN_BROWSER_TIMEOUT_MS = 100;
+export const MAX_BROWSER_TIMEOUT_MS = 120_000;
+export const MAX_BROWSER_URL_LENGTH = 2_048;
+export const MAX_BROWSER_EXPRESSION_LENGTH = 10_000;
+export const BROWSER_EVAL_GUIDANCE = "Use a single expression, function source, or IIFE. Wrap top-level return and multiple statements as `(() => { ... })()`.";
 export const BROWSER_TOOL_NAMES = [
 	"browser_goto",
 	"browser_eval",
@@ -64,6 +70,179 @@ export function resolveBrowserEnabled(branch: readonly unknown[]): boolean {
 export function browserStatus(enabled: boolean): string {
 	return `Browser: ${enabled ? "ON" : "OFF"}`;
 }
+
+export function validateBrowserTimeout(timeout: unknown): number {
+	if (timeout === undefined) return DEFAULT_BROWSER_TIMEOUT_MS;
+	if (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < MIN_BROWSER_TIMEOUT_MS || timeout > MAX_BROWSER_TIMEOUT_MS) {
+		throw new Error(`timeout must be an integer from ${MIN_BROWSER_TIMEOUT_MS} to ${MAX_BROWSER_TIMEOUT_MS} milliseconds`);
+	}
+	return timeout;
+}
+
+export function validateBrowserUrl(url: unknown): string {
+	if (typeof url !== "string" || url.trim().length === 0) throw new Error("url must not be empty");
+	if (url.length > MAX_BROWSER_URL_LENGTH) throw new Error(`url must be at most ${MAX_BROWSER_URL_LENGTH} characters`);
+	if (url.includes("\0")) throw new Error("url must not contain null bytes");
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new Error("url must be a valid URL");
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("url must use http or https");
+	return parsed.href;
+}
+
+function stripOuterParens(source: string): string {
+	return source.startsWith("(") && source.endsWith(")") ? source.slice(1, -1).trim() : source;
+}
+
+function isFunctionSource(source: string): boolean {
+	const candidate = stripOuterParens(source);
+	return /^(?:async\s+)?function(?:\s+[A-Za-z_$][\w$]*)?\s*\(/.test(candidate)
+		|| /^(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(candidate);
+}
+
+function isIifeSource(source: string): boolean {
+	return /^\s*\(/.test(source) && /\)\s*\(\s*\)\s*$/.test(source)
+		&& (source.includes("=>") || /\(\s*(?:async\s+)?function\b/.test(source));
+}
+
+export type BrowserEvalKind = "expression" | "function" | "iife";
+
+export function classifyBrowserEval(expression: unknown): BrowserEvalKind {
+	if (typeof expression !== "string" || expression.trim().length === 0) throw new Error("expression must not be empty");
+	if (expression.length > MAX_BROWSER_EXPRESSION_LENGTH) throw new Error(`expression must be at most ${MAX_BROWSER_EXPRESSION_LENGTH} characters`);
+	const source = expression.trim();
+	try {
+		// Parse only. Never invoke untrusted source in Node; execution happens in page context.
+		new Function(`return (${source});`);
+	} catch {
+		throw new Error(BROWSER_EVAL_GUIDANCE);
+	}
+	if (isIifeSource(source)) return "iife";
+	if (isFunctionSource(source)) return "function";
+	return "expression";
+}
+
+export function serializeBrowserEvalResult(value: unknown): unknown {
+	const seen = new WeakSet<object>();
+	function visit(candidate: unknown): unknown {
+		if (candidate === undefined || typeof candidate === "function" || typeof candidate === "symbol") return null;
+		if (typeof candidate === "number") return Number.isFinite(candidate) ? candidate : null;
+		if (typeof candidate === "bigint") return String(candidate);
+		if (candidate === null || typeof candidate !== "object") return candidate;
+		const node = candidate as { nodeType?: unknown; nodeName?: unknown };
+		if ((typeof Node !== "undefined" && candidate instanceof Node) || (typeof node.nodeType === "number" && typeof node.nodeName === "string")) return "ref: <Node>";
+		if (seen.has(candidate)) return "[Circular]";
+		seen.add(candidate);
+		if (Array.isArray(candidate)) return candidate.map(visit);
+		const output: Record<string, unknown> = {};
+		for (const [key, nested] of Object.entries(candidate)) {
+			try {
+				output[key] = visit(nested);
+			} catch {
+				output[key] = null;
+			}
+		}
+		return output;
+	}
+	return visit(value);
+}
+
+async function runBrowserOperation<T>(label: string, timeout: number, operation: () => Promise<T>): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	let timedOut = false;
+	try {
+		return await Promise.race([
+			operation(),
+			new Promise<T>((_, reject) => {
+				timer = setTimeout(() => {
+					timedOut = true;
+					reject(new Error("browser-operation-timeout"));
+				}, timeout);
+			}),
+		]);
+	} catch (error) {
+		if (timedOut) {
+			await closeBrowser().catch(() => undefined);
+			throw new Error(`${label} timed out after ${timeout} milliseconds`);
+		}
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error(`${label} failed: ${detail}`);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+export const BROWSER_SERIALIZER_SOURCE = `function serialize(value) {
+	const seen = new WeakSet();
+	function visit(candidate) {
+		if (candidate === undefined || typeof candidate === "function" || typeof candidate === "symbol") return null;
+		if (typeof candidate === "number") return Number.isFinite(candidate) ? candidate : null;
+		if (typeof candidate === "bigint") return String(candidate);
+		if (candidate === null || typeof candidate !== "object") return candidate;
+		const node = candidate;
+		if ((typeof Node !== "undefined" && candidate instanceof Node) || (typeof node.nodeType === "number" && typeof node.nodeName === "string")) return "ref: <Node>";
+		if (seen.has(candidate)) return "[Circular]";
+		seen.add(candidate);
+		if (Array.isArray(candidate)) return candidate.map(visit);
+		const output = {};
+		for (const [key, nested] of Object.entries(candidate)) {
+			try { output[key] = visit(nested); } catch { output[key] = null; }
+		}
+		return output;
+	}
+	return visit(value);
+}`;
+
+export function buildBrowserEvalScript(expression: unknown): string {
+	const kind = classifyBrowserEval(expression);
+	const source = (expression as string).trim();
+	const evaluated = kind === "expression" ? `(${source})` : kind === "function" ? `(${source})()` : source;
+	return `(async () => { const serialize = (${BROWSER_SERIALIZER_SOURCE}); const value = await ${evaluated}; return serialize(value); })()`;
+}
+
+type BrowserGotoInput = { url: string; timeout?: number };
+type BrowserEvalInput = { expression: string; timeout?: number };
+
+async function browserGotoTool(_toolCallId: string, params: BrowserGotoInput) {
+	const url = validateBrowserUrl(params.url);
+	const timeout = validateBrowserTimeout(params.timeout);
+	const result = await runBrowserOperation("browser_goto", timeout, async () => {
+		const page = await ensureBrowserPage();
+		const response = await page.goto(url, { timeout, waitUntil: "domcontentloaded" });
+		return { status: response?.status() ?? 0, finalUrl: page.url() };
+	});
+	return {
+		content: [{ type: "text" as const, text: JSON.stringify(result) }],
+		details: result,
+	};
+}
+
+async function browserEvalTool(_toolCallId: string, params: BrowserEvalInput) {
+	const timeout = validateBrowserTimeout(params.timeout);
+	const script = buildBrowserEvalScript(params.expression);
+	const result = await runBrowserOperation("browser_eval", timeout, async () => {
+		const page = await ensureBrowserPage();
+		return page.evaluate(script);
+	});
+	const serialized = serializeBrowserEvalResult(result);
+	return {
+		content: [{ type: "text" as const, text: JSON.stringify(serialized) }],
+		details: { result: serialized },
+	};
+}
+
+const BROWSER_GOTO_PARAMETERS = Type.Object({
+	url: Type.String({ minLength: 1, maxLength: MAX_BROWSER_URL_LENGTH }),
+	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
+});
+
+const BROWSER_EVAL_PARAMETERS = Type.Object({
+	expression: Type.String({ minLength: 1, maxLength: MAX_BROWSER_EXPRESSION_LENGTH }),
+	timeout: Type.Optional(Type.Integer({ minimum: MIN_BROWSER_TIMEOUT_MS, maximum: MAX_BROWSER_TIMEOUT_MS })),
+});
 
 async function launchBrowser(): Promise<{ context: BrowserContext; page: BrowserPage }> {
 	const profileDir = resolveBrowserProfilePath();
@@ -156,6 +335,22 @@ async function setBrowserEnabled(pi: ExtensionAPI, ctx: ExtensionContext, enable
 }
 
 export default function browserExtension(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "browser_goto",
+		label: "Browser Goto",
+		description: "Navigate the session browser to an HTTP or HTTPS URL and return status and final URL.",
+		parameters: BROWSER_GOTO_PARAMETERS,
+		execute: browserGotoTool,
+	});
+
+	pi.registerTool({
+		name: "browser_eval",
+		label: "Browser Eval",
+		description: "Evaluate a bounded expression, function source, or IIFE in the current browser page.",
+		parameters: BROWSER_EVAL_PARAMETERS,
+		execute: browserEvalTool,
+	});
+
 	for (const name of ["browser_close", "browser_kill"] as const) {
 		pi.registerTool({
 			name,
