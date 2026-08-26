@@ -15,7 +15,7 @@ pi remove npm:@lopezpetergabriel/pi-extensions
 
 Install commands pin the exact `@0.4.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
-The package provides ten extensions, three skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
+The package provides ten extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
 The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
@@ -141,7 +141,7 @@ done
 
 | Component | Automated gate | Live/manual acceptance |
 |---|---|---|
-| Root package, ten entrypoints, three skills, two agents | `npm run check` | Source header lists ten extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
+| Root package, ten entrypoints, four skills, two agents | `npm run check` | Source header lists ten extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
 | `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
 | `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |

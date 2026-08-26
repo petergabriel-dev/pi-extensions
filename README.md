@@ -1,6 +1,6 @@
 # Pi Extensions Workspace
 
-Independent development workspace for ten Pi extensions, three authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
+Independent development workspace for ten Pi extensions, four authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
 
 This repository isolates **source**, not Pi user state. Launcher reuses current Pi auth/settings/models/sessions/personal memory while disabling global extension discovery.
 
@@ -14,7 +14,7 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 
 ## Install
 
-Public package `@lopezpetergabriel/pi-extensions@0.4.0` ships ten extensions, three skills, and two package-owned bundled agent definitions.
+Public package `@lopezpetergabriel/pi-extensions@0.4.0` ships ten extensions, four skills, and two package-owned bundled agent definitions.
 
 ```bash
 pi install npm:@lopezpetergabriel/pi-extensions@0.4.0
@@ -64,7 +64,7 @@ Normal launch may write Pi-owned runtime state outside repository and ignored br
 
 - `agent/extensions/` — ten package entrypoints and supporting code
 - `agent/agents/` — explorer and worker definitions
-- `agent/skills/` — grill, grill-with-docs, worker-orchestration
+- `agent/skills/` — grill, grill-with-docs, web-debug, worker-orchestration
 - `agent/claude-bridge-client/` — shared MCP client and Claude read-only hook
 - `agent/cursor-bridge-client/` — Cursor read-only hook
 - `.cursor/` — project MCP, hooks, and discuss/plan commands
