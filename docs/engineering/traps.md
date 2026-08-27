@@ -45,7 +45,7 @@
 ## Project marker precedence
 
 - **Nearest ancestor `.pi` wins bridge/project discovery.** Starting below unintended marker can bind bridge IPC, project agents, and project settings to wrong root.
-- **This repository’s `.pi/agents` is also marker.** Before bridge tests, verify `pwd`, repository `.pi`, Pi bridge status root, and test argument all refer same checkout.
+- **This repository’s `.pi/agents` symlink is also the project marker.** Before bridge tests, verify `pwd`, repository `.pi`, Pi bridge status root, and test argument all refer same checkout. Never delete or replace it during cleanup; remove only ignored `.pi/memory/bridge/` or project agents and hook enforcement can disappear unexpectedly.
 - **Bundled agents are always in scope.** Definitions load module-relatively. Default user scope is bundled+user; project is bundled+nearest project; both is bundled then user then project, with later same-name definitions winning. The source checkout `.pi/agents` link is only a dev/project mechanism, not npm registration. A selected valid unsafe explorer override is rejected by validation, not replaced silently. Use `agentScope: "project"` or `"both"` to add project definitions.
 
 ## Plan-mode verification limits
@@ -70,8 +70,10 @@
 - **Claude MCP config source matters.** `claude mcp add -s user` writes active user registration; editing an assumed sidecar config may not affect `claude mcp list`.
 - **Claude Bash rewriting depends on PreToolUse `updatedInput`.** If host stops honoring rewritten input, deny Bash rather than fall back to unsandboxed regex approval.
 - **Sandbox bypass flags require explicit denial.** `dangerouslyDisableSandbox` must be rejected before wrapping.
-- **Cursor native edits have a revert window.** `afterFileEdit` restores pre-edit text after write lands. Exact preimage is required; missing preimage denies closed.
+- **Cursor hook verdicts use `permission`, not `decision`.** Command hooks must return `permission` plus supported `user_message`/`agent_message` fields; a `decision` key silently fails to enforce the verdict.
+- **`afterFileEdit` has no preimage/output contract.** Cursor supplies edit metadata such as `edits[].old_string`, not exact pre-edit bytes or supported post-edit output fields. Do not attempt a post-write revert; `preToolUse` denies `Write` before execution.
 - **Cursor shell classification is conservative.** Known reads allow, obvious writes deny, unknown commands ask. New exotic write forms require deny-pattern coverage.
+- **Cursor docs nudge is not a gate.** `.cursor/hooks/docs-nudge.js` asks on `git commit` when staged non-doc changes omit `docs/engineering/**`; malformed input and Git errors allow so commits are never blocked by the nudge.
 
 ## Workflow modes and review
 

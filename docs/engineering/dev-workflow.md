@@ -134,7 +134,7 @@ This runs:
 1. Workspace inventory/integrity check.
 2. Focused ask-user-question queue test, then CCC, engineering-docs, personal-memory, subagent-timeout, and workflow-mode tests.
 3. Configured TypeScript checks.
-4. Cursor read-only hook tests.
+4. Cursor read-only hook and neutral Cursor-kit tests.
 
 It does not start Pi, call a model, run live bridge protocol tests, exercise file-change rollback interactively, or verify terminal notification rendering.
 
@@ -146,6 +146,7 @@ npm run test:ask-user-question
 npm run test:extensions
 npm run typecheck
 npm run test:cursor
+npm run test:cursor-kit
 bash -n bin/pi-workspace
 python3 -m json.tool .cursor/hooks.json >/dev/null
 python3 -m json.tool .cursor/mcp.json >/dev/null
@@ -176,7 +177,7 @@ done
 | `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
 | `ask-user-question` | `npm run test:ask-user-question` | Queue test covers FIFO order, batch cancellation, abort re-check, drain reset, and per-question Skip progression. |
 | Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff plus `read_plan_tasks`/`tick_plan_task`. |
-| Cursor MCP/hooks/commands | `node agent/cursor-bridge-client/test-cursor-readonly-hook.js` | Real Cursor recall/capture/save; shell/MCP denial; native edit byte restoration. |
+| Cursor MCP/hooks/commands | `npm run test:cursor` and `npm run test:cursor-kit` | Real Cursor bridge commands, shell/MCP denial, `Write` pre-tool denial, neutral commands, and commit nudge. |
 | Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |
 
 ## Saved plan workflow
@@ -263,20 +264,30 @@ Acceptance:
 
 ## Cursor bridge workflow
 
-Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and command templates are relative and ready from workspace root.
+Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and bridge command templates are relative and ready from workspace root.
 
 1. Launch Pi and confirm intended bridge root.
 2. Open same root in Cursor.
-3. Use Cursor discuss/plan commands; pass `conversation_id` as `sessionId` when available.
+3. Use `/pi-discuss` or `/pi-plan`; pass `conversation_id` as `sessionId` when available.
 4. Verify recall/capture/save plus `read_plan_tasks`/`tick_plan_task` through `pi-claude-bridge`.
-5. Verify read-only shell, non-bridge MCP, and native-edit behavior.
+5. Verify read-only shell, non-bridge MCP, and `Write` denial from `preToolUse`.
 6. Return to Pi Build for mutations.
 
-Focused hook gate:
+Focused hook gates:
 
 ```bash
-node agent/cursor-bridge-client/test-cursor-readonly-hook.js
+npm run test:cursor
+npm run test:cursor-kit
 ```
+
+## Cursor-neutral workflow
+
+`.cursor/commands/discuss.md`, `.cursor/commands/plan.md`, and `.cursor/commands/build.md` form a standalone workflow for repositories without Pi or bridge configuration.
+
+- `/discuss` asks one focused question at a time, records the working handoff in conversation, and does not edit files.
+- `/plan` produces Evidence, Target files, and atomic Given/When/Then tasks with NFRs, verification gates, and commit boundaries. It creates no files during planning and creates only task-named docs during implementation.
+- `/build` executes one task at a time, verifies before commit, stops on failure, and reports each checkpoint.
+- `npm run test:cursor-kit` covers the commit nudge hook. The nudge asks, never denies, when a commit stages non-doc changes without `docs/engineering/**`; docs-staged, empty, malformed, and Git-failure cases allow.
 
 ## Engineering docs
 

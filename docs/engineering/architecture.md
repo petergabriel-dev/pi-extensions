@@ -52,10 +52,12 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 
 - `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code and Cursor.
 - `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard.
-- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity and restores native edit preimages.
+- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity, returns Cursor's `permission` contract, and denies `Write` in `preToolUse` before the tool runs.
 - `.cursor/mcp.json` registers the shared bridge MCP client.
-- `.cursor/hooks.json` registers Cursor shell, MCP, and post-edit guards.
-- `.cursor/commands/discuss.md` and `.cursor/commands/plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints.
+- `.cursor/hooks.json` registers Cursor shell, MCP, pre-tool, and commit-nudge guards.
+- `.cursor/commands/pi-discuss.md` and `.cursor/commands/pi-plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints.
+- `.cursor/commands/{discuss,plan,build}.md` provide a neutral workflow that needs no bridge or Pi session; `.cursor/skills/write-adr/SKILL.md` documents project ADR authoring.
+- `.cursor/hooks/docs-nudge.js` asks for an engineering-doc update on code commits that stage no `docs/engineering/**` path, without blocking the commit.
 
 ## Runtime-state ownership
 
@@ -143,7 +145,7 @@ Only one fresh bridge session processes a project. Another watcher becomes passi
 - Claude hook applies to any cwd below a `.pi` marker. Mutation tools and `dangerouslyDisableSandbox` are denied.
 - On macOS, Claude Bash is rewritten through `/usr/bin/sandbox-exec` with network and non-scratch writes denied. If unavailable, Bash denies closed.
 - Cursor shell commands are allow/deny/ask classified; mutating non-bridge MCP calls deny; unknown calls ask.
-- Cursor native edits are restored from exact pre-edit bytes and return a visible denial.
+- Cursor `Write` tool calls are denied by `preToolUse` before execution and return a visible `permission: "deny"`; no Cursor hook writes or reverts files.
 - Client code has zero Pi internal imports. All Pi-state writes travel through live bridge requests.
 
 ## Workflow modes

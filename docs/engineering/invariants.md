@@ -24,7 +24,7 @@
 - Bridge tools fail loudly if Pi bridge is down or stale. No direct memory-file fallback is allowed.
 - `.pi` marker presence is the only condition for Claude Code read-only enforcement.
 - Claude Code mutation tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) are always denied in `.pi` projects.
-- Cursor client-side file writes in `.pi` projects must be blocked or reverted by project hooks; native edit reverts must restore exact pre-edit bytes and fail loud.
+- Cursor `Write` tool calls in `.pi` projects must be denied by the project `preToolUse` hook before execution, using Cursor's `permission: "deny"` output; no Cursor hook may write or revert files.
 - Cursor must not introduce a client-side Pi-state write path; Pi state changes still go only through live bridge requests.
 - Claude Code Bash in `.pi` projects must not depend on bridge `policy.json` freshness, `planBashAllow`, or any Pi round-trip for allow/deny decisions.
 - Claude Code Bash in `.pi` projects must deny `dangerouslyDisableSandbox`; sandbox bypass flags are not allowed in read-only bridge mode.
@@ -113,8 +113,8 @@
 - Design manifest `tokenFiles` is sole permission to write token files outside `docs/design/` in Design mode.
 
 - Root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) must never overwrite content outside the managed `pi-docs` marker block.
-- Spoke bodies must remain pure pointers to canonical `docs/engineering/` paths; do not add generated project facts or summaries to spokes.
-- Spoke generation and repair must be idempotent: reruns must not duplicate marker blocks or change bytes when content is already current.
+- The managed spoke block remains a pure pointer to canonical `docs/engineering/` paths; hand-written workflow discipline may live outside markers but must not add generated project facts or summaries.
+- Spoke generation and repair must be idempotent: reruns must not duplicate marker blocks or change bytes when content is already current, and must preserve hand-written content outside markers.
 
 ## Memory architecture
 
