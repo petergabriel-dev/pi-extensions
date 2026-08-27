@@ -2,27 +2,27 @@
 id: ADR-0007
 title: Workflow modes direct subagent delegation by prompt
 status: Active
-date: 2026-06-03
+date: 2026-08-27
 ---
 
 # ADR-0007: Workflow modes direct subagent delegation by prompt
 
 ## Decision
 
-- Workflow modes use prompt-only guidance to direct subagent delegation; no new structural enforcement is added.
-- Discuss keeps quick lookups inline and uses `spawn_explorer` only for genuine multi-file or multi-symbol sweeps.
-- Plan defaults multi-file, multi-symbol, and fan-out investigation to `spawn_explorer`, while the parent synthesizes evidence and decisions.
-- Build uses the worker-orchestration A+B model: for a substantial confirmed saved-plan Section-4 task, spawn exactly one `spawn_worker` with task text as `task` and scoped `fileOwnership`; skip workers for trivial one-line tasks.
-- The parent retains saved-plan task selection, Verification Gate execution, final verification, commits, and confirmation before advancing.
-- Parallel worker fan-out is reserved for ad-hoc multi-task Build requests outside the saved-plan Section-4 loop.
+- Workflow modes use prompt guidance over the async `subagent` surface; structural policy remains in the parent launch host.
+- Discuss keeps quick lookups inline and uses `subagent` with `agent: "explorer"` only for genuine multi-file or multi-symbol sweeps.
+- Plan defaults multi-file, multi-symbol, and fan-out investigation to `subagent` with `agent: "explorer"`, while the parent synthesizes evidence and decisions.
+- Build uses the worker-orchestration A+B model: for a substantial confirmed saved-plan Section-4 task, start exactly one async `subagent` with `agent: "worker"`, task text as `task`, and scoped `fileOwnership`; skip workers for trivial one-line tasks.
+- `subagents_list` monitors runs and `subagent_message` handles live follow-up or parked-question answers. The parent retains saved-plan task selection, Verification Gate, final verification, commits, and confirmation before advancing.
+- Parallel worker fan-out remains reserved for ad-hoc multi-task Build requests outside the saved-plan Section-4 loop.
 
 ## Why
 
-- Prompt-only guidance is enough for v1 behavior and avoids duplicating or weakening existing safety gates.
+- Prompt guidance sets delegation preference while parent toolset/depth/ownership gates enforce safety for async child processes.
 - Discuss needs anti-over-delegation thresholds so ordinary product grilling and quick evidence checks stay fast and conversational.
 - Plan benefits from explorer fan-out because planning often needs broad read-only discovery before synthesis.
 - Saved-plan Build mode already has a load-bearing one-task-at-a-time confirmation/verification/commit loop; sequential worker use preserves that loop while still offloading substantial isolated implementation.
-- The existing `spawn_worker` Build-mode gate remains authoritative and safer than relying on child-session workflow hooks.
+- The parent `subagent` Build/toolset gate remains authoritative because child sessions disable normal extensions and workflow hooks.
 
 ## Affects
 
@@ -55,7 +55,7 @@ Code:
 ## Read when
 
 - changing workflow-mode prompts or saved-plan orchestration
-- changing `spawn_explorer` or `spawn_worker` tool contracts
+- changing `subagent`, `subagents_list`, or `subagent_message` contracts
 - changing worker-orchestration guidance
 - debugging delegation overuse, underuse, or saved-plan loop regressions
 

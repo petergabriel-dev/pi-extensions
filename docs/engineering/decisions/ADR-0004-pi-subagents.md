@@ -1,8 +1,9 @@
 ---
 id: ADR-0004
 title: Pi Subagents
-status: Active
+status: Superseded
 date: 2026-06-01
+supersededBy: ADR-0034
 decision: Use persisted, in-process child AgentSessions with bundled explorer/worker defaults and user/project definition precedence.
 why: In-process sessions preserve parent isolation and auditability; bundled module-relative defaults make clean installs work while scoped overrides remain explicit and validated.
 affects: agent/extensions/subagents, agent/extensions/browser/index.ts, agent/extensions/workflow-modes/index.ts, agent/agents/explorer.md, agent/agents/worker.md, agent/skills/worker-orchestration/SKILL.md, docs/engineering/decisions/ADR-0031-subagent-browser-access.md, package.json, scripts/check-package.mjs
@@ -11,6 +12,8 @@ readWhen: changing subagent sessions, role definitions, agent-definition discove
 ---
 
 # ADR-0004: Pi Subagents
+
+> Superseded by [ADR-0034: Async out-of-process subagents](ADR-0034-async-out-of-process-subagents.md). This document records the prior in-process design.
 
 ## Decision
 
@@ -86,4 +89,4 @@ Code:
 
 ## Supersedes
 
-- None
+- None. Superseded by [ADR-0034-async-out-of-process-subagents.md](ADR-0034-async-out-of-process-subagents.md).

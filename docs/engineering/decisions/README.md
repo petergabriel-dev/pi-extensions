@@ -5,13 +5,13 @@
 | ADR-0001 | Active | Pi Claude Code bridge boundary |  |
 | ADR-0002 | Superseded | Reliable Persistent-Memory Reconciliation |  |
 | ADR-0003 | Superseded | Non-Blocking Reason-Aware Persistent-Memory Consolidation |  |
-| ADR-0004 | Active | Pi Subagents | changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, browser proxies, or parent/child isolation |
+| ADR-0004 | Superseded | Pi Subagents | changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, browser proxies, or parent/child isolation |
 | ADR-0005 | Superseded | Pinned Default Persistent-Memory Model Resolution |  |
 | ADR-0006 | Superseded | Chunked Persistent-Memory Reconciliation |  |
 | ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
 | ADR-0008 | Superseded | Persistent-memory reconcile connection ownership and observability |  |
 | ADR-0009 | Superseded | Bridge staging validity and malformed quarantine |  |
-| ADR-0010 | Active | Global subagent idle timeout with max-total backstop | Changing subagent timeout policy, role-agent schemas, or timeout debugging |
+| ADR-0010 | Active | Global subagent idle timeout with max-total backstop | Changing subagent timeout policy, parked-child handling, or timeout debugging |
 | ADR-0011 | Superseded | Per-Candidate Persistent-Memory Reconciliation |  |
 | ADR-0012 | Active | Per-mode ponytail lazy-senior-dev reflex |  |
 | ADR-0013 | Superseded | Manual Single-Writer Persistent-Memory Consolidation | changing persistent-memory lifecycle hooks, /memory consolidate/recover/reconcile, staging cleanup, dead-letter recovery, reinforcement, or mode-transition reminders |
@@ -35,3 +35,4 @@
 | ADR-0031 | Active | Subagent browser access | changing browser page ownership, browser:* proxy events, subagent browser tools, explorer capability validation, or workflow-mode browser gating |
 | ADR-0032 | Active | Ask-user-question UI serialization | changing ask_user_question modes, question UI ownership, queue or cancellation semantics, root test registration, worker extension loading, workflow-mode prompt composition, or question routing |
 | ADR-0033 | Active | Pi-independent Cursor kit | changing Cursor commands, hooks, ADR skill, root spoke ownership, docs write-back workflow, or cross-harness bridge boundaries |
+| ADR-0034 | Active | Async out-of-process subagents | changing async child launch, IPC framing/auth, loadout resume, cmux transport, nested agent policy, browser proxy transport, ownership locks, progress, or parked-child timeout behavior |
