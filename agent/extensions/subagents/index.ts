@@ -40,7 +40,6 @@ const MAX_FINAL_TEXT_BYTES = 50 * 1024;
 const AGENT_SCOPE_DESCRIPTION =
 	"Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.";
 const SUBAGENT_EFFORT_LEVELS: SubagentEffortLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
-let extensionPi: ExtensionAPI | undefined;
 
 const SpikeParams = Type.Object({
 	path: Type.Optional(
@@ -490,12 +489,12 @@ function configuredModel(role: AgentRole, ctx: ExtensionContext): Model<any> | u
 	return resolveModelReference(readSubagentsSettings().models?.[role], ctx);
 }
 
-function parentThinkingLevel(): SubagentParentThinkingLevel | undefined {
-	return extensionPi?.getThinkingLevel?.() as SubagentParentThinkingLevel | undefined;
+function parentThinkingLevel(pi: ExtensionAPI): SubagentParentThinkingLevel | undefined {
+	return pi.getThinkingLevel?.() as SubagentParentThinkingLevel | undefined;
 }
 
-function configuredEffort(role: AgentRole): SubagentParentThinkingLevel | undefined {
-	return resolveEffort(readSubagentsSettings(), role, parentThinkingLevel());
+function configuredEffort(pi: ExtensionAPI, role: AgentRole): SubagentParentThinkingLevel | undefined {
+	return resolveEffort(readSubagentsSettings(), role, parentThinkingLevel(pi));
 }
 
 function resolveSubagentTimeouts(): SubagentTimeoutPolicy {
@@ -548,7 +547,7 @@ function subagentFailureMessage(result: SubagentRunResult): string {
 	return "error" in result ? result.error : "unknown subagent failure";
 }
 
-export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number, parentPi?: ExtensionAPI) {
+export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number, parentPi: ExtensionAPI) {
 	return defineTool<typeof SpawnExplorerParams, unknown>({
 		name: SPAWN_EXPLORER_TOOL_NAME,
 		label: "Spawn Explorer",
@@ -579,11 +578,10 @@ export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSign
 				};
 			}
 
-			const browserPi = parentPi ?? extensionPi;
-			const browserMode: WorkflowModeQueryResult = browserPi ? await queryWorkflowMode(browserPi, signal ?? parentSignal) : { ok: false, error: "No parent extension event bus." };
+			const browserMode = await queryWorkflowMode(parentPi, signal ?? parentSignal);
 			const browserNames = browserProxyToolNames(browserMode.mode);
 			const browserOwner = nextBrowserOwner("explorer");
-			const browserTools = browserPi ? createBrowserProxyTools(browserPi, browserOwner, browserNames, browserNames.length !== BROWSER_PROXY_BUILD_TOOLS.length) : [];
+			const browserTools = createBrowserProxyTools(parentPi, browserOwner, browserNames, browserNames.length !== BROWSER_PROXY_BUILD_TOOLS.length);
 			return withSubagentSlot(
 				"explorer",
 				parentCtx.cwd,
@@ -601,12 +599,12 @@ export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSign
 								signal: signal ?? parentSignal,
 								timeoutPolicy,
 								modelOverride: configuredModel("explorer", parentCtx),
-								thinkingLevel: configuredEffort("explorer"),
+								thinkingLevel: configuredEffort(parentPi, "explorer"),
 								customTools: browserTools,
 								progress,
 							});
 						} finally {
-							if (browserPi) await reapBrowserOwner(browserPi, browserOwner, undefined);
+							await reapBrowserOwner(parentPi, browserOwner, undefined);
 						}
 					})();
 					return {
@@ -822,7 +820,7 @@ async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise
 	ctx.ui.notify(`Subagent ${role} model: ${reference}`, "info");
 }
 
-async function chooseSubagentEffort(args: string, ctx: ExtensionContext): Promise<void> {
+async function chooseSubagentEffort(args: string, ctx: ExtensionContext, pi: ExtensionAPI): Promise<void> {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
 	const role = (parts[0] === "explorer" || parts[0] === "worker"
 		? parts[0]
@@ -837,21 +835,19 @@ async function chooseSubagentEffort(args: string, ctx: ExtensionContext): Promis
 
 	writeSubagentEffort(role, effort);
 	if (effort === "inherit") {
-		return ctx.ui.notify(`Subagent ${role} effort: inherit (effective parent: ${parentThinkingLevel() ?? "unknown"})`, "info");
+		return ctx.ui.notify(`Subagent ${role} effort: inherit (effective parent: ${parentThinkingLevel(pi) ?? "unknown"})`, "info");
 	}
 	ctx.ui.notify(`Subagent ${role} effort: ${effort}`, "info");
 }
 
 export default function subagentsSpikeExtension(pi: ExtensionAPI) {
-	if (!extensionPi) extensionPi = pi;
-
 	pi.registerCommand("subagent-model", {
 		description: "Choose per-role subagent model defaults for explorer and worker.",
 		handler: chooseSubagentModel,
 	});
 	pi.registerCommand("subagent-effort", {
 		description: "Choose per-role subagent thinking levels for explorer and worker.",
-		handler: chooseSubagentEffort,
+		handler: (args, ctx) => chooseSubagentEffort(args, ctx, pi),
 	});
 
 	pi.registerTool({
@@ -897,7 +893,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 							signal,
 							timeoutPolicy,
 							modelOverride: configuredModel("explorer", ctx),
-							thinkingLevel: configuredEffort("explorer"),
+							thinkingLevel: configuredEffort(pi, "explorer"),
 							customTools: browserTools,
 							progress,
 						});
@@ -986,7 +982,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 								signal,
 								timeoutPolicy,
 								modelOverride: configuredModel("worker", ctx),
-								thinkingLevel: configuredEffort("worker"),
+								thinkingLevel: configuredEffort(pi, "worker"),
 								customTools: [createNestedExplorerTool(ctx, signal, 1, pi), ...browserTools],
 								progress,
 							});
@@ -1050,7 +1046,7 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 		description: "Debug helper for subagents development: exercise nested spawn graph rejection paths.",
 		parameters: DebugGraphParams,
 		async execute(_toolCallId, _params: DebugGraphParams, signal, _onUpdate, ctx) {
-			const nestedTool = createNestedExplorerTool(ctx, signal, 2);
+			const nestedTool = createNestedExplorerTool(ctx, signal, 2, pi);
 			const result = await nestedTool.execute(
 				"debug-depth3",
 				{ task: "This should be rejected before spawning.", agentScope: "user" },

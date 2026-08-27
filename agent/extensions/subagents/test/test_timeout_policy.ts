@@ -53,7 +53,7 @@ for (const toolName of ["spawn_explorer", "spawn_worker", "subagents_debug_run_a
 	assertNoRoleTimeoutFields(toolName, tool.parameters);
 }
 
-const nestedExplorer = createNestedExplorerTool({ cwd: process.cwd() } as never, undefined, 1);
+const nestedExplorer = createNestedExplorerTool({ cwd: process.cwd() } as never, undefined, 1, {} as never);
 assertNoRoleTimeoutFields("nested spawn_explorer", nestedExplorer.parameters as ToolSchema);
 assert.equal(Object.hasOwn(tools.get("subagents_inprocess_spike")?.parameters.properties ?? {}, "timeoutMs"), true);
 
