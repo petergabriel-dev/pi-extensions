@@ -53,6 +53,6 @@ for (const toolName of ["subagent", "subagents_list"]) {
 	assert.ok(tool, `${toolName} registered`);
 }
 assertNoRoleTimeoutFields("subagent", tools.get("subagent")!.parameters);
-assert.deepEqual([...tools.keys()].sort(), ["subagent", "subagents_list"]);
+assert.deepEqual([...tools.keys()].sort(), ["subagent", "subagent_message", "subagents_list"]);
 
 console.log("subagent timeout policy tests passed");

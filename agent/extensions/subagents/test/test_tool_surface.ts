@@ -60,8 +60,10 @@ const context = {
 };
 
 const originalLaunch = SubagentLaunchHost.prototype.launch;
+const originalResume = SubagentLaunchHost.prototype.resume;
 const originalClose = SubagentLaunchHost.prototype.close;
 let launched: SubagentLaunchOptions | undefined;
+let resumedTask: string | undefined;
 SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOptions): Promise<SubagentLaunchHandle> {
 	launched = options;
 	const result = Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result" });
@@ -76,18 +78,32 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 		kill: () => undefined,
 	};
 };
+SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options): Promise<SubagentLaunchHandle> {
+	resumedTask = task;
+	const result = Promise.resolve({ owner: "subagent-1", childSessionId: "child-resumed", text: "resumed result" });
+	queueMicrotask(() => { void options.onResult?.("resumed result"); });
+	return {
+		owner: "subagent-1",
+		childSessionId: "child-resumed",
+		pid: 124,
+		loadoutPath,
+		result,
+		request: async () => undefined,
+		kill: () => undefined,
+	};
+};
 SubagentLaunchHost.prototype.close = async function (): Promise<void> {};
 
 try {
 	subagentsExtension(fakePi as never);
-	assert.deepEqual([...registeredTools.keys()].sort(), ["subagent", "subagents_list"]);
+	assert.deepEqual([...registeredTools.keys()].sort(), ["subagent", "subagent_message", "subagents_list"]);
 	assert.deepEqual(registeredCommands.sort(), ["subagent-effort", "subagent-model"]);
 	await handlers.get("session_start")?.({}, context);
 
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
 	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously/);
 	assert.equal(launched?.owner, "subagent-1");
-	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question"]);
 
 	await new Promise((resolve) => setImmediate(resolve));
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
@@ -97,9 +113,21 @@ try {
 	assert.equal(sentMessages.length, 1);
 	assert.match(sentMessages[0]!.content, /surface result/);
 	assert.ok(widgetRenders.length > 0);
+
+	const resumeResult = await registeredTools.get("subagent_message")!.execute("call-3", { owner: "subagent-1", message: "resume task" }, new AbortController().signal, undefined, context);
+	assert.match((resumeResult as { content: Array<{ text: string }> }).content[0]!.text, /resumed asynchronously/);
+	assert.equal(resumedTask, "resume task");
+	await new Promise((resolve) => setImmediate(resolve));
+	const resumedList = await registeredTools.get("subagents_list")!.execute("call-4", {}, new AbortController().signal, undefined, context);
+	const resumedDetails = (resumedList as { details: { agents: Array<{ status: string; result?: string }> } }).details;
+	assert.equal(resumedDetails.agents[0]?.status, "done");
+	assert.equal(resumedDetails.agents[0]?.result, "resumed result");
+	assert.equal(sentMessages.length, 2);
+	assert.match(sentMessages[1]!.content, /resumed result/);
 	await handlers.get("session_shutdown")?.({}, context);
 	console.log("subagent tool surface tests passed");
 } finally {
 	SubagentLaunchHost.prototype.launch = originalLaunch;
+	SubagentLaunchHost.prototype.resume = originalResume;
 	SubagentLaunchHost.prototype.close = originalClose;
 }

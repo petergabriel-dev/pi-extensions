@@ -11,7 +11,7 @@ import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type AgentScope } from "./agents.ts";
 import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
-import { SubagentLaunchHost, type SubagentResult } from "./launch.ts";
+import { SubagentLaunchHost, type SubagentLaunchHandle, type SubagentQuestion, type SubagentResult } from "./launch.ts";
 import {
 	clearSubagentProgress,
 	setSubagentProgressContext,
@@ -21,6 +21,7 @@ import {
 
 const SUBAGENT_TOOL_NAME = "subagent";
 const SUBAGENTS_LIST_TOOL_NAME = "subagents_list";
+const SUBAGENT_MESSAGE_TOOL_NAME = "subagent_message";
 const AGENT_SCOPE_DESCRIPTION =
 	"Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.";
 const SUBAGENT_EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
@@ -42,6 +43,13 @@ type SubagentParams = Static<typeof SubagentParams>;
 
 const SubagentsListParams = Type.Object({});
 type SubagentsListParams = Static<typeof SubagentsListParams>;
+
+const SubagentMessageParams = Type.Object({
+	owner: Type.String({ minLength: 1, maxLength: 128, description: "Unique subagent owner from subagents_list." }),
+	message: Type.String({ minLength: 1, maxLength: MAX_FINAL_TEXT_BYTES, description: "Message or answer to send to subagent." }),
+	questionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Question ID when answering a waiting child." })),
+});
+type SubagentMessageParams = Static<typeof SubagentMessageParams>;
 
 export type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 
@@ -108,6 +116,9 @@ interface SubagentRecord {
 	task: string;
 	startedAt: number;
 	finishedAt?: number;
+	loadoutPath?: string;
+	handle?: SubagentLaunchHandle;
+	question?: SubagentQuestion;
 	result?: string;
 	error?: string;
 	steered: boolean;
@@ -317,6 +328,42 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		while (records.size > MAX_TRACKED_RUNS) records.delete(records.keys().next().value as string);
 	};
 
+	const callbacksFor = (record: SubagentRecord) => ({
+		onResult: (text: string) => steerResult(pi, record, text),
+		onStatus: (status: "running" | "waiting") => {
+			record.status = status;
+			if (status === "running") record.question = undefined;
+			record.progress?.setStatus(status);
+		},
+		onQuestion: (question: SubagentQuestion) => {
+			record.question = question;
+			record.progress?.setStatus("waiting");
+			const options = question.options?.length ? `\nOptions: ${question.options.join(", ")}` : "";
+			pi.sendUserMessage(
+				`Subagent ${record.owner} is waiting for an answer.\nQuestion ID: ${question.questionId}\n${question.question}${options}\n\nReply with subagent_message using owner ${record.owner} and this questionId.`,
+				{ deliverAs: "followUp" },
+			);
+		},
+	});
+
+	const attachHandle = (record: SubagentRecord, handle: SubagentLaunchHandle): void => {
+		record.handle = handle;
+		record.childSessionId = handle.childSessionId;
+		record.loadoutPath = handle.loadoutPath;
+		void handle.result.then((result: SubagentResult) => {
+			record.result = result.text;
+			record.finishedAt = Date.now();
+			if (!record.steered) steerResult(pi, record, result.text);
+			record.status = record.steered ? "done" : "failed";
+			record.progress?.finish(record.status === "done" ? "done" : "failed");
+		}).catch((error: unknown) => {
+			record.status = "failed";
+			record.finishedAt = Date.now();
+			record.error = error instanceof Error ? error.message : String(error);
+			record.progress?.finish("failed");
+		});
+	};
+
 	pi.on("session_start", (_event, ctx) => {
 		setSubagentProgressContext(ctx);
 		ensureHost(ctx);
@@ -365,11 +412,12 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				const unsafeReason = validateExplorerTools(agent.tools);
 				if (unsafeReason) return { content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }], details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools } };
 			}
-			const tools = agent.tools ?? [];
-			if (tools.length === 0) {
-				const reason = `Agent ${agentName} has no explicit tools; refusing to launch unrestricted child.`;
+			const configuredTools = agent.tools ?? [];
+			if (configuredTools.length === 0) {
+				const reason = `Agent ${agentName} has no explicit tools; refusing to launch child.`;
 				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason } };
 			}
+			const tools = [...new Set([...configuredTools, "ask_question"])] as string[];
 
 			const owner = nextOwner();
 			const progress = startSubagentProgress(role, { name: owner });
@@ -400,21 +448,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 					model: selectedModel ? modelReference(selectedModel) : undefined,
 					thinkingLevel: configuredEffort(pi, role),
 					signal,
-					onResult: (text) => steerResult(pi, record, text),
+					...callbacksFor(record),
 				});
-				record.childSessionId = handle.childSessionId;
-				void handle.result.then((result: SubagentResult) => {
-					record.status = "done";
-					record.finishedAt = Date.now();
-					record.result = result.text;
-					if (!record.steered) steerResult(pi, record, result.text);
-					record.progress?.finish("done");
-				}).catch((error: unknown) => {
-					record.status = "failed";
-					record.finishedAt = Date.now();
-					record.error = error instanceof Error ? error.message : String(error);
-					record.progress?.finish("failed");
-				});
+				attachHandle(record, handle);
 				return {
 					content: [{ type: "text", text: `Subagent ${owner} started asynchronously. Result will arrive as a new parent turn.` }],
 					details: { ok: true, owner, childSessionId: handle.childSessionId, agent: agent.name, role, status: record.status },
@@ -425,6 +461,64 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				record.error = error instanceof Error ? error.message : String(error);
 				progress.finish("failed");
 				return { content: [{ type: "text", text: `Subagent launch failed: ${record.error}` }], details: { ok: false, owner, error: record.error } };
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: SUBAGENT_MESSAGE_TOOL_NAME,
+		label: "Message Subagent",
+		description: "Send message to a live subagent, answer its pending question, or resume a finished subagent session.",
+		parameters: SubagentMessageParams,
+		async execute(_toolCallId, params: SubagentMessageParams, signal, _onUpdate, ctx) {
+			const owner = params.owner.trim();
+			const message = params.message.trim();
+			const record = records.get(owner);
+			if (!record) return { content: [{ type: "text", text: `Unknown subagent ${owner}.` }], details: { ok: false, error: "Unknown subagent" } };
+			if (record.status === "waiting") {
+				if (!record.question || params.questionId !== record.question.questionId) {
+					return { content: [{ type: "text", text: `Subagent ${owner} is waiting for question ${record.question?.questionId ?? "(unknown)"}.` }], details: { ok: false, error: "Question ID mismatch", questionId: record.question?.questionId } };
+				}
+				if (!ensureHost(ctx).answerQuestion(owner, record.question.questionId, message)) {
+					return { content: [{ type: "text", text: `Could not answer question ${record.question.questionId}; child may have exited.` }], details: { ok: false, error: "Question is no longer pending" } };
+				}
+				return { content: [{ type: "text", text: `Answer delivered to ${owner}.` }], details: { ok: true, owner, questionId: record.question.questionId } };
+			}
+
+			if (record.status === "running") {
+				if (!record.handle) return { content: [{ type: "text", text: `Subagent ${owner} has no live handle.` }], details: { ok: false, error: "No live handle" } };
+				try {
+					await record.handle.request("message", { text: message });
+					return { content: [{ type: "text", text: `Message delivered to ${owner}.` }], details: { ok: true, owner, status: record.status } };
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					return { content: [{ type: "text", text: `Message to ${owner} failed: ${reason}` }], details: { ok: false, owner, error: reason } };
+				}
+			}
+
+			if (!record.loadoutPath) return { content: [{ type: "text", text: `Subagent ${owner} has no resumable loadout.` }], details: { ok: false, error: "No loadout" } };
+			const workflow = await queryWorkflowState(pi, signal);
+			if (record.role === "worker" && (!workflow.ok || workflow.mode !== "build")) {
+				const reason = workflow.error ?? `Subagent ${owner} cannot resume outside Build mode.`;
+				return { content: [{ type: "text", text: reason }], details: { ok: false, owner, error: reason, workflowMode: workflow.mode ?? "unknown" } };
+			}
+			record.progress = startSubagentProgress(record.role, { name: owner });
+			record.status = "running";
+			record.result = undefined;
+			record.error = undefined;
+			record.finishedAt = undefined;
+			record.steered = false;
+			record.question = undefined;
+			try {
+				const handle = await ensureHost(ctx).resume(record.loadoutPath, message, { signal, ...callbacksFor(record) });
+				attachHandle(record, handle);
+				return { content: [{ type: "text", text: `Subagent ${owner} resumed asynchronously.` }], details: { ok: true, owner, childSessionId: handle.childSessionId, status: record.status, resumed: true } };
+			} catch (error) {
+				record.status = "failed";
+				record.finishedAt = Date.now();
+				record.error = error instanceof Error ? error.message : String(error);
+				record.progress?.finish("failed");
+				return { content: [{ type: "text", text: `Subagent resume failed: ${record.error}` }], details: { ok: false, owner, error: record.error } };
 			}
 		},
 	});
@@ -445,6 +539,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : undefined,
 				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,
 				error: record.error,
+				question: record.question,
 			}));
 			const text = agents.length === 0
 				? "No subagents."

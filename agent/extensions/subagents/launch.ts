@@ -37,6 +37,14 @@ export interface SubagentLoadout {
 	createdAt: string;
 }
 
+export interface SubagentQuestion {
+	questionId: string;
+	question: string;
+	options?: string[];
+}
+
+export type SubagentRunStatus = "running" | "waiting";
+
 export interface SubagentLaunchOptions {
 	parentSessionId: string;
 	owner: string;
@@ -52,6 +60,8 @@ export interface SubagentLaunchOptions {
 	extensionPath?: string;
 	signal?: AbortSignal;
 	onResult?: (text: string) => void | Promise<void>;
+	onStatus?: (status: SubagentRunStatus) => void;
+	onQuestion?: (question: SubagentQuestion) => void | Promise<void>;
 }
 
 export type SubagentSpawnProcess = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -81,8 +91,22 @@ export interface SubagentLaunchHandle {
 	kill(): void;
 }
 
+interface SubagentRuntimeOptions {
+	task: string;
+	signal?: AbortSignal;
+	onResult?: (text: string) => void | Promise<void>;
+	onStatus?: (status: SubagentRunStatus) => void;
+	onQuestion?: (question: SubagentQuestion) => void | Promise<void>;
+}
+
+interface PendingQuestion {
+	question: SubagentQuestion;
+	resolve: (answer: string) => void;
+	reject: (error: Error) => void;
+}
+
 interface RunState {
-	options: SubagentLaunchOptions;
+	options: SubagentRuntimeOptions;
 	childSessionId: string;
 	child?: ChildProcess;
 	surface?: CmuxSurfaceHandle;
@@ -90,6 +114,7 @@ interface RunState {
 	resolveResult: (result: SubagentResult) => void;
 	rejectResult: (error: Error) => void;
 	resultSettled: boolean;
+	pendingQuestion?: PendingQuestion;
 	removeAbortListener?: () => void;
 }
 
@@ -178,6 +203,22 @@ function resultFromRequest(request: SubagentIpcRequest, childSessionId: string):
 	};
 }
 
+function questionFromRequest(request: SubagentIpcRequest): SubagentQuestion | undefined {
+	if (request.type !== "question" || !isRecord(request.payload) || typeof request.payload.questionId !== "string" || typeof request.payload.question !== "string") return undefined;
+	try {
+		validateIdentifier(request.payload.questionId, "questionId");
+	} catch {
+		return undefined;
+	}
+	const question = request.payload.question.trim();
+	if (!question || Buffer.byteLength(question, "utf8") > MAX_SUBAGENT_RESULT_BYTES) return undefined;
+	if (request.payload.options !== undefined) {
+		if (!Array.isArray(request.payload.options) || request.payload.options.length > 20 || request.payload.options.some((option) => typeof option !== "string" || !option.trim() || Buffer.byteLength(option, "utf8") > 1_000)) return undefined;
+		return { questionId: request.payload.questionId, question, options: request.payload.options.map((option) => option.trim()) };
+	}
+	return { questionId: request.payload.questionId, question };
+}
+
 function terminateChild(child: ChildProcess): void {
 	if (child.exitCode !== null || child.signalCode !== null) return;
 	child.kill("SIGTERM");
@@ -231,8 +272,6 @@ export class SubagentLaunchHost {
 		if (options.parentSessionId !== this.options.parentSessionId) throw new Error("Subagent parent session does not match IPC host.");
 		if (!options.task.trim()) throw new Error("Subagent task is required.");
 		if (!Array.isArray(options.tools) || options.tools.length === 0 || options.tools.some((tool) => typeof tool !== "string" || !tool.trim())) throw new Error("Subagent tools must be a non-empty allowlist.");
-		if (this.runs.has(options.owner)) throw new Error(`Subagent owner already exists: ${options.owner}`);
-
 		const childSessionId = options.childSessionId ?? crypto.randomUUID();
 		validateIdentifier(childSessionId, "childSessionId");
 		const loadout: SubagentLoadout = {
@@ -252,13 +291,47 @@ export class SubagentLaunchHost {
 			createdAt: new Date().toISOString(),
 		};
 		const loadoutPath = writeSubagentLoadout(loadout, this.options.agentDir ?? getAgentDir());
-		const args = buildSubagentCommandArgs(loadout, options.task);
+		return this.start(loadout, loadoutPath, options);
+	}
+
+	async resume(
+		loadoutPath: string,
+		task: string,
+		options: Pick<SubagentLaunchOptions, "signal" | "onResult" | "onStatus" | "onQuestion"> = {},
+	): Promise<SubagentLaunchHandle> {
+		if (this.closed) throw new Error("Subagent launch host is closed.");
+		if (!this.listening) await this.listen();
+		if (!task.trim()) throw new Error("Subagent task is required.");
+		const loadout = readSubagentLoadout(loadoutPath);
+		validateIdentifier(loadout.owner, "owner");
+		if (loadout.parentSessionId !== this.options.parentSessionId) throw new Error("Subagent loadout parent session does not match IPC host.");
+		const expectedPath = resolveSubagentLoadoutPath(loadout.parentSessionId, loadout.owner, this.options.agentDir ?? getAgentDir());
+		if (path.resolve(loadoutPath) !== path.resolve(expectedPath)) throw new Error("Subagent loadout path does not match its owner.");
+		return this.start(loadout, loadoutPath, { task, ...options });
+	}
+
+	answerQuestion(owner: string, questionId: string, answer: string): boolean {
+		const run = this.runs.get(owner);
+		if (!run?.pendingQuestion || run.pendingQuestion.question.questionId !== questionId || !answer.trim() || Buffer.byteLength(answer, "utf8") > MAX_SUBAGENT_RESULT_BYTES) return false;
+		run.pendingQuestion.resolve(answer);
+		return true;
+	}
+
+	private async start(loadout: SubagentLoadout, loadoutPath: string, runtime: SubagentRuntimeOptions): Promise<SubagentLaunchHandle> {
+		const existing = this.runs.get(loadout.owner);
+		if (existing) {
+			if (!existing.resultSettled) throw new Error(`Subagent owner already exists: ${loadout.owner}`);
+			await this.server.closeOwner(loadout.owner);
+			terminateRun(existing);
+			this.runs.delete(loadout.owner);
+		}
+		const args = buildSubagentCommandArgs(loadout, runtime.task);
 		const environment: Record<string, string> = {
 			PI_SUBAGENT_SOCKET: this.server.socketPath,
 			PI_SUBAGENT_TOKEN: this.server.token,
-			PI_SUBAGENT_OWNER: options.owner,
-			PI_SUBAGENT_PARENT_SESSION_ID: options.parentSessionId,
-			PI_SUBAGENT_CHILD_SESSION_ID: childSessionId,
+			PI_SUBAGENT_OWNER: loadout.owner,
+			PI_SUBAGENT_PARENT_SESSION_ID: loadout.parentSessionId,
+			PI_SUBAGENT_CHILD_SESSION_ID: loadout.childSessionId,
 			PI_SUBAGENT_LOADOUT: loadoutPath,
 		};
 		let run!: RunState;
@@ -268,14 +341,14 @@ export class SubagentLaunchHost {
 			resolveResult = resolve;
 			rejectResult = reject;
 		});
-		run = { options, childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false };
-		this.runs.set(options.owner, run);
+		run = { options: runtime, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false };
+		this.runs.set(loadout.owner, run);
 		const finishChild = (error?: Error) => {
 			run.removeAbortListener?.();
-			this.runs.delete(options.owner);
+			if (this.runs.get(loadout.owner) === run) this.runs.delete(loadout.owner);
 			if (!run.resultSettled) {
 				run.resultSettled = true;
-				rejectResult(error ?? new Error(`Subagent ${options.owner} exited before returning a result.`));
+				rejectResult(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
 			}
 		};
 		const attachChild = (child: ChildProcess): void => {
@@ -283,21 +356,13 @@ export class SubagentLaunchHost {
 			child.stdout?.on("data", () => undefined);
 			child.stderr?.on("data", () => undefined);
 			child.once("error", (error) => finishChild(error));
-			child.once("exit", (code, signal) => finishChild(new Error(`Subagent ${options.owner} exited (${code ?? signal ?? "unknown"}).`)));
-			if (options.signal) {
-				const abort = () => terminateChild(child);
-				if (options.signal.aborted) abort();
-				else {
-					options.signal.addEventListener("abort", abort, { once: true });
-					run.removeAbortListener = () => options.signal?.removeEventListener("abort", abort);
-				}
-			}
+			child.once("exit", (code, signal) => finishChild(new Error(`Subagent ${loadout.owner} exited (${code ?? signal ?? "unknown"}).`)));
 		};
 
 		let surface: CmuxSurfaceHandle | undefined;
 		try {
 			surface = this.cmux
-				? await this.cmux.launch({ cwd: options.cwd, title: options.agent.name, command: this.command, args, env: environment })
+				? await this.cmux.launch({ cwd: loadout.cwd, title: loadout.agentName, command: this.command, args, env: environment })
 				: undefined;
 		} catch (error) {
 			this.options.logger?.("cmux_launch_failed", { error: error instanceof Error ? error.message : String(error) });
@@ -306,13 +371,13 @@ export class SubagentLaunchHost {
 			run.surface = surface;
 			if (run.resultSettled) {
 				run.surface = undefined;
-				this.runs.delete(options.owner);
+				this.runs.delete(loadout.owner);
 				void surface.close();
 			}
 		} else {
 			try {
 				attachChild(this.spawnProcess(this.command, args, {
-					cwd: options.cwd,
+					cwd: loadout.cwd,
 					env: { ...process.env, ...environment },
 					stdio: ["ignore", "pipe", "pipe"],
 				}));
@@ -320,16 +385,32 @@ export class SubagentLaunchHost {
 				finishChild(error instanceof Error ? error : new Error(String(error)));
 			}
 		}
+		if (runtime.signal) {
+			const abort = () => {
+				terminateRun(run);
+				if (!run.resultSettled) {
+					run.resultSettled = true;
+					run.rejectResult(new Error(`Subagent ${loadout.owner} aborted.`));
+					if (this.runs.get(loadout.owner) === run) this.runs.delete(loadout.owner);
+				}
+			};
+			if (runtime.signal.aborted) abort();
+			else {
+				runtime.signal.addEventListener("abort", abort, { once: true });
+				run.removeAbortListener = () => runtime.signal?.removeEventListener("abort", abort);
+			}
+		}
+		runtime.onStatus?.("running");
 		void result.catch(() => undefined);
 		return {
-			owner: options.owner,
-			childSessionId,
+			owner: loadout.owner,
+			childSessionId: loadout.childSessionId,
 			pid: run.child?.pid,
 			loadoutPath,
 			result,
-			request: (type, payload) => this.request(options.owner, type, payload),
+			request: (type, payload) => this.request(loadout.owner, type, payload),
 			kill: () => {
-				const current = this.runs.get(options.owner);
+				const current = this.runs.get(loadout.owner);
 				if (current) terminateRun(current);
 			},
 		};
@@ -352,10 +433,26 @@ export class SubagentLaunchHost {
 	private async handleRequest(request: SubagentIpcRequest, _connection: unknown): Promise<unknown> {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
+		const question = questionFromRequest(request);
+		if (question) {
+			if (run.pendingQuestion) throw new Error(`Subagent ${request.owner} already has a pending question.`);
+			const answer = new Promise<string>((resolve, reject) => {
+				run.pendingQuestion = { question, resolve, reject };
+			});
+			run.options.onStatus?.("waiting");
+			try {
+				await run.options.onQuestion?.(question);
+				return { questionId: question.questionId, answer: await answer };
+			} finally {
+				if (run.pendingQuestion?.question.questionId === question.questionId) run.pendingQuestion = undefined;
+				if (!run.resultSettled) run.options.onStatus?.("running");
+			}
+		}
 		const result = resultFromRequest(request, run.childSessionId);
 		if (result) {
 			if (!run.resultSettled) {
 				run.resultSettled = true;
+				run.removeAbortListener?.();
 				run.resolveResult(result);
 				void Promise.resolve(run.options.onResult?.(result.text)).catch((error) => this.options.logger?.("result_steering_failed", { error: String(error) }));
 				if (run.surface) {
@@ -375,7 +472,10 @@ export class SubagentLaunchHost {
 		const run = this.runs.get(owner);
 		if (!run || run.resultSettled) return;
 		run.resultSettled = true;
-		run.rejectResult(error ?? new Error(`Subagent ${owner} disconnected.`));
+		run.removeAbortListener?.();
+		const disconnectError = error ?? new Error(`Subagent ${owner} disconnected.`);
+		run.pendingQuestion?.reject(disconnectError);
+		run.rejectResult(disconnectError);
 		if (run.surface) {
 			const surface = run.surface;
 			run.surface = undefined;

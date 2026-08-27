@@ -77,7 +77,7 @@ try {
 		owner: "child-test",
 		logger: (event) => logs.push(event),
 	});
-	for (const type of ["ownership", "browser", "question", "result"] as const) {
+	for (const type of ["ownership", "browser", "message", "question", "result"] as const) {
 		const payload = { type };
 		assert.deepEqual(await client.request(type, payload), payload);
 	}
