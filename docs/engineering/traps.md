@@ -113,12 +113,15 @@
 ## Pi subagents
 
 - **Child tool surface is explicit.** Out-of-process children launch with `--no-extensions` and `agent/extensions/subagents/child.ts`; only loadout-approved tools, `ask_question`, browser proxies, and allowlisted nested `subagent` are registered. Parent verifies toolset mode before launch.
+- **Child extension path follows module location.** `resolveSubagentExtensionPath()` derives `child.ts` from `import.meta.url` (`agent/extensions/subagents/launch.ts`); do not hard-code checkout paths. Source and npm installs have different absolute locations, and a missing path causes launch failure before child work starts.
+- **cmux send has shell-readiness race.** `new-surface` creates terminal without a command; `CmuxTransport` must poll `read-screen` for a shell prompt before `send`. If readiness or any cmux command fails, close the partial surface and use headless spawn (`agent/extensions/subagents/cmux.ts`, `launch.ts`).
 - **Child transcript stays out of parent context.** Only parsed final structured result returns; persisted child session is out-of-band evidence.
-- **Nested graph is bounded.** Parent → worker → explorer only. Giving worker another worker tool or explorer any spawn tool breaks recursion bound.
+- **Nested graph is bounded.** `subagent_agents:` plus depth two controls recursion. Bundled worker allowlists explorer; explorer is leaf. User/project definitions can choose other names only within the same allowlist/depth checks (`agent/extensions/subagents/agents.ts`, `policy.ts`, `index.ts`).
 - **Default scope is user.** Project test agent placed under `.pi/agents` is invisible when caller leaves `agentScope` at default.
 - **Idle timeout observes IPC activity, not hidden work.** Active child work that emits no IPC activity can hit global idle threshold; `ask_question` parks the child and pauses idle/max-total timers until answer or cancellation.
 - **Progress callbacks can outlive teardown.** Clear scheduled redraws and tolerate stale UI context on finish/failure.
-- **Worker ownership guards are process-local.** They prevent overlap among concurrent runs in same Pi process, not another process or external editor.
+- **Worker ownership guards are host-local.** `OwnershipLockManager` prevents overlap among children served by one parent host; it does not coordinate another Pi process or external editor (`agent/extensions/subagents/ownership.ts`).
+- **Browser proxy owner is IPC identity.** Child browser requests must retain child owner and request correlation; parent browser event handling must not fall back to `parent` owner, or pages/buffers can be shared accidentally (`agent/extensions/subagents/launch.ts`, `agent/extensions/subagents/index.ts`, `agent/extensions/browser/index.ts`).
 
 ## Personal memory and discussion notes
 

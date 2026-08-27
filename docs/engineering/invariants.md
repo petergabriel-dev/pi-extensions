@@ -93,19 +93,20 @@
 
 ## Pi subagents
 
-- `subagent` must query live workflow mode through the event bus before spawning; any resolved toolset containing mutating tools is refused outside `build`. This gate lives in parent because child capabilities are fixed in its loadout.
-- Child sessions launch as separate `pi --no-extensions -e agent/extensions/subagents/child.ts` processes. They do not inherit parent workflow hooks; loadout allowlist is authoritative on launch and resume.
-- Explorer agents are repository-read-only by toolset. Browser proxies are mode-scoped: read-only modes receive console/screenshot/network with buffer clearing disabled; Build may receive full browser proxy set.
-- Only child final result text enters parent context. Child transcript remains in its persisted session and is not appended to parent branch.
-- Spawn graph depth is capped at 2. Child `subagent` is exposed only when `subagent_agents:` allowlists requested definitions; depth or allowlist violations refuse.
-- Global subagent concurrency defaults to 3 through one shared lane; no reserved explorer lane exists.
-- File ownership paths must not overlap across active children. Parent IPC ownership locks release on child result, exit, crash, cancellation, or host close.
-- Progress widget updates must be keyed by `subagents-progress`, throttled to 250 ms, and cleared when all runs finish.
-- Subagent idle timeout measures active IPC time. `ask_question` parks child and pauses idle/max-total timers; answering or cancellation resumes/releases it. Active silent work can still hit idle timeout.
-- Subagent `maxTotalMs` is an absolute backstop and must not be reset by child events. `createSubagentWatchdog()` in `agent/extensions/subagents/timeout.ts` arms it once and only resets the idle timer from `touch()`.
-- Role-agent timeouts are global-only: explorer, nested explorer, worker, and debug-run resolve the same validated `subagents` policy. Public role-agent schemas expose no `timeoutMs`, `idleTimeoutMs`, or `maxTotalMs`; invalid, out-of-range, or inverted settings fall back together to 600,000ms idle / 1,200,000ms max-total (`agent/extensions/subagents/timeout-policy.ts`, `agent/extensions/subagents/index.ts`).
-- Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `hasPartialWork()` in `agent/extensions/subagents/spawn.ts` becomes true once any child tool execution has started.
-- Per-role subagent effort is settings-only: public spawn tool schemas expose no effort or thinking-level parameter; an absent `subagents.effort[role]` inherits the parent session level, while invalid values fall back to inherit (`agent/extensions/subagents/effort.ts`, `agent/extensions/subagents/index.ts`).
+- Parent `subagent` resolves live workflow state before launch. `validateSubagentToolset()` refuses any resolved mutating tool outside Build; only new launches are gated, so in-flight children survive mode changes (`agent/extensions/subagents/index.ts`, `agent/extensions/subagents/policy.ts`).
+- Child capability is loadout-authoritative. `SubagentLaunchHost` writes loadouts under Pi-owned runtime state with mode `0600`, then launches `pi --no-extensions -e agent/extensions/subagents/child.ts`; resume reuses the same toolset, prompt, session, depth, nested allowlist, and ownership snapshot (`agent/extensions/subagents/launch.ts`).
+- Every IPC frame uses the per-session random token, owner, correlation ID, and 4-byte length prefix. Invalid/unauthenticated frames are dropped; unknown owners and correlation mismatches do not reach child/browser operations (`agent/extensions/subagents/ipc.ts`).
+- Explorer definitions cannot include repository-mutating tools. Browser proxy tools are mode-scoped at launch: restricted modes receive console/screenshot/network only, and parent forces console/network buffer `clear=false`; Build may receive the full proxy set (`agent/extensions/subagents/index.ts`, `agent/extensions/subagents/child.ts`).
+- Only final child result text is steered into parent context. Child messages, questions, browser calls, nested spawns, and ownership requests remain on authenticated IPC; child transcript remains in its separate session (`agent/extensions/subagents/launch.ts`, `agent/extensions/subagents/child.ts`).
+- Nested spawn is bounded by `subagent_agents:` allowlists and maximum depth two. Explorers are leaves; a requested agent outside its allowlist or above depth cap is refused (`agent/extensions/subagents/agents.ts`, `agent/extensions/subagents/policy.ts`).
+- Global child concurrency uses one configurable default lane with capacity three; no reserved explorer lane exists (`agent/extensions/subagents/concurrency.ts`).
+- Normalized ownership paths/globs cannot overlap across active owners. Locks release on result, exit, disconnect/crash, cancellation, or host close (`agent/extensions/subagents/ownership.ts`, `agent/extensions/subagents/launch.ts`).
+- Progress uses keyed `subagents-progress` widget updates throttled to 250ms; terminal states remove entries and clear widget when no runs remain (`agent/extensions/subagents/progress.ts`).
+- Watchdog idle/max-total budgets count active time. Child `ask_question` changes status to waiting and pauses both timers; answer/cancel resumes or releases it. Active IPC touches idle timer; silent active work can still time out (`agent/extensions/subagents/timeout.ts`, `agent/extensions/subagents/launch.ts`).
+- Timeout policy is global-only and validated together: invalid, out-of-range, or inverted settings fall back to 600,000ms idle / 1,200,000ms max-total (`agent/extensions/subagents/timeout-policy.ts`).
+- Timeout values are not public spawn parameters. Parent resolves `subagents.idleTimeoutMs` and `subagents.maxTotalMs` from settings once per host; invalid, out-of-range, or inverted values use the shared defaults (`agent/extensions/subagents/index.ts`, `agent/extensions/subagents/timeout-policy.ts`).
+- Watchdog timeout rejects active child result, terminates its process/surface, reaps browser page, releases ownership and concurrency slot, and marks parent record failed (`agent/extensions/subagents/launch.ts`, `agent/extensions/subagents/index.ts`).
+- Per-role subagent effort remains settings-only: public spawn schemas expose no effort parameter; absent `subagents.effort[role]` inherits parent thinking level, invalid values fall back to inherit (`agent/extensions/subagents/effort.ts`, `agent/extensions/subagents/index.ts`).
 
 ## Engineering docs extension
 

@@ -199,23 +199,19 @@ Search may use daemon state under `~/.cocoindex_code/`, ignored project `.cocoin
 
 ## Subagents
 
-Subagents run as persisted in-process child `AgentSession`s with a fresh `SessionManager.create(ctx.cwd)`. Child resource loaders disable extension, theme, skill, and context-file discovery; parent receives only parsed final structured output, while child transcript remains in host session storage.
+`agent/extensions/subagents/index.ts` exposes `subagent`, `subagents_list`, and `subagent_message`. The parent resolves an agent definition, workflow mode, toolset, model, effort, ownership paths, and spawn depth before `SubagentLaunchHost` writes an atomic `0600` loadout under Pi-owned runtime state and starts a child process. The loadout preserves the exact tool allowlist, agent prompt, model, session ID, parent session ID, browser scope, depth, and nested-agent allowlist for resume.
 
-- Explorer definitions must contain only repository-read tools (`read`, `grep`, `find`, `ls`) plus the browser verification proxy set. Browser proxies are injected by the parent at spawn time; they do not grant repository mutation tools.
-- Browser proxy selection uses parent mode at spawn time: Build receives the eight browser tools; other modes receive only `browser_console`, `browser_screenshot`, and `browser_network`, with buffer clearing disabled for restricted explorers. Each worker/explorer run receives a distinct browser owner and its page is reaped on exit.
-- Worker spawn queries live workflow mode and refuses outside Build.
-- Spawn graph is bounded to parent → worker → explorer. Workers receive nested explorer only; explorers receive no spawn tools.
-- Default concurrency lane cap is three; reserved nested-explorer lane cap is one. Global settings may be overridden by nearest project `.pi/settings.json`.
-- Concurrent worker ownership paths may not overlap.
-- Progress widget is keyed/throttled and clears after all runs.
-- Idle watchdog resets on every child event; absolute max-total timer does not reset. Timeout failures preserve partial output metadata.
-- `/subagent-model` and `/subagent-effort` manage per-role model and thinking-level defaults; debug tools expose progress, graph, concurrency, discovery, direct run, and in-process spike diagnostics.
+`SubagentLaunchHost` owns one authenticated length-prefixed Unix socket per parent session (`agent/extensions/subagents/ipc.ts`) and routes child `result`, `question`, `message`, `browser`, `spawn`, and ownership requests. Frames require the per-host random token, owner, and correlation ID. Result completion closes cmux/browser resources; disconnect, process exit, cancellation, and host close also release ownership and concurrency slots. Parent receives final text through `sendUserMessage(..., { deliverAs: "followUp" })`; child transcript remains in its separate Pi session.
+
+Children launch with `pi --no-extensions -e agent/extensions/subagents/child.ts`; the child extension registers only loadout-approved browser/nested tools plus `ask_question`. `subagent_agents:` frontmatter controls nested definitions; `MAX_SUBAGENT_DEPTH` is two. Any toolset containing a mutating tool requires Build at spawn time. Concurrent children use one configurable default semaphore with capacity three; normalized overlapping ownership paths are rejected by `ownership.ts`.
+
+When cmux is available, `cmux.ts` creates an unfocused terminal surface, renames its tab, waits for a shell prompt, and sends the quoted child command. Any cmux failure closes the surface and falls back to headless process launch. `progress.ts` renders `subagents-progress` above the editor with 250ms throttling.
 
 ### Browser page state model
 
-`browser` launches one persistent Chromium context, then creates pages lazily with `context.newPage()` for validated owners. The parent owns one page; concurrent subagents may own up to `DEFAULT_BROWSER_CONCURRENCY_CAP` additional pages, so `MAX_BROWSER_PAGES` is currently four. The explicit registry rejects new owners at that cap.
+`browser` owns one persistent Chromium context and lazily creates owner-keyed pages through `context.newPage()`. Parent and children share the context but never a page: `MAX_BROWSER_PAGES` is four (`MAX_BROWSER_PAGES` in `agent/extensions/browser/index.ts`), with the explicit registry rejecting new owners at capacity. Child browser tools send authenticated IPC `browser` requests; the parent forwards them through `browser:request`/`browser:result` to browser-owned operations.
 
-Each owner has independent console and network ring buffers capped at 1,000 entries. Reading one owner's buffers cannot drain another owner's output. Owner close, timeout, or abort removes only that page; `/browser off`, `/new`, tree reconstruction to disabled, and `session_shutdown` close the shared context and all pages. Browser proxy calls use `browser:request`/`browser:result` with request and owner correlation plus bounded waits.
+Each owner has independent console and network ring buffers capped at 1,000 entries. Read-only child toolsets receive only console/screenshot/network and force console/network `clear=false`; Build toolsets may receive full proxy set. Timeout, abort, owner close, child result/exit, `/browser off`, `/new`, disabled tree reconstruction, and `session_shutdown` close the relevant page/context.
 
 ## Engineering docs
 
