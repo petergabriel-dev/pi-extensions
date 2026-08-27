@@ -129,6 +129,7 @@ try {
 		parentSessionId: "question",
 		agentDir: tempDir,
 		cmux: false,
+		timeoutPolicy: { idleTimeoutMs: 100, maxTotalMs: 300 },
 		spawnProcess: (_command, _args, options) => spawn(process.execPath, ["-e", questionChild], options),
 	});
 	const questionHandle = await questionHost.launch({
@@ -142,6 +143,10 @@ try {
 	const ownershipConflict = questionHost.acquireOwnership("other-owner", ["src/file.ts"]);
 	assert.equal(ownershipConflict.ok, false);
 	assert.equal(ownershipConflict.conflict?.owner, "question-owner");
+	let questionSettled = false;
+	void questionHandle.result.then(() => { questionSettled = true; }, () => { questionSettled = true; });
+	await new Promise((resolve) => setTimeout(resolve, 600));
+	assert.equal(questionSettled, false);
 	assert.equal(questionHost.answerQuestion("question-owner", "question-one", "yes"), true);
 	assert.deepEqual(await questionHandle.result, { owner: "question-owner", childSessionId: "question-child", text: "answer used" });
 	assert.deepEqual(questionStatuses, ["running", "waiting", "running"]);

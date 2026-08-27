@@ -17,6 +17,10 @@ class FakeClock implements SubagentWatchdogClock {
 		this.timers.delete(handle as number);
 	}
 
+	now(): number {
+		return this.nowMs;
+	}
+
 	advance(ms: number): void {
 		const target = this.nowMs + ms;
 		while (true) {
@@ -81,6 +85,32 @@ function makeWatchdog(idleMs = 100, maxTotalMs = 1_000) {
 	}
 	assert.deepEqual(fired, ["max_total"]);
 	assert.equal(watchdog.firedKind, "max_total");
+}
+
+{
+	const { clock, fired, watchdog } = makeWatchdog(1000, 250);
+	clock.advance(90);
+	watchdog.touch();
+	watchdog.setWaiting(true);
+	assert.equal(watchdog.waiting, true);
+	clock.advance(10_000);
+	assert.deepEqual(fired, []);
+	watchdog.setWaiting(false);
+	assert.equal(watchdog.waiting, false);
+	clock.advance(159);
+	assert.deepEqual(fired, []);
+	clock.advance(1);
+	assert.deepEqual(fired, ["max_total"]);
+
+	const parked = makeWatchdog(100, 500);
+	parked.watchdog.setWaiting(true);
+	parked.clock.advance(10_000);
+	assert.deepEqual(parked.fired, []);
+	parked.watchdog.setWaiting(false);
+	parked.clock.advance(99);
+	assert.deepEqual(parked.fired, []);
+	parked.clock.advance(1);
+	assert.deepEqual(parked.fired, ["idle"]);
 }
 
 {

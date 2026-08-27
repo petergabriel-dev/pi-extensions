@@ -11,6 +11,8 @@ import type { AgentRole, AgentConfig } from "./agents.ts";
 import { normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
 import { acquireSubagentSlot, type AcquiredSubagentSlot } from "./concurrency.ts";
 import { validateSubagentDepth } from "./policy.ts";
+import { createSubagentWatchdog, type SubagentWatchdog } from "./timeout.ts";
+import { DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_TOTAL_MS, type SubagentTimeoutPolicy } from "./timeout-policy.ts";
 import {
 	resolveSubagentSocketPath,
 	SubagentIpcServer,
@@ -84,6 +86,7 @@ export interface SubagentLaunchHostOptions {
 	cmux?: CmuxTransport | false;
 	onSpawn?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 	onBrowser?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
+	timeoutPolicy?: SubagentTimeoutPolicy;
 }
 
 export interface SubagentResult {
@@ -119,6 +122,7 @@ interface PendingQuestion {
 interface RunState {
 	options: SubagentRuntimeOptions;
 	tools: string[];
+	watchdog?: SubagentWatchdog;
 	childSessionId: string;
 	child?: ChildProcess;
 	surface?: CmuxSurfaceHandle;
@@ -400,14 +404,29 @@ export class SubagentLaunchHost {
 		});
 		run = { options: runtime, tools: loadout.tools, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false, slot };
 		this.runs.set(loadout.owner, run);
+		const releaseRun = () => {
+			run.removeAbortListener?.();
+			if (this.runs.get(loadout.owner) !== run) return;
+			this.runs.delete(loadout.owner);
+			this.ownership.release(loadout.owner);
+			run.slot?.release();
+		};
+		run.watchdog = createSubagentWatchdog({
+			idleMs: this.options.timeoutPolicy?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+			maxTotalMs: this.options.timeoutPolicy?.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS,
+			onFire: (kind) => {
+				if (run.resultSettled) return;
+				run.resultSettled = true;
+				this.reapBrowserPage(run, loadout.owner);
+				terminateRun(run);
+				releaseRun();
+				run.rejectResult(new Error(`Subagent ${loadout.owner} ${kind === "idle" ? "idle" : "maximum total"} timeout exceeded.`));
+			},
+		});
 		const finishChild = (error?: Error) => {
 			this.reapBrowserPage(run, loadout.owner);
-			run.removeAbortListener?.();
-			if (this.runs.get(loadout.owner) === run) {
-				this.runs.delete(loadout.owner);
-				this.ownership.release(loadout.owner);
-				run.slot?.release();
-			}
+			run.watchdog?.cancel();
+			releaseRun();
 			if (!run.resultSettled) {
 				run.resultSettled = true;
 				rejectResult(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
@@ -452,15 +471,12 @@ export class SubagentLaunchHost {
 		if (runtime.signal) {
 			const abort = () => {
 				this.reapBrowserPage(run, loadout.owner);
+				run.watchdog?.cancel();
 				terminateRun(run);
 				if (!run.resultSettled) {
 					run.resultSettled = true;
 					run.rejectResult(new Error(`Subagent ${loadout.owner} aborted.`));
-					if (this.runs.get(loadout.owner) === run) {
-						this.runs.delete(loadout.owner);
-						this.ownership.release(loadout.owner);
-						run.slot?.release();
-					}
+					releaseRun();
 				}
 			};
 			if (runtime.signal.aborted) abort();
@@ -491,7 +507,12 @@ export class SubagentLaunchHost {
 		process.off("exit", this.exitHandler);
 		for (const [owner, run] of this.runs) {
 			this.reapBrowserPage(run, owner);
+			run.watchdog?.cancel();
 			terminateRun(run);
+			if (!run.resultSettled) {
+				run.resultSettled = true;
+				run.rejectResult(new Error(`Subagent ${owner} host closed.`));
+			}
 			this.ownership.release(owner);
 			run.slot?.release();
 		}
@@ -512,6 +533,7 @@ export class SubagentLaunchHost {
 	private async handleRequest(request: SubagentIpcRequest, _connection: unknown): Promise<unknown> {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
+		run.watchdog?.touch();
 		if (request.type === "spawn") {
 			if (!this.options.onSpawn) throw new Error("Nested subagent spawning is unavailable.");
 			return this.options.onSpawn(request.owner, request.payload);
@@ -540,10 +562,12 @@ export class SubagentLaunchHost {
 				run.pendingQuestion = { question, resolve, reject };
 			});
 			run.options.onStatus?.("waiting");
+			run.watchdog?.setWaiting(true);
 			try {
 				await run.options.onQuestion?.(question);
 				return { questionId: question.questionId, answer: await answer };
 			} finally {
+				run.watchdog?.setWaiting(false);
 				if (run.pendingQuestion?.question.questionId === question.questionId) run.pendingQuestion = undefined;
 				if (!run.resultSettled) run.options.onStatus?.("running");
 			}
@@ -552,6 +576,7 @@ export class SubagentLaunchHost {
 		if (result) {
 			if (!run.resultSettled) {
 				run.resultSettled = true;
+				run.watchdog?.cancel();
 				run.removeAbortListener?.();
 				run.resolveResult(result);
 				void Promise.resolve(run.options.onResult?.(result.text)).catch((error) => this.options.logger?.("result_steering_failed", { error: String(error) }));
@@ -561,6 +586,7 @@ export class SubagentLaunchHost {
 					run.surface = undefined;
 					this.runs.delete(request.owner);
 					this.ownership.release(request.owner);
+					run.slot?.release();
 					void surface.close();
 				}
 			}
@@ -574,17 +600,17 @@ export class SubagentLaunchHost {
 		const run = this.runs.get(owner);
 		if (!run || run.resultSettled) return;
 		run.resultSettled = true;
+		run.watchdog?.cancel();
 		run.removeAbortListener?.();
 		const disconnectError = error ?? new Error(`Subagent ${owner} disconnected.`);
 		run.pendingQuestion?.reject(disconnectError);
 		run.rejectResult(disconnectError);
-		if (run.surface) {
-			const surface = run.surface;
-			run.surface = undefined;
+		this.reapBrowserPage(run, owner);
+		terminateRun(run);
+		if (this.runs.get(owner) === run) {
 			this.runs.delete(owner);
 			this.ownership.release(owner);
 			run.slot?.release();
-			void surface.close();
 		}
 	}
 }

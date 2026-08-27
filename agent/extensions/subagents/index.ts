@@ -14,6 +14,7 @@ import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type
 import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
 import { normalizeOwnership } from "./ownership.ts";
 import { validateSubagentAgentAllowlist, validateSubagentDepth, validateSubagentToolset } from "./policy.ts";
+import { resolveSubagentTimeoutPolicy } from "./timeout-policy.ts";
 import { SubagentLaunchHost, type SubagentLaunchHandle, type SubagentQuestion, type SubagentResult } from "./launch.ts";
 import {
 	clearSubagentProgress,
@@ -71,6 +72,8 @@ interface WorkflowStateQueryResult {
 interface SubagentsSettings {
 	models?: Partial<Record<AgentRole, string>>;
 	effort?: Partial<Record<AgentRole, string>>;
+	idleTimeoutMs?: unknown;
+	maxTotalMs?: unknown;
 }
 
 export const READ_ONLY_EXPLORER_TOOLS = new Set([
@@ -365,7 +368,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (host && hostSessionId === sessionId) return host;
 		const previous = host;
-		host = new SubagentLaunchHost({ parentSessionId: sessionId, onSpawn: spawnNested, onBrowser: (owner, payload) => requestBrowserViaParent(pi, owner, payload, records.get(owner)?.browserReadOnly ?? false) });
+		host = new SubagentLaunchHost({ parentSessionId: sessionId, timeoutPolicy: resolveSubagentTimeoutPolicy(readSubagentsSettings()), onSpawn: spawnNested, onBrowser: (owner, payload) => requestBrowserViaParent(pi, owner, payload, records.get(owner)?.browserReadOnly ?? false) });
 		hostSessionId = sessionId;
 		void previous?.close();
 		return host;
