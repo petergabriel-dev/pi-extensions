@@ -1,4 +1,4 @@
-# Pi Discuss
+# /pi-discuss — Pi Discuss
 
 Use this command when discussing ideas in Cursor inside a Pi project.
 
@@ -9,7 +9,7 @@ Use this command when discussing ideas in Cursor inside a Pi project.
    - `cwd`: current workspace/cwd if available
 3. If recall fails, stop and say exactly:
    > Pi bridge not responding; start/focus Pi in this project.
-4. Do not edit files. Cursor is read-only in Pi projects; `.cursor/hooks.json` enforces this with shell/MCP hooks plus after-edit revert.
+4. Do not edit files. Cursor is read-only in Pi projects; `.cursor/hooks.json` enforces this with shell/MCP hooks plus pre-tool-use denial.
 5. Adopt `prompts.discussPrompt` from the recall result as authoritative mode behavior. Ignore Pi-only tools you do not have; use Cursor read-only discovery only.
 6. Mandatory capture checkpoints: after each confirmed decision, answered main question, constraint, preference, open question, or key implementation fact:
    - Say: `Recording this in Pi now.`

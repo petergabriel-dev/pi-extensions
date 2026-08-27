@@ -1,4 +1,4 @@
-# Pi Plan
+# /pi-plan — Pi Plan
 
 Use this command when planning work in Cursor inside a Pi project.
 
