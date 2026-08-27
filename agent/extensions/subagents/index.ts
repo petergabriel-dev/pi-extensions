@@ -3,173 +3,65 @@ import * as path from "node:path";
 
 import { StringEnum, type Model } from "@earendil-works/pi-ai";
 import {
-	createAgentSession,
-	DefaultResourceLoader,
-	defineTool,
 	getAgentDir,
-	SessionManager,
-	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Type, type Static, type TSchema } from "typebox";
+import { Type, type Static } from "typebox";
 
-import { discoverAgents, formatAgentList, type AgentRole, type AgentScope } from "./agents.ts";
-import { getConcurrencySnapshot, withSubagentSlot, type SlotInfo } from "./concurrency.ts";
+import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type AgentScope } from "./agents.ts";
+import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
+import { SubagentLaunchHost, type SubagentResult } from "./launch.ts";
 import {
-	parseEffortLevel,
-	resolveEffort,
-	type SubagentEffortLevel,
-	type SubagentParentThinkingLevel,
-} from "./effort.ts";
-import { getProgressSnapshot, startSubagentProgress } from "./progress.ts";
-import { runSubagent, type ExplorerParsedResult, type SubagentRunResult, type WorkerParsedResult } from "./spawn.ts";
-import { resolveSubagentTimeoutPolicy, type SubagentTimeoutPolicy, type SubagentTimeoutSettings } from "./timeout-policy.ts";
+	clearSubagentProgress,
+	setSubagentProgressContext,
+	startSubagentProgress,
+	type ProgressHandle,
+} from "./progress.ts";
 
-const SPAWN_EXPLORER_TOOL_NAME = "spawn_explorer";
-const SPAWN_WORKER_TOOL_NAME = "spawn_worker";
-const TOOL_NAME = "subagents_inprocess_spike";
-const DEBUG_LIST_TOOL_NAME = "subagents_debug_list_agents";
-const DEBUG_RUN_TOOL_NAME = "subagents_debug_run_agent";
-const DEBUG_CONCURRENCY_TOOL_NAME = "subagents_debug_concurrency";
-const DEBUG_GRAPH_TOOL_NAME = "subagents_debug_spawn_graph";
-const DEBUG_PROGRESS_TOOL_NAME = "subagents_debug_progress";
-const DEFAULT_READ_PATH = "agent/AGENTS.md";
-const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_FINAL_TEXT_BYTES = 50 * 1024;
+const SUBAGENT_TOOL_NAME = "subagent";
+const SUBAGENTS_LIST_TOOL_NAME = "subagents_list";
 const AGENT_SCOPE_DESCRIPTION =
 	"Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.";
-const SUBAGENT_EFFORT_LEVELS: SubagentEffortLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const SUBAGENT_EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const DEFAULT_AGENT_SCOPE: AgentScope = "user";
+const MAX_FINAL_TEXT_BYTES = 50 * 1024;
+const MAX_TRACKED_RUNS = 100;
 
-const SpikeParams = Type.Object({
-	path: Type.Optional(
-		Type.String({
-			description: `File path the child session should read. Defaults to ${DEFAULT_READ_PATH}.`,
-		}),
-	),
-	prompt: Type.Optional(Type.String({ description: "Optional full child prompt override." })),
-	timeoutMs: Type.Optional(
-		Type.Number({
-			description: `Child session timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS}.`,
-			minimum: 1000,
-			maximum: 120000,
-		}),
-	),
-});
-
-type SpikeParams = Static<typeof SpikeParams>;
-
-const DebugListParams = Type.Object({
+const SubagentParams = Type.Object({
+	task: Type.String({ minLength: 1, maxLength: MAX_FINAL_TEXT_BYTES, description: "Task for async subagent. Result arrives as a later parent turn." }),
+	agent: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: 'Agent definition name. Defaults to "worker".' })),
 	agentScope: Type.Optional(
 		StringEnum(["user", "project", "both"] as const, {
 			description: AGENT_SCOPE_DESCRIPTION,
-			default: "user",
+			default: DEFAULT_AGENT_SCOPE,
 		}),
 	),
 });
+type SubagentParams = Static<typeof SubagentParams>;
 
-type DebugListParams = Static<typeof DebugListParams>;
+const SubagentsListParams = Type.Object({});
+type SubagentsListParams = Static<typeof SubagentsListParams>;
 
-const DebugRunParams = Type.Object({
-	agent: StringEnum(["explorer", "worker"] as const, { description: "Agent role to run." }),
-	task: Type.String({ description: "Task string to send to the child subagent." }),
-	agentScope: Type.Optional(
-		StringEnum(["user", "project", "both"] as const, {
-			description: AGENT_SCOPE_DESCRIPTION,
-			default: "user",
-		}),
-	),
-	useCurrentModel: Type.Optional(
-		Type.Boolean({
-			description: "Debug-only: ignore the agent definition's model and use the current parent model.",
-			default: false,
-		}),
-	),
-});
+export type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
 
-type DebugRunParams = Static<typeof DebugRunParams>;
-
-const DebugConcurrencyParams = Type.Object({
-	count: Type.Optional(Type.Number({ description: "Number of simulated spawns.", minimum: 1, maximum: 20, default: 5 })),
-	delayMs: Type.Optional(Type.Number({ description: "Milliseconds each simulated spawn holds its slot.", minimum: 1, maximum: 5000, default: 100 })),
-	role: Type.Optional(StringEnum(["explorer", "worker"] as const, { description: "Role lane to exercise.", default: "worker" })),
-	explorerLane: Type.Optional(Type.Boolean({ description: "Use the reserved explorer lane for explorer role.", default: false })),
-});
-
-type DebugConcurrencyParams = Static<typeof DebugConcurrencyParams>;
-
-const DebugGraphParams = Type.Object({
-	scenario: StringEnum(["depth3"] as const, { description: "Spawn graph enforcement scenario to exercise." }),
-});
-
-type DebugGraphParams = Static<typeof DebugGraphParams>;
-
-const DebugProgressParams = Type.Object({
-	delayMs: Type.Optional(Type.Number({ description: "Milliseconds to keep a fake progress row visible.", minimum: 1, maximum: 2000, default: 300 })),
-});
-
-type DebugProgressParams = Static<typeof DebugProgressParams>;
-
-const SpawnExplorerParams = Type.Object({
-	task: Type.String({ description: "Discovery task for the read-only explorer subagent." }),
-	agent: Type.Optional(
-		Type.String({
-			description: 'Explorer agent definition name. Defaults to "explorer".',
-			default: "explorer",
-		}),
-	),
-	agentScope: Type.Optional(
-		StringEnum(["user", "project", "both"] as const, {
-			description: AGENT_SCOPE_DESCRIPTION,
-			default: "user",
-		}),
-	),
-});
-
-type SpawnExplorerParams = Static<typeof SpawnExplorerParams>;
-
-const SpawnWorkerParams = Type.Object({
-	task: Type.String({ description: "Scoped implementation task for the worker subagent. Requires workflow Build mode." }),
-	agent: Type.Optional(
-		Type.String({
-			description: 'Worker agent definition name. Defaults to "worker".',
-			default: "worker",
-		}),
-	),
-	agentScope: Type.Optional(
-		StringEnum(["user", "project", "both"] as const, {
-			description: AGENT_SCOPE_DESCRIPTION,
-			default: "user",
-		}),
-	),
-	fileOwnership: Type.Optional(
-		Type.Array(Type.String(), {
-			description: "Paths or globs this worker is expected to modify. Parallel overlapping ownership is refused.",
-			default: [],
-		}),
-	),
-});
-
-type SpawnWorkerParams = Static<typeof SpawnWorkerParams>;
-
-type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
-
-interface WorkflowModeQueryResult {
+interface WorkflowStateQueryResult {
 	ok: boolean;
 	mode?: WorkflowMode;
+	cavemanEnabled: boolean;
 	error?: string;
 }
 
-interface SubagentsSettings extends SubagentTimeoutSettings {
-	concurrencyCap?: number;
-	explorerLaneCap?: number;
+interface SubagentsSettings {
 	models?: Partial<Record<AgentRole, string>>;
 	effort?: Partial<Record<AgentRole, string>>;
 }
 
-const DEFAULT_EXPLORER_TOOLS = ["read", "grep", "find", "ls"];
 export const READ_ONLY_EXPLORER_TOOLS = new Set([
-	...DEFAULT_EXPLORER_TOOLS,
+	"read",
+	"grep",
+	"find",
+	"ls",
 	"browser_goto",
 	"browser_eval",
 	"browser_console",
@@ -180,248 +72,63 @@ export const READ_ONLY_EXPLORER_TOOLS = new Set([
 	"browser_close",
 ]);
 
-interface ParentSnapshot {
-	sessionFile: string | undefined;
-	leafId: string | null;
-	entryCount: number;
-	branchLength: number;
-}
-
-interface ChildToolCallSummary {
-	toolName: string;
-	argsPreview: string;
-}
-
-interface SpikeDetails {
-	ok: boolean;
-	readToolCalled: boolean;
-	childSessionFile?: string;
-	childSessionFileExists: boolean;
-	childActiveTools: string[];
-	childEventCounts: Record<string, number>;
-	childToolCalls: ChildToolCallSummary[];
-	childFinalText: string;
-	parentBefore: ParentSnapshot;
-	parentAfter: ParentSnapshot;
-	parentUnchangedDuringExecute: boolean;
-	error?: string;
-}
-
-const CHILD_SYSTEM_PROMPT = `You are a throwaway in-process subagent spike.
-
-Your job is only to prove that a child AgentSession can run inside an extension tool execute() without inheriting parent state.
-Use only the read/grep tools you were given. Read the requested file before answering.
-Return a concise final answer that starts with SPIKE_CHILD_OK and mentions the file you inspected.`;
-
-function snapshotParent(ctx: ExtensionContext): ParentSnapshot {
-	return {
-		sessionFile: ctx.sessionManager.getSessionFile(),
-		leafId: ctx.sessionManager.getLeafId(),
-		entryCount: ctx.sessionManager.getEntries().length,
-		branchLength: ctx.sessionManager.getBranch().length,
-	};
-}
-
-function sameSnapshot(a: ParentSnapshot, b: ParentSnapshot): boolean {
-	return (
-		a.sessionFile === b.sessionFile &&
-		a.leafId === b.leafId &&
-		a.entryCount === b.entryCount &&
-		a.branchLength === b.branchLength
-	);
-}
-
-function truncateUtf8(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-	let out = text.slice(0, maxBytes);
-	while (Buffer.byteLength(out, "utf8") > maxBytes) out = out.slice(0, -1);
-	return `${out}\n\n[truncated to ${maxBytes} bytes]`;
-}
-
-function extractLastAssistantText(session: Awaited<ReturnType<typeof createAgentSession>>["session"]): string {
-	const direct = session.getLastAssistantText();
-	if (direct) return direct;
-	for (const message of [...session.messages].reverse()) {
-		if (message.role !== "assistant") continue;
-		return message.content
-			.map((part) => (part.type === "text" ? part.text : ""))
-			.filter(Boolean)
-			.join("\n");
-	}
-	return "";
-}
-
-function buildChildPrompt(params: SpikeParams): string {
-	if (params.prompt?.trim()) return params.prompt.trim();
-	const readPath = params.path?.trim() || DEFAULT_READ_PATH;
-	return [
-		`Use the read tool to read this file: ${readPath}`,
-		"Then return a concise summary beginning with SPIKE_CHILD_OK.",
-		"Do not edit files or run shell commands.",
-	].join("\n");
-}
-
-async function selectModel(ctx: ExtensionContext): Promise<Model<any> | undefined> {
-	if (ctx.model) return ctx.model;
-	const available = await Promise.resolve(ctx.modelRegistry.getAvailable());
-	return available[0];
-}
-
-function createIsolatedLoader(cwd: string, agentDir: string, settingsManager: SettingsManager): DefaultResourceLoader {
-	return new DefaultResourceLoader({
-		cwd,
-		agentDir,
-		settingsManager,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		systemPrompt: CHILD_SYSTEM_PROMPT,
-		appendSystemPrompt: [],
-		appendSystemPromptOverride: () => [],
-	});
-}
-
-async function runInProcessSpike(
-	params: SpikeParams,
-	ctx: ExtensionContext,
-	signal: AbortSignal | undefined,
-): Promise<SpikeDetails> {
-	const parentBefore = snapshotParent(ctx);
-	const eventCounts: Record<string, number> = {};
-	const childToolCalls: ChildToolCallSummary[] = [];
-	let childSession: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
-	let unsubscribe: (() => void) | undefined;
-	let timeoutId: ReturnType<typeof setTimeout> | undefined;
-	let removeAbortListener: (() => void) | undefined;
-
-	const baseDetails = (): Omit<SpikeDetails, "ok" | "parentAfter" | "parentUnchangedDuringExecute"> => ({
-		readToolCalled: childToolCalls.some((call) => call.toolName === "read"),
-		childSessionFile: childSession?.sessionFile,
-		childSessionFileExists: Boolean(childSession?.sessionFile && fs.existsSync(childSession.sessionFile)),
-		childActiveTools: childSession?.getActiveToolNames() ?? [],
-		childEventCounts: { ...eventCounts },
-		childToolCalls: [...childToolCalls],
-		childFinalText: childSession ? truncateUtf8(extractLastAssistantText(childSession), MAX_FINAL_TEXT_BYTES) : "",
-		parentBefore,
-	});
-
-	try {
-		const model = await selectModel(ctx);
-		if (!model) throw new Error("No model is available for the child spike session.");
-
-		const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-		const agentDir = getAgentDir();
-		const settingsManager = SettingsManager.inMemory({
-			compaction: { enabled: false },
-			retry: { enabled: false },
-		} as never);
-		const resourceLoader = createIsolatedLoader(ctx.cwd, agentDir, settingsManager);
-		await resourceLoader.reload();
-
-		const result = await createAgentSession({
-			cwd: ctx.cwd,
-			agentDir,
-			model,
-			tools: ["read", "grep"],
-			resourceLoader,
-			sessionManager: SessionManager.create(ctx.cwd),
-			settingsManager,
-		});
-		childSession = result.session;
-
-		unsubscribe = childSession.subscribe((event: any) => {
-			eventCounts[event.type] = (eventCounts[event.type] ?? 0) + 1;
-			if (event.type === "tool_execution_start") {
-				childToolCalls.push({
-					toolName: String(event.toolName ?? ""),
-					argsPreview: truncateUtf8(JSON.stringify(event.args ?? {}), 1000),
-				});
-			}
-		});
-
-		const abortChild = () => {
-			void childSession?.abort().catch(() => undefined);
-		};
-		if (signal) {
-			if (signal.aborted) abortChild();
-			signal.addEventListener("abort", abortChild, { once: true });
-			removeAbortListener = () => signal.removeEventListener("abort", abortChild);
-		}
-
-		const promptPromise = childSession.prompt(buildChildPrompt(params), {
-			expandPromptTemplates: false,
-			source: "extension",
-		});
-		void promptPromise.catch(() => undefined);
-
-		const timeoutPromise = new Promise<never>((_resolve, reject) => {
-			timeoutId = setTimeout(() => {
-				abortChild();
-				reject(new Error(`Child spike session timed out after ${timeoutMs}ms.`));
-			}, timeoutMs);
-		});
-
-		await Promise.race([promptPromise, timeoutPromise]);
-
-		const parentAfter = snapshotParent(ctx);
-		const childFinalText = truncateUtf8(extractLastAssistantText(childSession), MAX_FINAL_TEXT_BYTES);
-		const readToolCalled = childToolCalls.some((call) => call.toolName === "read");
-		const childSessionFileExists = Boolean(childSession.sessionFile && fs.existsSync(childSession.sessionFile));
-		const parentUnchangedDuringExecute = sameSnapshot(parentBefore, parentAfter);
-		const childActiveTools = childSession.getActiveToolNames();
-		const ok = Boolean(childFinalText && readToolCalled && childSessionFileExists && parentUnchangedDuringExecute);
-
-		return {
-			ok,
-			readToolCalled,
-			childSessionFile: childSession.sessionFile,
-			childSessionFileExists,
-			childActiveTools,
-			childEventCounts: { ...eventCounts },
-			childToolCalls: [...childToolCalls],
-			childFinalText,
-			parentBefore,
-			parentAfter,
-			parentUnchangedDuringExecute,
-		};
-	} catch (error) {
-		const parentAfter = snapshotParent(ctx);
-		return {
-			...baseDetails(),
-			ok: false,
-			parentAfter,
-			parentUnchangedDuringExecute: sameSnapshot(parentBefore, parentAfter),
-			error: error instanceof Error ? error.message : String(error),
-		};
-	} finally {
-		if (timeoutId) clearTimeout(timeoutId);
-		removeAbortListener?.();
-		unsubscribe?.();
-		childSession?.dispose();
-	}
-}
-
-function formatToolResult(details: SpikeDetails): string {
-	const lines = [
-		details.ok ? "In-process subagent spike OK." : "In-process subagent spike FAILED.",
-		`Child session file: ${details.childSessionFile ?? "(none)"}`,
-		`Child session file exists: ${details.childSessionFileExists ? "yes" : "no"}`,
-		`Child active tools: ${details.childActiveTools.join(", ") || "(none)"}`,
-		`Child read tool called: ${details.readToolCalled ? "yes" : "no"}`,
-		`Parent branch unchanged during execute: ${details.parentUnchangedDuringExecute ? "yes" : "no"}`,
-	];
-	if (details.error) lines.push(`Error: ${details.error}`);
-	if (details.childFinalText) lines.push("", "Child final text:", details.childFinalText);
-	return lines.join("\n");
-}
+export const BROWSER_PROXY_BUILD_TOOLS = [
+	"browser_goto",
+	"browser_eval",
+	"browser_console",
+	"browser_network",
+	"browser_fill",
+	"browser_click",
+	"browser_screenshot",
+	"browser_close",
+] as const;
+export const BROWSER_PROXY_READ_ONLY_TOOLS = ["browser_console", "browser_screenshot", "browser_network"] as const;
+export type BrowserProxyName = typeof BROWSER_PROXY_BUILD_TOOLS[number];
 
 export function validateExplorerTools(tools: string[] | undefined): string | undefined {
-	const activeTools = tools ?? DEFAULT_EXPLORER_TOOLS;
+	const activeTools = tools ?? ["read", "grep", "find", "ls"];
 	const unsafeTools = activeTools.filter((tool) => !READ_ONLY_EXPLORER_TOOLS.has(tool));
-	if (unsafeTools.length > 0) return `Explorer agent includes non-repository-read-only tool(s): ${unsafeTools.join(", ")}.`;
-	return undefined;
+	return unsafeTools.length > 0 ? `Explorer agent includes non-repository-read-only tool(s): ${unsafeTools.join(", ")}.` : undefined;
+}
+
+export function browserProxyToolNames(mode: WorkflowMode | undefined): BrowserProxyName[] {
+	return [...(mode === "build" ? BROWSER_PROXY_BUILD_TOOLS : BROWSER_PROXY_READ_ONLY_TOOLS)];
+}
+
+export function augmentBrowserProxyTools(tools: string[] | undefined, names: readonly BrowserProxyName[]): string[] {
+	return [...new Set([...(tools ?? ["read", "grep", "find", "ls"]), ...names])];
+}
+
+interface SubagentRecord {
+	owner: string;
+	childSessionId: string;
+	agentName: string;
+	role: AgentRole;
+	status: "running" | "waiting" | "done" | "failed";
+	task: string;
+	startedAt: number;
+	finishedAt?: number;
+	result?: string;
+	error?: string;
+	steered: boolean;
+	progress?: ProgressHandle;
+}
+
+function isWorkflowMode(value: unknown): value is WorkflowMode {
+	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review" || value === "design";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function truncateUtf8(text: string, maxBytes = MAX_FINAL_TEXT_BYTES): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	const suffix = `\n\n[truncated to ${maxBytes} bytes]`;
+	const contentBytes = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	let output = text.slice(0, contentBytes);
+	while (Buffer.byteLength(output, "utf8") > contentBytes) output = output.slice(0, -1);
+	return `${output}${suffix}`;
 }
 
 function settingsPath(): string {
@@ -430,8 +137,8 @@ function settingsPath(): string {
 
 function readSettings(): Record<string, unknown> {
 	try {
-		const parsed = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
-		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+		const parsed = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
+		return isRecord(parsed) ? parsed : {};
 	} catch {
 		return {};
 	}
@@ -439,38 +146,33 @@ function readSettings(): Record<string, unknown> {
 
 function readSubagentsSettings(): SubagentsSettings {
 	const value = readSettings().subagents;
-	return value && typeof value === "object" && !Array.isArray(value) ? value as SubagentsSettings : {};
+	return isRecord(value) ? value as SubagentsSettings : {};
 }
 
-function writeSubagentModel(role: AgentRole, modelRef?: string): void {
+function writeSubagentModel(role: AgentRole, modelRef: string | undefined): void {
 	const settings = readSettings();
 	const subagents = readSubagentsSettings();
 	const models = { ...(subagents.models ?? {}) };
 	if (modelRef) models[role] = modelRef;
 	else delete models[role];
-
 	const nextSubagents = { ...subagents };
 	if (Object.keys(models).length > 0) nextSubagents.models = models;
 	else delete nextSubagents.models;
 	settings.subagents = nextSubagents;
-	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 
-function writeSubagentEffort(role: AgentRole, effort: SubagentEffortLevel | "inherit"): void {
+function writeSubagentEffort(role: AgentRole, effort: string | "inherit"): void {
 	const settings = readSettings();
 	const subagents = readSubagentsSettings();
-	const configured =
-		subagents.effort && typeof subagents.effort === "object" && !Array.isArray(subagents.effort)
-			? { ...subagents.effort }
-			: {};
+	const configured = isRecord(subagents.effort) ? { ...subagents.effort } : {};
 	if (effort === "inherit") delete configured[role];
 	else configured[role] = effort;
-
 	const nextSubagents = { ...subagents };
 	if (Object.keys(configured).length > 0) nextSubagents.effort = configured;
 	else delete nextSubagents.effort;
 	settings.subagents = nextSubagents;
-	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+	fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 
 function modelReference(model: Model<any>): string {
@@ -481,8 +183,7 @@ function resolveModelReference(reference: string | undefined, ctx: ExtensionCont
 	if (!reference) return undefined;
 	const slashIndex = reference.indexOf("/");
 	if (slashIndex > 0) return ctx.modelRegistry.find(reference.slice(0, slashIndex), reference.slice(slashIndex + 1));
-	const available = ctx.modelRegistry.getAll();
-	return available.find((model) => model.id === reference) ?? available.find((model) => model.id.includes(reference));
+	return ctx.modelRegistry.getAll().find((model) => model.id === reference) ?? ctx.modelRegistry.getAll().find((model) => model.id.includes(reference));
 }
 
 function configuredModel(role: AgentRole, ctx: ExtensionContext): Model<any> | undefined {
@@ -497,353 +198,143 @@ function configuredEffort(pi: ExtensionAPI, role: AgentRole): SubagentParentThin
 	return resolveEffort(readSubagentsSettings(), role, parentThinkingLevel(pi));
 }
 
-function resolveSubagentTimeouts(): SubagentTimeoutPolicy {
-	return resolveSubagentTimeoutPolicy(readSubagentsSettings());
-}
-
-function isWorkflowMode(value: unknown): value is WorkflowMode {
-	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review" || value === "design";
-}
-
-const runningWorkerOwnership = new Map<string, Set<string>>();
-let nextWorkerRunId = 0;
-
-function normalizeOwnership(paths: string[] | undefined): string[] {
-	return [...new Set((paths ?? []).map((item) => item.trim()).filter(Boolean))].sort();
-}
-
-function ownershipOverlaps(a: string, b: string): boolean {
-	const left = a.replace(/\/+$|\/\*\*?$|\/\*$/g, "");
-	const right = b.replace(/\/+$|\/\*\*?$|\/\*$/g, "");
-	return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
-}
-
-function findOwnershipConflict(ownership: string[]): { runId: string; path: string; existingPath: string } | undefined {
-	for (const path of ownership) {
-		for (const [runId, existing] of runningWorkerOwnership.entries()) {
-			for (const existingPath of existing) {
-				if (ownershipOverlaps(path, existingPath)) return { runId, path, existingPath };
-			}
-		}
-	}
-	return undefined;
-}
-
-async function withWorkerOwnership<T>(ownership: string[], fn: (runId: string) => Promise<T>): Promise<T> {
-	const runId = `worker-${++nextWorkerRunId}`;
-	if (ownership.length > 0) runningWorkerOwnership.set(runId, new Set(ownership));
-	try {
-		return await fn(runId);
-	} finally {
-		runningWorkerOwnership.delete(runId);
-	}
-}
-
-function addConcurrencyDetails<T extends object>(details: T, slot: SlotInfo, extra: Record<string, unknown> = {}): T & { concurrency: SlotInfo } {
-	return { ...details, ...extra, concurrency: slot };
-}
-
-function subagentFailureMessage(result: SubagentRunResult): string {
-	return "error" in result ? result.error : "unknown subagent failure";
-}
-
-export function createNestedExplorerTool(parentCtx: ExtensionContext, parentSignal: AbortSignal | undefined, depth: number, parentPi: ExtensionAPI) {
-	return defineTool<typeof SpawnExplorerParams, unknown>({
-		name: SPAWN_EXPLORER_TOOL_NAME,
-		label: "Spawn Explorer",
-		description: "Nested read-only explorer available to worker subagents. Depth is limited to main -> worker -> explorer.",
-		parameters: SpawnExplorerParams,
-		async execute(_toolCallId, params: SpawnExplorerParams, signal) {
-			if (depth >= 2) {
-				const reason = "Nested spawn depth limit exceeded: spawn graph is main -> worker -> explorer (max depth 2).";
-				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason, depth } };
-			}
-
-			const agentName = params.agent?.trim() || "explorer";
-			const agentScope = (params.agentScope ?? "user") as AgentScope;
-			const discovery = discoverAgents(parentCtx.cwd, agentScope);
-			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
-			if (!agent) {
-				return {
-					content: [{ type: "text", text: `Explorer agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }],
-					details: { ok: false, error: "Explorer agent not found", discovery, depth: depth + 1 },
-				};
-			}
-
-			const unsafeReason = validateExplorerTools(agent.tools);
-			if (unsafeReason) {
-				return {
-					content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }],
-					details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools, depth: depth + 1 },
-				};
-			}
-
-			const browserMode = await queryWorkflowMode(parentPi, signal ?? parentSignal);
-			const browserNames = browserProxyToolNames(browserMode.mode);
-			const browserOwner = nextBrowserOwner("explorer");
-			const browserTools = createBrowserProxyTools(parentPi, browserOwner, browserNames, browserNames.length !== BROWSER_PROXY_BUILD_TOOLS.length);
-			return withSubagentSlot(
-				"explorer",
-				parentCtx.cwd,
-				signal ?? parentSignal,
-				async (slot) => {
-					const progress = startSubagentProgress(parentCtx, "explorer", { depth });
-					const timeoutPolicy = resolveSubagentTimeouts();
-					const result = await (async () => {
-						try {
-							return await runSubagent({
-								agent: { ...agent, tools: augmentBrowserProxyTools(agent.tools, browserNames) },
-								role: "explorer",
-								task: browserTask(params.task, browserNames, browserMode.mode),
-								ctx: parentCtx,
-								signal: signal ?? parentSignal,
-								timeoutPolicy,
-								modelOverride: configuredModel("explorer", parentCtx),
-								thinkingLevel: configuredEffort(parentPi, "explorer"),
-								customTools: browserTools,
-								progress,
-							});
-						} finally {
-							await reapBrowserOwner(parentPi, browserOwner, undefined);
-						}
-					})();
-					return {
-						content: [{ type: "text", text: result.ok ? `Nested explorer summary: ${(result.parsed as ExplorerParsedResult).summary}` : `Nested explorer failed: ${subagentFailureMessage(result)}` }],
-						details: addConcurrencyDetails(result, slot, { depth: depth + 1, browserMode: browserMode.mode ?? "unknown", browserTools: browserNames }),
-					};
-				},
-				{ explorerLane: true },
-			);
-		},
-	});
-}
-
-function queryWorkflowMode(pi: ExtensionAPI, signal: AbortSignal | undefined, timeoutMs = 1000): Promise<WorkflowModeQueryResult> {
+function queryWorkflowState(pi: ExtensionAPI, signal: AbortSignal | undefined, timeoutMs = 1000): Promise<WorkflowStateQueryResult> {
 	return new Promise((resolve) => {
 		let settled = false;
 		let unsubscribe: (() => void) | undefined;
-		let timeoutId: ReturnType<typeof setTimeout> | undefined;
-		let removeAbortListener: (() => void) | undefined;
-
-		const settle = (result: WorkflowModeQueryResult) => {
-			if (settled) return;
-			settled = true;
-			if (timeoutId) clearTimeout(timeoutId);
-			removeAbortListener?.();
-			unsubscribe?.();
-			resolve(result);
-		};
-
-		const abort = () => settle({ ok: false, error: "Workflow mode query aborted." });
-		if (signal?.aborted) return abort();
-		if (signal) {
-			signal.addEventListener("abort", abort, { once: true });
-			removeAbortListener = () => signal.removeEventListener("abort", abort);
-		}
-
-		unsubscribe = pi.events.on("workflow-modes:state", (data: unknown) => {
-			const mode = (data as { mode?: unknown } | undefined)?.mode;
-			if (!isWorkflowMode(mode)) return settle({ ok: false, error: "workflow-modes returned an invalid mode state." });
-			settle({ ok: true, mode });
-		});
-
-		timeoutId = setTimeout(() => {
-			settle({ ok: false, error: "Timed out waiting for workflow-modes:state; refusing to spawn worker." });
-		}, timeoutMs);
-
-		try {
-			pi.events.emit("workflow-modes:get", undefined);
-		} catch (error) {
-			settle({ ok: false, error: error instanceof Error ? error.message : String(error) });
-		}
-	});
-}
-
-const BROWSER_REQUEST_EVENT = "browser:request";
-const BROWSER_RESULT_EVENT = "browser:result";
-export const BROWSER_PROXY_BUILD_TOOLS = [
-	"browser_goto",
-	"browser_eval",
-	"browser_console",
-	"browser_network",
-	"browser_fill",
-	"browser_click",
-	"browser_screenshot",
-	"browser_close",
-] as const;
-export const BROWSER_PROXY_READ_ONLY_TOOLS = ["browser_console", "browser_screenshot", "browser_network"] as const;
-export type BrowserProxyName = typeof BROWSER_PROXY_BUILD_TOOLS[number];
-let nextBrowserOwnerId = 0;
-let nextBrowserRequestId = 0;
-
-export function browserProxyToolNames(mode: WorkflowMode | undefined): BrowserProxyName[] {
-	return [...(mode === "build" ? BROWSER_PROXY_BUILD_TOOLS : BROWSER_PROXY_READ_ONLY_TOOLS)];
-}
-
-export function augmentBrowserProxyTools(tools: string[] | undefined, names: readonly BrowserProxyName[]): string[] {
-	return [...new Set([...(tools ?? DEFAULT_EXPLORER_TOOLS), ...names])];
-}
-
-function browserProxyGuidance(names: readonly BrowserProxyName[], mode: WorkflowMode | undefined): string {
-	if (names.length === BROWSER_PROXY_BUILD_TOOLS.length) return "Browser verification tools available: browser_goto, browser_eval, browser_console, browser_network, browser_fill, browser_click, browser_screenshot, browser_close.";
-	return `Browser access restricted because parent workflow mode is ${mode ?? "unknown"}. Available browser tools: ${names.join(", ")}. Console/network clear is forced false.`;
-}
-
-function browserTask(task: string, names: readonly BrowserProxyName[], mode: WorkflowMode | undefined): string {
-	return `${task}\n\n${browserProxyGuidance(names, mode)}`;
-}
-
-function nextBrowserOwner(role: AgentRole): string {
-	return `subagent-${role}-${++nextBrowserOwnerId}`;
-}
-
-function browserProxyParameters(name: BrowserProxyName): TSchema {
-	const timeout = Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 }));
-	switch (name) {
-		case "browser_goto": return Type.Object({ url: Type.String({ minLength: 1, maxLength: 2_048 }), timeout });
-		case "browser_eval": return Type.Object({ expression: Type.String({ minLength: 1, maxLength: 10_000 }), timeout });
-		case "browser_console": return Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })), filter: Type.Optional(Type.String({ maxLength: 1_000 })), clear: Type.Optional(Type.Boolean()) });
-		case "browser_network": return Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })), urlFilter: Type.Optional(Type.String({ maxLength: 1_000 })), status: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })), verbose: Type.Optional(Type.Boolean()), includeHeaders: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })), clear: Type.Optional(Type.Boolean()) });
-		case "browser_fill": return Type.Object({ selector: Type.String({ minLength: 1, maxLength: 2_048 }), value: Type.String({ maxLength: 100_000 }), timeout });
-		case "browser_click": return Type.Object({ selector: Type.String({ minLength: 1, maxLength: 2_048 }), timeout });
-		case "browser_screenshot": return Type.Object({ fullPage: Type.Optional(Type.Boolean()), timeout });
-		case "browser_close": return Type.Object({});
-	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function requestBrowserProxy(pi: ExtensionAPI, owner: string, tool: BrowserProxyName, params: Record<string, unknown>, signal: AbortSignal | undefined): Promise<unknown> {
-	const requestId = `${owner}-${tool}-${++nextBrowserRequestId}`;
-	return new Promise((resolve, reject) => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
-		let unsubscribe: (() => void) | undefined;
 		let removeAbort: (() => void) | undefined;
-		let settled = false;
-		const finish = (action: () => void) => {
+		const settle = (result: WorkflowStateQueryResult) => {
 			if (settled) return;
 			settled = true;
 			if (timer) clearTimeout(timer);
-			unsubscribe?.();
 			removeAbort?.();
-			action();
+			unsubscribe?.();
+			resolve(result);
 		};
-		const onResult = (value: unknown) => {
-			if (!isRecord(value) || value.requestId !== requestId || value.owner !== owner) return;
-			if (value.ok === true) return finish(() => resolve(value.result));
-			if (value.ok === false && typeof value.error === "string") return finish(() => reject(new Error(String(value.error))));
-			finish(() => reject(new Error("Malformed browser result.")));
-		};
-		const abort = () => finish(() => reject(new Error(`${tool} browser request aborted.`)));
+		const abort = () => settle({ ok: false, cavemanEnabled: true, error: "Workflow state query aborted." });
 		if (signal?.aborted) return abort();
 		if (signal) {
 			signal.addEventListener("abort", abort, { once: true });
 			removeAbort = () => signal.removeEventListener("abort", abort);
 		}
-		unsubscribe = pi.events.on(BROWSER_RESULT_EVENT, onResult);
-		timer = setTimeout(() => finish(() => reject(new Error(`${tool} browser request timed out after 1,500 milliseconds.`))), 1_500);
+		unsubscribe = pi.events.on("workflow-modes:state", (data: unknown) => {
+			const value = isRecord(data) ? data : {};
+			if (!isWorkflowMode(value.mode)) return settle({ ok: false, cavemanEnabled: true, error: "workflow-modes returned invalid mode state." });
+			settle({ ok: true, mode: value.mode, cavemanEnabled: typeof value.cavemanEnabled === "boolean" ? value.cavemanEnabled : true });
+		});
+		timer = setTimeout(() => settle({ ok: false, cavemanEnabled: true, error: "Timed out waiting for workflow-modes state." }), timeoutMs);
 		try {
-			pi.events.emit(BROWSER_REQUEST_EVENT, { requestId, owner, tool, params });
+			pi.events.emit("workflow-modes:get", undefined);
 		} catch (error) {
-			finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+			settle({ ok: false, cavemanEnabled: true, error: error instanceof Error ? error.message : String(error) });
 		}
 	});
 }
 
-type BrowserProxyToolResult = { content: Array<{ type: "text"; text: string }>; details: unknown };
-
-function browserProxyResult(value: unknown): BrowserProxyToolResult {
-	if (isRecord(value) && Array.isArray(value.content) && value.content.every((item) => isRecord(item) && item.type === "text" && typeof item.text === "string")) {
-		return { content: value.content as Array<{ type: "text"; text: string }>, details: value.details };
-	}
-	return { content: [{ type: "text", text: JSON.stringify(value) }], details: value };
+function inferRole(agent: AgentConfig): AgentRole {
+	return agent.name === "explorer" ? "explorer" : "worker";
 }
 
-function createBrowserProxyTools(pi: ExtensionAPI, owner: string, names: readonly BrowserProxyName[], restricted: boolean) {
-	return names.map((name) => defineTool<TSchema, unknown>({
-		name,
-		label: name.replaceAll("_", " "),
-		description: restricted && (name === "browser_console" || name === "browser_network")
-			? `${name} browser inspection; buffer clear is forced false in read-only workflow modes.`
-			: `Proxy ${name} to the parent browser page owned by this subagent.`,
-		parameters: browserProxyParameters(name) as never,
-		async execute(_toolCallId, rawParams, signal) {
-			const params = (isRecord(rawParams) ? rawParams : {}) as Record<string, unknown>;
-			const forwarded = restricted && (name === "browser_console" || name === "browser_network") ? { ...params, clear: false } : params;
-			try {
-				const result = await requestBrowserProxy(pi, owner, name, forwarded, signal);
-				return browserProxyResult(result);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return { content: [{ type: "text", text: `${name} failed: ${message}` }], details: { ok: false, error: message, owner, tool: name } };
-			}
-		},
-	}));
+function nextOwner(): string {
+	return `subagent-${++ownerCounter}`;
 }
 
-async function reapBrowserOwner(pi: ExtensionAPI, owner: string, signal: AbortSignal | undefined): Promise<void> {
-	try {
-		await requestBrowserProxy(pi, owner, "browser_close", {}, signal);
-	} catch {
-		// Browser gate-off, timeout, or already-reaped pages need no further cleanup.
+function resultMessage(record: SubagentRecord, text: string): string {
+	return `Subagent ${record.owner} finished.\n\n${truncateUtf8(text)}`;
+}
+
+function steerResult(pi: ExtensionAPI, record: SubagentRecord, text: string): void {
+	if (record.steered) return;
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			pi.sendUserMessage(resultMessage(record, text), { deliverAs: "followUp" });
+			record.steered = true;
+			return;
+		} catch (error) {
+			lastError = error;
+		}
 	}
+	record.error = `Result steering failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
 }
 
 async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise<void> {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
-	const role = (parts[0] === "explorer" || parts[0] === "worker"
-		? parts[0]
-		: await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
+	const role = (parts[0] === "explorer" || parts[0] === "worker" ? parts[0] : await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
 	if (!role) return;
-
 	const requestedModel = parts[0] === role ? parts[1] : parts[0];
 	if (requestedModel === "inherit") {
-		writeSubagentModel(role);
+		writeSubagentModel(role, undefined);
 		return ctx.ui.notify(`Subagent ${role} model: inherit`, "info");
 	}
-
 	const available = await Promise.resolve(ctx.modelRegistry.getAvailable());
 	if (available.length === 0) return ctx.ui.notify("No available models found.", "warning");
-	const selectedReference = requestedModel ?? await ctx.ui.select(`Model for ${role}`, ["inherit", ...available.map((model) => modelReference(model))]);
+	const selectedReference = requestedModel ?? await ctx.ui.select(`Model for ${role}`, ["inherit", ...available.map(modelReference)]);
 	if (selectedReference === "inherit") {
-		writeSubagentModel(role);
+		writeSubagentModel(role, undefined);
 		return ctx.ui.notify(`Subagent ${role} model: inherit`, "info");
 	}
-
 	const selected = selectedReference ? resolveModelReference(selectedReference, ctx) : undefined;
 	if (!selected) return ctx.ui.notify(`Unknown model${requestedModel ? `: ${requestedModel}` : ""}.`, "warning");
-
-	const reference = modelReference(selected);
-	writeSubagentModel(role, reference);
-	ctx.ui.notify(`Subagent ${role} model: ${reference}`, "info");
+	writeSubagentModel(role, modelReference(selected));
+	ctx.ui.notify(`Subagent ${role} model: ${modelReference(selected)}`, "info");
 }
 
 async function chooseSubagentEffort(args: string, ctx: ExtensionContext, pi: ExtensionAPI): Promise<void> {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
-	const role = (parts[0] === "explorer" || parts[0] === "worker"
-		? parts[0]
-		: await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
+	const role = (parts[0] === "explorer" || parts[0] === "worker" ? parts[0] : await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
 	if (!role) return ctx.ui.notify("Subagent effort selection cancelled.", "info");
-
 	const requestedEffort = parts[0] === role ? parts[1] : parts[0];
 	const selectedEffort = requestedEffort ?? await ctx.ui.select(`Effort for ${role}`, ["inherit", ...SUBAGENT_EFFORT_LEVELS]);
-	if (!selectedEffort) return ctx.ui.notify("Subagent effort selection cancelled.", "info");
-	const effort = parseEffortLevel(selectedEffort);
-	if (!effort) return ctx.ui.notify(`Unknown effort${selectedEffort ? `: ${selectedEffort}` : ""}.`, "warning");
-
-	writeSubagentEffort(role, effort);
-	if (effort === "inherit") {
-		return ctx.ui.notify(`Subagent ${role} effort: inherit (effective parent: ${parentThinkingLevel(pi) ?? "unknown"})`, "info");
+	if (!selectedEffort || (selectedEffort !== "inherit" && !SUBAGENT_EFFORT_LEVELS.includes(selectedEffort as typeof SUBAGENT_EFFORT_LEVELS[number]))) {
+		return ctx.ui.notify(`Unknown effort${selectedEffort ? `: ${selectedEffort}` : ""}.`, "warning");
 	}
-	ctx.ui.notify(`Subagent ${role} effort: ${effort}`, "info");
+	writeSubagentEffort(role, selectedEffort);
+	if (selectedEffort === "inherit") return ctx.ui.notify(`Subagent ${role} effort: inherit (effective parent: ${parentThinkingLevel(pi) ?? "unknown"})`, "info");
+	ctx.ui.notify(`Subagent ${role} effort: ${selectedEffort}`, "info");
 }
 
-export default function subagentsSpikeExtension(pi: ExtensionAPI) {
+let ownerCounter = 0;
+
+export default function subagentsExtension(pi: ExtensionAPI): void {
+	let host: SubagentLaunchHost | undefined;
+	let hostSessionId: string | undefined;
+	const records = new Map<string, SubagentRecord>();
+
+	const ensureHost = (ctx: ExtensionContext): SubagentLaunchHost => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (host && hostSessionId === sessionId) return host;
+		const previous = host;
+		host = new SubagentLaunchHost({ parentSessionId: sessionId });
+		hostSessionId = sessionId;
+		void previous?.close();
+		return host;
+	};
+
+	const rememberRecord = (record: SubagentRecord): void => {
+		records.set(record.owner, record);
+		while (records.size > MAX_TRACKED_RUNS) records.delete(records.keys().next().value as string);
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		setSubagentProgressContext(ctx);
+		ensureHost(ctx);
+	});
+
+	pi.on("session_shutdown", async () => {
+		const closing = host;
+		host = undefined;
+		hostSessionId = undefined;
+		await closing?.close();
+		records.clear();
+		clearSubagentProgress();
+		setSubagentProgressContext(undefined);
+	});
+
 	pi.registerCommand("subagent-model", {
 		description: "Choose per-role subagent model defaults for explorer and worker.",
-		handler: chooseSubagentModel,
+		handler: (args, ctx) => chooseSubagentModel(args, ctx),
 	});
 	pi.registerCommand("subagent-effort", {
 		description: "Choose per-role subagent thinking levels for explorer and worker.",
@@ -851,342 +342,119 @@ export default function subagentsSpikeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: SPAWN_EXPLORER_TOOL_NAME,
-		label: "Spawn Explorer",
-		description:
-			"Run a read-only explorer subagent in an isolated child session and return structured findings without adding the child transcript to parent context.",
-		parameters: SpawnExplorerParams,
-		async execute(_toolCallId, params: SpawnExplorerParams, signal, _onUpdate, ctx) {
-			const agentName = params.agent?.trim() || "explorer";
-			const agentScope = (params.agentScope ?? "user") as AgentScope;
-			const discovery = discoverAgents(ctx.cwd, agentScope);
-			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
-			if (!agent) {
-				return {
-					content: [{ type: "text", text: `Explorer agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }],
-					details: { ok: false, error: "Explorer agent not found", discovery },
-				};
-			}
-
-			const unsafeReason = validateExplorerTools(agent.tools);
-			if (unsafeReason) {
-				return {
-					content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }],
-					details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools },
-				};
-			}
-
-			const browserMode = await queryWorkflowMode(pi, signal);
-			const browserNames = browserProxyToolNames(browserMode.mode);
-			const browserOwner = nextBrowserOwner("explorer");
-			const browserTools = createBrowserProxyTools(pi, browserOwner, browserNames, browserNames.length !== BROWSER_PROXY_BUILD_TOOLS.length);
-			return withSubagentSlot("explorer", ctx.cwd, signal, async (slot) => {
-				const progress = startSubagentProgress(ctx, "explorer");
-				const timeoutPolicy = resolveSubagentTimeouts();
-				const result = await (async () => {
-					try {
-						return await runSubagent({
-							agent: { ...agent, tools: augmentBrowserProxyTools(agent.tools, browserNames) },
-							role: "explorer",
-							task: browserTask(params.task, browserNames, browserMode.mode),
-							ctx,
-							signal,
-							timeoutPolicy,
-							modelOverride: configuredModel("explorer", ctx),
-							thinkingLevel: configuredEffort(pi, "explorer"),
-							customTools: browserTools,
-							progress,
-						});
-					} finally {
-						await reapBrowserOwner(pi, browserOwner, undefined);
-					}
-				})();
-
-				if (!result.ok) {
-					return {
-						content: [{ type: "text", text: `Explorer failed: ${subagentFailureMessage(result)}` }],
-						details: addConcurrencyDetails(result, slot),
-					};
-				}
-
-				const parsed = result.parsed as ExplorerParsedResult;
-				return {
-					content: [
-						{
-							type: "text",
-							text: [
-								`Explorer summary: ${parsed.summary}`,
-								parsed.filesInspected.length > 0 ? `Files inspected: ${parsed.filesInspected.join(", ")}` : "Files inspected: none reported",
-								parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
-							].join("\n"),
-						},
-					],
-					details: addConcurrencyDetails(result, slot),
-				};
-			});
-		},
-	});
-
-	pi.registerTool({
-		name: SPAWN_WORKER_TOOL_NAME,
-		label: "Spawn Worker",
-		description:
-			"Run a coding worker subagent in an isolated child session. Refuses unless workflow-modes reports Build mode.",
-		parameters: SpawnWorkerParams,
-		async execute(_toolCallId, params: SpawnWorkerParams, signal, _onUpdate, ctx) {
-			const workflowMode = await queryWorkflowMode(pi, signal);
-			if (!workflowMode.ok || workflowMode.mode !== "build") {
-				const modeLabel = workflowMode.mode ?? "unknown";
-				const reason = workflowMode.error ?? `spawn_worker is blocked in ${modeLabel} mode. Switch to Build mode with /mode build.`;
-				return {
-					content: [{ type: "text", text: reason }],
-					details: { ok: false, error: reason, workflowMode: modeLabel },
-				};
-			}
-
+		name: SUBAGENT_TOOL_NAME,
+		label: "Subagent",
+		description: "Start one async subagent. Returns immediately; final result arrives as a new parent turn.",
+		parameters: SubagentParams,
+		async execute(_toolCallId, params: SubagentParams, signal, _onUpdate, ctx) {
 			const agentName = params.agent?.trim() || "worker";
-			const agentScope = (params.agentScope ?? "user") as AgentScope;
+			const agentScope = (params.agentScope ?? DEFAULT_AGENT_SCOPE) as AgentScope;
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
 			if (!agent) {
-				return {
-					content: [{ type: "text", text: `Worker agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }],
-					details: { ok: false, error: "Worker agent not found", workflowMode: workflowMode.mode, discovery },
-				};
+				return { content: [{ type: "text", text: `Agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }], details: { ok: false, error: "Agent not found", discovery } };
 			}
 
-			const ownership = normalizeOwnership(params.fileOwnership);
-			const conflict = findOwnershipConflict(ownership);
-			if (conflict) {
-				const reason = `spawn_worker ownership overlaps running ${conflict.runId}: requested ${conflict.path}, existing ${conflict.existingPath}.`;
-				return {
-					content: [{ type: "text", text: reason }],
-					details: { ok: false, error: reason, workflowMode: workflowMode.mode, fileOwnership: ownership, conflict },
-				};
+			const role = inferRole(agent);
+			const workflow = await queryWorkflowState(pi, signal);
+			if (role === "worker" && (!workflow.ok || workflow.mode !== "build")) {
+				const reason = workflow.error ?? `Subagent ${agentName} is blocked outside Build mode. Switch to Build mode with /mode build.`;
+				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason, workflowMode: workflow.mode ?? "unknown" } };
+			}
+			if (role === "explorer") {
+				const unsafeReason = validateExplorerTools(agent.tools);
+				if (unsafeReason) return { content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }], details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools } };
+			}
+			const tools = agent.tools ?? [];
+			if (tools.length === 0) {
+				const reason = `Agent ${agentName} has no explicit tools; refusing to launch unrestricted child.`;
+				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason } };
 			}
 
-			return withWorkerOwnership(ownership, (workerRunId) =>
-				withSubagentSlot("worker", ctx.cwd, signal, async (slot) => {
-					const browserNames = [...BROWSER_PROXY_BUILD_TOOLS];
-					const browserTools = createBrowserProxyTools(pi, workerRunId, browserNames, false);
-					const workerTools = augmentBrowserProxyTools([...(agent.tools ?? []), SPAWN_EXPLORER_TOOL_NAME], browserNames);
-					const progress = startSubagentProgress(ctx, "worker");
-					const timeoutPolicy = resolveSubagentTimeouts();
-					const result = await (async () => {
-						try {
-							return await runSubagent({
-								agent: { ...agent, tools: workerTools },
-								role: "worker",
-								task: browserTask(params.task, browserNames, workflowMode.mode),
-								ctx,
-								signal,
-								timeoutPolicy,
-								modelOverride: configuredModel("worker", ctx),
-								thinkingLevel: configuredEffort(pi, "worker"),
-								customTools: [createNestedExplorerTool(ctx, signal, 1, pi), ...browserTools],
-								progress,
-							});
-						} finally {
-							await reapBrowserOwner(pi, workerRunId, undefined);
-						}
-					})();
-
-					if (!result.ok) {
-						return {
-							content: [{ type: "text", text: `Worker failed: ${subagentFailureMessage(result)}` }],
-							details: addConcurrencyDetails(result, slot, { workflowMode: workflowMode.mode, fileOwnership: ownership, workerRunId }),
-						};
-					}
-
-					const parsed = result.parsed as WorkerParsedResult;
-					return {
-						content: [
-							{
-								type: "text",
-								text: [
-									`Worker summary: ${parsed.summary}`,
-									parsed.filesTouched.length > 0 ? `Files touched: ${parsed.filesTouched.join(", ")}` : "Files touched: none reported",
-									parsed.followUps.length > 0 ? `Follow-ups: ${parsed.followUps.join("; ")}` : "Follow-ups: none",
-									parsed.openQuestions.length > 0 ? `Open questions: ${parsed.openQuestions.join("; ")}` : "Open questions: none",
-								].join("\n"),
-							},
-						],
-						details: addConcurrencyDetails(result, slot, { workflowMode: workflowMode.mode, fileOwnership: ownership, workerRunId }),
-					};
-				}),
-			);
-		},
-	});
-
-	pi.registerTool({
-		name: DEBUG_PROGRESS_TOOL_NAME,
-		label: "Subagents Debug Progress",
-		description: "Debug helper for subagents development: briefly render and clear the subagents progress widget.",
-		parameters: DebugProgressParams,
-		async execute(_toolCallId, params: DebugProgressParams, _signal, _onUpdate, ctx) {
-			const delayMs = Math.max(1, Math.min(2000, Math.floor(params.delayMs ?? 300)));
-			const progress = startSubagentProgress(ctx, "worker");
-			progress.setActivity("debug wait");
-			progress.incrementToolCount();
-			await new Promise((resolve) => setTimeout(resolve, delayMs));
-			const during = getProgressSnapshot();
-			progress.finish();
-			await new Promise((resolve) => setTimeout(resolve, 300));
-			const after = getProgressSnapshot();
-			return {
-				content: [{ type: "text", text: `Progress widget debug complete; running after clear: ${after.running.length}.` }],
-				details: { ok: after.running.length === 0, during, after },
+			const owner = nextOwner();
+			const progress = startSubagentProgress(role, { name: owner });
+			const record: SubagentRecord = {
+				owner,
+				childSessionId: "pending",
+				agentName: agent.name,
+				role,
+				status: "running",
+				task: params.task.trim(),
+				startedAt: Date.now(),
+				steered: false,
+				progress,
 			};
-		},
-	});
+			rememberRecord(record);
 
-	pi.registerTool({
-		name: DEBUG_GRAPH_TOOL_NAME,
-		label: "Subagents Debug Spawn Graph",
-		description: "Debug helper for subagents development: exercise nested spawn graph rejection paths.",
-		parameters: DebugGraphParams,
-		async execute(_toolCallId, _params: DebugGraphParams, signal, _onUpdate, ctx) {
-			const nestedTool = createNestedExplorerTool(ctx, signal, 2, pi);
-			const result = await nestedTool.execute(
-				"debug-depth3",
-				{ task: "This should be rejected before spawning.", agentScope: "user" },
-				signal,
-				undefined,
-				ctx,
-			);
-			return result;
-		},
-	});
-
-	pi.registerTool({
-		name: DEBUG_CONCURRENCY_TOOL_NAME,
-		label: "Subagents Debug Concurrency",
-		description:
-			"Debug helper for subagents development: exercise the concurrency limiter with simulated subagent runs and report queueing behavior.",
-		parameters: DebugConcurrencyParams,
-		async execute(_toolCallId, params: DebugConcurrencyParams, signal, _onUpdate, ctx) {
-			const count = Math.max(1, Math.min(20, Math.floor(params.count ?? 5)));
-			const delayMs = Math.max(1, Math.min(5000, Math.floor(params.delayMs ?? 100)));
-			const role = (params.role ?? "worker") as AgentRole;
-			const started: Array<{ index: number; slot: SlotInfo; startedAt: number }> = [];
-			const completed: Array<{ index: number; completedAt: number }> = [];
-			const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-			const before = getConcurrencySnapshot(ctx.cwd);
-			await Promise.all(
-				Array.from({ length: count }, (_unused, index) =>
-					withSubagentSlot(
-						role,
-						ctx.cwd,
-						signal,
-						async (slot) => {
-							started.push({ index, slot, startedAt: Date.now() });
-							await sleep(delayMs);
-							completed.push({ index, completedAt: Date.now() });
-						},
-						{ explorerLane: Boolean(params.explorerLane) },
-					),
-				),
-			);
-			const after = getConcurrencySnapshot(ctx.cwd);
-			const maxActive = Math.max(0, ...started.map((item) => item.slot.activeAtAcquire));
-			const queued = started.filter((item) => item.slot.queuedMs > 0).length;
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Simulated ${count} ${role} spawn(s); max active ${maxActive}; queued ${queued}; cap ${started[0]?.slot.capacity ?? "unknown"}.`,
-					},
-				],
-				details: { ok: true, before, after, count, delayMs, role, maxActive, queued, started, completed },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: DEBUG_LIST_TOOL_NAME,
-		label: "Subagents Debug List Agents",
-		description:
-			"Debug helper for subagents development: list discovered agent definitions with source, model, and tools. Bundled defaults are always present; user is the default scope, project uses the nearest project override, and both applies user then project.",
-		parameters: DebugListParams,
-		async execute(_toolCallId, params: DebugListParams, _signal, _onUpdate, ctx) {
-			const agentScope = (params.agentScope ?? "user") as AgentScope;
-			const discovery = discoverAgents(ctx.cwd, agentScope);
-			return {
-				content: [
-					{
-						type: "text",
-						text: [
-							`Agent scope: ${discovery.agentScope}`,
-							`User agents dir: ${discovery.userAgentsDir}`,
-							`Project agents dir: ${discovery.projectAgentsDir ?? "(none)"}`,
-							"",
-							formatAgentList(discovery.agents),
-						].join("\n"),
-					},
-				],
-				details: discovery,
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: DEBUG_RUN_TOOL_NAME,
-		label: "Subagents Debug Run Agent",
-		description:
-			"Debug helper for subagents development: run a discovered explorer or worker through the core in-process runSubagent module and return its parsed structured result.",
-		parameters: DebugRunParams,
-		async execute(_toolCallId, params: DebugRunParams, signal, _onUpdate, ctx) {
-			const agentScope = (params.agentScope ?? "user") as AgentScope;
-			const discovery = discoverAgents(ctx.cwd, agentScope);
-			const agent = discovery.agents.find((candidate) => candidate.name === params.agent);
-			if (!agent) {
+			try {
+				const selectedModel = configuredModel(role, ctx);
+				const handle = await ensureHost(ctx).launch({
+					parentSessionId: ctx.sessionManager.getSessionId(),
+					owner,
+					role,
+					agent,
+					cwd: ctx.cwd,
+					task: params.task.trim(),
+					tools,
+					cavemanEnabled: workflow.cavemanEnabled,
+					model: selectedModel ? modelReference(selectedModel) : undefined,
+					thinkingLevel: configuredEffort(pi, role),
+					signal,
+					onResult: (text) => steerResult(pi, record, text),
+				});
+				record.childSessionId = handle.childSessionId;
+				void handle.result.then((result: SubagentResult) => {
+					record.status = "done";
+					record.finishedAt = Date.now();
+					record.result = result.text;
+					if (!record.steered) steerResult(pi, record, result.text);
+					record.progress?.finish("done");
+				}).catch((error: unknown) => {
+					record.status = "failed";
+					record.finishedAt = Date.now();
+					record.error = error instanceof Error ? error.message : String(error);
+					record.progress?.finish("failed");
+				});
 				return {
-					content: [{ type: "text", text: `Unknown agent ${params.agent}. Available: ${formatAgentList(discovery.agents)}` }],
-					details: { ok: false, discovery },
+					content: [{ type: "text", text: `Subagent ${owner} started asynchronously. Result will arrive as a new parent turn.` }],
+					details: { ok: true, owner, childSessionId: handle.childSessionId, agent: agent.name, role, status: record.status },
 				};
+			} catch (error) {
+				record.status = "failed";
+				record.finishedAt = Date.now();
+				record.error = error instanceof Error ? error.message : String(error);
+				progress.finish("failed");
+				return { content: [{ type: "text", text: `Subagent launch failed: ${record.error}` }], details: { ok: false, owner, error: record.error } };
 			}
-
-			const timeoutPolicy = resolveSubagentTimeouts();
-			const result = await runSubagent({
-				agent,
-				role: params.agent as AgentRole,
-				task: params.task,
-				ctx,
-				signal,
-				timeoutPolicy,
-				modelOverride: params.useCurrentModel ? ctx.model : undefined,
-			});
-			return {
-				content: [
-					{
-						type: "text",
-						text: result.ok
-							? `Subagent ${params.agent} OK.\n\n${JSON.stringify(result.parsed, null, 2)}`
-							: `Subagent ${params.agent} FAILED: ${subagentFailureMessage(result)}\n\n${JSON.stringify(result.parsed ?? {}, null, 2)}`,
-					},
-				],
-				details: result,
-			};
 		},
 	});
 
 	pi.registerTool({
-		name: TOOL_NAME,
-		label: "Subagents In-Process Spike",
-		description:
-			"Throwaway verification spike: create a persisted child AgentSession in-process from this tool execute(), give it read/grep only, prompt it to read one file, stream events, return final text, and report parent branch isolation.",
-		promptSnippet: "Run a throwaway in-process child session spike for subagent architecture validation.",
-		promptGuidelines: [
-			`Use ${TOOL_NAME} only when explicitly asked to run the subagents in-process spike.`,
-			`${TOOL_NAME} is diagnostic-only; do not use it for ordinary code search or implementation work.`,
-		],
-		parameters: SpikeParams,
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const details = await runInProcessSpike(params, ctx, signal);
-			return {
-				content: [{ type: "text", text: formatToolResult(details) }],
-				details,
-			};
+		name: SUBAGENTS_LIST_TOOL_NAME,
+		label: "List Subagents",
+		description: "List running, waiting, completed, and failed async subagents.",
+		parameters: SubagentsListParams,
+		async execute(_toolCallId, _params: SubagentsListParams, _signal, _onUpdate, _ctx) {
+			const agents = [...records.values()].map((record) => ({
+				owner: record.owner,
+				childSessionId: record.childSessionId,
+				agent: record.agentName,
+				role: record.role,
+				status: record.status,
+				startedAt: new Date(record.startedAt).toISOString(),
+				finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : undefined,
+				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,
+				error: record.error,
+			}));
+			const text = agents.length === 0
+				? "No subagents."
+				: agents.map((agent) => {
+					const elapsed = Math.max(0, (Date.parse(agent.finishedAt ?? new Date().toISOString()) - Date.parse(agent.startedAt)) / 1000).toFixed(1);
+					const result = agent.result ? `\n  Result: ${agent.result}` : "";
+					const error = agent.error ? `\n  Error: ${agent.error}` : "";
+					return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role} elapsed=${elapsed}s${result}${error}`;
+				}).join("\n\n");
+			return { content: [{ type: "text", text: truncateUtf8(text) }], details: { agents } };
 		},
 	});
 }

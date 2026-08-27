@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import subagentsExtension, { BROWSER_PROXY_BUILD_TOOLS, BROWSER_PROXY_READ_ONLY_TOOLS, augmentBrowserProxyTools, browserProxyToolNames, createNestedExplorerTool } from "../index.ts";
+import subagentsExtension, { BROWSER_PROXY_BUILD_TOOLS, BROWSER_PROXY_READ_ONLY_TOOLS, augmentBrowserProxyTools, browserProxyToolNames } from "../index.ts";
 import {
 	DEFAULT_IDLE_TIMEOUT_MS,
 	DEFAULT_MAX_TOTAL_MS,
@@ -35,6 +35,7 @@ for (const settings of [
 
 const tools = new Map<string, RegisteredTool>();
 subagentsExtension({
+	on() {},
 	registerCommand() {},
 	registerTool(tool: RegisteredTool) {
 		tools.set(tool.name, tool);
@@ -47,14 +48,11 @@ function assertNoRoleTimeoutFields(toolName: string, schema: ToolSchema): void {
 	}
 }
 
-for (const toolName of ["spawn_explorer", "spawn_worker", "subagents_debug_run_agent"]) {
+for (const toolName of ["subagent", "subagents_list"]) {
 	const tool = tools.get(toolName);
 	assert.ok(tool, `${toolName} registered`);
-	assertNoRoleTimeoutFields(toolName, tool.parameters);
 }
-
-const nestedExplorer = createNestedExplorerTool({ cwd: process.cwd() } as never, undefined, 1, {} as never);
-assertNoRoleTimeoutFields("nested spawn_explorer", nestedExplorer.parameters as ToolSchema);
-assert.equal(Object.hasOwn(tools.get("subagents_inprocess_spike")?.parameters.properties ?? {}, "timeoutMs"), true);
+assertNoRoleTimeoutFields("subagent", tools.get("subagent")!.parameters);
+assert.deepEqual([...tools.keys()].sort(), ["subagent", "subagents_list"]);
 
 console.log("subagent timeout policy tests passed");
