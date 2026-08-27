@@ -3,7 +3,7 @@ id: ADR-0029
 title: Consolidated extension dev tooling
 status: Active
 date: 2026-08-26
-decision: Keep ten runtime extension entrypoints separate; consolidate extension test and typecheck dependencies, locks, and configuration into a root-owned development toolchain in a later implementation.
+decision: Keep eleven runtime extension entrypoints separate; consolidate extension test and typecheck dependencies, locks, and configuration into a root-owned development toolchain in a later implementation.
 why: Runtime coupling is small, while nested development tooling duplicates manifests, locks, and TypeScript configuration, permits Pi host peer drift, and leaves typecheck gaps.
 affects: package.json, package-lock.json, scripts/check-workspace.mjs, agent/extensions/browser/package.json, agent/extensions/browser/package-lock.json, agent/extensions/browser/tsconfig.json, agent/extensions/ccc-search/package.json, agent/extensions/ccc-search/package-lock.json, agent/extensions/ccc-search/tsconfig.json, agent/extensions/engineering-docs/package.json, agent/extensions/filechanges/package.json, agent/extensions/filechanges/package-lock.json, agent/extensions/personal-memory/package.json, agent/extensions/personal-memory/tsconfig.json, agent/extensions/subagents/package.json, agent/extensions/subagents/package-lock.json, agent/extensions/subagents/tsconfig.json, agent/extensions/workflow-modes/package.json, agent/extensions/workflow-modes/package-lock.json, agent/extensions/workflow-modes/tsconfig.json, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, README.md, docs/engineering/decisions/ADR-0023-workspace-source-runtime-separation.md, docs/engineering/decisions/ADR-0029-consolidated-extension-dev-tooling.md, docs/engineering/decisions/README.md
 consequences: Runtime extension boundaries remain unchanged; a later migration can remove duplicated development setup and close typecheck/version gaps, but root scripts, workspace checks, manifests, locks, and TypeScript configuration must move together.
@@ -17,8 +17,9 @@ supersedes: None
 
 ## Decision
 
-- Keep all ten runtime extension entrypoints deliberately separate; do not merge, split, or rename extensions to reduce development-tooling files (`package.json:37-47`).
+- Keep all eleven runtime extension entrypoints deliberately separate; do not merge, split, or rename extensions to reduce development-tooling files (`package.json:39-50`).
 - In a later scoped migration, move extension test/typecheck dependencies, lock ownership, and shared TypeScript configuration to a root-owned development toolchain. Preserve targeted extension test commands and runtime loading boundaries.
+- The eleventh runtime entrypoint, `ask-user-question`, already matches this target shape: it adds no nested manifest, lockfile, TypeScript config, or bootstrap entry; its focused queue test runs from the root script.
 - Migration must close existing typecheck gaps and remove independent Pi host development-version drift rather than merely relocating files (`agent/extensions/engineering-docs/package.json:1-10`, `agent/extensions/filechanges/package.json:1-11`, `agent/extensions/ccc-search/package.json:15`, `agent/extensions/subagents/package.json:21`).
 - Move root scripts and integrity checks in lockstep with tooling files. `scripts/check-workspace.mjs` pins the current root manifest shape (`scripts/check-workspace.mjs:67-84`), while bootstrap and aggregate checks encode the current nested topology (`package.json:55-62`).
 - This ADR records the target only. It does not change `package.json`, `npm run bootstrap`, any nested manifest, lockfile, TypeScript config, or runtime entrypoint.
@@ -67,7 +68,7 @@ Future code/config migration:
 
 ## Consequences
 
-- Good: Ten runtime entrypoints and their ownership/event boundaries remain independently loadable.
+- Good: Eleven runtime entrypoints and their ownership/event boundaries remain independently loadable.
 - Good: A later root-owned toolchain can provide one dependency installation, one host-version policy, and typecheck coverage for every TypeScript extension.
 - Good: Targeted extension tests can remain runnable while root verification becomes less dependent on nested setup drift.
 - Bad/risk: Consolidation is a coordinated migration; changing tooling files without root scripts and `check-workspace.mjs` can break bootstrap, package checks, or CI.
@@ -80,7 +81,7 @@ ADR-0023 remains Active. It decides package source versus Pi-owned runtime-state
 
 ## Read when
 
-- changing the ten runtime extension boundaries or entrypoints
+- changing the eleven runtime extension boundaries or entrypoints
 - changing root or nested package manifests, lockfiles, TypeScript configs, or bootstrap
 - changing extension test/typecheck aggregation or Pi host development dependency versions
 - changing workspace checks that pin package or tooling shape
