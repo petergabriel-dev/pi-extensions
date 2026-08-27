@@ -1,6 +1,6 @@
 {
   "name": "@lopezpetergabriel/pi-extensions",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Pi extensions, skills, and agents by lopezpetergabriel",
   "keywords": [
     "pi-package"
@@ -14,6 +14,7 @@
     "access": "public"
   },
   "files": [
+    "agent/extensions/ask-user-question/*.ts",
     "agent/extensions/browser/index.ts",
     "agent/extensions/ccc-search/index.ts",
     "agent/extensions/claude-bridge/index.ts",
@@ -36,6 +37,7 @@
   ],
   "pi": {
     "extensions": [
+      "./agent/extensions/ask-user-question/index.ts",
       "./agent/extensions/browser/index.ts",
       "./agent/extensions/ccc-search/index.ts",
       "./agent/extensions/claude-bridge/index.ts",
