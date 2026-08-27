@@ -53,7 +53,8 @@ export interface SubagentIpcConnectionOptions {
 	onDisconnect?: (owner: string | undefined, error?: Error) => void;
 }
 
-export interface SubagentIpcServerOptions extends Omit<SubagentIpcConnectionOptions, "owner" | "onOwner" | "onDisconnect"> {
+export interface SubagentIpcServerOptions extends Omit<SubagentIpcConnectionOptions, "token" | "owner" | "onOwner" | "onDisconnect"> {
+	token?: string;
 	socketPath?: string;
 	sessionId?: string;
 	agentDir?: string;
@@ -397,6 +398,7 @@ export class SubagentIpcServer {
 		let connection: SubagentIpcConnection;
 		connection = new SubagentIpcConnection(socket, {
 			...this.options,
+			token: this.token,
 			onOwner: (owner) => {
 				if (this.connections.has(owner)) return false;
 				this.connections.set(owner, connection);
