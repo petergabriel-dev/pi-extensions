@@ -3,21 +3,21 @@ import * as path from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import type { AgentRole } from "./agents.ts";
-
 const DEFAULT_CONCURRENCY_CAP = 3;
-const DEFAULT_EXPLORER_LANE_CAP = 1;
 
 export interface SubagentConcurrencySettings {
 	concurrencyCap: number;
-	explorerLaneCap: number;
 }
 
 export interface SlotInfo {
-	lane: "default" | "explorer";
+	lane: "default";
 	queuedMs: number;
 	activeAtAcquire: number;
 	capacity: number;
+}
+
+export interface AcquiredSubagentSlot extends SlotInfo {
+	release(): void;
 }
 
 interface Waiter {
@@ -32,7 +32,7 @@ class Semaphore {
 	private active = 0;
 	private queue: Waiter[] = [];
 
-	constructor(private readonly lane: SlotInfo["lane"], private capacity: number) {}
+	constructor(private capacity: number) {}
 
 	setCapacity(capacity: number): void {
 		this.capacity = Math.max(1, Math.floor(capacity));
@@ -47,38 +47,28 @@ class Semaphore {
 		return this.queue.length;
 	}
 
-	async run<T>(signal: AbortSignal | undefined, fn: (slot: SlotInfo) => Promise<T>): Promise<T> {
-		const slot = await this.acquire(signal);
-		try {
-			return await fn(slot);
-		} finally {
-			this.release();
-		}
-	}
-
-	private acquire(signal: AbortSignal | undefined): Promise<SlotInfo> {
+	async acquire(signal: AbortSignal | undefined): Promise<SlotInfo> {
 		if (signal?.aborted) return Promise.reject(new Error("Subagent spawn aborted while waiting for a concurrency slot."));
-
 		const enqueuedAt = Date.now();
 		if (this.active < this.capacity) {
 			this.active += 1;
-			return Promise.resolve({ lane: this.lane, queuedMs: 0, activeAtAcquire: this.active, capacity: this.capacity });
+			return { lane: "default", queuedMs: 0, activeAtAcquire: this.active, capacity: this.capacity };
 		}
-
 		return new Promise<SlotInfo>((resolve, reject) => {
 			const waiter: Waiter = { resolve, reject, signal, enqueuedAt };
 			const abort = () => {
 				const index = this.queue.indexOf(waiter);
 				if (index >= 0) this.queue.splice(index, 1);
+				signal?.removeEventListener("abort", abort);
 				reject(new Error("Subagent spawn aborted while waiting for a concurrency slot."));
 			};
 			waiter.abort = abort;
-			if (signal) signal.addEventListener("abort", abort, { once: true });
+			signal?.addEventListener("abort", abort, { once: true });
 			this.queue.push(waiter);
 		});
 	}
 
-	private release(): void {
+	release(): void {
 		this.active = Math.max(0, this.active - 1);
 		this.drain();
 	}
@@ -86,24 +76,18 @@ class Semaphore {
 	private drain(): void {
 		while (this.active < this.capacity && this.queue.length > 0) {
 			const waiter = this.queue.shift()!;
-			if (waiter.signal) waiter.signal.removeEventListener("abort", waiter.abort!);
+			waiter.signal?.removeEventListener("abort", waiter.abort!);
 			if (waiter.signal?.aborted) {
 				waiter.reject(new Error("Subagent spawn aborted while waiting for a concurrency slot."));
 				continue;
 			}
 			this.active += 1;
-			waiter.resolve({
-				lane: this.lane,
-				queuedMs: Date.now() - waiter.enqueuedAt,
-				activeAtAcquire: this.active,
-				capacity: this.capacity,
-			});
+			waiter.resolve({ lane: "default", queuedMs: Date.now() - waiter.enqueuedAt, activeAtAcquire: this.active, capacity: this.capacity });
 		}
 	}
 }
 
-const defaultLane = new Semaphore("default", DEFAULT_CONCURRENCY_CAP);
-const explorerLane = new Semaphore("explorer", DEFAULT_EXPLORER_LANE_CAP);
+const defaultLane = new Semaphore(DEFAULT_CONCURRENCY_CAP);
 
 function parsePositiveInteger(value: unknown, fallback: number): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -112,7 +96,7 @@ function parsePositiveInteger(value: unknown, fallback: number): number {
 
 function readJsonObject(filePath: string): Record<string, unknown> {
 	try {
-		const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
 	} catch {
 		return {};
@@ -137,36 +121,34 @@ function subagentsConfig(settings: Record<string, unknown>): Record<string, unkn
 
 export function getSubagentConcurrencySettings(cwd: string): SubagentConcurrencySettings {
 	const globalConfig = subagentsConfig(readJsonObject(path.join(getAgentDir(), "settings.json")));
-	const projectSettingsPath = findNearestProjectSettings(cwd);
-	const projectConfig = projectSettingsPath ? subagentsConfig(readJsonObject(projectSettingsPath)) : {};
-	const merged = { ...globalConfig, ...projectConfig };
-	return {
-		concurrencyCap: parsePositiveInteger(merged.concurrencyCap, DEFAULT_CONCURRENCY_CAP),
-		explorerLaneCap: parsePositiveInteger(merged.explorerLaneCap, DEFAULT_EXPLORER_LANE_CAP),
-	};
+	const projectPath = findNearestProjectSettings(cwd);
+	const projectConfig = projectPath ? subagentsConfig(readJsonObject(projectPath)) : {};
+	return { concurrencyCap: parsePositiveInteger({ ...globalConfig, ...projectConfig }.concurrencyCap, DEFAULT_CONCURRENCY_CAP) };
 }
 
 export function getConcurrencySnapshot(cwd: string) {
 	const settings = getSubagentConcurrencySettings(cwd);
 	defaultLane.setCapacity(settings.concurrencyCap);
-	explorerLane.setCapacity(settings.explorerLaneCap);
-	return {
-		settings,
-		defaultLane: { active: defaultLane.getActive(), queued: defaultLane.getQueued() },
-		explorerLane: { active: explorerLane.getActive(), queued: explorerLane.getQueued() },
-	};
+	return { settings, defaultLane: { active: defaultLane.getActive(), queued: defaultLane.getQueued() } };
+}
+
+export async function acquireSubagentSlot(cwd: string, signal: AbortSignal | undefined): Promise<AcquiredSubagentSlot> {
+	const settings = getSubagentConcurrencySettings(cwd);
+	defaultLane.setCapacity(settings.concurrencyCap);
+	const info = await defaultLane.acquire(signal);
+	let released = false;
+	return { ...info, release: () => { if (released) return; released = true; defaultLane.release(); } };
 }
 
 export async function withSubagentSlot<T>(
-	role: AgentRole,
-	cwd: string,
+	_cwd: string,
 	signal: AbortSignal | undefined,
 	fn: (slot: SlotInfo) => Promise<T>,
-	options: { explorerLane?: boolean } = {},
 ): Promise<T> {
-	const settings = getSubagentConcurrencySettings(cwd);
-	defaultLane.setCapacity(settings.concurrencyCap);
-	explorerLane.setCapacity(settings.explorerLaneCap);
-	const lane = role === "explorer" && options.explorerLane ? explorerLane : defaultLane;
-	return lane.run(signal, fn);
+	const slot = await acquireSubagentSlot(_cwd, signal);
+	try {
+		return await fn(slot);
+	} finally {
+		slot.release();
+	}
 }

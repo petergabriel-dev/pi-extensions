@@ -8,6 +8,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CAVEMAN_PROMPT } from "../workflow-modes/caveman.ts";
 import { CmuxTransport, type CmuxSurfaceHandle } from "./cmux.ts";
 import type { AgentRole, AgentConfig } from "./agents.ts";
+import { normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
+import { acquireSubagentSlot, type AcquiredSubagentSlot } from "./concurrency.ts";
+import { validateSubagentDepth } from "./policy.ts";
 import {
 	resolveSubagentSocketPath,
 	SubagentIpcServer,
@@ -34,6 +37,9 @@ export interface SubagentLoadout {
 	thinkingLevel?: string;
 	appendSystemPrompt: string;
 	cavemanEnabled: boolean;
+	depth: number;
+	subagentAgents?: string[];
+	fileOwnership?: string[];
 	createdAt: string;
 }
 
@@ -59,6 +65,9 @@ export interface SubagentLaunchOptions {
 	childSessionId?: string;
 	extensionPath?: string;
 	signal?: AbortSignal;
+	depth?: number;
+	subagentAgents?: string[];
+	fileOwnership?: string[];
 	onResult?: (text: string) => void | Promise<void>;
 	onStatus?: (status: SubagentRunStatus) => void;
 	onQuestion?: (question: SubagentQuestion) => void | Promise<void>;
@@ -73,6 +82,7 @@ export interface SubagentLaunchHostOptions {
 	command?: string;
 	spawnProcess?: SubagentSpawnProcess;
 	cmux?: CmuxTransport | false;
+	onSpawn?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 }
 
 export interface SubagentResult {
@@ -114,6 +124,7 @@ interface RunState {
 	resolveResult: (result: SubagentResult) => void;
 	rejectResult: (error: Error) => void;
 	resultSettled: boolean;
+	slot?: AcquiredSubagentSlot;
 	pendingQuestion?: PendingQuestion;
 	removeAbortListener?: () => void;
 }
@@ -164,10 +175,14 @@ export function writeSubagentLoadout(loadout: SubagentLoadout, agentDir: string)
 
 export function readSubagentLoadout(loadoutPath: string): SubagentLoadout {
 	const value: unknown = JSON.parse(fs.readFileSync(loadoutPath, "utf8"));
-	if (!isRecord(value) || value.version !== LOADOUT_VERSION || typeof value.parentSessionId !== "string" || typeof value.childSessionId !== "string" || typeof value.owner !== "string" || !Array.isArray(value.tools) || typeof value.appendSystemPrompt !== "string" || typeof value.cavemanEnabled !== "boolean") {
+	if (!isRecord(value) || value.version !== LOADOUT_VERSION || typeof value.parentSessionId !== "string" || typeof value.childSessionId !== "string" || typeof value.owner !== "string" || typeof value.role !== "string" || typeof value.agentName !== "string" || typeof value.cwd !== "string" || typeof value.extensionPath !== "string" || !isStringArray(value.tools) || typeof value.appendSystemPrompt !== "string" || typeof value.cavemanEnabled !== "boolean") {
 		throw new Error("Invalid subagent loadout.");
 	}
-	return value as SubagentLoadout;
+	const depth = value.depth === undefined ? 0 : value.depth;
+	if ((value.role !== "worker" && value.role !== "explorer") || typeof depth !== "number" || !Number.isInteger(depth) || depth < 0 || (value.subagentAgents !== undefined && !isStringArray(value.subagentAgents)) || (value.fileOwnership !== undefined && !isStringArray(value.fileOwnership))) {
+		throw new Error("Invalid subagent loadout.");
+	}
+	return { ...value, depth } as SubagentLoadout;
 }
 
 export function buildSubagentCommandArgs(loadout: SubagentLoadout, task: string): string[] {
@@ -188,6 +203,10 @@ export function buildSubagentCommandArgs(loadout: SubagentLoadout, task: string)
 
 function isRecord(value: unknown): value is Record<string, any> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
 }
 
 function validateIdentifier(value: string, label: string): void {
@@ -239,6 +258,7 @@ export class SubagentLaunchHost {
 	private readonly command: string;
 	private readonly spawnProcess: SubagentSpawnProcess;
 	private readonly cmux: CmuxTransport | undefined;
+	private readonly ownership = new OwnershipLockManager();
 	private closed = false;
 	private listening = false;
 	private readonly exitHandler = () => {
@@ -272,8 +292,14 @@ export class SubagentLaunchHost {
 		if (options.parentSessionId !== this.options.parentSessionId) throw new Error("Subagent parent session does not match IPC host.");
 		if (!options.task.trim()) throw new Error("Subagent task is required.");
 		if (!Array.isArray(options.tools) || options.tools.length === 0 || options.tools.some((tool) => typeof tool !== "string" || !tool.trim())) throw new Error("Subagent tools must be a non-empty allowlist.");
+		if (options.fileOwnership !== undefined && (!Array.isArray(options.fileOwnership) || options.fileOwnership.some((item) => typeof item !== "string" || !item.trim()))) throw new Error("Subagent ownership paths must be non-empty strings.");
+		if (options.subagentAgents !== undefined && (!Array.isArray(options.subagentAgents) || options.subagentAgents.some((item) => typeof item !== "string" || !item.trim()))) throw new Error("Subagent child agent names must be non-empty strings.");
+		const depthError = validateSubagentDepth(options.depth ?? 0);
+		if (depthError) throw new Error(depthError);
 		const childSessionId = options.childSessionId ?? crypto.randomUUID();
 		validateIdentifier(childSessionId, "childSessionId");
+		const childAgents = options.subagentAgents ? [...new Set(options.subagentAgents.map((item) => item.trim()).filter(Boolean))] : undefined;
+		const fileOwnership = normalizeOwnership(options.fileOwnership);
 		const loadout: SubagentLoadout = {
 			version: LOADOUT_VERSION,
 			parentSessionId: options.parentSessionId,
@@ -288,6 +314,9 @@ export class SubagentLaunchHost {
 			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			appendSystemPrompt: buildSubagentSystemPrompt(options.agent.systemPrompt, options.cavemanEnabled),
 			cavemanEnabled: options.cavemanEnabled,
+			depth: options.depth ?? 0,
+			...(childAgents && childAgents.length > 0 ? { subagentAgents: childAgents } : {}),
+			...(fileOwnership.length > 0 ? { fileOwnership } : {}),
 			createdAt: new Date().toISOString(),
 		};
 		const loadoutPath = writeSubagentLoadout(loadout, this.options.agentDir ?? getAgentDir());
@@ -317,15 +346,41 @@ export class SubagentLaunchHost {
 		return true;
 	}
 
+	acquireOwnership(owner: string, paths: readonly string[] | undefined): OwnershipAcquireResult {
+		validateIdentifier(owner, "owner");
+		return this.ownership.acquire(owner, paths);
+	}
+
+	releaseOwnership(owner: string): void {
+		this.ownership.release(owner);
+	}
+
+	getOwnershipSnapshot(): Record<string, string[]> {
+		return this.ownership.snapshot();
+	}
+
 	private async start(loadout: SubagentLoadout, loadoutPath: string, runtime: SubagentRuntimeOptions): Promise<SubagentLaunchHandle> {
+		const depthError = validateSubagentDepth(loadout.depth);
+		if (depthError) throw new Error(depthError);
 		const existing = this.runs.get(loadout.owner);
 		if (existing) {
 			if (!existing.resultSettled) throw new Error(`Subagent owner already exists: ${loadout.owner}`);
 			await this.server.closeOwner(loadout.owner);
 			terminateRun(existing);
 			this.runs.delete(loadout.owner);
+			this.ownership.release(loadout.owner);
+			existing.slot?.release();
 		}
 		const args = buildSubagentCommandArgs(loadout, runtime.task);
+		const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
+		if (!ownership.ok) throw new Error(`Subagent ownership overlaps ${ownership.conflict?.owner}: requested ${ownership.conflict?.requestedPath}, existing ${ownership.conflict?.existingPath}.`);
+		let slot: AcquiredSubagentSlot;
+		try {
+			slot = await acquireSubagentSlot(loadout.cwd, runtime.signal);
+		} catch (error) {
+			this.ownership.release(loadout.owner);
+			throw error;
+		}
 		const environment: Record<string, string> = {
 			PI_SUBAGENT_SOCKET: this.server.socketPath,
 			PI_SUBAGENT_TOKEN: this.server.token,
@@ -341,11 +396,15 @@ export class SubagentLaunchHost {
 			resolveResult = resolve;
 			rejectResult = reject;
 		});
-		run = { options: runtime, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false };
+		run = { options: runtime, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false, slot };
 		this.runs.set(loadout.owner, run);
 		const finishChild = (error?: Error) => {
 			run.removeAbortListener?.();
-			if (this.runs.get(loadout.owner) === run) this.runs.delete(loadout.owner);
+			if (this.runs.get(loadout.owner) === run) {
+				this.runs.delete(loadout.owner);
+				this.ownership.release(loadout.owner);
+				run.slot?.release();
+			}
 			if (!run.resultSettled) {
 				run.resultSettled = true;
 				rejectResult(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
@@ -372,6 +431,8 @@ export class SubagentLaunchHost {
 			if (run.resultSettled) {
 				run.surface = undefined;
 				this.runs.delete(loadout.owner);
+				this.ownership.release(loadout.owner);
+				run.slot?.release();
 				void surface.close();
 			}
 		} else {
@@ -391,7 +452,11 @@ export class SubagentLaunchHost {
 				if (!run.resultSettled) {
 					run.resultSettled = true;
 					run.rejectResult(new Error(`Subagent ${loadout.owner} aborted.`));
-					if (this.runs.get(loadout.owner) === run) this.runs.delete(loadout.owner);
+					if (this.runs.get(loadout.owner) === run) {
+						this.runs.delete(loadout.owner);
+						this.ownership.release(loadout.owner);
+						run.slot?.release();
+					}
 				}
 			};
 			if (runtime.signal.aborted) abort();
@@ -420,7 +485,11 @@ export class SubagentLaunchHost {
 		if (this.closed) return;
 		this.closed = true;
 		process.off("exit", this.exitHandler);
-		for (const run of this.runs.values()) terminateRun(run);
+		for (const [owner, run] of this.runs) {
+			terminateRun(run);
+			this.ownership.release(owner);
+			run.slot?.release();
+		}
 		await this.server.close();
 	}
 
@@ -433,6 +502,22 @@ export class SubagentLaunchHost {
 	private async handleRequest(request: SubagentIpcRequest, _connection: unknown): Promise<unknown> {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
+		if (request.type === "spawn") {
+			if (!this.options.onSpawn) throw new Error("Nested subagent spawning is unavailable.");
+			return this.options.onSpawn(request.owner, request.payload);
+		}
+		if (request.type === "ownership") {
+			if (!isRecord(request.payload) || (request.payload.action !== "acquire" && request.payload.action !== "release")) throw new Error("Ownership request is malformed.");
+			if (request.payload.action === "release") {
+				this.releaseOwnership(request.owner);
+				return { accepted: true, released: true };
+			}
+			const paths = request.payload.paths;
+			if (paths !== undefined && (!Array.isArray(paths) || paths.some((item) => typeof item !== "string"))) throw new Error("Ownership paths are malformed.");
+			const acquired = this.acquireOwnership(request.owner, paths as string[] | undefined);
+			if (!acquired.ok) throw new Error(`Subagent ownership overlaps ${acquired.conflict?.owner}: requested ${acquired.conflict?.requestedPath}, existing ${acquired.conflict?.existingPath}.`);
+			return acquired;
+		}
 		const question = questionFromRequest(request);
 		if (question) {
 			if (run.pendingQuestion) throw new Error(`Subagent ${request.owner} already has a pending question.`);
@@ -459,6 +544,7 @@ export class SubagentLaunchHost {
 					const surface = run.surface;
 					run.surface = undefined;
 					this.runs.delete(request.owner);
+					this.ownership.release(request.owner);
 					void surface.close();
 				}
 			}
@@ -480,6 +566,8 @@ export class SubagentLaunchHost {
 			const surface = run.surface;
 			run.surface = undefined;
 			this.runs.delete(owner);
+			this.ownership.release(owner);
+			run.slot?.release();
 			void surface.close();
 		}
 	}

@@ -10,7 +10,7 @@ const IPC_SOCKET_MODE = 0o600;
 const MAX_IDENTIFIER_BYTES = 128;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
-export type SubagentIpcMessageType = "hello" | "ownership" | "browser" | "message" | "question" | "result";
+export type SubagentIpcMessageType = "hello" | "ownership" | "browser" | "message" | "question" | "result" | "spawn";
 export type SubagentIpcLogger = (event: string, details?: Record<string, unknown>) => void;
 
 export interface SubagentIpcRequest<T = unknown> {
@@ -141,7 +141,7 @@ function validateIdentifier(value: string, label: string): void {
 }
 
 function isMessageType(value: unknown): value is SubagentIpcMessageType {
-	return value === "hello" || value === "ownership" || value === "browser" || value === "message" || value === "question" || value === "result";
+	return value === "hello" || value === "ownership" || value === "browser" || value === "message" || value === "question" || value === "result" || value === "spawn";
 }
 
 function errorFrom(value: unknown): Error {

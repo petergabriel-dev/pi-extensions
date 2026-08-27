@@ -14,11 +14,11 @@ assert.equal(READ_ONLY_EXPLORER_TOOLS.has("browser_kill"), false);
 assert.match(validateExplorerTools(["edit", "write", "bash"]) ?? "", /non-repository-read-only tool\(s\): edit, write, bash/);
 assert.match(validateExplorerTools(["browser_kill"]) ?? "", /browser_kill/);
 
-function writeAgent(dir: string, name: string, description = name, tools?: string): void {
+function writeAgent(dir: string, name: string, description = name, tools?: string, subagentAgents?: string): void {
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(
 		path.join(dir, `${name}.md`),
-		`---\nname: ${name}\ndescription: ${description}${tools ? `\ntools: ${tools}` : ""}\n---\n\nPrompt for ${name}.\n`,
+		`---\nname: ${name}\ndescription: ${description}${tools ? `\ntools: ${tools}` : ""}${subagentAgents ? `\nsubagent_agents: ${subagentAgents}` : ""}\n---\n\nPrompt for ${name}.\n`,
 	);
 }
 
@@ -29,12 +29,13 @@ try {
 	const project = path.join(projectRoot, ".pi", "agents");
 	fs.mkdirSync(path.join(projectRoot, "nested", "cwd"), { recursive: true });
 	writeAgent(bundled, "explorer", "bundled explorer", "read,grep");
-	writeAgent(bundled, "worker", "bundled worker");
+	writeAgent(bundled, "worker", "bundled worker", undefined, "explorer, explorer");
 
 	const options = { bundledAgentsDir: bundled, userAgentsDir: user };
 	const clean = discoverAgents(tempRoot, "user", options);
 	assert.deepEqual(clean.agents.map((agent) => agent.name), ["explorer", "worker"]);
 	assert.ok(clean.agents.every((agent) => agent.source === "bundled"));
+	assert.deepEqual(clean.agents.find((agent) => agent.name === "worker")?.subagentAgents, ["explorer"]);
 
 	const packagedDefaults = discoverAgents(tempRoot, "user", {
 		userAgentsDir: path.join(tempRoot, "missing-user-agents"),
@@ -73,7 +74,7 @@ try {
 	assert.deepEqual(unsafe?.tools, ["read", "write"]);
 
 	const formatted = formatAgentList(unsafe ? [unsafe] : []);
-	assert.match(formatted, /explorer \(user\) model=default tools=read,write - unsafe explorer/);
+	assert.match(formatted, /explorer \(user\) model=default tools=read,write subagent_agents=none - unsafe explorer/);
 	assert.equal(formatAgentList([]), "No subagent definitions found.");
 } finally {
 	fs.rmSync(tempRoot, { recursive: true, force: true });

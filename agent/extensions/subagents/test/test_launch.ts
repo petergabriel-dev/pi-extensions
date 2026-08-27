@@ -67,6 +67,7 @@ const loadout: SubagentLoadout = {
 	thinkingLevel: "high",
 	appendSystemPrompt: buildSubagentSystemPrompt("Agent rules", true),
 	cavemanEnabled: true,
+	depth: 0,
 	createdAt: new Date().toISOString(),
 };
 
@@ -97,6 +98,9 @@ try {
 		task: "do work",
 		tools: ["read", "grep"],
 		cavemanEnabled: true,
+		depth: 0,
+		subagentAgents: ["explorer"],
+		fileOwnership: ["src/**"],
 		childSessionId: "child-session",
 		thinkingLevel: "high",
 		onResult: (text) => { steered.push(text); },
@@ -107,6 +111,9 @@ try {
 	const saved = readSubagentLoadout(handle.loadoutPath);
 	assert.deepEqual(saved.tools, ["read", "grep"]);
 	assert.equal(saved.cavemanEnabled, true);
+	assert.equal(saved.depth, 0);
+	assert.deepEqual(saved.subagentAgents, ["explorer"]);
+	assert.deepEqual(saved.fileOwnership, ["src/**"]);
 	assert.equal(fs.statSync(handle.loadoutPath).mode & 0o777, 0o600);
 	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result" });
 	assert.deepEqual(steered, ["child result"]);
@@ -148,6 +155,7 @@ try {
 		task: "do work",
 		tools: ["read", "grep"],
 		cavemanEnabled: true,
+		fileOwnership: ["hanging/**"],
 		childSessionId: "child-hanging",
 		thinkingLevel: "high",
 	});
@@ -158,6 +166,7 @@ try {
 	const exited = once(processToKill, "exit");
 	await hostWithHangingChild.close();
 	await exited;
+	assert.deepEqual(hostWithHangingChild.getOwnershipSnapshot(), {});
 	assert.ok(processToKill.exitCode !== null || processToKill.signalCode !== null);
 	await host.close();
 	console.log("subagent launch tests passed");

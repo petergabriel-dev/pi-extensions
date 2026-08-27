@@ -13,6 +13,7 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	subagentAgents?: string[];
 	systemPrompt: string;
 	source: AgentSource;
 	filePath: string;
@@ -30,6 +31,7 @@ type AgentFrontmatter = {
 	description?: unknown;
 	tools?: unknown;
 	model?: unknown;
+	subagent_agents?: unknown;
 };
 
 export const DEFAULT_AGENT_SCOPE: AgentScope = "user";
@@ -57,6 +59,18 @@ function parseTools(value: unknown): string[] | undefined {
 	if (Array.isArray(value)) {
 		const tools = value.map((tool) => asString(tool)).filter((tool): tool is string => Boolean(tool));
 		return tools.length > 0 ? tools : undefined;
+	}
+	return undefined;
+}
+
+function parseAgentNames(value: unknown): string[] | undefined {
+	if (typeof value === "string") {
+		const names = value.split(",").map((name) => asString(name)).filter((name): name is string => Boolean(name));
+		return names.length > 0 ? [...new Set(names)] : undefined;
+	}
+	if (Array.isArray(value)) {
+		const names = value.map((name) => asString(name)).filter((name): name is string => Boolean(name));
+		return names.length > 0 ? [...new Set(names)] : undefined;
 	}
 	return undefined;
 }
@@ -94,6 +108,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			description,
 			tools: parseTools(frontmatter.tools),
 			model: asString(frontmatter.model),
+			subagentAgents: parseAgentNames(frontmatter.subagent_agents),
 			systemPrompt: body.trim(),
 			source,
 			filePath,
@@ -158,7 +173,8 @@ export function formatAgentList(agents: AgentConfig[]): string {
 		.map((agent) => {
 			const tools = agent.tools?.join(",") ?? "default";
 			const model = agent.model ?? "default";
-			return `${agent.name} (${agent.source}) model=${model} tools=${tools} - ${agent.description}`;
+			const subagents = agent.subagentAgents?.join(",") ?? "none";
+			return `${agent.name} (${agent.source}) model=${model} tools=${tools} subagent_agents=${subagents} - ${agent.description}`;
 		})
 		.join("\n");
 }

@@ -2,6 +2,7 @@
 name: worker
 description: Build-mode subagent for scoped implementation work with coding tools and concise handoff output
 tools: read, bash, edit, write, grep, find, ls
+subagent_agents: explorer
 model: openai-codex/gpt-5.5
 ---
 

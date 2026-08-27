@@ -11,6 +11,8 @@ import { Type, type Static } from "typebox";
 
 import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type AgentScope } from "./agents.ts";
 import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
+import { normalizeOwnership } from "./ownership.ts";
+import { validateSubagentAgentAllowlist, validateSubagentDepth, validateSubagentToolset } from "./policy.ts";
 import { SubagentLaunchHost, type SubagentLaunchHandle, type SubagentQuestion, type SubagentResult } from "./launch.ts";
 import {
 	clearSubagentProgress,
@@ -38,6 +40,7 @@ const SubagentParams = Type.Object({
 			default: DEFAULT_AGENT_SCOPE,
 		}),
 	),
+	fileOwnership: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1_000 }), { maxItems: 100, description: "Paths or globs exclusively owned by this child while it runs." })),
 });
 type SubagentParams = Static<typeof SubagentParams>;
 
@@ -114,6 +117,12 @@ interface SubagentRecord {
 	role: AgentRole;
 	status: "running" | "waiting" | "done" | "failed";
 	task: string;
+	tools: string[];
+	subagentAgents?: string[];
+	depth: number;
+	fileOwnership: string[];
+	agentScope: AgentScope;
+	parentOwner?: string;
 	startedAt: number;
 	finishedAt?: number;
 	loadoutPath?: string;
@@ -311,13 +320,14 @@ let ownerCounter = 0;
 export default function subagentsExtension(pi: ExtensionAPI): void {
 	let host: SubagentLaunchHost | undefined;
 	let hostSessionId: string | undefined;
+	let activeContext: ExtensionContext | undefined;
 	const records = new Map<string, SubagentRecord>();
 
 	const ensureHost = (ctx: ExtensionContext): SubagentLaunchHost => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (host && hostSessionId === sessionId) return host;
 		const previous = host;
-		host = new SubagentLaunchHost({ parentSessionId: sessionId });
+		host = new SubagentLaunchHost({ parentSessionId: sessionId, onSpawn: spawnNested });
 		hostSessionId = sessionId;
 		void previous?.close();
 		return host;
@@ -328,8 +338,8 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		while (records.size > MAX_TRACKED_RUNS) records.delete(records.keys().next().value as string);
 	};
 
-	const callbacksFor = (record: SubagentRecord) => ({
-		onResult: (text: string) => steerResult(pi, record, text),
+	const callbacksFor = (record: SubagentRecord, steerToParent = true) => ({
+		...(steerToParent ? { onResult: (text: string) => steerResult(pi, record, text) } : {}),
 		onStatus: (status: "running" | "waiting") => {
 			record.status = status;
 			if (status === "running") record.question = undefined;
@@ -346,15 +356,15 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	const attachHandle = (record: SubagentRecord, handle: SubagentLaunchHandle): void => {
+	const attachHandle = (record: SubagentRecord, handle: SubagentLaunchHandle, steerToParent = true): void => {
 		record.handle = handle;
 		record.childSessionId = handle.childSessionId;
 		record.loadoutPath = handle.loadoutPath;
 		void handle.result.then((result: SubagentResult) => {
 			record.result = result.text;
 			record.finishedAt = Date.now();
-			if (!record.steered) steerResult(pi, record, result.text);
-			record.status = record.steered ? "done" : "failed";
+			if (steerToParent && !record.steered) steerResult(pi, record, result.text);
+			record.status = !steerToParent || record.steered ? "done" : "failed";
 			record.progress?.finish(record.status === "done" ? "done" : "failed");
 		}).catch((error: unknown) => {
 			record.status = "failed";
@@ -364,12 +374,88 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	};
 
+	async function spawnNested(parentOwner: string, payload: unknown): Promise<unknown> {
+		const parent = records.get(parentOwner);
+		if (!parent) throw new Error(`Unknown parent subagent ${parentOwner}.`);
+		if (!isRecord(payload) || typeof payload.task !== "string" || !payload.task.trim()) throw new Error("Nested subagent request is malformed.");
+		const agentName = typeof payload.agent === "string" && payload.agent.trim() ? payload.agent.trim() : parent.subagentAgents?.[0];
+		if (!agentName) throw new Error(`Subagent ${parentOwner} has no child agent allowlist.`);
+		const allowlistError = validateSubagentAgentAllowlist(parent.subagentAgents, agentName);
+		if (allowlistError) throw new Error(allowlistError);
+		const depth = parent.depth + 1;
+		const depthError = validateSubagentDepth(depth);
+		if (depthError) throw new Error(depthError);
+		const ctx = activeContext;
+		if (!ctx) throw new Error("Nested subagent context is unavailable.");
+		const discovery = discoverAgents(ctx.cwd, parent.agentScope);
+		const agent = discovery.agents.find((candidate) => candidate.name === agentName);
+		if (!agent) throw new Error(`Nested agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}`);
+		const configuredTools = agent.tools ?? [];
+		if (configuredTools.length === 0) throw new Error(`Nested agent ${agentName} has no explicit tools.`);
+		const tools = [...new Set([...configuredTools, "ask_question", ...(agent.subagentAgents?.length ? ["subagent"] : [])])] as string[];
+		const workflow = await queryWorkflowState(pi, undefined);
+		const toolsetReason = validateSubagentToolset(tools, workflow.mode);
+		if (toolsetReason) throw new Error(workflow.error ?? toolsetReason);
+		const ownershipValue = payload.fileOwnership;
+		if (ownershipValue !== undefined && (!Array.isArray(ownershipValue) || ownershipValue.some((item) => typeof item !== "string"))) throw new Error("Nested ownership paths are malformed.");
+		const ownership = normalizeOwnership(ownershipValue as string[] | undefined);
+		const owner = nextOwner();
+		const record: SubagentRecord = {
+			owner,
+			childSessionId: "pending",
+			agentName: agent.name,
+			role: inferRole(agent),
+			status: "running",
+			task: payload.task.trim(),
+			tools,
+			subagentAgents: agent.subagentAgents,
+			depth,
+			fileOwnership: ownership,
+			agentScope: parent.agentScope,
+			parentOwner,
+			startedAt: Date.now(),
+			steered: false,
+			progress: startSubagentProgress(inferRole(agent), { name: owner, parentId: parentOwner, depth }),
+		};
+		rememberRecord(record);
+		try {
+			const selectedModel = configuredModel(record.role, ctx);
+			const handle = await ensureHost(ctx).launch({
+				parentSessionId: ctx.sessionManager.getSessionId(),
+				owner,
+				role: record.role,
+				agent,
+				cwd: ctx.cwd,
+				task: record.task,
+				tools,
+				cavemanEnabled: workflow.cavemanEnabled,
+				model: selectedModel ? modelReference(selectedModel) : undefined,
+				thinkingLevel: configuredEffort(pi, record.role),
+				depth,
+				subagentAgents: agent.subagentAgents,
+				fileOwnership: ownership,
+				...callbacksFor(record, false),
+			});
+			attachHandle(record, handle, false);
+			const result = await handle.result;
+			return { owner, childSessionId: result.childSessionId, text: result.text };
+		} catch (error) {
+			record.status = "failed";
+			record.finishedAt = Date.now();
+			record.error = error instanceof Error ? error.message : String(error);
+			record.progress?.finish("failed");
+			throw error;
+		}
+	}
+
 	pi.on("session_start", (_event, ctx) => {
+		activeContext = ctx;
 		setSubagentProgressContext(ctx);
 		ensureHost(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
+		activeContext = undefined;
 		const closing = host;
 		host = undefined;
 		hostSessionId = undefined;
@@ -404,10 +490,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 
 			const role = inferRole(agent);
 			const workflow = await queryWorkflowState(pi, signal);
-			if (role === "worker" && (!workflow.ok || workflow.mode !== "build")) {
-				const reason = workflow.error ?? `Subagent ${agentName} is blocked outside Build mode. Switch to Build mode with /mode build.`;
-				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason, workflowMode: workflow.mode ?? "unknown" } };
-			}
 			if (role === "explorer") {
 				const unsafeReason = validateExplorerTools(agent.tools);
 				if (unsafeReason) return { content: [{ type: "text", text: `Refusing to spawn explorer: ${unsafeReason}` }], details: { ok: false, error: unsafeReason, agent: agent.name, tools: agent.tools } };
@@ -417,7 +499,13 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				const reason = `Agent ${agentName} has no explicit tools; refusing to launch child.`;
 				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason } };
 			}
-			const tools = [...new Set([...configuredTools, "ask_question"])] as string[];
+			const tools = [...new Set([...configuredTools, "ask_question", ...(agent.subagentAgents?.length ? ["subagent"] : [])])] as string[];
+			const toolsetReason = validateSubagentToolset(tools, workflow.mode);
+			if (toolsetReason) {
+				const reason = workflow.error ?? toolsetReason;
+				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason, workflowMode: workflow.mode ?? "unknown", tools } };
+			}
+			const ownership = normalizeOwnership(params.fileOwnership);
 
 			const owner = nextOwner();
 			const progress = startSubagentProgress(role, { name: owner });
@@ -428,6 +516,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				role,
 				status: "running",
 				task: params.task.trim(),
+				tools,
+				subagentAgents: agent.subagentAgents,
+				depth: 0,
+				fileOwnership: ownership,
+				agentScope,
 				startedAt: Date.now(),
 				steered: false,
 				progress,
@@ -447,6 +540,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 					cavemanEnabled: workflow.cavemanEnabled,
 					model: selectedModel ? modelReference(selectedModel) : undefined,
 					thinkingLevel: configuredEffort(pi, role),
+					depth: 0,
+					subagentAgents: agent.subagentAgents,
+					fileOwnership: ownership,
 					signal,
 					...callbacksFor(record),
 				});
@@ -498,8 +594,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 
 			if (!record.loadoutPath) return { content: [{ type: "text", text: `Subagent ${owner} has no resumable loadout.` }], details: { ok: false, error: "No loadout" } };
 			const workflow = await queryWorkflowState(pi, signal);
-			if (record.role === "worker" && (!workflow.ok || workflow.mode !== "build")) {
-				const reason = workflow.error ?? `Subagent ${owner} cannot resume outside Build mode.`;
+			const toolsetReason = validateSubagentToolset(record.tools, workflow.mode);
+			if (toolsetReason) {
+				const reason = workflow.error ?? toolsetReason;
 				return { content: [{ type: "text", text: reason }], details: { ok: false, owner, error: reason, workflowMode: workflow.mode ?? "unknown" } };
 			}
 			record.progress = startSubagentProgress(record.role, { name: owner });
@@ -535,6 +632,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				agent: record.agentName,
 				role: record.role,
 				status: record.status,
+				depth: record.depth,
+				fileOwnership: record.fileOwnership,
+				agentScope: record.agentScope,
+				parentOwner: record.parentOwner,
 				startedAt: new Date(record.startedAt).toISOString(),
 				finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : undefined,
 				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,

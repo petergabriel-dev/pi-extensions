@@ -103,7 +103,7 @@ try {
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
 	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously/);
 	assert.equal(launched?.owner, "subagent-1");
-	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question"]);
+	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent"]);
 
 	await new Promise((resolve) => setImmediate(resolve));
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);

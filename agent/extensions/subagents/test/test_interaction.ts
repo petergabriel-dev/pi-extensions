@@ -112,14 +112,19 @@ try {
 	});
 	const questionHandle = await questionHost.launch({
 		...launchOptions("question", "question-owner", "question-child"),
+		fileOwnership: ["src/**"],
 		onStatus: (status) => questionStatuses.push(status),
 		onQuestion: (value) => { question = value; },
 	});
 	await waitFor(() => Boolean(question));
 	assert.deepEqual(question, { questionId: "question-one", question: "Which answer?", options: ["yes", "no"] });
+	const ownershipConflict = questionHost.acquireOwnership("other-owner", ["src/file.ts"]);
+	assert.equal(ownershipConflict.ok, false);
+	assert.equal(ownershipConflict.conflict?.owner, "question-owner");
 	assert.equal(questionHost.answerQuestion("question-owner", "question-one", "yes"), true);
 	assert.deepEqual(await questionHandle.result, { owner: "question-owner", childSessionId: "question-child", text: "answer used" });
 	assert.deepEqual(questionStatuses, ["running", "waiting", "running"]);
+	await waitFor(() => Object.keys(questionHost.getOwnershipSnapshot()).length === 0);
 	await questionHost.close();
 
 	const messageHost = new SubagentLaunchHost({
