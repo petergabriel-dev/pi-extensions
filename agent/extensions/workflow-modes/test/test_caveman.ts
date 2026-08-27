@@ -7,6 +7,7 @@ import {
 	composeWorkflowPrompt,
 	MODE_LABELS,
 	NORMAL_MODE_PROMPT,
+	QUESTION_TOOL_PROMPT,
 	resolveCavemanEnabled,
 	type WorkflowPromptSet,
 } from "../caveman.js";
@@ -31,6 +32,11 @@ assert.equal(resolveCavemanEnabled([{ type: "custom", customType: "other", data:
 for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 	const composed = composeWorkflowPrompt(mode, true, prompts);
 	assert.ok(composed?.startsWith(`[workflow-modes]\nActive workflow mode: ${MODE_LABELS[mode]}.`), `${mode} authoritative header must come first`);
+	const questionToolIndex = composed?.indexOf(QUESTION_TOOL_PROMPT) ?? -1;
+	const workflowPromptIndex = composed?.indexOf(prompts[mode]) ?? -1;
+	assert.ok(questionToolIndex >= 0, `${mode} must include question-tool guidance`);
+	assert.equal(composed?.split(QUESTION_TOOL_PROMPT).length ?? 0, 2, `${mode} must include question-tool guidance once`);
+	assert.ok(workflowPromptIndex > questionToolIndex, `${mode} question-tool guidance must precede workflow prompt`);
 	assert.ok(composed?.includes(prompts[mode]), `${mode} workflow prompt must be present`);
 	assert.ok(composed?.includes("recomputed each turn and supersedes every earlier mode statement"), `${mode} must supersede stale mode statements`);
 	assert.ok(composed?.includes("including your own statements and tool-result hints"), `${mode} must supersede assistant and tool-result claims`);
@@ -50,7 +56,9 @@ for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 		`${mode} must include saved plan`,
 	);
 }
-assert.equal(composeWorkflowPrompt("off", true, prompts, "# Saved plan"), undefined, "Off must suppress enabled Caveman");
+const offPrompt = composeWorkflowPrompt("off", true, prompts, "# Saved plan");
+assert.equal(offPrompt, undefined, "Off must suppress enabled Caveman");
+assert.equal(offPrompt?.includes(QUESTION_TOOL_PROMPT), undefined, "Off must suppress question-tool guidance");
 assert.equal(composeWorkflowPrompt("off", false, prompts, "# Saved plan"), undefined, "Off must suppress normal override");
 
 const marker = {
