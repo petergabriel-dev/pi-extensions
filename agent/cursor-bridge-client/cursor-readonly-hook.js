@@ -39,64 +39,54 @@ function eventName(input) {
 	return String(input.hook_event_name || input.hookEventName || input.event || input.type || "");
 }
 
-function decision(decision, message, extra) {
-	return { decision, ...(message ? { message } : {}), ...(extra || {}) };
+function hookResult(permission, message) {
+	return {
+		permission,
+		...(message ? { user_message: message, agent_message: message } : {}),
+	};
 }
 
-function allow(message, extra) { return decision("allow", message, extra); }
-function ask(message, extra) { return decision("ask", message, extra); }
-function deny(message, extra) { return decision("deny", message, extra); }
+function allow() { return hookResult("allow"); }
+function ask(message) { return hookResult("ask", message); }
+function deny(message) { return hookResult("deny", message); }
 
 function commandFromInput(input) {
 	return String(input.command || input.shell_command || input.shellCommand || input.tool_input?.command || input.toolInput?.command || "").trim();
 }
 
 function classifyShell(command) {
-	if (!command) return { decision: "ask", reason: "Empty shell command in Pi project." };
-	if (MUTATING_COMMAND_RE.test(command)) return { decision: "deny", reason: "Shell command appears to mutate files or repo state." };
-	if (READ_ONLY_COMMAND_RE.test(command)) return { decision: "allow" };
-	return { decision: "ask", reason: "Shell command is not clearly read-only." };
+	if (!command) return { permission: "ask", reason: "Empty shell command in Pi project." };
+	if (MUTATING_COMMAND_RE.test(command)) return { permission: "deny", reason: "Shell command appears to mutate files or repo state." };
+	if (READ_ONLY_COMMAND_RE.test(command)) return { permission: "allow" };
+	return { permission: "ask", reason: "Shell command is not clearly read-only." };
 }
 
 function serverName(input) {
-	return String(input.server || input.serverName || input.server_name || input.mcp_server || input.mcpServer || input.tool?.server || "");
+	return String(input.mcp_server_name || input.server || input.serverName || input.server_name || input.mcp_server || input.mcpServer || input.tool?.server || "");
 }
 
 function mcpToolName(input) {
-	return String(input.name || input.toolName || input.tool_name || input.mcp_tool || input.mcpTool || input.tool?.name || "");
+	return String(input.mcp_tool_name || input.name || input.toolName || input.tool_name || input.mcp_tool || input.mcpTool || input.tool?.name || "");
 }
 
 function classifyMcp(input) {
 	const server = serverName(input);
 	const tool = mcpToolName(input);
-	if (PI_BRIDGE_SERVERS.has(server)) return { decision: "allow" };
-	if (MUTATING_MCP_RE.test(tool)) return { decision: "deny", reason: `MCP tool ${server ? `${server}/` : ""}${tool || "<unknown>"} appears mutating and is not the Pi bridge.` };
-	return { decision: "ask", reason: `MCP tool ${server ? `${server}/` : ""}${tool || "<unknown>"} is not known read-only.` };
+	if (PI_BRIDGE_SERVERS.has(server)) return { permission: "allow" };
+	if (MUTATING_MCP_RE.test(tool)) return { permission: "deny", reason: `MCP tool ${server ? `${server}/` : ""}${tool || "<unknown>"} appears mutating and is not the Pi bridge.` };
+	return { permission: "ask", reason: `MCP tool ${server ? `${server}/` : ""}${tool || "<unknown>"} is not known read-only.` };
 }
 
-function editedPath(input) {
-	return input.path || input.filePath || input.file_path || input.uri || input.file?.path;
+function toolType(input) {
+	const tool = input.tool_name || input.toolName || input.tool_type || input.toolType || (typeof input.tool === "string" ? input.tool : input.tool?.name) || "";
+	return String(tool).trim();
 }
 
-function preEditBytes(input) {
-	for (const key of ["before", "beforeContent", "before_content", "original", "originalContent", "original_content", "previousContent", "previous_content"]) {
-		if (typeof input[key] === "string") return input[key];
-	}
-	return undefined;
-}
-
-function revertEdit(input, projectRoot) {
-	const targetRaw = editedPath(input);
-	const before = preEditBytes(input);
-	if (typeof targetRaw !== "string" || !targetRaw.trim()) return deny("Pi read-only hook failed closed: afterFileEdit missing file path.");
-	if (typeof before !== "string") return deny("Pi read-only hook failed closed: afterFileEdit missing pre-edit bytes; cannot restore exactly.");
-	const target = path.resolve(projectRoot, targetRaw.replace(/^file:\/\//, ""));
-	const root = path.resolve(projectRoot) + path.sep;
-	if (!(target + path.sep).startsWith(root) && target !== path.resolve(projectRoot)) {
-		return deny(`Pi read-only hook blocked path outside project: ${target}`);
-	}
-	fs.writeFileSync(target, before, "utf8");
-	return deny(`Pi read-only hook reverted native Cursor edit to ${path.relative(projectRoot, target)}. Use Pi /mode build for mutations.`, { reverted: true, path: target });
+function classifyTool(input) {
+	const tool = toolType(input);
+	if (!tool) return { permission: "deny", reason: "preToolUse is missing tool type." };
+	if (tool.toLowerCase() === "write") return { permission: "deny", reason: "Write tool would mutate files in Pi project." };
+	return { permission: "allow" };
 }
 
 function handle(input) {
@@ -105,18 +95,22 @@ function handle(input) {
 	const event = eventName(input);
 	if (event === "beforeShellExecution") {
 		const classified = classifyShell(commandFromInput(input));
-		if (classified.decision === "allow") return allow();
-		if (classified.decision === "deny") return deny(`${classified.reason} Use Pi /mode build for mutations.`);
+		if (classified.permission === "allow") return allow();
+		if (classified.permission === "deny") return deny(`${classified.reason} Use Pi /mode build for mutations.`);
 		return ask(`${classified.reason} Continue only if this is read-only.`);
 	}
 	if (event === "beforeMCPExecution") {
 		const classified = classifyMcp(input);
-		if (classified.decision === "allow") return allow();
-		if (classified.decision === "deny") return deny(`${classified.reason} Use pi-claude-bridge for Pi state.`);
+		if (classified.permission === "allow") return allow();
+		if (classified.permission === "deny") return deny(`${classified.reason} Use pi-claude-bridge for Pi state.`);
 		return ask(`${classified.reason} Continue only if this cannot mutate state.`);
 	}
-	if (event === "afterFileEdit") return revertEdit(input, projectRoot);
-	return ask(`Unknown Cursor hook event ${event || "<missing>"} in Pi project; fail closed unless confirmed read-only.`);
+	if (event === "preToolUse") {
+		const classified = classifyTool(input);
+		if (classified.permission === "allow") return allow();
+		return deny(`${classified.reason} Use Pi /mode build for mutations.`);
+	}
+	return deny(`Unknown Cursor hook event ${event || "<missing>"} in Pi project.`);
 }
 
 function main() {
@@ -129,4 +123,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { classifyShell, classifyMcp, handle, findPiProjectRoot };
+module.exports = { classifyShell, classifyMcp, classifyTool, handle, findPiProjectRoot };

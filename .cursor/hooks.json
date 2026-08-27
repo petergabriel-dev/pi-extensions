@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "hooks": {
     "beforeShellExecution": [
       {
@@ -12,7 +13,7 @@
         "failClosed": true
       }
     ],
-    "afterFileEdit": [
+    "preToolUse": [
       {
         "command": "node agent/cursor-bridge-client/cursor-readonly-hook.js",
         "failClosed": true
