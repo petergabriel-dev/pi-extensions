@@ -66,8 +66,9 @@
 
 - `workflow-modes` is the sole Caveman owner. The standalone `caveman-mode` extension must not exist or register a second `/caveman` command.
 - Caveman preference is selected-session-branch state using the stable `caveman-mode-state` custom entry. No explicit entry means ON; latest valid ancestral entry wins.
-- Discuss, Plan, Build, Review, and Design compose their workflow prompt with Caveman when enabled and the explicit normal-style override when disabled.
-- Off must inject neither Caveman nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
+- All five active modes compose the shared question-tool fragment between the authoritative header and mode prompt, followed by Caveman when enabled or the explicit normal-style override when disabled.
+- `workflow-modes` names `ask_user_question` only in prompt text and must never import `ask-user-question`.
+- Off must inject neither question-tool fragment, Caveman, nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
 
 - Design write/edit gates fail closed: missing, unreadable, or invalid design manifest permits only `docs/design/**`; only validated manifest `tokenFiles` may extend this surface. Design never permits `docs/engineering/**` writes.
 
