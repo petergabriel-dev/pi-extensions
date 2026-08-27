@@ -37,6 +37,7 @@ export type SubagentIpcFrame = SubagentIpcRequest | SubagentIpcResponse;
 export interface SubagentIpcRequestOptions {
 	requestId?: string;
 	timeoutMs?: number;
+	noDeadline?: boolean;
 }
 
 export interface SubagentIpcResponseOptions {
@@ -160,7 +161,7 @@ function validateTimeout(value: number | undefined, label: string): number {
 
 interface PendingRequest {
 	owner: string;
-	timer: ReturnType<typeof setTimeout>;
+	timer?: ReturnType<typeof setTimeout>;
 	resolve: (result: unknown) => void;
 	reject: (error: Error) => void;
 }
@@ -203,10 +204,13 @@ export class SubagentIpcConnection {
 		if (!this.ownerValue) throw new Error("IPC owner is not established.");
 		const requestId = options.requestId ?? crypto.randomUUID();
 		validateIdentifier(requestId, "requestId");
-		const timeoutMs = validateTimeout(options.timeoutMs, "timeoutMs");
+		if (options.noDeadline !== undefined && typeof options.noDeadline !== "boolean") throw new Error("noDeadline must be a boolean.");
+		if (options.noDeadline && type !== "question" && type !== "spawn") throw new Error("noDeadline is allowed only for question or spawn requests.");
+		if (options.noDeadline && options.timeoutMs !== undefined) throw new Error("noDeadline requests cannot specify timeoutMs.");
+		const timeoutMs = options.noDeadline ? undefined : validateTimeout(options.timeoutMs, "timeoutMs");
 		const frame: SubagentIpcRequest = { kind: "request", token: this.options.token, requestId, owner: this.ownerValue, type, payload };
 		return new Promise<T>((resolve, reject) => {
-			const timer = setTimeout(() => {
+			const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
 				this.pending.delete(requestId);
 				reject(new Error(`IPC request ${requestId} timed out after ${timeoutMs} milliseconds.`));
 			}, timeoutMs);
@@ -214,7 +218,7 @@ export class SubagentIpcConnection {
 			try {
 				this.socket.write(encodeSubagentIpcFrame(frame));
 			} catch (error) {
-				clearTimeout(timer);
+				if (timer) clearTimeout(timer);
 				this.pending.delete(requestId);
 				reject(errorFrom(error));
 			}
@@ -282,7 +286,7 @@ export class SubagentIpcConnection {
 			return;
 		}
 		this.pending.delete(frame.requestId);
-		clearTimeout(pending.timer);
+		if (pending.timer) clearTimeout(pending.timer);
 		if (frame.ok) pending.resolve(frame.result);
 		else pending.reject(new Error(frame.error ?? "IPC request failed."));
 	}
@@ -333,7 +337,7 @@ export class SubagentIpcConnection {
 		this.disconnectError = error;
 		const failure = error ?? new SubagentIpcDisconnectedError();
 		for (const pending of this.pending.values()) {
-			clearTimeout(pending.timer);
+			if (pending.timer) clearTimeout(pending.timer);
 			pending.reject(failure);
 		}
 		this.pending.clear();

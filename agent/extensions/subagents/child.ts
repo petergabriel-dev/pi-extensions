@@ -144,7 +144,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 					questionId,
 					question: params.question.trim(),
 					...(params.options ? { options: params.options.map((option) => option.trim()) } : {}),
-				});
+				}, { noDeadline: true });
 				if (!isRecord(response) || typeof response.answer !== "string") throw new Error("Parent returned malformed question answer.");
 				return { content: [{ type: "text", text: response.answer }], details: { ok: true, questionId } };
 			} catch (error) {
@@ -170,7 +170,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 						agent: agentName,
 						task: params.task.trim(),
 						...(params.fileOwnership ? { fileOwnership: params.fileOwnership } : {}),
-					});
+					}, { noDeadline: true });
 					if (!isRecord(response) || typeof response.text !== "string") throw new Error("Parent returned malformed nested subagent result.");
 					return { content: [{ type: "text", text: response.text }], details: { ok: true, agent: agentName } };
 				} catch (error) {

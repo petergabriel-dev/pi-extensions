@@ -19,6 +19,11 @@ const previous = {
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 const tools = new Map<string, { execute: (...args: any[]) => Promise<unknown> }>();
 const sentMessages: string[] = [];
+const PARKED_DELAY_MS = 5_100;
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const loadoutPath = path.join(tempDir, "loadout.json");
 const loadout: SubagentLoadout = {
@@ -42,9 +47,15 @@ fs.writeFileSync(loadoutPath, JSON.stringify(loadout));
 const server = new SubagentIpcServer({
 	socketPath,
 	token: "child-test-token",
-	onRequest: (request) => {
-		if (request.type === "question") return { answer: "yes" };
-		if (request.type === "spawn") return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
+	onRequest: async (request) => {
+		if (request.type === "question") {
+			await delay(PARKED_DELAY_MS);
+			return { answer: "yes" };
+		}
+		if (request.type === "spawn") {
+			await delay(PARKED_DELAY_MS);
+			return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
+		}
 		if (request.type === "browser") return { content: [{ type: "text", text: "browser result" }], details: { ok: true } };
 		return undefined;
 	},
@@ -75,9 +86,13 @@ try {
 	assert.ok(tools.has("browser_console"));
 	assert.ok(tools.has("browser_close"));
 	await handlers.get("session_start")?.({}, {});
+	const questionStartedAt = Date.now();
 	const questionResult = await tools.get("ask_question")!.execute("question-call", { question: "Continue?", options: ["yes", "no"] }, new AbortController().signal, undefined, {});
+	assert.ok(Date.now() - questionStartedAt >= PARKED_DELAY_MS - 250);
 	assert.deepEqual((questionResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "yes" });
+	const nestedStartedAt = Date.now();
 	const nestedResult = await tools.get("subagent")!.execute("nested-call", { agent: "explorer", task: "inspect" }, new AbortController().signal, undefined, {});
+	assert.ok(Date.now() - nestedStartedAt >= PARKED_DELAY_MS - 250);
 	assert.deepEqual((nestedResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "nested result" });
 	const refusedResult = await tools.get("subagent")!.execute("nested-refused", { agent: "worker", task: "inspect" }, new AbortController().signal, undefined, {});
 	assert.match((refusedResult as { content: Array<{ text: string }> }).content[0]!.text, /allowed child agents/);

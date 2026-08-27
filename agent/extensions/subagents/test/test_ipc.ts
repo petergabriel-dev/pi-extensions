@@ -11,6 +11,7 @@ import {
 	parseSubagentIpcFrame,
 	resolveSubagentSocketPath,
 	SubagentIpcClient,
+	SubagentIpcDisconnectedError,
 	SubagentIpcFrameDecoder,
 	SubagentIpcServer,
 	type SubagentIpcRequest,
@@ -30,6 +31,7 @@ const server = new SubagentIpcServer({
 	logger: (event) => logs.push(event),
 	onRequest: (request, connection) => {
 		requests.push(request);
+		if ((request.type === "message" || request.type === "question") && (request.payload as { hang?: boolean })?.hang) return new Promise(() => undefined);
 		if (request.type === "result" && (request.payload as { probe?: string })?.probe === "correlation") {
 			connection.respond(request, { ignored: true }, { requestId: "wrong-request-id" });
 			connection.respond(request, { ignored: true }, { owner: "wrong-owner" });
@@ -94,7 +96,16 @@ try {
 	assert.deepEqual(await client.request("result", { probe: "correlation" }), { matched: true });
 	assert.ok(logs.filter((event) => event === "correlation_mismatch").length >= 2);
 
+	await assert.rejects(client.request("message", { hang: true }, { noDeadline: true }), /only for question or spawn/);
+	await assert.rejects(client.request("message", { hang: true }, { timeoutMs: 25 }), /timed out after 25 milliseconds/);
+	let noDeadlineSettled = false;
+	const noDeadline = client.request("question", { hang: true }, { noDeadline: true });
+	void noDeadline.then(() => { noDeadlineSettled = true; }, () => { noDeadlineSettled = true; });
+	await delay(50);
+	assert.equal(noDeadlineSettled, false);
 	await client.close();
+	await assert.rejects(noDeadline, (error: unknown) => error instanceof SubagentIpcDisconnectedError);
+
 	await Promise.race([
 		disconnected,
 		delay(500).then(() => { throw new Error("Timed out waiting for IPC disconnect reap."); }),
