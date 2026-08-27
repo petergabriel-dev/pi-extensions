@@ -29,14 +29,22 @@ function delay(ms: number): Promise<void> {
 		assert.match(renders.at(-1)?.content?.[1] ?? "", /worker-one \[running\]/);
 		assert.equal(renders.at(-1)?.key, "subagents-progress");
 		assert.equal(renders.at(-1)?.placement, "aboveEditor");
+		first.setTransport("headless", "/tmp/subagents/worker-one.log");
+		await delay(260);
+		assert.match(renders.at(-1)?.content?.[1] ?? "", /transport headless/);
+		assert.match(renders.at(-1)?.content?.[1] ?? "", /worker-one\.log/);
 
 		first.setStatus("waiting");
 		await delay(260);
 		assert.match(renders.at(-1)?.content?.[1] ?? "", /worker-one \[waiting\]/);
 
 		const second = startSubagentProgress("explorer", { name: "explorer-one" });
+		second.setTransport("cmux", "/tmp/subagents/explorer-one.log");
+		second.setFailure("sentinel failure");
 		first.finish("done");
 		await delay(260);
+		assert.match(renders.at(-1)?.content?.join("\n") ?? "", /explorer-one \[running\].*transport cmux/s);
+		assert.match(renders.at(-1)?.content?.join("\n") ?? "", /sentinel failure/);
 		const snapshot = getProgressSnapshot();
 		assert.deepEqual(snapshot.running.map((run) => run.status), ["done", "running"]);
 		assert.match(renders.at(-1)?.content?.join("\n") ?? "", /worker-one \[done\]/);

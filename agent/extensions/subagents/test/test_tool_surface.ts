@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import subagentsExtension, { requestBrowserViaParent } from "../index.ts";
 import {
+	SubagentFailureError,
 	SubagentLaunchHost,
 	type SubagentLaunchHandle,
 	type SubagentLaunchOptions,
@@ -72,13 +73,18 @@ let launched: SubagentLaunchOptions | undefined;
 let resumedTask: string | undefined;
 SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOptions): Promise<SubagentLaunchHandle> {
 	launched = options;
-	const result = Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result" });
-	queueMicrotask(() => { void options.onResult?.("surface result"); });
+	const failing = options.task === "failure task";
+	const result = failing
+		? Promise.reject(new SubagentFailureError(options.owner, { transport: "headless", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
+		: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result" });
+	if (!failing) queueMicrotask(() => { void options.onResult?.("surface result"); });
 	return {
 		owner: options.owner,
 		childSessionId: "child-surface",
 		pid: 123,
 		loadoutPath: "/tmp/surface-loadout.json",
+		transport: "headless",
+		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		result,
 		request: async () => undefined,
 		kill: () => undefined,
@@ -93,6 +99,8 @@ SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options
 		childSessionId: "child-resumed",
 		pid: 124,
 		loadoutPath,
+		transport: "headless",
+		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		result,
 		request: async () => undefined,
 		kill: () => undefined,
@@ -107,14 +115,17 @@ try {
 	await handlers.get("session_start")?.({}, context);
 
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
-	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously/);
+	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over headless/);
+	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /surface-test-session\/subagent-1\.log/);
 	assert.equal(launched?.owner, "subagent-1");
 	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close"]);
 
 	await new Promise((resolve) => setImmediate(resolve));
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
-	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string }> } }).details;
+	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string }> } }).details;
 	assert.equal(listDetails.agents[0]?.status, "done");
+	assert.equal(listDetails.agents[0]?.transport, "headless");
+	assert.match(listDetails.agents[0]?.logPath ?? "", /surface-test-session\/subagent-1\.log/);
 	assert.equal(listDetails.agents[0]?.result, "surface result");
 	assert.equal(sentMessages.length, 1);
 	assert.match(sentMessages[0]!.content, /surface result/);
@@ -127,11 +138,25 @@ try {
 	assert.equal(resumedTask, "resume task");
 	await new Promise((resolve) => setImmediate(resolve));
 	const resumedList = await registeredTools.get("subagents_list")!.execute("call-4", {}, new AbortController().signal, undefined, context);
-	const resumedDetails = (resumedList as { details: { agents: Array<{ status: string; result?: string }> } }).details;
+	const resumedDetails = (resumedList as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string }> } }).details;
 	assert.equal(resumedDetails.agents[0]?.status, "done");
 	assert.equal(resumedDetails.agents[0]?.result, "resumed result");
 	assert.equal(sentMessages.length, 2);
 	assert.match(sentMessages[1]!.content, /resumed result/);
+
+	const failureResult = await registeredTools.get("subagent")!.execute("call-5", { task: "failure task" }, new AbortController().signal, undefined, context);
+	assert.match((failureResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over headless/);
+	await new Promise((resolve) => setImmediate(resolve));
+	const failureList = await registeredTools.get("subagents_list")!.execute("call-6", {}, new AbortController().signal, undefined, context);
+	const failureAgents = (failureList as { details: { agents: Array<{ owner: string; status: string; transport?: string; logPath?: string; outputTail?: string }> } }).details.agents;
+	const failureAgent = failureAgents.find((agent) => agent.owner === "subagent-2");
+	assert.equal(failureAgent?.status, "failed");
+	assert.equal(failureAgent?.transport, "headless");
+	assert.match(failureAgent?.logPath ?? "", /subagent-2\.log/);
+	assert.equal(failureAgent?.outputTail, "sentinel output");
+	assert.equal(sentMessages.length, 3);
+	assert.match(sentMessages[2]!.content, /sentinel failure/);
+	assert.match(sentMessages[2]!.content, /subagent-2\.log/);
 	await handlers.get("session_shutdown")?.({}, context);
 	console.log("subagent tool surface tests passed");
 } finally {

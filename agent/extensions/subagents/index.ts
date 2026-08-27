@@ -15,7 +15,14 @@ import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
 import { normalizeOwnership } from "./ownership.ts";
 import { validateSubagentAgentAllowlist, validateSubagentDepth, validateSubagentToolset } from "./policy.ts";
 import { resolveSubagentTimeoutPolicy } from "./timeout-policy.ts";
-import { SubagentLaunchHost, type SubagentLaunchHandle, type SubagentQuestion, type SubagentResult } from "./launch.ts";
+import {
+	SubagentFailureError,
+	SubagentLaunchHost,
+	type SubagentLaunchHandle,
+	type SubagentQuestion,
+	type SubagentResult,
+} from "./launch.ts";
+import type { SubagentTransport } from "./diagnostics.ts";
 import {
 	clearSubagentProgress,
 	setSubagentProgressContext,
@@ -134,6 +141,10 @@ interface SubagentRecord {
 	startedAt: number;
 	finishedAt?: number;
 	loadoutPath?: string;
+	transport?: SubagentTransport;
+	logPath?: string;
+	cmuxFallbackReason?: string;
+	outputTail?: string;
 	handle?: SubagentLaunchHandle;
 	question?: SubagentQuestion;
 	result?: string;
@@ -320,6 +331,33 @@ function steerResult(pi: ExtensionAPI, record: SubagentRecord, text: string): vo
 	record.error = `Result steering failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
 }
 
+function failureMessage(record: SubagentRecord): string {
+	const lines = [
+		`Subagent ${record.owner} failed.`,
+		`Transport: ${record.transport ?? "unknown"}`,
+		`Log: ${record.logPath ?? "unavailable"}`,
+		`Error: ${record.error ?? "unknown error"}`,
+	];
+	if (record.cmuxFallbackReason) lines.push(`cmux fallback: ${record.cmuxFallbackReason}`);
+	if (record.outputTail) lines.push(`Recent output:\n${record.outputTail}`);
+	return lines.join("\n");
+}
+
+function steerFailure(pi: ExtensionAPI, record: SubagentRecord): void {
+	if (record.steered) return;
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			pi.sendUserMessage(failureMessage(record), { deliverAs: "followUp" });
+			record.steered = true;
+			return;
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	record.error = `Failure steering failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
+}
+
 async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise<void> {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
 	const role = (parts[0] === "explorer" || parts[0] === "worker" ? parts[0] : await ctx.ui.select("Subagent role", ["explorer", "worker"])) as AgentRole | undefined;
@@ -401,6 +439,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		record.handle = handle;
 		record.childSessionId = handle.childSessionId;
 		record.loadoutPath = handle.loadoutPath;
+		record.transport = handle.transport;
+		record.logPath = handle.logPath;
+		record.cmuxFallbackReason = handle.cmuxFallbackReason;
+		record.outputTail = undefined;
+		record.progress?.setTransport(handle.transport, handle.logPath);
 		void handle.result.then((result: SubagentResult) => {
 			record.result = result.text;
 			record.finishedAt = Date.now();
@@ -410,8 +453,16 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		}).catch((error: unknown) => {
 			record.status = "failed";
 			record.finishedAt = Date.now();
-			record.error = error instanceof Error ? error.message : String(error);
+			record.error = error instanceof SubagentFailureError ? error.info.error : error instanceof Error ? error.message : String(error);
+			if (error instanceof SubagentFailureError) {
+				record.transport = error.info.transport;
+				record.logPath = error.info.logPath;
+				record.cmuxFallbackReason = error.info.fallbackReason;
+				record.outputTail = error.info.tail;
+			}
+			record.progress?.setFailure(record.error);
 			record.progress?.finish("failed");
+			if (steerToParent) steerFailure(pi, record);
 		});
 	};
 
@@ -597,8 +648,18 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				});
 				attachHandle(record, handle);
 				return {
-					content: [{ type: "text", text: `Subagent ${owner} started asynchronously. Result will arrive as a new parent turn.` }],
-					details: { ok: true, owner, childSessionId: handle.childSessionId, agent: agent.name, role, status: record.status },
+					content: [{ type: "text", text: `Subagent ${owner} started asynchronously over ${handle.transport}. Log: ${handle.logPath}. Result will arrive as a new parent turn.` }],
+					details: {
+						ok: true,
+						owner,
+						childSessionId: handle.childSessionId,
+						agent: agent.name,
+						role,
+						status: record.status,
+						transport: handle.transport,
+						logPath: handle.logPath,
+						...(handle.cmuxFallbackReason ? { cmuxFallbackReason: handle.cmuxFallbackReason } : {}),
+					},
 				};
 			} catch (error) {
 				record.status = "failed";
@@ -687,17 +748,24 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				parentOwner: record.parentOwner,
 				startedAt: new Date(record.startedAt).toISOString(),
 				finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : undefined,
+				transport: record.transport,
+				logPath: record.logPath,
+				cmuxFallbackReason: record.cmuxFallbackReason,
 				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,
 				error: record.error,
+				outputTail: record.outputTail,
 				question: record.question,
 			}));
 			const text = agents.length === 0
 				? "No subagents."
 				: agents.map((agent) => {
 					const elapsed = Math.max(0, (Date.parse(agent.finishedAt ?? new Date().toISOString()) - Date.parse(agent.startedAt)) / 1000).toFixed(1);
+					const transport = agent.transport ? ` transport=${agent.transport}` : "";
+					const log = agent.logPath ? ` log=${agent.logPath}` : "";
 					const result = agent.result ? `\n  Result: ${agent.result}` : "";
 					const error = agent.error ? `\n  Error: ${agent.error}` : "";
-					return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role} elapsed=${elapsed}s${result}${error}`;
+					const tail = agent.outputTail ? `\n  Recent output: ${agent.outputTail}` : "";
+					return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log} elapsed=${elapsed}s${result}${error}${tail}`;
 				}).join("\n\n");
 			return { content: [{ type: "text", text: truncateUtf8(text) }], details: { agents } };
 		},

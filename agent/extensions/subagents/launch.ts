@@ -6,7 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CAVEMAN_PROMPT } from "../workflow-modes/caveman.ts";
-import { CmuxTransport, type CmuxSurfaceHandle } from "./cmux.ts";
+import { CmuxTransport, type CmuxLaunchOutcome, type CmuxSurfaceHandle } from "./cmux.ts";
+import {
+	createSubagentDiagnostics,
+	redactSubagentText,
+	type SubagentDiagnostics,
+	type SubagentTransport,
+} from "./diagnostics.ts";
 import type { AgentRole, AgentConfig } from "./agents.ts";
 import { normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
 import { acquireSubagentSlot, type AcquiredSubagentSlot } from "./concurrency.ts";
@@ -52,6 +58,24 @@ export interface SubagentQuestion {
 }
 
 export type SubagentRunStatus = "running" | "waiting";
+
+export interface SubagentFailureInfo {
+	transport: SubagentTransport;
+	logPath: string;
+	error: string;
+	tail: string;
+	fallbackReason?: string;
+}
+
+export class SubagentFailureError extends Error {
+	readonly info: SubagentFailureInfo;
+
+	constructor(owner: string, info: SubagentFailureInfo) {
+		super(`Subagent ${owner} failed over ${info.transport}. Log: ${info.logPath}. Error: ${info.error}${info.fallbackReason ? ` cmux fallback: ${info.fallbackReason}.` : ""}${info.tail ? `\nRecent output:\n${info.tail}` : ""}`);
+		this.name = "SubagentFailureError";
+		this.info = info;
+	}
+}
 
 export interface SubagentLaunchOptions {
 	parentSessionId: string;
@@ -100,6 +124,9 @@ export interface SubagentLaunchHandle {
 	readonly childSessionId: string;
 	readonly pid: number | undefined;
 	readonly loadoutPath: string;
+	readonly transport: SubagentTransport;
+	readonly logPath: string;
+	readonly cmuxFallbackReason?: string;
 	readonly result: Promise<SubagentResult>;
 	request<T = unknown>(type: SubagentIpcMessageType, payload?: unknown): Promise<T>;
 	kill(): void;
@@ -130,6 +157,11 @@ interface RunState {
 	resolveResult: (result: SubagentResult) => void;
 	rejectResult: (error: Error) => void;
 	resultSettled: boolean;
+	failureFinalizing?: boolean;
+	diagnostics: SubagentDiagnostics;
+	transport: SubagentTransport;
+	cmuxFallbackReason?: string;
+	cleanup?: () => void;
 	slot?: AcquiredSubagentSlot;
 	pendingQuestion?: PendingQuestion;
 	removeAbortListener?: () => void;
@@ -376,6 +408,9 @@ export class SubagentLaunchHost {
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
 			existing.slot?.release();
+		} else {
+			// Result cleanup releases the run before the child socket necessarily emits close.
+			await this.server.closeOwner(loadout.owner);
 		}
 		const args = buildSubagentCommandArgs(loadout, runtime.task);
 		const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
@@ -395,6 +430,14 @@ export class SubagentLaunchHost {
 			PI_SUBAGENT_CHILD_SESSION_ID: loadout.childSessionId,
 			PI_SUBAGENT_LOADOUT: loadoutPath,
 		};
+		let diagnostics: SubagentDiagnostics;
+		try {
+			diagnostics = createSubagentDiagnostics({ parentSessionId: loadout.parentSessionId, owner: loadout.owner, token: this.server.token, agentDir: this.options.agentDir });
+		} catch (error) {
+			this.ownership.release(loadout.owner);
+			slot.release();
+			throw error;
+		}
 		let run!: RunState;
 		let resolveResult!: (result: SubagentResult) => void;
 		let rejectResult!: (error: Error) => void;
@@ -402,7 +445,18 @@ export class SubagentLaunchHost {
 			resolveResult = resolve;
 			rejectResult = reject;
 		});
-		run = { options: runtime, tools: loadout.tools, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false, slot };
+		run = {
+			options: runtime,
+			tools: loadout.tools,
+			childSessionId: loadout.childSessionId,
+			loadoutPath,
+			resolveResult,
+			rejectResult,
+			resultSettled: false,
+			diagnostics,
+			transport: "headless",
+			slot,
+		};
 		this.runs.set(loadout.owner, run);
 		const releaseRun = () => {
 			run.removeAbortListener?.();
@@ -411,50 +465,51 @@ export class SubagentLaunchHost {
 			this.ownership.release(loadout.owner);
 			run.slot?.release();
 		};
+		run.cleanup = releaseRun;
+		const finishChild = (error?: Error) => {
+			if (run.resultSettled || run.failureFinalizing) return;
+			run.failureFinalizing = true;
+			run.resultSettled = true;
+			run.pendingQuestion?.reject(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
+			void this.finalizeFailure(run, loadout.owner, error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
+		};
 		run.watchdog = createSubagentWatchdog({
 			idleMs: this.options.timeoutPolicy?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
 			maxTotalMs: this.options.timeoutPolicy?.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS,
-			onFire: (kind) => {
-				if (run.resultSettled) return;
-				run.resultSettled = true;
-				this.reapBrowserPage(run, loadout.owner);
-				terminateRun(run);
-				releaseRun();
-				run.rejectResult(new Error(`Subagent ${loadout.owner} ${kind === "idle" ? "idle" : "maximum total"} timeout exceeded.`));
-			},
+			onFire: (kind) => finishChild(new Error(`Subagent ${loadout.owner} ${kind === "idle" ? "idle" : "maximum total"} timeout exceeded.`)),
 		});
-		const finishChild = (error?: Error) => {
-			this.reapBrowserPage(run, loadout.owner);
-			run.watchdog?.cancel();
-			releaseRun();
-			if (!run.resultSettled) {
-				run.resultSettled = true;
-				rejectResult(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
-			}
-		};
 		const attachChild = (child: ChildProcess): void => {
 			run.child = child;
-			child.stdout?.on("data", () => undefined);
-			child.stderr?.on("data", () => undefined);
+			child.stdout?.on("data", (chunk: Buffer | string) => run.diagnostics.append("stdout", chunk));
+			child.stderr?.on("data", (chunk: Buffer | string) => run.diagnostics.append("stderr", chunk));
 			child.once("error", (error) => finishChild(error));
 			child.once("exit", (code, signal) => finishChild(new Error(`Subagent ${loadout.owner} exited (${code ?? signal ?? "unknown"}).`)));
 		};
 
+		let transport: SubagentTransport = "headless";
+		let fallbackReason: string | undefined;
 		let surface: CmuxSurfaceHandle | undefined;
 		try {
-			surface = this.cmux
+			const outcome: CmuxLaunchOutcome | undefined = this.cmux
 				? await this.cmux.launch({ cwd: loadout.cwd, title: loadout.agentName, command: this.command, args, env: environment })
 				: undefined;
+			if (outcome?.transport === "cmux") {
+				transport = "cmux";
+				surface = outcome.surface;
+			} else if (outcome) {
+				fallbackReason = redactSubagentText(outcome.reason, this.server.token);
+			}
 		} catch (error) {
-			this.options.logger?.("cmux_launch_failed", { error: error instanceof Error ? error.message : String(error) });
+			fallbackReason = redactSubagentText(error instanceof Error ? error.message : String(error), this.server.token);
+			this.options.logger?.("cmux_launch_failed", { error: fallbackReason });
 		}
+		run.transport = transport;
+		run.cmuxFallbackReason = fallbackReason;
 		if (surface) {
 			run.surface = surface;
 			if (run.resultSettled) {
 				run.surface = undefined;
-				this.runs.delete(loadout.owner);
-				this.ownership.release(loadout.owner);
-				run.slot?.release();
+				run.cleanup?.();
 				void surface.close();
 			}
 		} else {
@@ -473,6 +528,7 @@ export class SubagentLaunchHost {
 				this.reapBrowserPage(run, loadout.owner);
 				run.watchdog?.cancel();
 				terminateRun(run);
+				run.diagnostics.close();
 				if (!run.resultSettled) {
 					run.resultSettled = true;
 					run.rejectResult(new Error(`Subagent ${loadout.owner} aborted.`));
@@ -492,6 +548,9 @@ export class SubagentLaunchHost {
 			childSessionId: loadout.childSessionId,
 			pid: run.child?.pid,
 			loadoutPath,
+			transport: run.transport,
+			logPath: run.diagnostics.logPath,
+			...(run.cmuxFallbackReason ? { cmuxFallbackReason: run.cmuxFallbackReason } : {}),
 			result,
 			request: (type, payload) => this.request(loadout.owner, type, payload),
 			kill: () => {
@@ -509,12 +568,13 @@ export class SubagentLaunchHost {
 			this.reapBrowserPage(run, owner);
 			run.watchdog?.cancel();
 			terminateRun(run);
+			run.diagnostics.close();
 			if (!run.resultSettled) {
 				run.resultSettled = true;
+				run.pendingQuestion?.reject(new Error(`Subagent ${owner} host closed.`));
 				run.rejectResult(new Error(`Subagent ${owner} host closed.`));
 			}
-			this.ownership.release(owner);
-			run.slot?.release();
+			run.cleanup?.();
 		}
 		await this.server.close();
 	}
@@ -577,40 +637,55 @@ export class SubagentLaunchHost {
 			if (!run.resultSettled) {
 				run.resultSettled = true;
 				run.watchdog?.cancel();
-				run.removeAbortListener?.();
+				run.diagnostics.close();
 				run.resolveResult(result);
 				void Promise.resolve(run.options.onResult?.(result.text)).catch((error) => this.options.logger?.("result_steering_failed", { error: String(error) }));
 				this.reapBrowserPage(run, request.owner);
-				if (run.surface) {
-					const surface = run.surface;
-					run.surface = undefined;
-					this.runs.delete(request.owner);
-					this.ownership.release(request.owner);
-					run.slot?.release();
-					void surface.close();
-				}
+				const surface = run.surface;
+				run.surface = undefined;
+				run.cleanup?.();
+				if (surface) void surface.close();
 			}
 			return { accepted: true };
 		}
 		throw new Error(`Unsupported child IPC message: ${request.type}.`);
 	}
 
+	private async finalizeFailure(run: RunState, owner: string, error: Error): Promise<void> {
+		const safeError = redactSubagentText(error.message, this.server.token);
+		if (run.surface) {
+			try {
+				run.diagnostics.append("cmux", await run.surface.readScreen(20));
+			} catch (captureError) {
+				this.options.logger?.("cmux_capture_failed", {
+					owner,
+					error: redactSubagentText(captureError instanceof Error ? captureError.message : String(captureError), this.server.token),
+				});
+			}
+		}
+		run.diagnostics.close();
+		const failure = new SubagentFailureError(owner, {
+			transport: run.transport,
+			logPath: run.diagnostics.logPath,
+			error: safeError,
+			tail: run.diagnostics.tail(),
+			...(run.cmuxFallbackReason ? { fallbackReason: run.cmuxFallbackReason } : {}),
+		});
+		run.watchdog?.cancel();
+		this.reapBrowserPage(run, owner);
+		terminateRun(run);
+		run.cleanup?.();
+		run.rejectResult(failure);
+	}
+
 	private handleDisconnect(owner: string | undefined, error?: Error): void {
 		if (!owner) return;
 		const run = this.runs.get(owner);
-		if (!run || run.resultSettled) return;
+		if (!run || run.resultSettled || run.failureFinalizing) return;
+		run.failureFinalizing = true;
 		run.resultSettled = true;
-		run.watchdog?.cancel();
-		run.removeAbortListener?.();
 		const disconnectError = error ?? new Error(`Subagent ${owner} disconnected.`);
 		run.pendingQuestion?.reject(disconnectError);
-		run.rejectResult(disconnectError);
-		this.reapBrowserPage(run, owner);
-		terminateRun(run);
-		if (this.runs.get(owner) === run) {
-			this.runs.delete(owner);
-			this.ownership.release(owner);
-			run.slot?.release();
-		}
+		void this.finalizeFailure(run, owner, disconnectError);
 	}
 }

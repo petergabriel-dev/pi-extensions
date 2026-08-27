@@ -8,7 +8,7 @@
     ]
   },
   "scripts": {
-    "test": "tsx test/test_timeout.ts && tsx test/test_timeout_policy.ts && tsx test/test_agents.ts && tsx test/test_effort.ts && tsx test/test_ipc.ts && tsx test/test_launch.ts && tsx test/test_cmux.ts && tsx test/test_progress.ts && tsx test/test_interaction.ts && tsx test/test_child.ts && tsx test/test_policy.ts && tsx test/test_tool_surface.ts",
+    "test": "tsx test/test_diagnostics.ts && tsx test/test_timeout.ts && tsx test/test_timeout_policy.ts && tsx test/test_agents.ts && tsx test/test_effort.ts && tsx test/test_ipc.ts && tsx test/test_launch.ts && tsx test/test_cmux.ts && tsx test/test_progress.ts && tsx test/test_interaction.ts && tsx test/test_child.ts && tsx test/test_policy.ts && tsx test/test_tool_surface.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

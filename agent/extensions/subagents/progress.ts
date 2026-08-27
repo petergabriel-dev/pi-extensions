@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { AgentRole } from "./agents.ts";
+import type { SubagentTransport } from "./diagnostics.ts";
 
 const WIDGET_KEY = "subagents-progress";
 const REDRAW_INTERVAL_MS = 250;
@@ -11,6 +12,8 @@ export interface ProgressHandle {
 	id: string;
 	setActivity(activity: string): void;
 	setStatus(status: SubagentProgressStatus): void;
+	setTransport(transport: SubagentTransport, logPath: string): void;
+	setFailure(error: string): void;
 	incrementToolCount(): void;
 	finish(status?: "done" | "failed"): void;
 }
@@ -25,6 +28,9 @@ export interface ProgressRun {
 	startedAt: number;
 	depth: number;
 	parentId?: string;
+	transport?: SubagentTransport;
+	logPath?: string;
+	error?: string;
 }
 
 const runs = new Map<string, ProgressRun>();
@@ -48,7 +54,10 @@ function renderLines(): string[] | undefined {
 		`Subagents: ${ordered.length}`,
 		...ordered.map((run) => {
 			const indent = "  ".repeat(run.depth);
-			return `${indent}- ${run.name} [${run.status}]: ${run.activity}; tools ${run.toolCount}; ${elapsed(run.startedAt)}`;
+			const transport = run.transport ? `; transport ${run.transport}` : "";
+			const log = run.logPath ? `; log ${run.logPath}` : "";
+			const error = run.error ? `; error ${run.error.slice(0, 256)}` : "";
+			return `${indent}- ${run.name} [${run.status}]: ${run.activity}; tools ${run.toolCount}; ${elapsed(run.startedAt)}${transport}${log}${error}`;
 		}),
 	];
 }
@@ -117,6 +126,20 @@ export function startSubagentProgress(
 			const run = runs.get(id);
 			if (!run) return;
 			run.status = status;
+			requestRender();
+		},
+		setTransport(transport: SubagentTransport, logPath: string) {
+			const run = runs.get(id);
+			if (!run) return;
+			run.transport = transport;
+			run.logPath = logPath;
+			requestRender();
+		},
+		setFailure(error: string) {
+			const run = runs.get(id);
+			if (!run) return;
+			run.error = error;
+			run.activity = "failed";
 			requestRender();
 		},
 		incrementToolCount() {

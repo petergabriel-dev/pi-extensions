@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 
+import { MAX_SUBAGENT_TAIL_BYTES, redactSubagentText } from "./diagnostics.ts";
+
 const DEFAULT_COMMAND_TIMEOUT_MS = 1_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 2_000;
 const DEFAULT_PROMPT_POLL_MS = 100;
@@ -30,8 +32,13 @@ export interface CmuxLaunchOptions {
 
 export interface CmuxSurfaceHandle {
 	readonly surface: string;
+	readScreen(lines?: number): Promise<string>;
 	close(): Promise<void>;
 }
+
+export type CmuxLaunchOutcome =
+	| { transport: "cmux"; surface: CmuxSurfaceHandle }
+	| { transport: "headless"; reason: string };
 
 function defaultRun(command: string, args: readonly string[], timeoutMs: number): Promise<CmuxCommandResult> {
 	return new Promise((resolve, reject) => {
@@ -100,7 +107,7 @@ export class CmuxTransport {
 		this.logger = options.logger;
 	}
 
-	async launch(options: CmuxLaunchOptions): Promise<CmuxSurfaceHandle | undefined> {
+	async launch(options: CmuxLaunchOptions): Promise<CmuxLaunchOutcome> {
 		let surface: string | undefined;
 		try {
 			await this.run(this.command, ["identify", "--json"], this.commandTimeoutMs);
@@ -115,12 +122,28 @@ export class CmuxTransport {
 			await this.run(this.command, ["rename-tab", "--surface", surface, "--title", options.title], this.commandTimeoutMs);
 			await this.waitForPrompt(surface);
 			await this.run(this.command, ["send", "--surface", surface, `${buildCmuxCommandLine(options.command, options.args, options.env)}\n`], this.commandTimeoutMs);
-			return { surface, close: () => this.closeSurface(surface!) };
+			return {
+				transport: "cmux",
+				surface: {
+					surface,
+					readScreen: (lines = 20) => this.readScreen(surface!, lines, options.env.PI_SUBAGENT_TOKEN),
+					close: () => this.closeSurface(surface!),
+				},
+			};
 		} catch (error) {
-			this.logger?.("cmux_fallback", { error: errorMessage(error), surface });
+			const reason = redactSubagentText(errorMessage(error), options.env.PI_SUBAGENT_TOKEN ?? "");
+			this.logger?.("cmux_fallback", { error: reason, surface });
 			if (surface) await this.closeSurface(surface);
-			return undefined;
+			return { transport: "headless", reason };
 		}
+	}
+
+	private async readScreen(surface: string, lines: number, token = ""): Promise<string> {
+		const boundedLines = Number.isInteger(lines) ? Math.max(1, Math.min(100, lines)) : 20;
+		const screen = await this.run(this.command, ["read-screen", "--surface", surface, "--lines", String(boundedLines)], this.commandTimeoutMs);
+		let output = redactSubagentText(screen.stdout, token);
+		while (Buffer.byteLength(output, "utf8") > MAX_SUBAGENT_TAIL_BYTES) output = output.slice(1);
+		return output;
 	}
 
 	private async waitForPrompt(surface: string): Promise<void> {
@@ -128,8 +151,8 @@ export class CmuxTransport {
 		let nudged = false;
 		while (Date.now() < deadline) {
 			try {
-				const screen = await this.run(this.command, ["read-screen", "--surface", surface, "--lines", "20"], this.commandTimeoutMs);
-				if (shellPromptReady(screen.stdout)) return;
+				const screen = await this.readScreen(surface, 20);
+				if (shellPromptReady(screen)) return;
 			} catch {
 				// A fresh cmux terminal can have no readable buffer until it receives a key.
 			}

@@ -43,6 +43,14 @@ const read = (chunk) => {
 socket.on("connect", () => socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "hello", owner: process.env.PI_SUBAGENT_OWNER, type: "hello", payload: { pid: process.pid } })));
 socket.on("data", read);
 `;
+const disconnectScript = `
+const net = require("node:net");
+const socket = net.createConnection(process.env.PI_SUBAGENT_SOCKET);
+const frame = (value) => { const body = Buffer.from(JSON.stringify(value)); const out = Buffer.alloc(4 + body.length); out.writeUInt32BE(body.length); body.copy(out, 4); return out; };
+process.stderr.write("sentinel stderr " + process.env.PI_SUBAGENT_TOKEN + "\\n");
+socket.on("connect", () => socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "hello", owner: process.env.PI_SUBAGENT_OWNER, type: "hello", payload: { pid: process.pid } })));
+socket.on("data", () => { socket.destroy(); setTimeout(() => process.exit(0), 10); });
+`;
 const hangingScript = `setInterval(() => {}, 1000);`;
 let hangingProcess: ReturnType<typeof spawn> | undefined;
 
@@ -137,6 +145,36 @@ try {
 	});
 	assert.deepEqual(await fallback.result, { owner: "worker-fallback", childSessionId: "child-fallback", text: "child result" });
 	await fallbackHost.close();
+
+	const failureHost = new SubagentLaunchHost({
+		parentSessionId: "failure",
+		agentDir: tempDir,
+		spawnProcess: (_command, _args, options) => spawn(process.execPath, ["-e", disconnectScript], options),
+		cmux: false,
+	});
+	const failed = await failureHost.launch({
+		parentSessionId: "failure",
+		owner: "worker-failure",
+		role: "worker",
+		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+		cwd: process.cwd(),
+		task: "disconnect",
+		tools: ["read", "grep"],
+		cavemanEnabled: true,
+		childSessionId: "child-failure",
+	});
+	await assert.rejects(failed.result, (error: unknown) => {
+		assert.equal((error as { name?: string }).name, "SubagentFailureError");
+		assert.equal((error as { info: { transport: string } }).info.transport, "headless");
+		assert.equal((error as { message: string }).message.includes("0123456789"), false);
+		assert.match((error as { info: { tail: string } }).info.tail, /sentinel stderr/);
+		return true;
+	});
+	const failureLog = fs.readFileSync(failed.logPath, "utf8");
+	assert.equal(failureLog.includes("0123456789"), false);
+	assert.match(failureLog, /sentinel stderr/);
+	assert.ok(Buffer.byteLength(failureLog, "utf8") <= 1_024 * 1_024);
+	await failureHost.close();
 
 	const hangingSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
 		captured.command = command;
