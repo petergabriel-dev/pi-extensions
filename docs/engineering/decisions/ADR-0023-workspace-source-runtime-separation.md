@@ -3,10 +3,10 @@ id: ADR-0023
 title: Workspace source and runtime separation
 status: Active
 date: 2026-07-17
-decision: Publish the allowlisted source/assets as public npm package @lopezpetergabriel/pi-extensions; keep Pi-owned runtime state outside the repository and never package or copy it into active ~/.pi source.
+decision: Publish the allowlisted source/assets as public npm package @lopezpetergabriel/pi-extensions, including CHANGELOG.md; keep Pi-owned runtime state outside the repository and never package or copy it into active ~/.pi source. Use npm publish --access public, Release vX.Y.Z commit messages, and annotated vX.Y.Z tags for releases.
 why: A relocatable package preserves source history and clean installation without risking credentials, sessions, personal memory, generated state, or active global Pi source/config.
-affects: package.json, package-lock.json, LICENSE, .gitignore, .pi/agents, bin/pi-workspace, scripts/check-workspace.mjs, scripts/check-package.mjs, agent/extensions/subagents/agents.ts, agent/agents, docs/engineering
-consequences: The package ships eleven extensions, four skills, and two bundled agents with root production dependencies and Pi peer dependencies; source-launcher behavior remains separate from npm installation, which does not copy into active ~/.pi source, while normal runs still share Pi-owned runtime state.
+affects: package.json, package-lock.json, CHANGELOG.md, LICENSE, .gitignore, .pi/agents, bin/pi-workspace, scripts/check-workspace.mjs, scripts/check-package.mjs, agent/extensions/subagents/agents.ts, agent/agents, docs/engineering
+consequences: The package ships eleven extensions, four skills, two bundled agents, and the packaged changelog with root production dependencies and Pi peer dependencies; source-launcher behavior remains separate from npm installation, which does not copy into active ~/.pi source, while normal runs still share Pi-owned runtime state. Release gates run before npm publish, and release commits/tags use the documented versioned conventions.
 readWhen: changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy
 ---
 
@@ -15,7 +15,7 @@ readWhen: changing package resources or allowlists, dependencies, launcher flags
 ## Decision
 
 - Keep this workspace as an independent Git repository preserving imported ancestry, with no remote that points back to the active global Pi source checkout.
-- Publish the allowlisted source/assets as public npm package `@lopezpetergabriel/pi-extensions`; the package is not a separate Pi home and never contains or copies Pi-owned runtime state.
+- Publish the allowlisted source/assets as public npm package `@lopezpetergabriel/pi-extensions`; include `CHANGELOG.md` with the package allowlist. The package is not a separate Pi home and never contains or copies Pi-owned runtime state.
 - Ship exactly eleven extension entrypoints, four authored skills, and two bundled agent definitions. Root `package.json` declares extension/skill resources and allowlists package-owned agent assets; root owns production dependencies while Pi packages remain peer dependencies.
 - The source launcher `bin/pi-workspace` runs `pi --no-extensions -e <repository-root>` so global extension discovery is disabled and the workspace package loads once; npm installation loads the package without copying source into active `~/.pi`.
 - Reuse host Pi auth, settings, model catalogs, sessions, and indexed personal memory through normal Pi runtime ownership. Do not copy them into repository.
@@ -43,6 +43,7 @@ Docs:
 - `docs/engineering/invariants.md`
 - `docs/engineering/traps.md`
 - `docs/engineering/decisions/README.md`
+- `CHANGELOG.md`
 
 Code/config:
 
