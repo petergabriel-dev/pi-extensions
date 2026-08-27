@@ -34,3 +34,4 @@
 | ADR-0030 | Active | Agent-driven browser verification | changing browser tools, Chromium or playwright-core setup, browser profile/lifecycle, console/network capture, page actions, screenshot handling, or browser package tests |
 | ADR-0031 | Active | Subagent browser access | changing browser page ownership, browser:* proxy events, subagent browser tools, explorer capability validation, or workflow-mode browser gating |
 | ADR-0032 | Active | Ask-user-question UI serialization | changing ask_user_question modes, question UI ownership, queue or cancellation semantics, root test registration, worker extension loading, workflow-mode prompt composition, or question routing |
+| ADR-0033 | Active | Pi-independent Cursor kit | changing Cursor commands, hooks, ADR skill, root spoke ownership, docs write-back workflow, or cross-harness bridge boundaries |
