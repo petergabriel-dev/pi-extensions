@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import subagentsExtension from "../index.ts";
+import subagentsExtension, { requestBrowserViaParent } from "../index.ts";
 import {
 	SubagentLaunchHost,
 	type SubagentLaunchHandle,
@@ -13,6 +13,7 @@ const sentMessages: Array<{ content: string; options?: unknown }> = [];
 const registeredTools = new Map<string, { execute: (...args: any[]) => Promise<unknown> }>();
 const registeredCommands: string[] = [];
 const widgetRenders: unknown[] = [];
+let browserRequest: unknown;
 
 const events = {
 	on(name: string, handler: (data: unknown) => void) {
@@ -22,6 +23,11 @@ const events = {
 		return () => listeners.delete(handler);
 	},
 	emit(name: string, data: unknown) {
+		if (name === "browser:request") {
+			browserRequest = data;
+			const request = data as { requestId: string; owner: string };
+			for (const listener of eventHandlers.get("browser:result") ?? []) listener({ requestId: request.requestId, owner: request.owner, ok: true, result: { content: [{ type: "text", text: "browser result" }], details: {} } });
+		}
 		if (name === "workflow-modes:get") {
 			for (const listener of eventHandlers.get("workflow-modes:state") ?? []) listener({ mode: "build", cavemanEnabled: true });
 		}
@@ -103,7 +109,7 @@ try {
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
 	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously/);
 	assert.equal(launched?.owner, "subagent-1");
-	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent"]);
+	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close"]);
 
 	await new Promise((resolve) => setImmediate(resolve));
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
@@ -113,6 +119,8 @@ try {
 	assert.equal(sentMessages.length, 1);
 	assert.match(sentMessages[0]!.content, /surface result/);
 	assert.ok(widgetRenders.length > 0);
+	await requestBrowserViaParent(fakePi as never, "subagent-1", { tool: "browser_network", params: { clear: true } }, true);
+	assert.equal((browserRequest as { params: { clear: boolean } }).params.clear, false);
 
 	const resumeResult = await registeredTools.get("subagent_message")!.execute("call-3", { owner: "subagent-1", message: "resume task" }, new AbortController().signal, undefined, context);
 	assert.match((resumeResult as { content: Array<{ text: string }> }).content[0]!.text, /resumed asynchronously/);

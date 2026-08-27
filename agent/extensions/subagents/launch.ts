@@ -83,6 +83,7 @@ export interface SubagentLaunchHostOptions {
 	spawnProcess?: SubagentSpawnProcess;
 	cmux?: CmuxTransport | false;
 	onSpawn?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
+	onBrowser?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 }
 
 export interface SubagentResult {
@@ -117,6 +118,7 @@ interface PendingQuestion {
 
 interface RunState {
 	options: SubagentRuntimeOptions;
+	tools: string[];
 	childSessionId: string;
 	child?: ChildProcess;
 	surface?: CmuxSurfaceHandle;
@@ -396,9 +398,10 @@ export class SubagentLaunchHost {
 			resolveResult = resolve;
 			rejectResult = reject;
 		});
-		run = { options: runtime, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false, slot };
+		run = { options: runtime, tools: loadout.tools, childSessionId: loadout.childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false, slot };
 		this.runs.set(loadout.owner, run);
 		const finishChild = (error?: Error) => {
+			this.reapBrowserPage(run, loadout.owner);
 			run.removeAbortListener?.();
 			if (this.runs.get(loadout.owner) === run) {
 				this.runs.delete(loadout.owner);
@@ -448,6 +451,7 @@ export class SubagentLaunchHost {
 		}
 		if (runtime.signal) {
 			const abort = () => {
+				this.reapBrowserPage(run, loadout.owner);
 				terminateRun(run);
 				if (!run.resultSettled) {
 					run.resultSettled = true;
@@ -486,6 +490,7 @@ export class SubagentLaunchHost {
 		this.closed = true;
 		process.off("exit", this.exitHandler);
 		for (const [owner, run] of this.runs) {
+			this.reapBrowserPage(run, owner);
 			terminateRun(run);
 			this.ownership.release(owner);
 			run.slot?.release();
@@ -499,12 +504,22 @@ export class SubagentLaunchHost {
 		return connection.request<T>(type, payload);
 	}
 
+	private reapBrowserPage(run: RunState, owner: string): void {
+		if (!run.tools.includes("browser_close") || !this.options.onBrowser) return;
+		void Promise.resolve(this.options.onBrowser(owner, { tool: "browser_close", params: {} })).catch((error) => this.options.logger?.("browser_reap_failed", { owner, error: error instanceof Error ? error.message : String(error) }));
+	}
+
 	private async handleRequest(request: SubagentIpcRequest, _connection: unknown): Promise<unknown> {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
 		if (request.type === "spawn") {
 			if (!this.options.onSpawn) throw new Error("Nested subagent spawning is unavailable.");
 			return this.options.onSpawn(request.owner, request.payload);
+		}
+		if (request.type === "browser") {
+			if (!this.options.onBrowser) throw new Error("Browser proxy is unavailable.");
+			if (!isRecord(request.payload) || typeof request.payload.tool !== "string" || !run.tools.includes(request.payload.tool)) throw new Error("Browser tool is not in child allowlist.");
+			return this.options.onBrowser(request.owner, request.payload);
 		}
 		if (request.type === "ownership") {
 			if (!isRecord(request.payload) || (request.payload.action !== "acquire" && request.payload.action !== "release")) throw new Error("Ownership request is malformed.");
@@ -540,6 +555,7 @@ export class SubagentLaunchHost {
 				run.removeAbortListener?.();
 				run.resolveResult(result);
 				void Promise.resolve(run.options.onResult?.(result.text)).catch((error) => this.options.logger?.("result_steering_failed", { error: String(error) }));
+				this.reapBrowserPage(run, request.owner);
 				if (run.surface) {
 					const surface = run.surface;
 					run.surface = undefined;

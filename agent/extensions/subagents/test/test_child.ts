@@ -30,7 +30,7 @@ const loadout: SubagentLoadout = {
 	agentName: "worker",
 	cwd: process.cwd(),
 	extensionPath: "child.ts",
-	tools: ["read", "ask_question", "subagent"],
+	tools: ["read", "ask_question", "subagent", "browser_console", "browser_close"],
 	appendSystemPrompt: "Agent rules",
 	cavemanEnabled: true,
 	depth: 0,
@@ -45,6 +45,7 @@ const server = new SubagentIpcServer({
 	onRequest: (request) => {
 		if (request.type === "question") return { answer: "yes" };
 		if (request.type === "spawn") return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
+		if (request.type === "browser") return { content: [{ type: "text", text: "browser result" }], details: { ok: true } };
 		return undefined;
 	},
 });
@@ -71,6 +72,8 @@ try {
 	subagentChildExtension(fakePi as never);
 	assert.ok(tools.has("ask_question"));
 	assert.ok(tools.has("subagent"));
+	assert.ok(tools.has("browser_console"));
+	assert.ok(tools.has("browser_close"));
 	await handlers.get("session_start")?.({}, {});
 	const questionResult = await tools.get("ask_question")!.execute("question-call", { question: "Continue?", options: ["yes", "no"] }, new AbortController().signal, undefined, {});
 	assert.deepEqual((questionResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "yes" });
@@ -78,6 +81,8 @@ try {
 	assert.deepEqual((nestedResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "nested result" });
 	const refusedResult = await tools.get("subagent")!.execute("nested-refused", { agent: "worker", task: "inspect" }, new AbortController().signal, undefined, {});
 	assert.match((refusedResult as { content: Array<{ text: string }> }).content[0]!.text, /allowed child agents/);
+	const browserResult = await tools.get("browser_console")!.execute("browser-call", { clear: false }, new AbortController().signal, undefined, {});
+	assert.deepEqual((browserResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "browser result" });
 	const connection = server.getConnection("child-owner");
 	assert.ok(connection);
 	assert.deepEqual(await connection.request("message", { text: "parent says hello" }), { accepted: true });

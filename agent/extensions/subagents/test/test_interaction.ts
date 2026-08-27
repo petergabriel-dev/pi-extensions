@@ -50,6 +50,27 @@ socket.on("data", (chunk) => {
   }
 });
 `;
+const browserChild = `
+const net = require("node:net");
+let buffer = Buffer.alloc(0);
+const socket = net.createConnection(process.env.PI_SUBAGENT_SOCKET);
+const frame = (value) => { const body = Buffer.from(JSON.stringify(value)); const out = Buffer.alloc(4 + body.length); out.writeUInt32BE(body.length, 0); body.copy(out, 4); return out; };
+const send = (requestId, type, payload) => socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId, owner: process.env.PI_SUBAGENT_OWNER, type, payload }));
+socket.on("connect", () => send("hello", "hello", { pid: process.pid }));
+socket.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (buffer.length >= 4) {
+    const length = buffer.readUInt32BE(0);
+    if (buffer.length < length + 4) return;
+    const response = JSON.parse(buffer.subarray(4, length + 4).toString());
+    buffer = buffer.subarray(length + 4);
+    if (response.kind !== "response") continue;
+    if (response.requestId === "hello") send("browser", "browser", { tool: "browser_console", params: { clear: false } });
+    else if (response.requestId === "browser") send("result", "result", { text: "browser result" });
+    else if (response.requestId === "result") socket.end();
+  }
+});
+`;
 const resultChild = `
 const net = require("node:net");
 let buffer = Buffer.alloc(0);
@@ -138,6 +159,26 @@ try {
 	await messageHandle.request("message", { text: "parent message" });
 	assert.deepEqual(await messageHandle.result, { owner: "message-owner", childSessionId: "message-child", text: "message used" });
 	await messageHost.close();
+
+	const browserRequests: Array<{ owner: string; payload: unknown }> = [];
+	const browserHost = new SubagentLaunchHost({
+		parentSessionId: "browser",
+		agentDir: tempDir,
+		cmux: false,
+		spawnProcess: (_command, _args, options) => spawn(process.execPath, ["-e", browserChild], options),
+		onBrowser: (owner, payload) => {
+			browserRequests.push({ owner, payload });
+			return { content: [{ type: "text", text: "browser response" }], details: { ok: true } };
+		},
+	});
+	const browserHandle = await browserHost.launch({
+		...launchOptions("browser", "browser-owner", "browser-child"),
+		tools: ["read", "browser_console", "browser_close"],
+	});
+	assert.deepEqual(await browserHandle.result, { owner: "browser-owner", childSessionId: "browser-child", text: "browser result" });
+	assert.deepEqual(browserRequests[0], { owner: "browser-owner", payload: { tool: "browser_console", params: { clear: false } } });
+	assert.deepEqual(browserRequests[1], { owner: "browser-owner", payload: { tool: "browser_close", params: {} } });
+	await browserHost.close();
 
 	let spawnCount = 0;
 	const spawned = [] as ReturnType<typeof spawn>[];

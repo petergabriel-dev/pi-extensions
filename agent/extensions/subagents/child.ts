@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 
-import { Type, type Static } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type, type Static, type TSchema } from "typebox";
+import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { SubagentIpcClient, type SubagentIpcRequest } from "./ipc.ts";
 import { readSubagentLoadout, truncateSubagentResult } from "./launch.ts";
@@ -19,6 +19,77 @@ const NestedSubagentParams = Type.Object({
 	fileOwnership: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1_000 }), { maxItems: 100 })),
 });
 type NestedSubagentParams = Static<typeof NestedSubagentParams>;
+
+const BrowserGotoParams = Type.Object({
+	url: Type.String({ minLength: 1, maxLength: 2_048 }),
+	timeout: Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 })),
+});
+const BrowserEvalParams = Type.Object({
+	expression: Type.String({ minLength: 1, maxLength: 10_000 }),
+	timeout: Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 })),
+});
+const BrowserConsoleParams = Type.Object({
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
+	filter: Type.Optional(Type.String({ maxLength: 1_000 })),
+	clear: Type.Optional(Type.Boolean()),
+});
+const BrowserNetworkParams = Type.Object({
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
+	urlFilter: Type.Optional(Type.String({ maxLength: 1_000 })),
+	status: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })),
+	verbose: Type.Optional(Type.Boolean()),
+	includeHeaders: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
+	clear: Type.Optional(Type.Boolean()),
+});
+const BrowserSelectorParams = Type.Object({
+	selector: Type.String({ minLength: 1, maxLength: 2_048 }),
+	timeout: Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 })),
+});
+const BrowserFillParams = Type.Object({
+	selector: Type.String({ minLength: 1, maxLength: 2_048 }),
+	value: Type.String({ maxLength: 100_000 }),
+	timeout: Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 })),
+});
+const BrowserScreenshotParams = Type.Object({
+	fullPage: Type.Optional(Type.Boolean()),
+	timeout: Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 })),
+});
+const BrowserEmptyParams = Type.Object({});
+const BrowserProxyParameters: Record<string, TSchema> = {
+	browser_goto: BrowserGotoParams,
+	browser_eval: BrowserEvalParams,
+	browser_console: BrowserConsoleParams,
+	browser_network: BrowserNetworkParams,
+	browser_fill: BrowserFillParams,
+	browser_click: BrowserSelectorParams,
+	browser_screenshot: BrowserScreenshotParams,
+	browser_close: BrowserEmptyParams,
+};
+const BROWSER_PROXY_NAMES = Object.keys(BrowserProxyParameters);
+
+type BrowserProxyName = keyof typeof BrowserProxyParameters;
+
+function browserProxyTimeout(params: Record<string, unknown>): number {
+	const timeout = params.timeout;
+	return typeof timeout === "number" && Number.isInteger(timeout) && timeout >= 100 && timeout <= 120_000 ? Math.min(120_000, timeout + 1_000) : 32_000;
+}
+
+function requestBrowserProxy(client: SubagentIpcClient, tool: BrowserProxyName, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+	const request = client.request("browser", { tool, params }, { timeoutMs: browserProxyTimeout(params) });
+	if (!signal) return request;
+	return new Promise((resolve, reject) => {
+		const finish = (action: () => void) => {
+			signal.removeEventListener("abort", onAbort);
+			action();
+		};
+		const onAbort = () => {
+			void client.request("browser", { tool: "browser_close", params: {} }, { timeoutMs: 2_000 }).catch(() => undefined);
+			finish(() => reject(new Error("Browser proxy request aborted.")));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		request.then((value) => finish(() => resolve(value)), (error) => finish(() => reject(error)));
+	});
+}
 
 function lastAssistantText(messages: readonly unknown[]): string {
 	for (const rawMessage of [...messages].reverse()) {
@@ -105,6 +176,28 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					return { content: [{ type: "text", text: `Nested subagent failed: ${message}` }], details: { ok: false, error: message, agent: agentName } };
+				}
+			},
+		});
+	}
+
+	for (const toolName of BROWSER_PROXY_NAMES) {
+		if (!loadout?.tools.includes(toolName)) continue;
+		const parameters = BrowserProxyParameters[toolName]!;
+		pi.registerTool<TSchema, unknown>({
+			name: toolName,
+			label: toolName.replaceAll("_", " "),
+			description: `Run ${toolName} through parent browser session.`,
+			parameters,
+			async execute(_toolCallId, params: unknown, signal) {
+				if (!client) return { content: [{ type: "text", text: "Parent IPC is not connected." }], details: { ok: false, tool: toolName } };
+				try {
+					const result = await requestBrowserProxy(client, toolName, isRecord(params) ? params : {}, signal);
+					if (isRecord(result) && Array.isArray(result.content)) return result as unknown as AgentToolResult<unknown>;
+					return { content: [{ type: "text", text: JSON.stringify(result) }], details: { ok: true, tool: toolName, result } };
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return { content: [{ type: "text", text: `${toolName} failed: ${message}` }], details: { ok: false, tool: toolName, error: message } };
 				}
 			},
 		});

@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -30,6 +31,10 @@ const SUBAGENT_EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 const DEFAULT_AGENT_SCOPE: AgentScope = "user";
 const MAX_FINAL_TEXT_BYTES = 50 * 1024;
 const MAX_TRACKED_RUNS = 100;
+const MAX_BROWSER_PROXY_TIMEOUT_MS = 120_000;
+const BROWSER_REQUEST_EVENT = "browser:request";
+const BROWSER_RESULT_EVENT = "browser:result";
+const BROWSER_READ_ONLY_TOOLS = new Set(["browser_console", "browser_network"]);
 
 const SubagentParams = Type.Object({
 	task: Type.String({ minLength: 1, maxLength: MAX_FINAL_TEXT_BYTES, description: "Task for async subagent. Result arrives as a later parent turn." }),
@@ -130,6 +135,7 @@ interface SubagentRecord {
 	question?: SubagentQuestion;
 	result?: string;
 	error?: string;
+	browserReadOnly: boolean;
 	steered: boolean;
 	progress?: ProgressHandle;
 }
@@ -252,6 +258,38 @@ function queryWorkflowState(pi: ExtensionAPI, signal: AbortSignal | undefined, t
 	});
 }
 
+export function requestBrowserViaParent(pi: ExtensionAPI, owner: string, payload: unknown, readOnly: boolean): Promise<unknown> {
+	if (!isRecord(payload) || typeof payload.tool !== "string" || !isRecord(payload.params)) throw new Error("Browser proxy request is malformed.");
+	const params = readOnly && BROWSER_READ_ONLY_TOOLS.has(payload.tool) ? { ...payload.params, clear: false } : payload.params;
+	const requestId = crypto.randomUUID();
+	const timeoutValue = payload.params.timeout;
+	const timeout = typeof timeoutValue === "number" && Number.isInteger(timeoutValue) && timeoutValue >= 100 && timeoutValue <= MAX_BROWSER_PROXY_TIMEOUT_MS
+		? timeoutValue
+		: 30_000;
+	return new Promise((resolve, reject) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (action: () => void) => {
+			if (timer) clearTimeout(timer);
+			unsubscribe?.();
+			action();
+		};
+		let unsubscribe: (() => void) | undefined;
+		const onResult = (value: unknown) => {
+			if (!isRecord(value) || value.requestId !== requestId || value.owner !== owner) return;
+			if (value.ok === true) return finish(() => resolve(value.result));
+			if (value.ok === false && typeof value.error === "string") return finish(() => reject(new Error(String(value.error))));
+			return finish(() => reject(new Error("Malformed browser proxy result.")));
+		};
+		timer = setTimeout(() => finish(() => reject(new Error(`Browser proxy request timed out after ${timeout} milliseconds.`))), timeout);
+		unsubscribe = pi.events.on(BROWSER_RESULT_EVENT, onResult);
+		try {
+			pi.events.emit(BROWSER_REQUEST_EVENT, { requestId, owner, tool: payload.tool, params });
+		} catch (error) {
+			finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+		}
+	});
+}
+
 function inferRole(agent: AgentConfig): AgentRole {
 	return agent.name === "explorer" ? "explorer" : "worker";
 }
@@ -327,7 +365,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (host && hostSessionId === sessionId) return host;
 		const previous = host;
-		host = new SubagentLaunchHost({ parentSessionId: sessionId, onSpawn: spawnNested });
+		host = new SubagentLaunchHost({ parentSessionId: sessionId, onSpawn: spawnNested, onBrowser: (owner, payload) => requestBrowserViaParent(pi, owner, payload, records.get(owner)?.browserReadOnly ?? false) });
 		hostSessionId = sessionId;
 		void previous?.close();
 		return host;
@@ -392,8 +430,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		if (!agent) throw new Error(`Nested agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}`);
 		const configuredTools = agent.tools ?? [];
 		if (configuredTools.length === 0) throw new Error(`Nested agent ${agentName} has no explicit tools.`);
-		const tools = [...new Set([...configuredTools, "ask_question", ...(agent.subagentAgents?.length ? ["subagent"] : [])])] as string[];
 		const workflow = await queryWorkflowState(pi, undefined);
+		const tools = augmentBrowserProxyTools(
+			[...new Set([...configuredTools, "ask_question", ...(agent.subagentAgents?.length ? ["subagent"] : [])])],
+			browserProxyToolNames(workflow.mode),
+		);
 		const toolsetReason = validateSubagentToolset(tools, workflow.mode);
 		if (toolsetReason) throw new Error(workflow.error ?? toolsetReason);
 		const ownershipValue = payload.fileOwnership;
@@ -412,6 +453,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			depth,
 			fileOwnership: ownership,
 			agentScope: parent.agentScope,
+			browserReadOnly: workflow.mode !== "build",
 			parentOwner,
 			startedAt: Date.now(),
 			steered: false,
@@ -499,7 +541,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				const reason = `Agent ${agentName} has no explicit tools; refusing to launch child.`;
 				return { content: [{ type: "text", text: reason }], details: { ok: false, error: reason } };
 			}
-			const tools = [...new Set([...configuredTools, "ask_question", ...(agent.subagentAgents?.length ? ["subagent"] : [])])] as string[];
+			const tools = augmentBrowserProxyTools(
+				[...new Set([...configuredTools, "ask_question", ...(agent.subagentAgents?.length ? ["subagent"] : [])])],
+				browserProxyToolNames(workflow.mode),
+			);
 			const toolsetReason = validateSubagentToolset(tools, workflow.mode);
 			if (toolsetReason) {
 				const reason = workflow.error ?? toolsetReason;
@@ -521,6 +566,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				depth: 0,
 				fileOwnership: ownership,
 				agentScope,
+				browserReadOnly: workflow.mode !== "build",
 				startedAt: Date.now(),
 				steered: false,
 				progress,
