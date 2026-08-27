@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CAVEMAN_PROMPT } from "../workflow-modes/caveman.ts";
+import { CmuxTransport, type CmuxSurfaceHandle } from "./cmux.ts";
 import type { AgentRole, AgentConfig } from "./agents.ts";
 import {
 	resolveSubagentSocketPath,
@@ -61,6 +62,7 @@ export interface SubagentLaunchHostOptions {
 	logger?: (event: string, details?: Record<string, unknown>) => void;
 	command?: string;
 	spawnProcess?: SubagentSpawnProcess;
+	cmux?: CmuxTransport | false;
 }
 
 export interface SubagentResult {
@@ -82,7 +84,8 @@ export interface SubagentLaunchHandle {
 interface RunState {
 	options: SubagentLaunchOptions;
 	childSessionId: string;
-	child: ChildProcess;
+	child?: ChildProcess;
+	surface?: CmuxSurfaceHandle;
 	loadoutPath: string;
 	resolveResult: (result: SubagentResult) => void;
 	rejectResult: (error: Error) => void;
@@ -184,15 +187,21 @@ function terminateChild(child: ChildProcess): void {
 	killTimer.unref();
 }
 
+function terminateRun(run: RunState): void {
+	if (run.child) terminateChild(run.child);
+	void run.surface?.close();
+}
+
 export class SubagentLaunchHost {
 	readonly server: SubagentIpcServer;
 	private readonly runs = new Map<string, RunState>();
 	private readonly command: string;
 	private readonly spawnProcess: SubagentSpawnProcess;
+	private readonly cmux: CmuxTransport | undefined;
 	private closed = false;
 	private listening = false;
 	private readonly exitHandler = () => {
-		for (const run of this.runs.values()) terminateChild(run.child);
+		for (const run of this.runs.values()) terminateRun(run);
 	};
 
 	constructor(private readonly options: SubagentLaunchHostOptions) {
@@ -204,6 +213,7 @@ export class SubagentLaunchHost {
 		});
 		this.command = options.command ?? "pi";
 		this.spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+		this.cmux = options.cmux === false ? undefined : options.cmux ?? new CmuxTransport({ logger: options.logger });
 		process.on("exit", this.exitHandler);
 	}
 
@@ -243,33 +253,35 @@ export class SubagentLaunchHost {
 		};
 		const loadoutPath = writeSubagentLoadout(loadout, this.options.agentDir ?? getAgentDir());
 		const args = buildSubagentCommandArgs(loadout, options.task);
+		const environment: Record<string, string> = {
+			PI_SUBAGENT_SOCKET: this.server.socketPath,
+			PI_SUBAGENT_TOKEN: this.server.token,
+			PI_SUBAGENT_OWNER: options.owner,
+			PI_SUBAGENT_PARENT_SESSION_ID: options.parentSessionId,
+			PI_SUBAGENT_CHILD_SESSION_ID: childSessionId,
+			PI_SUBAGENT_LOADOUT: loadoutPath,
+		};
+		let run!: RunState;
+		let resolveResult!: (result: SubagentResult) => void;
+		let rejectResult!: (error: Error) => void;
 		const result = new Promise<SubagentResult>((resolve, reject) => {
-			const child = this.spawnProcess(this.command, args, {
-				cwd: options.cwd,
-				env: {
-					...process.env,
-					PI_SUBAGENT_SOCKET: this.server.socketPath,
-					PI_SUBAGENT_TOKEN: this.server.token,
-					PI_SUBAGENT_OWNER: options.owner,
-					PI_SUBAGENT_PARENT_SESSION_ID: options.parentSessionId,
-					PI_SUBAGENT_CHILD_SESSION_ID: childSessionId,
-					PI_SUBAGENT_LOADOUT: loadoutPath,
-				},
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			const run: RunState = { options, childSessionId, child, loadoutPath, resolveResult: resolve, rejectResult: reject, resultSettled: false };
-			this.runs.set(options.owner, run);
+			resolveResult = resolve;
+			rejectResult = reject;
+		});
+		run = { options, childSessionId, loadoutPath, resolveResult, rejectResult, resultSettled: false };
+		this.runs.set(options.owner, run);
+		const finishChild = (error?: Error) => {
+			run.removeAbortListener?.();
+			this.runs.delete(options.owner);
+			if (!run.resultSettled) {
+				run.resultSettled = true;
+				rejectResult(error ?? new Error(`Subagent ${options.owner} exited before returning a result.`));
+			}
+		};
+		const attachChild = (child: ChildProcess): void => {
+			run.child = child;
 			child.stdout?.on("data", () => undefined);
 			child.stderr?.on("data", () => undefined);
-			const finishChild = (error?: Error) => {
-				run.removeAbortListener?.();
-				this.runs.delete(options.owner);
-				if (!run.resultSettled) {
-					run.resultSettled = true;
-					if (error) reject(error);
-					else reject(new Error(`Subagent ${options.owner} exited before returning a result.`));
-				}
-			};
 			child.once("error", (error) => finishChild(error));
 			child.once("exit", (code, signal) => finishChild(new Error(`Subagent ${options.owner} exited (${code ?? signal ?? "unknown"}).`)));
 			if (options.signal) {
@@ -280,18 +292,45 @@ export class SubagentLaunchHost {
 					run.removeAbortListener = () => options.signal?.removeEventListener("abort", abort);
 				}
 			}
-		});
+		};
+
+		let surface: CmuxSurfaceHandle | undefined;
+		try {
+			surface = this.cmux
+				? await this.cmux.launch({ cwd: options.cwd, title: options.agent.name, command: this.command, args, env: environment })
+				: undefined;
+		} catch (error) {
+			this.options.logger?.("cmux_launch_failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+		if (surface) {
+			run.surface = surface;
+			if (run.resultSettled) {
+				run.surface = undefined;
+				this.runs.delete(options.owner);
+				void surface.close();
+			}
+		} else {
+			try {
+				attachChild(this.spawnProcess(this.command, args, {
+					cwd: options.cwd,
+					env: { ...process.env, ...environment },
+					stdio: ["ignore", "pipe", "pipe"],
+				}));
+			} catch (error) {
+				finishChild(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
 		void result.catch(() => undefined);
 		return {
 			owner: options.owner,
 			childSessionId,
-			pid: this.runs.get(options.owner)?.child.pid,
+			pid: run.child?.pid,
 			loadoutPath,
 			result,
 			request: (type, payload) => this.request(options.owner, type, payload),
 			kill: () => {
-				const run = this.runs.get(options.owner);
-				if (run) terminateChild(run.child);
+				const current = this.runs.get(options.owner);
+				if (current) terminateRun(current);
 			},
 		};
 	}
@@ -300,7 +339,7 @@ export class SubagentLaunchHost {
 		if (this.closed) return;
 		this.closed = true;
 		process.off("exit", this.exitHandler);
-		for (const run of this.runs.values()) terminateChild(run.child);
+		for (const run of this.runs.values()) terminateRun(run);
 		await this.server.close();
 	}
 
@@ -319,6 +358,12 @@ export class SubagentLaunchHost {
 				run.resultSettled = true;
 				run.resolveResult(result);
 				void Promise.resolve(run.options.onResult?.(result.text)).catch((error) => this.options.logger?.("result_steering_failed", { error: String(error) }));
+				if (run.surface) {
+					const surface = run.surface;
+					run.surface = undefined;
+					this.runs.delete(request.owner);
+					void surface.close();
+				}
 			}
 			return { accepted: true };
 		}
@@ -331,5 +376,11 @@ export class SubagentLaunchHost {
 		if (!run || run.resultSettled) return;
 		run.resultSettled = true;
 		run.rejectResult(error ?? new Error(`Subagent ${owner} disconnected.`));
+		if (run.surface) {
+			const surface = run.surface;
+			run.surface = undefined;
+			this.runs.delete(owner);
+			void surface.close();
+		}
 	}
 }

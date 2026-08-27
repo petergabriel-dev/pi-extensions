@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { once } from "node:events";
 
 import { CAVEMAN_PROMPT } from "../../workflow-modes/caveman.ts";
+import { CmuxTransport } from "../cmux.ts";
 import {
 	buildSubagentCommandArgs,
 	buildSubagentSystemPrompt,
@@ -85,6 +86,7 @@ try {
 		agentDir: tempDir,
 		command: "pi",
 		spawnProcess: fakeSpawn,
+		cmux: false,
 	});
 	const handle = await host.launch({
 		parentSessionId: "parent-session",
@@ -109,6 +111,26 @@ try {
 	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result" });
 	assert.deepEqual(steered, ["child result"]);
 
+	const fallbackHost = new SubagentLaunchHost({
+		parentSessionId: "fallback",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn,
+		cmux: new CmuxTransport({ run: async () => { throw new Error("cmux socket refused"); } }),
+	});
+	const fallback = await fallbackHost.launch({
+		parentSessionId: "fallback",
+		owner: "worker-fallback",
+		role: "worker",
+		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+		cwd: process.cwd(),
+		task: "do fallback work",
+		tools: ["read", "grep"],
+		cavemanEnabled: true,
+		childSessionId: "child-fallback",
+	});
+	assert.deepEqual(await fallback.result, { owner: "worker-fallback", childSessionId: "child-fallback", text: "child result" });
+	await fallbackHost.close();
+
 	const hangingSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
 		captured.command = command;
 		captured.args = [...args];
@@ -116,9 +138,9 @@ try {
 		hangingProcess = spawn(process.execPath, ["-e", hangingScript], options);
 		return hangingProcess!;
 	};
-	const hostWithHangingChild = new SubagentLaunchHost({ parentSessionId: "parent-hanging", agentDir: tempDir, spawnProcess: hangingSpawn });
+	const hostWithHangingChild = new SubagentLaunchHost({ parentSessionId: "hanging", agentDir: tempDir, spawnProcess: hangingSpawn, cmux: false });
 	const hanging = await hostWithHangingChild.launch({
-		parentSessionId: "parent-hanging",
+		parentSessionId: "hanging",
 		owner: "worker-hanging",
 		role: "worker",
 		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
