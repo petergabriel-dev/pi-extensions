@@ -52,6 +52,6 @@
 
 - Published runtime dependencies belong in the root package: `diff` is a production dependency, while `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` are `"*"` peers. Keep nested extension packages, manifests, and locks for development bootstrap only; install them with `npm run bootstrap` rather than treating them as published package boundaries.
 - Prefer Node standard library for bridge clients, hooks, launchers, and integrity checks when it meets requirements.
-- Non-trivial policy/state logic keeps one focused runnable test. Root checks aggregate package tests/typechecks without duplicating their assertions.
+- Non-trivial policy/state logic keeps one focused runnable test. Focused tests may run from a root npm script without a nested manifest; `agent/extensions/ask-user-question/test/test_queue.ts` is reached through `npm run test:ask-user-question`. Root checks aggregate package tests/typechecks without duplicating their assertions.
 - Tests for delimiter-safe JSON prompts extract the delimited payload, parse it as JSON, assert semantic values, and verify a single closing delimiter; do not assert raw escaped bytes.
 - Tests must isolate temporary runtime state and remove spawned processes/files when complete.

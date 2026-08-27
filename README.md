@@ -1,6 +1,6 @@
 # Pi Extensions Workspace
 
-Independent development workspace for ten Pi extensions, four authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
+Independent development workspace for eleven Pi extensions, four authored skills, two subagent definitions, bridge clients, Cursor integration, and canonical engineering docs. The public npm package ships only its allowlisted runtime/resources, not bridge clients or Cursor configuration.
 
 This repository isolates **source**, not Pi user state. Launcher reuses current Pi auth/settings/models/sessions/personal memory while disabling global extension discovery.
 
@@ -14,18 +14,18 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 
 ## Install
 
-Public package `@lopezpetergabriel/pi-extensions@0.4.0` ships ten extensions, four skills, and two package-owned bundled agent definitions.
+Public package `@lopezpetergabriel/pi-extensions@0.5.0` ships eleven extensions, four skills, and two package-owned bundled agent definitions.
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.4.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.4.0   # install for this project
-pi -e npm:@lopezpetergabriel/pi-extensions@0.4.0   # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.5.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.5.0   # install for this project
+pi -e npm:@lopezpetergabriel/pi-extensions@0.5.0   # temporary try
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.4.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.5.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 `ccc` remains an external prerequisite for `ccc_search` (`ccc --version`). Existing raw or global copies can double-load; inspect `pi list` and `pi config`, then remove or disable duplicates.
 
@@ -42,7 +42,7 @@ npm run check
 ./bin/pi-workspace
 ```
 
-Review any Pi project-trust prompt before approving local resources. Startup header should list exactly ten extensions from this repository and no global extension paths. Exit with `/quit`.
+Review any Pi project-trust prompt before approving local resources. Startup header should list exactly eleven extensions from this repository and no global extension paths. Exit with `/quit`.
 
 `bin/pi-workspace` executes `pi --no-extensions -e <repository-root>`. Do not replace it with `pi -e .`: without `--no-extensions`, active global copies may load beside workspace copies.
 
@@ -52,7 +52,8 @@ Review any Pi project-trust prompt before approving local resources. Startup hea
 npm ci --ignore-scripts --legacy-peer-deps # install root published runtime dependency
 npm run bootstrap       # npm ci in five lockfile-backed development packages
 npm run check           # verify workspace plus npm artifact inventory/size
-npm test                # extension tests, typechecks, Cursor hook tests
+npm test                # extension tests, queue test, typechecks, Cursor hook tests
+npm run test:ask-user-question # focused ask-user-question queue test
 npm run test:extensions # focused extension tests
 npm run typecheck       # all configured TypeScript checks
 npm run test:cursor     # Cursor read-only hook regression suite
@@ -62,7 +63,7 @@ Normal launch may write Pi-owned runtime state outside repository and ignored br
 
 ## Repository map
 
-- `agent/extensions/` — ten package entrypoints and supporting code
+- `agent/extensions/` — eleven package entrypoints and supporting code
 - `agent/agents/` — explorer and worker definitions
 - `agent/skills/` — grill, grill-with-docs, web-debug, worker-orchestration
 - `agent/claude-bridge-client/` — shared MCP client and Claude read-only hook

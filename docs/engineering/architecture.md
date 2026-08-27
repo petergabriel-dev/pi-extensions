@@ -2,7 +2,7 @@
 
 ## Workspace and package boundary
 
-This repository publishes as `@lopezpetergabriel/pi-extensions@0.4.0`, one Pi package containing ten extensions, four skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
+This repository publishes as `@lopezpetergabriel/pi-extensions@0.5.0`, one Pi package containing eleven extensions, four skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
 
 - The npm allowlist ships runtime TS/helpers, workflow plan template, agent/skill Markdown, `docs/engineering/**`, README/LICENSE, and npm-mandatory nested READMEs under engineering-docs/filechanges. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state; package gates enforce <=512 KiB packed and <=1 MiB unpacked.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
@@ -28,6 +28,7 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.4.0`, one Pi pa
 | 8 | `agent/extensions/personal-memory/index.ts` | `remember`, `recall_memory_entry`, `/remember` | Owns user-global indexed personal-memory reads, writes, and one-time legacy migration. |
 | 9 | `agent/extensions/subagents/index.ts` | `spawn_explorer`, `spawn_worker`, model command, debug tools | Discovers role definitions, enforces spawn policy/concurrency/ownership, and runs isolated persisted child sessions. |
 | 10 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
+| 11 | `agent/extensions/ask-user-question/index.ts` | `ask_user_question` tool | Owns model-initiated text, single-select, and multi-select questions, module-local FIFO UI serialization, per-question Skip, and cancel-all Escape handling. |
 
 ### Agent definitions
 
@@ -101,15 +102,15 @@ Live mutable extension state has one owner. Cross-extension mutation uses namesp
 
 Static coupling totals five imports: `claude-bridge` imports `workflow-modes`, `engineering-docs`, and `personal-memory` (`agent/extensions/claude-bridge/index.ts:6-8`), while `workflow-modes` imports `engineering-docs` from its entrypoint and policy helper (`agent/extensions/workflow-modes/index.ts:8`, `agent/extensions/workflow-modes/policy.ts:1`). `claude-bridge` is therefore the only consumer spanning multiple sibling extensions; both `workflow-modes` imports target the same sibling.
 
-Four extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Browser uses the namespaced `browser:request`/`browser:result` event channel; incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
+Five extensions have no outgoing cross-extension edge—neither a sibling import nor a `pi.events` call—in their complete runtime source: `ask-user-question` (`agent/extensions/ask-user-question/index.ts:1-724`, `agent/extensions/ask-user-question/queue.ts:1-36`), `ccc-search` (`agent/extensions/ccc-search/index.ts:1-183`), `filechanges` (`agent/extensions/filechanges/index.ts:1-586`), `notify` (`agent/extensions/notify.ts:1-55`), and `personal-memory` (`agent/extensions/personal-memory/index.ts:1-181`, `agent/extensions/personal-memory/curation.ts:1-137`, `agent/extensions/personal-memory/store.ts:1-246`). Browser uses the namespaced `browser:request`/`browser:result` event channel; incoming use of `personal-memory/store.ts` by `claude-bridge` remains visible in the static map above (`agent/extensions/claude-bridge/index.ts:8`).
 
-Build topology keeps ten runtime entrypoints (`package.json:37-47`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
+Build topology keeps eleven runtime entrypoints (`package.json:37-48`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
 
 - seven nested manifests (`agent/extensions/browser/package.json:1`, `agent/extensions/ccc-search/package.json:1`, `agent/extensions/engineering-docs/package.json:1`, `agent/extensions/filechanges/package.json:1`, `agent/extensions/personal-memory/package.json:1`, `agent/extensions/subagents/package.json:1`, `agent/extensions/workflow-modes/package.json:1`);
 - five nested lockfiles (`agent/extensions/browser/package-lock.json:1`, `agent/extensions/ccc-search/package-lock.json:1`, `agent/extensions/filechanges/package-lock.json:1`, `agent/extensions/subagents/package-lock.json:1`, `agent/extensions/workflow-modes/package-lock.json:1`); and
 - five nested TypeScript configs (`agent/extensions/browser/tsconfig.json:1`, `agent/extensions/ccc-search/tsconfig.json:1`, `agent/extensions/personal-memory/tsconfig.json:1`, `agent/extensions/subagents/tsconfig.json:1`, `agent/extensions/workflow-modes/tsconfig.json:1`).
 
-Root scripts install the five lockfile-backed packages, then aggregate six extension suites and five typechecks (`package.json:55-62`).
+Root scripts install the five lockfile-backed packages, then run the focused ask-user-question queue test, aggregate six nested extension suites, and run five typechecks (`package.json:55-63`).
 
 ## Pi ↔ multi-harness bridge
 

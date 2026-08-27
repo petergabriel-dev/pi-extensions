@@ -5,17 +5,17 @@
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.4.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.4.0
-pi -e npm:@lopezpetergabriel/pi-extensions@0.4.0
+pi install npm:@lopezpetergabriel/pi-extensions@0.5.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.5.0
+pi -e npm:@lopezpetergabriel/pi-extensions@0.5.0
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.4.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.5.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
-The package provides ten extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
+The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
 The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
@@ -36,7 +36,7 @@ PACKAGE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-package.XXXXXX")"
 trap 'rm -rf "$PACKAGE_TEST_DIR"' EXIT INT TERM
 npm pack --ignore-scripts --pack-destination "$PACKAGE_TEST_DIR"
 mkdir -p "$PACKAGE_TEST_DIR/package" "$PACKAGE_TEST_DIR/agent"
-tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.4.0.tgz" \
+tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.5.0.tgz" \
   -C "$PACKAGE_TEST_DIR/package" --strip-components=1
 npm install --prefix "$PACKAGE_TEST_DIR/package" --omit=dev --omit=peer --ignore-scripts
 PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
@@ -85,7 +85,7 @@ Launcher resolves repository root from its own path and executes `pi --no-extens
 On first startup:
 
 1. Review project trust prompt before approval.
-2. Inspect `[Extensions]` header: exactly ten paths should resolve inside this repository.
+2. Inspect `[Extensions]` header: exactly eleven paths should resolve inside this repository.
 3. Confirm no global extension path appears.
 4. Confirm `.pi/agents` resolves to `agent/agents`.
 5. Exit with `/quit` when done.
@@ -111,7 +111,7 @@ GitHub Actions runs the same bootstrap and `npm test` gate for pull requests and
 This runs:
 
 1. Workspace inventory/integrity check.
-2. CCC, engineering-docs, personal-memory, subagent-timeout, and workflow-mode tests.
+2. Focused ask-user-question queue test, then CCC, engineering-docs, personal-memory, subagent-timeout, and workflow-mode tests.
 3. Configured TypeScript checks.
 4. Cursor read-only hook tests.
 
@@ -121,6 +121,7 @@ Useful focused commands:
 
 ```bash
 npm run check
+npm run test:ask-user-question
 npm run test:extensions
 npm run typecheck
 npm run test:cursor
@@ -141,7 +142,7 @@ done
 
 | Component | Automated gate | Live/manual acceptance |
 |---|---|---|
-| Root package, ten entrypoints, four skills, two agents | `npm run check` | Source header lists ten extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
+| Root package, eleven entrypoints, four skills, two agents | `npm run check` | Source header lists eleven extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
 | `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
 | `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |
@@ -152,6 +153,7 @@ done
 | `personal-memory` | `npm --prefix agent/extensions/personal-memory test` and `npm --prefix agent/extensions/personal-memory run typecheck` | In isolated Pi home, save slug, inspect generated `MEMORY.md`, fetch one entry. |
 | `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | Debug/live role runs only when explicitly needed; worker must refuse outside Build. |
 | `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
+| `ask-user-question` | `npm run test:ask-user-question` | Queue test covers FIFO order, batch cancellation, abort re-check, drain reset, and per-question Skip progression. |
 | Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff plus `read_plan_tasks`/`tick_plan_task`. |
 | Cursor MCP/hooks/commands | `node agent/cursor-bridge-client/test-cursor-readonly-hook.js` | Real Cursor recall/capture/save; shell/MCP denial; native edit byte restoration. |
 | Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |

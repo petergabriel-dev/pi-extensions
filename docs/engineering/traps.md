@@ -6,6 +6,7 @@
 - **Bootstrap does not eliminate all network use.** Engineering-docs and personal-memory scripts invoke `npx --yes`; uncached TypeScript/tsx packages still require npm registry access during tests/typecheck.
 - **Extension dependencies are split.** A test passing in one package does not prove another package is installed. After cloning or lock changes, run root `npm ci --ignore-scripts --legacy-peer-deps`, nested `npm run bootstrap`, then root gate. If nested workflow tests fail before source execution because `node_modules/.bin/tsx`, `tsc`, or `@types/node` is absent, bootstrap first; a temporary ignored `tsx` shim may unblock tests, but remove it afterward.
 - **Runtime Pi API and extension dependency versions can differ.** Package-load smoke plus extension typechecks are both required; one does not replace other. Missing nested `tsc` is a dependency/bootstrap failure, not proof of source failure.
+- **`npm pack` can fail on cache ownership.** A root-owned entry under `~/.npm/_cacache` causes `npm pack` to return `EPERM`; repair ownership for the current user, then rerun `npm run check:package`.
 
 ## Browser verification
 
@@ -20,6 +21,7 @@
 - **Navigation waits only for DOM readiness.** `browser_goto` uses `waitUntil: "domcontentloaded"`; async requests may still be pending (`agent/extensions/browser/index.ts:579-585`).
 - **Eval returns node placeholders.** DOM nodes serialize as exact `"ref: <Node>"`; Task 1 live output matched (`agent/extensions/browser/index.ts:474-496`).
 - **Network failures expose Chromium error text.** `requestfailed` stores `request.failure()?.errorText`; Task 1 recorded exact `net::ERR_EMPTY_RESPONSE` for an unread fetch (`agent/extensions/browser/index.ts:756-763`).
+- **`pi-tui` resize can trip its width guard.** Resize calls `requestRender()` without `invalidate()`, so stale wider lines can crash the process. Keep `ask-user-question` render caches keyed by width (`agent/extensions/ask-user-question/index.ts:243-249`, `:378-384`, `:565-571`).
 - **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or esbuild bundling with Pi peers externalized for syntax-only checks; live behavior still needs a real Pi session.
 
 ## Source isolation versus runtime sharing
@@ -106,7 +108,7 @@
 
 ## Pi subagents
 
-- **Worker gate belongs in parent.** Child loaders disable extensions, so child does not inherit workflow mutation hook. `spawn_worker` must verify live Build before child creation.
+- **Workers cannot ask questions.** `runSubagent()` loads children with `noExtensions: true` (`agent/extensions/subagents/spawn.ts:247`), so workers do not receive `ask_user_question`; the parent must handle model-initiated UI. Worker spawn still verifies live Build before child creation.
 - **Child transcript stays out of parent context.** Only parsed final structured result returns; persisted child session is out-of-band evidence.
 - **Nested graph is bounded.** Parent → worker → explorer only. Giving worker another worker tool or explorer any spawn tool breaks recursion bound.
 - **Default scope is user.** Project test agent placed under `.pi/agents` is invisible when caller leaves `agentScope` at default.
