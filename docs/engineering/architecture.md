@@ -26,7 +26,7 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.6.0`, one Pi pa
 | 6 | `agent/extensions/filechanges/index.ts` | `/filechanges`, `/filechanges-accept`, `/filechanges-decline` | Tracks successful Pi `edit`/`write` mutations against branch-local first-write baselines and can keep or revert them. |
 | 7 | `agent/extensions/notify.ts` | `agent_end` lifecycle hook | Emits terminal-native “Ready for input” notification; no persistent state. |
 | 8 | `agent/extensions/personal-memory/index.ts` | `remember`, `recall_memory_entry`, `/remember` | Owns user-global indexed personal-memory reads, writes, and one-time legacy migration. |
-| 9 | `agent/extensions/subagents/index.ts` | `spawn_explorer`, `spawn_worker`, model command, debug tools | Discovers role definitions, enforces spawn policy/concurrency/ownership, and runs isolated persisted child sessions. |
+| 9 | `agent/extensions/subagents/index.ts` | `subagent`, `subagents_list`, `subagent_message`, model/effort commands | Discovers agent definitions, enforces toolset/depth/concurrency/ownership policy, and runs isolated persisted child processes. |
 | 10 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
 | 11 | `agent/extensions/ask-user-question/index.ts` | `ask_user_question` tool | Owns model-initiated text, single-select, and multi-select questions, module-local FIFO UI serialization, per-question Skip, and cancel-all Escape handling. |
 
@@ -85,7 +85,7 @@ browser ──browser:result──> subagents browser proxies
 workflow-modes ──tool-call gate──> browser mutation tools
        │
        ├──state/events──> engineering-docs write gating
-       ├──state/build gate──────> subagents spawn_worker
+       ├──state/build gate──────> subagents subagent
        └──state/save-plan───────> claude-bridge <──file IPC── bridge clients
                                       │
                                       ├──add event────> discussion-notes

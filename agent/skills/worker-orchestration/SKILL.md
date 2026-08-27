@@ -7,6 +7,10 @@ description: Guides contract-first orchestration of Pi worker subagents. Use whe
 
 Use this skill when coordinating worker subagents for implementation work.
 
+## Current Pi Surface
+
+Parent starts work with `subagent` using `agent: "worker"`; discovery uses `agent: "explorer"`. Use `subagents_list` for status and `subagent_message` for live follow-up or parked-question answers. Nested children use `subagent` only when their agent definition allowlists the child and depth remains bounded.
+
 ## Core Model
 
 Use an **A+B orchestration model**:
@@ -67,7 +71,7 @@ Use explorer subagents for read-only discovery when:
 - You need architecture context across many files.
 - You want a worker to avoid spending implementation time searching.
 
-Workers may delegate discovery to explorers when allowed, but explorers are leaves. Do not ask explorers to edit, and do not ask workers to spawn other workers.
+Workers may delegate discovery to explorers when allowed, but explorers are leaves. Do not ask explorers to edit, and do not ask workers to spawn another worker. A worker may use allowlisted `subagent` for explorer discovery only.
 
 ## Worker Spawn Checklist
 

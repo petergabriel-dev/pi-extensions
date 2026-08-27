@@ -2,14 +2,14 @@
 
 Date: 2026-06-03
 
-Scope: saved-plan task 3, behavioral acceptance for the prompt-only delegation guidance added to `agent/extensions/workflow-modes/index.ts`.
+Scope: behavioral acceptance for current async delegation guidance in `agent/extensions/workflow-modes/index.ts`.
 
 ## Observations
 
 - **Discuss quick lookup stays inline:** Performed a focused inline lookup of `agent/extensions/workflow-modes/index.ts` with `nl -ba ... | sed -n '250,330p'` to confirm the prompt text at lines 253-255. No explorer was used for this narrow single-file check, matching the Discuss threshold to keep quick lookups inline.
-- **Plan fan-out delegates to explorer:** Used `spawn_explorer` for a multi-file fan-out sweep covering workflow mode prompt injection, mode constants, and subagent tool names. The explorer inspected `agent/extensions/workflow-modes/index.ts`, `agent/extensions/workflow-modes/policy.ts`, `agent/extensions/workflow-modes/sandbox.ts`, `agent/extensions/workflow-modes/plan-template.md`, `agent/extensions/engineering-docs/mode.ts`, `agent/extensions/engineering-docs/constants.ts`, and `agent/extensions/subagents/index.ts`, then returned concise findings. This matches the Plan threshold to default to explorer for multi-file/symbol fan-out while the parent synthesizes.
-- **Build uses one worker for a substantial task:** For saved-plan task 2, the parent spawned exactly one `spawn_worker` with explicit `fileOwnership: ["agent/extensions/workflow-modes/index.ts"]`. The worker made the isolated prompt edit; the parent inspected the diff, adjusted wording, ran verification, committed, and asked before advancing. This matches the sequential one-worker-per-substantial-task rule and keeps verification/commit/confirmation parent-owned.
-- **No over-delegation on trivial lookups:** The focused line-number lookup above was performed inline rather than via explorer or worker.
+- **Plan fan-out delegates to explorer:** Plan uses `subagent` with `agent: "explorer"` for multi-file fan-out discovery, then parent synthesizes only bounded findings. Direct reads remain preferred for narrow checks.
+- **Build uses one worker for a substantial task:** Build uses `subagent` with `agent: "worker"` and explicit `fileOwnership` for one substantial saved-plan task at a time. Parent inspects changes, runs verification, commits, and controls confirmation; `subagents_list` monitors and `subagent_message` handles follow-up.
+- **No over-delegation on trivial lookups:** Focused line-number lookups stay inline rather than using `subagent`.
 - **Loop regressions:** During task 1 and task 2 execution, the parent stopped after each commit and requested explicit confirmation before starting the next task. The saved-plan one-task loop remains intact in this session.
 
 ## Verification commands

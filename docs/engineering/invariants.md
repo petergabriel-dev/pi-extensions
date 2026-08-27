@@ -93,15 +93,15 @@
 
 ## Pi subagents
 
-- `spawn_worker` must query live workflow mode through the event bus before spawning and must refuse unless mode is `build`. This gate lives in the parent tool because worker children have coding tools.
-- Child sessions must not inherit the parent workflow-modes `tool_call` hook. `runSubagent()` uses a `DefaultResourceLoader` with `noExtensions: true`, and the parent performs the worker build-mode check before child creation.
-- Explorer tools are read-only with respect to the repository by construction. `spawn_explorer` refuses definitions whose tools include anything outside `read`, `grep`, `find`, `ls`, and the browser verification proxy set: `browser_goto`, `browser_eval`, `browser_console`, `browser_network`, `browser_fill`, `browser_click`, `browser_screenshot`, and `browser_close`. Browser proxies may affect external web state but grant no repository mutation tools.
-- Only a child subagent's final structured return may enter parent context. The child transcript remains in the persisted child session and is not appended to the parent branch.
-- Spawn graph is bounded to `main -> worker -> explorer`, max depth 2. Workers receive nested `spawn_explorer`; workers do not receive `spawn_worker`; explorers receive no spawn tools.
-- Global subagent concurrency defaults to 3 via the default lane. Nested worker-spawned explorers use the reserved explorer lane so workers cannot deadlock waiting on default worker slots.
-- Parallel worker file ownership must not overlap. `spawn_worker` refuses an overlapping `fileOwnership` request while another worker owns the same path/subtree.
+- `subagent` must query live workflow mode through the event bus before spawning; any resolved toolset containing mutating tools is refused outside `build`. This gate lives in parent because child capabilities are fixed in its loadout.
+- Child sessions launch as separate `pi --no-extensions -e agent/extensions/subagents/child.ts` processes. They do not inherit parent workflow hooks; loadout allowlist is authoritative on launch and resume.
+- Explorer agents are repository-read-only by toolset. Browser proxies are mode-scoped: read-only modes receive console/screenshot/network with buffer clearing disabled; Build may receive full browser proxy set.
+- Only child final result text enters parent context. Child transcript remains in its persisted session and is not appended to parent branch.
+- Spawn graph depth is capped at 2. Child `subagent` is exposed only when `subagent_agents:` allowlists requested definitions; depth or allowlist violations refuse.
+- Global subagent concurrency defaults to 3 through one shared lane; no reserved explorer lane exists.
+- File ownership paths must not overlap across active children. Parent IPC ownership locks release on child result, exit, crash, cancellation, or host close.
 - Progress widget updates must be keyed by `subagents-progress`, throttled to 250 ms, and cleared when all runs finish.
-- Subagent idle timeout must measure time since the last child event, not time since spawn. `runSubagent()` in `agent/extensions/subagents/spawn.ts` must call `watchdog.touch()` for every child `AgentSessionEvent`, so `message_update` streaming and tool lifecycle activity cannot trip idle timeout while active.
+- Subagent idle timeout measures active IPC time. `ask_question` parks child and pauses idle/max-total timers; answering or cancellation resumes/releases it. Active silent work can still hit idle timeout.
 - Subagent `maxTotalMs` is an absolute backstop and must not be reset by child events. `createSubagentWatchdog()` in `agent/extensions/subagents/timeout.ts` arms it once and only resets the idle timer from `touch()`.
 - Role-agent timeouts are global-only: explorer, nested explorer, worker, and debug-run resolve the same validated `subagents` policy. Public role-agent schemas expose no `timeoutMs`, `idleTimeoutMs`, or `maxTotalMs`; invalid, out-of-range, or inverted settings fall back together to 600,000ms idle / 1,200,000ms max-total (`agent/extensions/subagents/timeout-policy.ts`, `agent/extensions/subagents/index.ts`).
 - Timed-out subagent failures must preserve recoverable child text and include structured `failureKind` plus `partialWork`; `hasPartialWork()` in `agent/extensions/subagents/spawn.ts` becomes true once any child tool execution has started.

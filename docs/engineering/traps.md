@@ -112,11 +112,11 @@
 
 ## Pi subagents
 
-- **Workers cannot ask questions.** `runSubagent()` loads children with `noExtensions: true` (`agent/extensions/subagents/spawn.ts:247`), so workers do not receive `ask_user_question`; the parent must handle model-initiated UI. Worker spawn still verifies live Build before child creation.
+- **Child tool surface is explicit.** Out-of-process children launch with `--no-extensions` and `agent/extensions/subagents/child.ts`; only loadout-approved tools, `ask_question`, browser proxies, and allowlisted nested `subagent` are registered. Parent verifies toolset mode before launch.
 - **Child transcript stays out of parent context.** Only parsed final structured result returns; persisted child session is out-of-band evidence.
 - **Nested graph is bounded.** Parent → worker → explorer only. Giving worker another worker tool or explorer any spawn tool breaks recursion bound.
 - **Default scope is user.** Project test agent placed under `.pi/agents` is invisible when caller leaves `agentScope` at default.
-- **Idle timeout observes emitted events, not hidden work.** Silent provider/tool wait can hit global idle threshold despite underlying activity.
+- **Idle timeout observes IPC activity, not hidden work.** Active child work that emits no IPC activity can hit global idle threshold; `ask_question` parks the child and pauses idle/max-total timers until answer or cancellation.
 - **Progress callbacks can outlive teardown.** Clear scheduled redraws and tolerate stale UI context on finish/failure.
 - **Worker ownership guards are process-local.** They prevent overlap among concurrent runs in same Pi process, not another process or external editor.
 
