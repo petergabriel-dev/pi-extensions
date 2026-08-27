@@ -5,19 +5,19 @@
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.5.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.5.0
-pi -e npm:@lopezpetergabriel/pi-extensions@0.5.0
+pi install npm:@lopezpetergabriel/pi-extensions@0.6.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.6.0
+pi -e npm:@lopezpetergabriel/pi-extensions@0.6.0
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.5.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.6.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
-The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
+The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README.md, LICENSE, CHANGELOG.md, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
 For a clean source/release setup, install the root published dependency/lock, then nested development packages. Pi-managed installs disable peer solving; Pi API imports remain `"*"` peers.
 
@@ -36,7 +36,7 @@ PACKAGE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-package.XXXXXX")"
 trap 'rm -rf "$PACKAGE_TEST_DIR"' EXIT INT TERM
 npm pack --ignore-scripts --pack-destination "$PACKAGE_TEST_DIR"
 mkdir -p "$PACKAGE_TEST_DIR/package" "$PACKAGE_TEST_DIR/agent"
-tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.5.0.tgz" \
+tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.6.0.tgz" \
   -C "$PACKAGE_TEST_DIR/package" --strip-components=1
 npm install --prefix "$PACKAGE_TEST_DIR/package" --omit=dev --omit=peer --ignore-scripts
 PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
@@ -44,6 +44,27 @@ PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
 ```
 
 `PI_CODING_AGENT_DIR` is honored by workflow plan storage and personal memory. Plan files land under the disposable agent directory; personal-memory files land beside it under `memory/`.
+
+## Release procedure
+
+Run release gates from repository root before publishing:
+
+```bash
+npm ci --ignore-scripts --legacy-peer-deps
+npm run bootstrap
+npm test
+npm pack --dry-run --json --ignore-scripts
+```
+
+Run exact-artifact smoke test above with a disposable `PI_CODING_AGENT_DIR`. After all gates pass, use `Release v0.6.0` as the release commit message, publish with `npm publish --access public`, then create an annotated `v0.6.0` tag:
+
+```bash
+git commit -m "Release v0.6.0"
+npm publish --access public
+git tag -a v0.6.0 -m "Release v0.6.0"
+```
+
+Replace `0.6.0` in commit and tag commands for later releases. Keep annotated tag names in `vX.Y.Z` form and release commit messages in `Release vX.Y.Z` form.
 
 ## Bootstrap
 

@@ -14,22 +14,22 @@ This repository isolates **source**, not Pi user state. Launcher reuses current 
 
 ## Install
 
-Public package `@lopezpetergabriel/pi-extensions@0.5.0` ships eleven extensions, four skills, and two package-owned bundled agent definitions.
+Public package `@lopezpetergabriel/pi-extensions@0.6.0` ships eleven extensions, four skills, and two package-owned bundled agent definitions.
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.5.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.5.0   # install for this project
-pi -e npm:@lopezpetergabriel/pi-extensions@0.5.0   # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.6.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.6.0   # install for this project
+pi -e npm:@lopezpetergabriel/pi-extensions@0.6.0   # temporary try
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.5.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.6.0` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 `ccc` remains an external prerequisite for `ccc_search` (`ccc --version`). Existing raw or global copies can double-load; inspect `pi list` and `pi config`, then remove or disable duplicates.
 
-The npm package contains runtime TypeScript/helpers, the workflow plan template, bundled agent and skill Markdown, engineering docs, README/LICENSE, and npm-mandatory nested READMEs under engineering-docs/filechanges. It does not contain tests, bridge clients, Cursor configuration, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, or runtime/user state. Packed and unpacked package checks enforce 512 KiB and 1 MiB limits.
+The npm package contains runtime TypeScript/helpers, the workflow plan template, bundled agent and skill Markdown, engineering docs, README.md, LICENSE, CHANGELOG.md, and npm-mandatory nested READMEs under engineering-docs/filechanges. It does not contain tests, bridge clients, Cursor configuration, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, or runtime/user state. Packed and unpacked package checks enforce 512 KiB and 1 MiB limits.
 
 ## Develop from source
 
