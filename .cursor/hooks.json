@@ -5,6 +5,9 @@
       {
         "command": "node agent/cursor-bridge-client/cursor-readonly-hook.js",
         "failClosed": true
+      },
+      {
+        "command": ".cursor/hooks/docs-nudge.js"
       }
     ],
     "beforeMCPExecution": [
