@@ -66,6 +66,7 @@ const publishedFiles = [
   "docs/engineering/**",
   "README.md",
   "LICENSE",
+  "CHANGELOG.md",
 ];
 
 const manifest = JSON.parse(await readFile(relative("package.json"), "utf8"));

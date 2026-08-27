@@ -29,6 +29,7 @@ const isAllowed = (file) =>
   file === "package.json" ||
   file === "README.md" ||
   file === "LICENSE" ||
+  file === "CHANGELOG.md" ||
   /^agent\/extensions\/(?:[^/]+\/)?[^/]+\.ts$/.test(file) ||
   file === "agent/extensions/engineering-docs/README.md" ||
   file === "agent/extensions/filechanges/README.md" ||
@@ -86,6 +87,8 @@ for (const file of [
   "docs/engineering/manifest.json",
   "README.md",
   "LICENSE",
+  "CHANGELOG.md",
+  "agent/skills/web-debug/SKILL.md",
 ]) {
   assert.ok(files.has(file), `missing required asset: ${file}`);
 }
