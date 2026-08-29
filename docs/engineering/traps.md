@@ -24,6 +24,13 @@
 - **`pi-tui` resize can trip its width guard.** Resize calls `requestRender()` without `invalidate()`, so stale wider lines can crash the process. Keep `ask-user-question` render caches keyed by width (`agent/extensions/ask-user-question/index.ts:243-249`, `:378-384`, `:565-571`).
 - **Inline `tsx -e` is unreliable for ESM-only Pi peers.** Eval may compile as CJS and fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` even after `NODE_PATH` changes. Use package tests for runtime behavior or esbuild bundling with Pi peers externalized for syntax-only checks; live behavior still needs a real Pi session.
 
+## ask_user_question context defer
+
+- Pi's automatic compaction checks run after an agent loop (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:779`) and before a non-streaming prompt (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:864-868`), not at each tool-result boundary. An answered question can cross the threshold mid-run, so the extension reads `ctx.getContextUsage()` after each answered result.
+- `prompt()` handles streaming input at `@earendil-works/pi-coding-agent/dist/core/agent-session.js:834-846` before its compaction check. Do not resume with `deliverAs: "followUp"`; the message queues while streaming and misses the pre-prompt check.
+- `AgentSession.compact()` starts with `await this.abort()` (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:1400-1402`). The extension aborts at `tool_execution_end`, then waits for `agent_settled` before sending the fresh user turn; it does not call `ctx.compact()` from tool execution.
+- `tool_execution_end` is emitted in tool completion order. A mixed ask-user-question/tool run therefore needs the per-run abort/marker guard; Task 5 observed the other tool result persisted and no unpaired `tool_use`.
+
 ## Source isolation versus runtime sharing
 
 - **Workspace isolates source, not Pi home.** Normal launcher reuses global auth, settings, model catalogs, sessions, context, and personal memory. `/login`, `/settings`, `/trust`, `/remember`, and bridge `save_memory` can change shared user state.
