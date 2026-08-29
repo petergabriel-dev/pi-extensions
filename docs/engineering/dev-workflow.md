@@ -126,13 +126,13 @@ Use `--no-session` for a disposable parent session:
 - Unix socket: `$PI_CODING_AGENT_DIR/subagents/<parent-session>.sock`, mode `0600`.
 - Loadout: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.json`, mode `0600`.
 - Diagnostics: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.log`, mode `0600`; directory mode `0700`; persistent log cap 1 MiB; recent-output tail cap 8 KiB. Child stdout/stderr and failed cmux screen capture are token-redacted before persistence or display. No full environment/auth data is logged.
-- Child process: `pi --no-extensions -e <resolved-agent/extensions/subagents/child.ts> --print --tools <allowlist> --append-system-prompt <agent-prompt> --session-id <child-session> --no-approve [--model <provider/id>] [--thinking <level>] <task>`.
+- Child process: interactive `pi --no-extensions -e <resolved-agent/extensions/subagents/child.ts> --tools <allowlist> --append-system-prompt <agent-prompt> --session-id <child-session> --no-approve [--model <provider/id>] [--thinking <level>] <task>` launched in cmux.
 
 Normal IPC requests retain bounded client deadlines. Parent-parked `question` and nested `spawn` requests explicitly use no-deadline waits; socket disconnect, host close, cancellation, and owner reaping still reject them. No-deadline mode is not valid for ordinary messages, results, browser, ownership, or hello requests.
 
 Do not hand-run that child command without a live parent socket, random token, owner, and loadout. Use the parent tool for normal launches. `resolveSubagentExtensionPath()` derives the source or npm path from module location, so do not hard-code it.
 
-Headless testing needs no cmux. These tests use `cmux: false` or inject a failing cmux runner, then verify IPC, result delivery, question parking/resume, loadout resume, ownership cleanup, browser proxy routing, and child teardown:
+Subagent tests avoid external cmux surfaces. They use the explicit `cmux: false` plus `spawnProcess` seam or inject failing cmux runners, then verify IPC, result delivery, question parking/resume, loadout resume, ownership cleanup, browser proxy routing, and child teardown:
 
 ```bash
 npm --prefix agent/extensions/subagents test
@@ -155,7 +155,7 @@ cmux identify --json
 cmux new-surface --help
 ```
 
-`CmuxTransport` creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted child command. Start output, progress, list output, and failure follow-up identify `cmux` or `headless` transport plus diagnostics log path. If cmux is absent, unreachable, or not ready, it returns the fallback reason, closes any partial surface, and launches headless. Failed cmux runs capture bounded screen output before auto-close. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
+`CmuxTransport` is required for production launches: it creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted interactive child command without `--print`. Start output, progress, list output, and failure follow-up identify cmux transport plus diagnostics log path. Binary lookup, socket, auth, or surface failures produce classified errors and close partial surfaces. `spawnProcess` is reserved for explicit test injection. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
 
 After any manual/live run, confirm teardown. Child processes must match child extension path, not parent Pi:
 
