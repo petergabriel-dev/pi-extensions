@@ -19,6 +19,7 @@ const previous = {
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 const tools = new Map<string, { execute: (...args: any[]) => Promise<unknown> }>();
 const sentMessages: string[] = [];
+const resultPayloads: unknown[] = [];
 const PARKED_DELAY_MS = 5_100;
 
 function delay(ms: number): Promise<void> {
@@ -57,6 +58,7 @@ const server = new SubagentIpcServer({
 			return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
 		}
 		if (request.type === "browser") return { content: [{ type: "text", text: "browser result" }], details: { ok: true } };
+		if (request.type === "result") resultPayloads.push(request.payload);
 		return undefined;
 	},
 });
@@ -102,6 +104,20 @@ try {
 	assert.ok(connection);
 	assert.deepEqual(await connection.request("message", { text: "parent says hello" }), { accepted: true });
 	assert.deepEqual(sentMessages, ["parent says hello"]);
+
+	let shutdownCount = 0;
+	const lifecycleContext = { shutdown: () => { shutdownCount += 1; } };
+	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "pre-retry" }] }] }, lifecycleContext);
+	assert.deepEqual(resultPayloads, []);
+	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "final result" }] }] }, lifecycleContext);
+	handlers.get("agent_settled")?.({}, lifecycleContext);
+	await delay(50);
+	assert.deepEqual(resultPayloads, [{ childSessionId: "child-session", text: "final result" }]);
+	assert.equal(shutdownCount, 1);
+	handlers.get("agent_settled")?.({}, lifecycleContext);
+	await delay(10);
+	assert.equal(resultPayloads.length, 1);
+	assert.equal(shutdownCount, 1);
 	console.log("subagent child tests passed");
 } finally {
 	await handlers.get("session_shutdown")?.({}, {});

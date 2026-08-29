@@ -10,7 +10,7 @@ import {
 
 assert.equal(shellQuote("plain value"), "'plain value'");
 assert.equal(shellQuote("a'b"), "'a'\\''b'");
-assert.equal(buildCmuxCommandLine("pi", ["--print", "a b"], { PI_SUBAGENT_OWNER: "worker-one" }), "PI_SUBAGENT_OWNER='worker-one' 'pi' '--print' 'a b'");
+assert.equal(buildCmuxCommandLine("pi", ["--tools", "read", "a b"], { PI_SUBAGENT_OWNER: "worker-one" }), "PI_SUBAGENT_OWNER='worker-one' 'pi' '--tools' 'read' 'a b'");
 assert.equal(parseCmuxSurfaceRef("surface:7\n"), "surface:7");
 assert.equal(parseCmuxSurfaceRef('{"surface":"surface:8"}'), "surface:8");
 assert.equal(shellPromptReady("starting\nuser@host %"), true);
@@ -25,7 +25,7 @@ const runner = async (command: string, args: readonly string[]) => {
 	return { stdout: "", stderr: "" };
 };
 const transport = new CmuxTransport({ command: "cmux-test", run: runner, commandTimeoutMs: 100, promptTimeoutMs: 100, promptPollMs: 1 });
-const outcome = await transport.launch({ cwd: "/tmp/project", title: "worker", command: "pi", args: ["--print", "do work"], env: { PI_SUBAGENT_OWNER: "worker-one" } });
+const outcome = await transport.launch({ cwd: "/tmp/project", title: "worker", command: "pi", args: ["--tools", "read", "do work"], env: { PI_SUBAGENT_OWNER: "worker-one" } });
 assert.equal(outcome.transport, "cmux");
 const surface = outcome.surface;
 assert.deepEqual(calls.map((call) => call.args[0]), ["identify", "new-surface", "rename-tab", "read-screen", "send"]);
@@ -46,9 +46,12 @@ const fallback = new CmuxTransport({
 		return { stdout: "", stderr: "" };
 	},
 });
-const fallbackOutcome = await fallback.launch({ cwd: "/tmp", title: "worker", command: "pi", args: [], env: {} });
-assert.equal(fallbackOutcome.transport, "headless");
-assert.equal(fallbackOutcome.reason, "socket refused");
+await assert.rejects(fallback.launch({ cwd: "/tmp", title: "worker", command: "pi", args: [], env: {} }), (error: unknown) => {
+	assert.equal((error as { name?: string }).name, "CmuxLaunchError");
+	assert.equal((error as { kind?: string }).kind, "socket-unreachable");
+	assert.equal((error as { message: string }).message, "cmux socket unreachable.");
+	return true;
+});
 assert.deepEqual(fallbackCalls, ["identify"]);
 
 const notReadyCalls: string[] = [];
@@ -63,12 +66,37 @@ const notReady = new CmuxTransport({
 		return { stdout: "booting", stderr: "" };
 	},
 });
-const notReadyOutcome = await notReady.launch({ cwd: "/tmp", title: "worker", command: "pi", args: [], env: {} });
-assert.equal(notReadyOutcome.transport, "headless");
-assert.match(notReadyOutcome.reason, /shell was not ready/);
+await assert.rejects(notReady.launch({ cwd: "/tmp", title: "worker", command: "pi", args: [], env: {} }), (error: unknown) => {
+	assert.equal((error as { kind?: string }).kind, "surface-creation-failed");
+	assert.equal((error as { message: string }).message, "cmux surface creation failed.");
+	return true;
+});
 assert.equal(notReadyCalls.includes("send"), false);
 assert.equal(notReadyCalls.includes("send-key"), true);
 assert.equal(notReadyCalls.at(-1), "close-surface");
+
+const binary = new CmuxTransport({
+	command: "cmux-test",
+	run: async () => { throw Object.assign(new Error("spawn cmux ENOENT"), { code: "ENOENT" }); },
+});
+await assert.rejects(binary.launch({ cwd: "/tmp", title: "worker", command: "pi", args: [], env: {} }), (error: unknown) => {
+	assert.equal((error as { kind?: string }).kind, "binary-missing");
+	assert.equal((error as { message: string }).message, "cmux binary missing.");
+	return true;
+});
+
+const auth = new CmuxTransport({
+	command: "cmux-test",
+	run: async () => { throw new Error("authentication rejected ipc-token cmux-password"); },
+});
+await assert.rejects(auth.launch({ cwd: "/tmp", title: "worker", command: "pi", args: [], env: { PI_SUBAGENT_TOKEN: "ipc-token" } }), (error: unknown) => {
+	assert.equal((error as { kind?: string }).kind, "auth-rejected");
+	const message = (error as { message: string }).message;
+	assert.equal(message, "cmux auth rejected.");
+	assert.equal(message.includes("ipc-token"), false);
+	assert.equal(message.includes("cmux-password"), false);
+	return true;
+});
 
 let boundedReads = 0;
 const bounded = new CmuxTransport({

@@ -75,7 +75,7 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 	launched = options;
 	const failing = options.task === "failure task";
 	const result = failing
-		? Promise.reject(new SubagentFailureError(options.owner, { transport: "headless", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
+		? Promise.reject(new SubagentFailureError(options.owner, { transport: "cmux", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
 		: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result" });
 	if (!failing) queueMicrotask(() => { void options.onResult?.("surface result"); });
 	return {
@@ -83,7 +83,7 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 		childSessionId: "child-surface",
 		pid: 123,
 		loadoutPath: "/tmp/surface-loadout.json",
-		transport: "headless",
+		transport: "cmux",
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		result,
 		request: async () => undefined,
@@ -99,7 +99,7 @@ SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options
 		childSessionId: "child-resumed",
 		pid: 124,
 		loadoutPath,
-		transport: "headless",
+		transport: "cmux",
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		result,
 		request: async () => undefined,
@@ -115,7 +115,7 @@ try {
 	await handlers.get("session_start")?.({}, context);
 
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
-	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over headless/);
+	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over cmux/);
 	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /surface-test-session\/subagent-1\.log/);
 	assert.equal(launched?.owner, "subagent-1");
 	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close"]);
@@ -124,7 +124,7 @@ try {
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
 	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string }> } }).details;
 	assert.equal(listDetails.agents[0]?.status, "done");
-	assert.equal(listDetails.agents[0]?.transport, "headless");
+	assert.equal(listDetails.agents[0]?.transport, "cmux");
 	assert.match(listDetails.agents[0]?.logPath ?? "", /surface-test-session\/subagent-1\.log/);
 	assert.equal(listDetails.agents[0]?.result, "surface result");
 	assert.equal(sentMessages.length, 1);
@@ -145,13 +145,13 @@ try {
 	assert.match(sentMessages[1]!.content, /resumed result/);
 
 	const failureResult = await registeredTools.get("subagent")!.execute("call-5", { task: "failure task" }, new AbortController().signal, undefined, context);
-	assert.match((failureResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over headless/);
+	assert.match((failureResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over cmux/);
 	await new Promise((resolve) => setImmediate(resolve));
 	const failureList = await registeredTools.get("subagents_list")!.execute("call-6", {}, new AbortController().signal, undefined, context);
 	const failureAgents = (failureList as { details: { agents: Array<{ owner: string; status: string; transport?: string; logPath?: string; outputTail?: string }> } }).details.agents;
 	const failureAgent = failureAgents.find((agent) => agent.owner === "subagent-2");
 	assert.equal(failureAgent?.status, "failed");
-	assert.equal(failureAgent?.transport, "headless");
+	assert.equal(failureAgent?.transport, "cmux");
 	assert.match(failureAgent?.logPath ?? "", /subagent-2\.log/);
 	assert.equal(failureAgent?.outputTail, "sentinel output");
 	assert.equal(sentMessages.length, 3);

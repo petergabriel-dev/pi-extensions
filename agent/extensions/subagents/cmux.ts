@@ -86,7 +86,7 @@ function classifyCmuxFailure(error: unknown, stage: CmuxFailureStage): CmuxFailu
 	const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
 	if (code === "ENOENT" || /(?:spawn|exec).*cmux.*enoent|command not found|cmux (?:binary )?(?:not found|missing)/.test(text)) return "binary-missing";
 	if (/auth(?:entication)?|unauthori[sz]ed|forbidden|invalid (?:password|credential)|permission denied/.test(text)) return "auth-rejected";
-	if (/socket|econnrefused|econnreset|enotconn|connection|connect|unreachable|timed out|timeout/.test(text)) return "socket-unreachable";
+	if (/socket|econnrefused|econnreset|enotconn|connection|connect|unreachable/.test(text) || (stage === "preflight" && /timed out|timeout/.test(text))) return "socket-unreachable";
 	return stage === "preflight" ? "socket-unreachable" : "surface-creation-failed";
 }
 

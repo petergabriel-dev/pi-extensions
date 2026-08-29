@@ -29,9 +29,9 @@ function delay(ms: number): Promise<void> {
 		assert.match(renders.at(-1)?.content?.[1] ?? "", /worker-one \[running\]/);
 		assert.equal(renders.at(-1)?.key, "subagents-progress");
 		assert.equal(renders.at(-1)?.placement, "aboveEditor");
-		first.setTransport("headless", "/tmp/subagents/worker-one.log");
+		first.setTransport("cmux", "/tmp/subagents/worker-one.log");
 		await delay(260);
-		assert.match(renders.at(-1)?.content?.[1] ?? "", /transport headless/);
+		assert.match(renders.at(-1)?.content?.[1] ?? "", /transport cmux/);
 		assert.match(renders.at(-1)?.content?.[1] ?? "", /worker-one\.log/);
 
 		first.setStatus("waiting");

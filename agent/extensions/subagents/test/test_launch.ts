@@ -84,10 +84,11 @@ try {
 	assert.equal(buildSubagentSystemPrompt("Agent rules", false), "Agent rules");
 	assert.ok(Buffer.byteLength(truncateSubagentResult("x".repeat(MAX_SUBAGENT_RESULT_BYTES + 100)), "utf8") <= MAX_SUBAGENT_RESULT_BYTES);
 	assert.deepEqual(buildSubagentCommandArgs(loadout, "do work"), [
-		"--no-extensions", "-e", loadout.extensionPath, "--print", "--tools", "read,grep",
+		"--no-extensions", "-e", loadout.extensionPath, "--tools", "read,grep",
 		"--append-system-prompt", loadout.appendSystemPrompt, "--session-id", "child-session",
 		"--no-approve", "--model", "openai/test-model", "--thinking", "high", "do work",
 	]);
+	assert.equal(buildSubagentCommandArgs(loadout, "do work").includes("--print"), false);
 
 	const steered: string[] = [];
 	const host = new SubagentLaunchHost({
@@ -126,13 +127,14 @@ try {
 	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result" });
 	assert.deepEqual(steered, ["child result"]);
 
-	const fallbackHost = new SubagentLaunchHost({
+	let fallbackSpawned = false;
+	const unavailableHost = new SubagentLaunchHost({
 		parentSessionId: "fallback",
 		agentDir: tempDir,
-		spawnProcess: fakeSpawn,
+		spawnProcess: () => { fallbackSpawned = true; throw new Error("headless spawn must not run"); },
 		cmux: new CmuxTransport({ run: async () => { throw new Error("cmux socket refused"); } }),
 	});
-	const fallback = await fallbackHost.launch({
+	const unavailable = await unavailableHost.launch({
 		parentSessionId: "fallback",
 		owner: "worker-fallback",
 		role: "worker",
@@ -143,8 +145,18 @@ try {
 		cavemanEnabled: true,
 		childSessionId: "child-fallback",
 	});
-	assert.deepEqual(await fallback.result, { owner: "worker-fallback", childSessionId: "child-fallback", text: "child result" });
-	await fallbackHost.close();
+	assert.equal(unavailable.transport, "cmux");
+	assert.equal(unavailable.cmuxFailureReason, "cmux socket unreachable.");
+	await assert.rejects(unavailable.result, (error: unknown) => {
+		assert.equal((error as { name?: string }).name, "SubagentFailureError");
+		assert.equal((error as { info: { transport: string } }).info.transport, "cmux");
+		assert.equal((error as { info: { cmuxFailureReason?: string } }).info.cmuxFailureReason, "cmux socket unreachable.");
+		assert.match((error as { message: string }).message, /Log: .*\.log/);
+		return true;
+	});
+	assert.equal(fallbackSpawned, false);
+	assert.deepEqual(unavailableHost.getOwnershipSnapshot(), {});
+	await unavailableHost.close();
 
 	const failureHost = new SubagentLaunchHost({
 		parentSessionId: "failure",

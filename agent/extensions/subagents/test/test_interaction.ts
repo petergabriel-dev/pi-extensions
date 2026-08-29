@@ -9,6 +9,7 @@ import { SubagentLaunchHost } from "../launch.ts";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-interaction-"));
 const agent = { name: "worker" as const, systemPrompt: "Agent rules", model: undefined };
+let questionArgs: readonly string[] = [];
 
 const questionChild = `
 const net = require("node:net");
@@ -130,7 +131,10 @@ try {
 		agentDir: tempDir,
 		cmux: false,
 		timeoutPolicy: { idleTimeoutMs: 100, maxTotalMs: 300 },
-		spawnProcess: (_command, _args, options) => spawn(process.execPath, ["-e", questionChild], options),
+		spawnProcess: (_command, args, options) => {
+			questionArgs = [...args];
+			return spawn(process.execPath, ["-e", questionChild], options);
+		},
 	});
 	const questionHandle = await questionHost.launch({
 		...launchOptions("question", "question-owner", "question-child"),
@@ -138,6 +142,7 @@ try {
 		onStatus: (status) => questionStatuses.push(status),
 		onQuestion: (value) => { question = value; },
 	});
+	assert.equal(questionArgs.includes("--print"), false);
 	await waitFor(() => Boolean(question));
 	assert.deepEqual(question, { questionId: "question-one", question: "Which answer?", options: ["yes", "no"] });
 	const ownershipConflict = questionHost.acquireOwnership("other-owner", ["src/file.ts"]);
