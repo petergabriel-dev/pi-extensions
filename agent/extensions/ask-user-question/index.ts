@@ -1,7 +1,13 @@
 import { type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, Key, Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
-import { cancelAskUserQuestionBatch, withAskUserQuestionQueue } from "./queue.js";
+import {
+	buildResumeMessage,
+	recordAnswer,
+	shouldDefer,
+	takePending,
+} from "./defer.js";
+import { askUserQuestionQueueDepth, cancelAskUserQuestionBatch, withAskUserQuestionQueue } from "./queue.js";
 
 const MAX_OPTIONS = 50;
 const OptionSchema = Type.Object({
@@ -637,7 +643,32 @@ async function askMultiChoice(
 	});
 }
 
+const CONTEXT_DEFER_ENTRY = "ask-user-question:context-defer";
+
+function formatAnswersForResume(answers: AskAnswer[]): string {
+	return answers.map(formatAnswerForModel).join("\n");
+}
+
 export default function askUserQuestion(pi: ExtensionAPI): void {
+	let deferredThisRun = false;
+
+	pi.registerEntryRenderer(CONTEXT_DEFER_ENTRY, (_entry, _options, theme) => {
+		return new Text(theme.fg("dim", "Context threshold reached; resuming after compaction."), 0, 0);
+	});
+
+	pi.on("tool_execution_end", (event, ctx) => {
+		if (event.toolName !== "ask_user_question" || !deferredThisRun || askUserQuestionQueueDepth() !== 0) return;
+		pi.appendEntry(CONTEXT_DEFER_ENTRY);
+		ctx.abort();
+	});
+
+	pi.on("agent_settled", () => {
+		const answers = takePending();
+		deferredThisRun = false;
+		if (!answers) return;
+		pi.sendUserMessage(buildResumeMessage(answers));
+	});
+
 	pi.registerTool({
 		name: "ask_user_question",
 		label: "ask_user_question",
@@ -663,7 +694,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 			if (signal?.aborted) return cancelledResult(question, mode, context);
 			if (!ctx.hasUI) return unavailableResult(question, mode, "ask_user_question requires interactive mode UI", context);
 
-			return withAskUserQuestionQueue(
+			const result = await withAskUserQuestionQueue(
 				signal,
 				async () => {
 					if (mode === "text") {
@@ -683,6 +714,20 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 				},
 				() => cancelledResult(question, mode, context),
 			);
+			const details = result.details as AskUserQuestionResultDetails | undefined;
+			if (details?.status === "answered") {
+				const deferNow = shouldDefer({
+					usage: ctx.getContextUsage(),
+					status: details.status,
+					mode: ctx.mode,
+					alreadyDeferred: deferredThisRun,
+				});
+				if (deferNow) deferredThisRun = true;
+				if (deferredThisRun) {
+					recordAnswer({ question: details.question, answer: formatAnswersForResume(details.answers) });
+				}
+			}
+			return result;
 		},
 
 		renderCall(args, theme) {
