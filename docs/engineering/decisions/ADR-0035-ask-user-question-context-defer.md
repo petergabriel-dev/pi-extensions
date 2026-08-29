@@ -44,6 +44,7 @@ Code:
 
 Pi host evidence:
 
+- [Upstream issue #8833](https://github.com/earendil-works/pi/issues/8833) (tool-result-boundary threshold check)
 - `@earendil-works/pi-coding-agent/dist/core/agent-session.js:779` (`shouldCompact` after the agent loop)
 - `@earendil-works/pi-coding-agent/dist/core/agent-session.js:834-846` (streaming `prompt()` early return)
 - `@earendil-works/pi-coding-agent/dist/core/agent-session.js:864-868` (non-streaming pre-prompt compaction check)
