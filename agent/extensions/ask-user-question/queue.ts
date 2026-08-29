@@ -8,6 +8,10 @@ export function cancelAskUserQuestionBatch(): void {
 	if (pending > 0) batchCancelled = true;
 }
 
+export function askUserQuestionQueueDepth(): number {
+	return pending;
+}
+
 export function withAskUserQuestionQueue<T>(
 	signal: AbortSignal | undefined,
 	run: () => Promise<T>,
