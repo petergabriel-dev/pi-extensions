@@ -651,13 +651,21 @@ function formatAnswersForResume(answers: AskAnswer[]): string {
 
 export default function askUserQuestion(pi: ExtensionAPI): void {
 	let deferredThisRun = false;
+	let deferAbortRequested = false;
 
 	pi.registerEntryRenderer(CONTEXT_DEFER_ENTRY, (_entry, _options, theme) => {
 		return new Text(theme.fg("dim", "Context threshold reached; resuming after compaction."), 0, 0);
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
-		if (event.toolName !== "ask_user_question" || !deferredThisRun || askUserQuestionQueueDepth() !== 0) return;
+		if (
+			event.toolName !== "ask_user_question" ||
+			!deferredThisRun ||
+			deferAbortRequested ||
+			askUserQuestionQueueDepth() !== 0
+		)
+			return;
+		deferAbortRequested = true;
 		pi.appendEntry(CONTEXT_DEFER_ENTRY);
 		ctx.abort();
 	});
@@ -665,6 +673,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 	pi.on("agent_settled", () => {
 		const answers = takePending();
 		deferredThisRun = false;
+		deferAbortRequested = false;
 		if (!answers) return;
 		pi.sendUserMessage(buildResumeMessage(answers));
 	});
