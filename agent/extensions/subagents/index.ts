@@ -143,7 +143,7 @@ interface SubagentRecord {
 	loadoutPath?: string;
 	transport?: SubagentTransport;
 	logPath?: string;
-	cmuxFallbackReason?: string;
+	cmuxFailureReason?: string;
 	outputTail?: string;
 	handle?: SubagentLaunchHandle;
 	question?: SubagentQuestion;
@@ -338,7 +338,7 @@ function failureMessage(record: SubagentRecord): string {
 		`Log: ${record.logPath ?? "unavailable"}`,
 		`Error: ${record.error ?? "unknown error"}`,
 	];
-	if (record.cmuxFallbackReason) lines.push(`cmux fallback: ${record.cmuxFallbackReason}`);
+	if (record.cmuxFailureReason) lines.push(`Cmux failure: ${record.cmuxFailureReason}`);
 	if (record.outputTail) lines.push(`Recent output:\n${record.outputTail}`);
 	return lines.join("\n");
 }
@@ -441,7 +441,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		record.loadoutPath = handle.loadoutPath;
 		record.transport = handle.transport;
 		record.logPath = handle.logPath;
-		record.cmuxFallbackReason = handle.cmuxFallbackReason;
+		record.cmuxFailureReason = handle.cmuxFailureReason;
 		record.outputTail = undefined;
 		record.progress?.setTransport(handle.transport, handle.logPath);
 		void handle.result.then((result: SubagentResult) => {
@@ -457,7 +457,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			if (error instanceof SubagentFailureError) {
 				record.transport = error.info.transport;
 				record.logPath = error.info.logPath;
-				record.cmuxFallbackReason = error.info.fallbackReason;
+				record.cmuxFailureReason = error.info.cmuxFailureReason;
 				record.outputTail = error.info.tail;
 			}
 			record.progress?.setFailure(record.error);
@@ -658,7 +658,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 						status: record.status,
 						transport: handle.transport,
 						logPath: handle.logPath,
-						...(handle.cmuxFallbackReason ? { cmuxFallbackReason: handle.cmuxFallbackReason } : {}),
+						...(handle.cmuxFailureReason ? { cmuxFailureReason: handle.cmuxFailureReason } : {}),
 					},
 				};
 			} catch (error) {
@@ -750,7 +750,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : undefined,
 				transport: record.transport,
 				logPath: record.logPath,
-				cmuxFallbackReason: record.cmuxFallbackReason,
+				cmuxFailureReason: record.cmuxFailureReason,
 				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,
 				error: record.error,
 				outputTail: record.outputTail,

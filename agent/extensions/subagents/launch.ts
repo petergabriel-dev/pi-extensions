@@ -64,14 +64,14 @@ export interface SubagentFailureInfo {
 	logPath: string;
 	error: string;
 	tail: string;
-	fallbackReason?: string;
+	cmuxFailureReason?: string;
 }
 
 export class SubagentFailureError extends Error {
 	readonly info: SubagentFailureInfo;
 
 	constructor(owner: string, info: SubagentFailureInfo) {
-		super(`Subagent ${owner} failed over ${info.transport}. Log: ${info.logPath}. Error: ${info.error}${info.fallbackReason ? ` cmux fallback: ${info.fallbackReason}.` : ""}${info.tail ? `\nRecent output:\n${info.tail}` : ""}`);
+		super(`Subagent ${owner} failed over ${info.transport}. Log: ${info.logPath}. Error: ${info.error}${info.cmuxFailureReason ? ` Cmux failure: ${info.cmuxFailureReason}` : ""}${info.tail ? `\nRecent output:\n${info.tail}` : ""}`);
 		this.name = "SubagentFailureError";
 		this.info = info;
 	}
@@ -128,7 +128,7 @@ export interface SubagentLaunchHandle {
 	readonly loadoutPath: string;
 	readonly transport: SubagentTransport;
 	readonly logPath: string;
-	readonly cmuxFallbackReason?: string;
+	readonly cmuxFailureReason?: string;
 	readonly result: Promise<SubagentResult>;
 	request<T = unknown>(type: SubagentIpcMessageType, payload?: unknown): Promise<T>;
 	kill(): void;
@@ -162,7 +162,7 @@ interface RunState {
 	failureFinalizing?: boolean;
 	diagnostics: SubagentDiagnostics;
 	transport: SubagentTransport;
-	cmuxFallbackReason?: string;
+	cmuxFailureReason?: string;
 	cleanup?: () => void;
 	slot?: AcquiredSubagentSlot;
 	pendingQuestion?: PendingQuestion;
@@ -488,24 +488,20 @@ export class SubagentLaunchHost {
 		};
 
 		let transport: SubagentTransport = "cmux";
-		let fallbackReason: string | undefined;
+		let cmuxFailureReason: string | undefined;
 		let surface: CmuxSurfaceHandle | undefined;
 		try {
-			const outcome: CmuxLaunchOutcome | undefined = this.cmux
-				? await this.cmux.launch({ cwd: loadout.cwd, title: loadout.agentName, command: this.command, args, env: environment })
-				: undefined;
-			if (outcome?.transport === "cmux") {
-				transport = "cmux";
+			if (this.cmux) {
+				const outcome: CmuxLaunchOutcome = await this.cmux.launch({ cwd: loadout.cwd, title: loadout.agentName, command: this.command, args, env: environment });
+				if (outcome.transport !== "cmux") throw new Error(outcome.reason);
+				transport = outcome.transport;
 				surface = outcome.surface;
-			} else if (outcome) {
-				fallbackReason = redactSubagentText(outcome.reason, this.server.token);
 			}
 		} catch (error) {
-			fallbackReason = redactSubagentText(error instanceof Error ? error.message : String(error), this.server.token);
-			this.options.logger?.("cmux_launch_failed", { error: fallbackReason });
+			cmuxFailureReason = redactSubagentText(error instanceof Error ? error.message : String(error), this.server.token);
 		}
 		run.transport = transport;
-		run.cmuxFallbackReason = fallbackReason;
+		run.cmuxFailureReason = cmuxFailureReason;
 		if (surface) {
 			run.surface = surface;
 			if (run.resultSettled) {
@@ -527,7 +523,7 @@ export class SubagentLaunchHost {
 				finishChild(error instanceof Error ? error : new Error(String(error)));
 			}
 		} else {
-			finishChild(new Error(`Subagent ${loadout.owner} could not start interactive cmux session${fallbackReason ? `: ${fallbackReason}` : "."}`));
+			finishChild(new Error(`Subagent ${loadout.owner} could not start interactive cmux session${cmuxFailureReason ? `: ${cmuxFailureReason}` : "."}`));
 		}
 		if (runtime.signal) {
 			const abort = () => {
@@ -556,7 +552,7 @@ export class SubagentLaunchHost {
 			loadoutPath,
 			transport: run.transport,
 			logPath: run.diagnostics.logPath,
-			...(run.cmuxFallbackReason ? { cmuxFallbackReason: run.cmuxFallbackReason } : {}),
+			...(run.cmuxFailureReason ? { cmuxFailureReason: run.cmuxFailureReason } : {}),
 			result,
 			request: (type, payload) => this.request(loadout.owner, type, payload),
 			kill: () => {
@@ -675,7 +671,7 @@ export class SubagentLaunchHost {
 			logPath: run.diagnostics.logPath,
 			error: safeError,
 			tail: run.diagnostics.tail(),
-			...(run.cmuxFallbackReason ? { fallbackReason: run.cmuxFallbackReason } : {}),
+			...(run.cmuxFailureReason ? { cmuxFailureReason: run.cmuxFailureReason } : {}),
 		});
 		run.watchdog?.cancel();
 		this.reapBrowserPage(run, owner);

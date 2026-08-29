@@ -38,19 +38,56 @@ export interface CmuxSurfaceHandle {
 
 export type CmuxLaunchOutcome =
 	| { transport: "cmux"; surface: CmuxSurfaceHandle }
+	/** @deprecated Test-only compatibility shape; CmuxTransport now throws on failure. */
 	| { transport: "headless"; reason: string };
+
+export type CmuxFailureKind = "binary-missing" | "socket-unreachable" | "auth-rejected" | "surface-creation-failed";
+
+type CmuxFailureStage = "preflight" | "surface";
+
+const CMUX_FAILURE_MESSAGES: Record<CmuxFailureKind, string> = {
+	"binary-missing": "cmux binary missing.",
+	"socket-unreachable": "cmux socket unreachable.",
+	"auth-rejected": "cmux auth rejected.",
+	"surface-creation-failed": "cmux surface creation failed.",
+};
+
+export class CmuxLaunchError extends Error {
+	readonly kind: CmuxFailureKind;
+
+	constructor(kind: CmuxFailureKind) {
+		super(CMUX_FAILURE_MESSAGES[kind]);
+		this.name = "CmuxLaunchError";
+		this.kind = kind;
+	}
+}
 
 function defaultRun(command: string, args: readonly string[], timeoutMs: number): Promise<CmuxCommandResult> {
 	return new Promise((resolve, reject) => {
 		execFile(command, [...args], { encoding: "utf8", timeout: timeoutMs }, (error, stdout, stderr) => {
-			if (error) return reject(error);
+			if (error) {
+				const commandError = error as Error & { stderr?: string; stdout?: string };
+				commandError.stderr = String(stderr);
+				commandError.stdout = String(stdout);
+				return reject(commandError);
+			}
 			resolve({ stdout: String(stdout), stderr: String(stderr) });
 		});
 	});
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+function errorText(error: unknown): string {
+	if (!isRecord(error)) return String(error);
+	return [error.message, error.code, error.stderr, error.stdout].filter((value) => typeof value === "string").join(" ");
+}
+
+function classifyCmuxFailure(error: unknown, stage: CmuxFailureStage): CmuxFailureKind {
+	const text = errorText(error).toLowerCase();
+	const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+	if (code === "ENOENT" || /(?:spawn|exec).*cmux.*enoent|command not found|cmux (?:binary )?(?:not found|missing)/.test(text)) return "binary-missing";
+	if (/auth(?:entication)?|unauthori[sz]ed|forbidden|invalid (?:password|credential)|permission denied/.test(text)) return "auth-rejected";
+	if (/socket|econnrefused|econnreset|enotconn|connection|connect|unreachable|timed out|timeout/.test(text)) return "socket-unreachable";
+	return stage === "preflight" ? "socket-unreachable" : "surface-creation-failed";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -110,15 +147,24 @@ export class CmuxTransport {
 	async launch(options: CmuxLaunchOptions): Promise<CmuxLaunchOutcome> {
 		let surface: string | undefined;
 		try {
-			await this.run(this.command, ["identify", "--json"], this.commandTimeoutMs);
-			const created = await this.run(this.command, [
-				"new-surface",
-				"--type", "terminal",
-				"--working-directory", options.cwd,
-				"--focus", "false",
-			], this.commandTimeoutMs);
+			try {
+				await this.run(this.command, ["identify", "--json"], this.commandTimeoutMs);
+			} catch (error) {
+				throw new CmuxLaunchError(classifyCmuxFailure(error, "preflight"));
+			}
+			let created: CmuxCommandResult;
+			try {
+				created = await this.run(this.command, [
+					"new-surface",
+					"--type", "terminal",
+					"--working-directory", options.cwd,
+					"--focus", "false",
+				], this.commandTimeoutMs);
+			} catch (error) {
+				throw new CmuxLaunchError(classifyCmuxFailure(error, "surface"));
+			}
 			surface = parseCmuxSurfaceRef(created.stdout);
-			if (!surface) throw new Error("cmux did not return a surface ref.");
+			if (!surface) throw new CmuxLaunchError("surface-creation-failed");
 			await this.run(this.command, ["rename-tab", "--surface", surface, "--title", options.title], this.commandTimeoutMs);
 			await this.waitForPrompt(surface);
 			await this.run(this.command, ["send", "--surface", surface, `${buildCmuxCommandLine(options.command, options.args, options.env)}\n`], this.commandTimeoutMs);
@@ -131,10 +177,10 @@ export class CmuxTransport {
 				},
 			};
 		} catch (error) {
-			const reason = redactSubagentText(errorMessage(error), options.env.PI_SUBAGENT_TOKEN ?? "");
-			this.logger?.("cmux_fallback", { error: reason, surface });
+			const failure = error instanceof CmuxLaunchError ? error : new CmuxLaunchError(classifyCmuxFailure(error, surface ? "surface" : "preflight"));
+			this.logger?.("cmux_launch_failed", { kind: failure.kind, surface });
 			if (surface) await this.closeSurface(surface);
-			return { transport: "headless", reason };
+			throw failure;
 		}
 	}
 
@@ -172,8 +218,8 @@ export class CmuxTransport {
 	private async closeSurface(surface: string): Promise<void> {
 		try {
 			await this.run(this.command, ["close-surface", "--surface", surface], this.commandTimeoutMs);
-		} catch (error) {
-			this.logger?.("cmux_close_failed", { surface, error: errorMessage(error) });
+		} catch {
+			this.logger?.("cmux_close_failed", { surface });
 		}
 	}
 }
