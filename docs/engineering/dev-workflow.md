@@ -125,7 +125,10 @@ Use `--no-session` for a disposable parent session:
 
 - Unix socket: `$PI_CODING_AGENT_DIR/subagents/<parent-session>.sock`, mode `0600`.
 - Loadout: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.json`, mode `0600`.
+- Diagnostics: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.log`, mode `0600`; directory mode `0700`; persistent log cap 1 MiB; recent-output tail cap 8 KiB. Child stdout/stderr and failed cmux screen capture are token-redacted before persistence or display. No full environment/auth data is logged.
 - Child process: `pi --no-extensions -e <resolved-agent/extensions/subagents/child.ts> --print --tools <allowlist> --append-system-prompt <agent-prompt> --session-id <child-session> --no-approve [--model <provider/id>] [--thinking <level>] <task>`.
+
+Normal IPC requests retain bounded client deadlines. Parent-parked `question` and nested `spawn` requests explicitly use no-deadline waits; socket disconnect, host close, cancellation, and owner reaping still reject them. No-deadline mode is not valid for ordinary messages, results, browser, ownership, or hello requests.
 
 Do not hand-run that child command without a live parent socket, random token, owner, and loadout. Use the parent tool for normal launches. `resolveSubagentExtensionPath()` derives the source or npm path from module location, so do not hard-code it.
 
@@ -152,7 +155,7 @@ cmux identify --json
 cmux new-surface --help
 ```
 
-`CmuxTransport` creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted child command. If cmux is absent, unreachable, or not ready, it closes any partial surface and launches headless. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
+`CmuxTransport` creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted child command. Start output, progress, list output, and failure follow-up identify `cmux` or `headless` transport plus diagnostics log path. If cmux is absent, unreachable, or not ready, it returns the fallback reason, closes any partial surface, and launches headless. Failed cmux runs capture bounded screen output before auto-close. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
 
 After any manual/live run, confirm teardown. Child processes must match child extension path, not parent Pi:
 
@@ -168,7 +171,7 @@ If a stray child remains, terminate only listed child PIDs, then recheck:
 ps -axo pid=,command= | grep '[a]gent/extensions/subagents/child.ts' | awk '{print $1}' | while read -r pid; do kill "$pid"; done
 ```
 
-Do not delete broad `.pi/` state or normal user sessions. Remove only the disposable `PI_CODING_AGENT_DIR` after all child processes exit. Clean cmux tabs with `cmux close-surface --surface <surface-ref>` when host teardown did not close them.
+Do not delete broad `.pi/` state or normal user sessions. Remove only the disposable `PI_CODING_AGENT_DIR` after all child processes exit. Clean cmux tabs with `cmux close-surface --surface <surface-ref>` when host teardown did not close them. A failed run should leave no failed tab: use its reported log path and bounded tail for diagnosis, then retry only through an explicit new `subagent` or `subagent_message` action.
 
 ## Standard verification gate
 

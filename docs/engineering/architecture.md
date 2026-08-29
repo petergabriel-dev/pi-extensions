@@ -205,7 +205,7 @@ Search may use daemon state under `~/.cocoindex_code/`, ignored project `.cocoin
 
 Children launch with `pi --no-extensions -e agent/extensions/subagents/child.ts`; the child extension registers only loadout-approved browser/nested tools plus `ask_question`. `subagent_agents:` frontmatter controls nested definitions; `MAX_SUBAGENT_DEPTH` is two. Any toolset containing a mutating tool requires Build at spawn time. Concurrent children use one configurable default semaphore with capacity three; normalized overlapping ownership paths are rejected by `ownership.ts`.
 
-When cmux is available, `cmux.ts` creates an unfocused terminal surface, renames its tab, waits for a shell prompt, and sends the quoted child command. Any cmux failure closes the surface and falls back to headless process launch. `progress.ts` renders `subagents-progress` above the editor with 250ms throttling.
+When cmux is available, `cmux.ts` creates an unfocused terminal surface, renames its tab, waits for a shell prompt, and sends the quoted child command. Launch returns a discriminated `cmux` or `headless` outcome; fallback retains its reason. Any cmux failure closes the surface and falls back to headless process launch. Each run captures child stdout/stderr in a Pi-owned `0600` log under `<agentDir>/subagents/<parent-session>/`, bounded to 1 MiB, with an in-memory recent-output tail bounded to 8 KiB and exact IPC-token redaction. Failed cmux runs best-effort capture bounded `read-screen` output before auto-close. Start, progress, list, and failure follow-up expose transport and log path; failures are steered once to the parent. `progress.ts` renders `subagents-progress` above the editor with 250ms throttling.
 
 ### Browser page state model
 
