@@ -116,6 +116,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 
 	let client: SubagentIpcClient | undefined;
 	let resultSent = false;
+	let latestResultText = "";
 	let loadout;
 	try {
 		loadout = readSubagentLoadout(process.env.PI_SUBAGENT_LOADOUT ?? "");
@@ -207,11 +208,15 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 		client = await SubagentIpcClient.connect({ socketPath, token, owner, onRequest: handleParentRequest });
 	});
 
-	pi.on("agent_end", (event, ctx) => {
+	pi.on("agent_end", (event) => {
+		if (resultSent) return;
+		latestResultText = truncateSubagentResult(lastAssistantText(event.messages));
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
 		if (!client || resultSent) return;
 		resultSent = true;
-		const text = truncateSubagentResult(lastAssistantText(event.messages));
-		void client.request("result", { childSessionId, text })
+		void client.request("result", { childSessionId, text: latestResultText })
 			.then(() => ctx.shutdown())
 			.catch(() => ctx.shutdown());
 	});
