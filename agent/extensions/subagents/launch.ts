@@ -1,5 +1,5 @@
 import * as crypto from "node:crypto";
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { type ChildProcess, type SpawnOptions } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,7 +106,9 @@ export interface SubagentLaunchHostOptions {
 	agentDir?: string;
 	logger?: (event: string, details?: Record<string, unknown>) => void;
 	command?: string;
+	/** Test-only process injection; production launches use cmux interactive transport. */
 	spawnProcess?: SubagentSpawnProcess;
+	/** Test-only cmux bypass when paired with spawnProcess. */
 	cmux?: CmuxTransport | false;
 	onSpawn?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 	onBrowser?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
@@ -227,7 +229,6 @@ export function buildSubagentCommandArgs(loadout: SubagentLoadout, task: string)
 	const args = [
 		"--no-extensions",
 		"-e", loadout.extensionPath,
-		"--print",
 		"--tools", loadout.tools.join(","),
 		"--append-system-prompt", loadout.appendSystemPrompt,
 		"--session-id", loadout.childSessionId,
@@ -294,7 +295,7 @@ export class SubagentLaunchHost {
 	readonly server: SubagentIpcServer;
 	private readonly runs = new Map<string, RunState>();
 	private readonly command: string;
-	private readonly spawnProcess: SubagentSpawnProcess;
+	private readonly spawnProcess: SubagentSpawnProcess | undefined;
 	private readonly cmux: CmuxTransport | undefined;
 	private readonly ownership = new OwnershipLockManager();
 	private closed = false;
@@ -311,7 +312,7 @@ export class SubagentLaunchHost {
 			onDisconnect: (owner, error) => this.handleDisconnect(owner, error),
 		});
 		this.command = options.command ?? "pi";
-		this.spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+		this.spawnProcess = options.spawnProcess;
 		this.cmux = options.cmux === false ? undefined : options.cmux ?? new CmuxTransport({ logger: options.logger });
 		process.on("exit", this.exitHandler);
 	}
@@ -454,7 +455,7 @@ export class SubagentLaunchHost {
 			rejectResult,
 			resultSettled: false,
 			diagnostics,
-			transport: "headless",
+			transport: "cmux",
 			slot,
 		};
 		this.runs.set(loadout.owner, run);
@@ -486,7 +487,7 @@ export class SubagentLaunchHost {
 			child.once("exit", (code, signal) => finishChild(new Error(`Subagent ${loadout.owner} exited (${code ?? signal ?? "unknown"}).`)));
 		};
 
-		let transport: SubagentTransport = "headless";
+		let transport: SubagentTransport = "cmux";
 		let fallbackReason: string | undefined;
 		let surface: CmuxSurfaceHandle | undefined;
 		try {
@@ -512,7 +513,10 @@ export class SubagentLaunchHost {
 				run.cleanup?.();
 				void surface.close();
 			}
-		} else {
+		} else if (this.options.cmux === false && this.spawnProcess) {
+			// Test-only seam. Production never falls back to a headless child.
+			transport = "headless";
+			run.transport = transport;
 			try {
 				attachChild(this.spawnProcess(this.command, args, {
 					cwd: loadout.cwd,
@@ -522,6 +526,8 @@ export class SubagentLaunchHost {
 			} catch (error) {
 				finishChild(error instanceof Error ? error : new Error(String(error)));
 			}
+		} else {
+			finishChild(new Error(`Subagent ${loadout.owner} could not start interactive cmux session${fallbackReason ? `: ${fallbackReason}` : "."}`));
 		}
 		if (runtime.signal) {
 			const abort = () => {
