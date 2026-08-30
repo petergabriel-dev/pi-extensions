@@ -2,11 +2,11 @@
 id: ADR-0034
 title: Async out-of-process subagents
 status: Active
-date: 2026-08-27
-decision: Run subagents as independent Pi processes behind an authenticated parent-owned IPC host, with loadout snapshots, async result steering, cmux presentation fallback, toolset/depth/ownership gates, and parent browser proxying.
+date: 2026-08-30
+decision: Run subagents as independent interactive Pi processes behind an authenticated parent-owned IPC host, with loadout snapshots, cmux-required presentation, settled-only result steering, toolset/depth/ownership gates, and parent browser proxying.
 why: Separate processes remove stale parent ExtensionAPI coupling and keep delegation non-blocking while preserving bounded capabilities, resumable sessions, browser ownership, and parent context isolation.
-affects: agent/extensions/subagents/index.ts, agent/extensions/subagents/child.ts, agent/extensions/subagents/ipc.ts, agent/extensions/subagents/launch.ts, agent/extensions/subagents/cmux.ts, agent/extensions/subagents/concurrency.ts, agent/extensions/subagents/ownership.ts, agent/extensions/subagents/policy.ts, agent/extensions/subagents/progress.ts, agent/extensions/subagents/timeout.ts, agent/extensions/browser/index.ts, agent/extensions/workflow-modes/index.ts, agent/agents/explorer.md, agent/agents/worker.md, agent/skills/worker-orchestration/SKILL.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0004-pi-subagents.md, docs/engineering/decisions/ADR-0007-workflow-modes-subagent-delegation.md, docs/engineering/decisions/ADR-0010-subagent-idle-timeout.md, docs/engineering/decisions/ADR-0031-subagent-browser-access.md
-consequences: Delegation returns immediately and final text arrives as a parent follow-up; runtime sockets/loadouts stay in Pi-owned state; child crashes and disconnects can be reaped; cmux is optional presentation; nested work, browser pages, ownership paths, concurrency, and timeout budgets remain bounded.
+affects: agent/extensions/subagents/index.ts, agent/extensions/subagents/child.ts, agent/extensions/subagents/ipc.ts, agent/extensions/subagents/launch.ts, agent/extensions/subagents/cmux.ts, agent/extensions/subagents/concurrency.ts, agent/extensions/subagents/ownership.ts, agent/extensions/subagents/policy.ts, agent/extensions/subagents/progress.ts, agent/extensions/subagents/timeout.ts, agent/extensions/subagents/test/test_launch.ts, agent/extensions/subagents/test/test_cmux.ts, agent/extensions/subagents/test/test_interaction.ts, agent/extensions/subagents/test/test_child.ts, agent/extensions/subagents/test/test_progress.ts, agent/extensions/subagents/test/test_tool_surface.ts, agent/extensions/browser/index.ts, agent/extensions/workflow-modes/index.ts, agent/agents/explorer.md, agent/agents/worker.md, agent/skills/worker-orchestration/SKILL.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0004-pi-subagents.md, docs/engineering/decisions/ADR-0007-workflow-modes-subagent-delegation.md, docs/engineering/decisions/ADR-0010-subagent-idle-timeout.md, docs/engineering/decisions/ADR-0031-subagent-browser-access.md, docs/engineering/decisions/README.md
+consequences: Delegation returns immediately and final text arrives as a parent follow-up; runtime sockets/loadouts stay in Pi-owned state; child crashes and disconnects can be reaped; cmux is required for production launch and reports classified failures; nested work, browser pages, ownership paths, concurrency, and timeout budgets remain bounded.
 readWhen: changing async child launch, IPC framing/auth, loadout resume, cmux transport, nested agent policy, browser proxy transport, ownership locks, progress, or parked-child timeout behavior
 supersedes: ADR-0004
 ---
@@ -17,9 +17,9 @@ supersedes: ADR-0004
 
 - `subagent` resolves the selected agent, live workflow mode, exact tool allowlist, model/effort, depth, nested-agent allowlist, and file ownership before launch. Any mutating toolset requires Build mode.
 - `SubagentLaunchHost` writes an atomic `0600` loadout and owns one `0600` Unix socket under Pi runtime state. Frames are 4-byte length-prefixed JSON authenticated by a per-session random token, owner, and correlation ID.
-- Children run `pi --no-extensions -e agent/extensions/subagents/child.ts`. The child extension registers only loadout-approved tools plus `ask_question`, mode-scoped browser proxies, and allowlisted nested `subagent`. Final text is steered into the parent as a new follow-up turn; child transcript stays in its own session.
+- Children run interactive `pi --no-extensions -e agent/extensions/subagents/child.ts` without `--print`. The child extension registers only loadout-approved tools plus `ask_question`, mode-scoped browser proxies, and allowlisted nested `subagent`. It caches text from extension-level `agent_end`, then steers exactly once on `agent_settled`, after retry, compaction, and queued continuation settle; child transcript stays in its own session.
 - `subagent_message` sends live messages, answers parked questions, or resumes the immutable loadout with the same toolset. `ask_question` parks the child and excludes parked time from idle and max-total watchdog budgets.
-- cmux creates an unfocused named terminal surface and sends the child command only after shell readiness. Missing/unreachable cmux falls back to headless process launch.
+- cmux is the required production transport. It creates an unfocused named terminal surface and sends the child command only after shell readiness. Binary lookup, socket, auth, and surface failures close partial surfaces and reject with classified errors; `spawnProcess` is reserved for explicit test injection.
 - One configurable concurrency lane caps active children at three. Normalized overlapping ownership paths are refused and released on result, exit, disconnect, cancellation, or host close. Nested definitions use `subagent_agents:` and maximum depth two.
 - Browser tools remain parent-owned: child browser calls travel over IPC to the browser extension event bus, retain child owner keys, and are limited to four pages total. Owner pages are reaped with child lifecycle.
 
@@ -34,8 +34,8 @@ Design was informed by upstream [`amosblomqvist/pi-interactive-subagents`](https
 - Good: launch is non-blocking; parent receives bounded final text without child transcript bloat.
 - Good: loadout snapshots make finished-session resume reproduce the same restricted process and toolset.
 - Good: process exit, crash, disconnect, timeout, and host teardown release locks, slots, browser pages, and cmux surfaces.
-- Good: cmux is presentation-only; headless testing and operation remain available outside cmux.
-- Bad/risk: IPC adds framing, correlation, timeout, and crash-reaping paths; active child work that emits no IPC activity can still hit idle timeout.
+- Good: cmux gives each child a visible interactive session while classified failures preserve actionable diagnostics and test injection remains deterministic.
+- Bad/risk: IPC adds framing, correlation, timeout, and crash-reaping paths; active child work that emits no IPC activity can still hit idle timeout. Cmux availability is required for production launches.
 - Bad/risk: shared browser context retains cookies/storage while page state and buffers remain owner-isolated; Build browser actions can affect external web state.
 
 ## Affects
@@ -50,6 +50,7 @@ Docs:
 - [ADR-0007-workflow-modes-subagent-delegation.md](ADR-0007-workflow-modes-subagent-delegation.md)
 - [ADR-0010-subagent-idle-timeout.md](ADR-0010-subagent-idle-timeout.md)
 - [ADR-0031-subagent-browser-access.md](ADR-0031-subagent-browser-access.md)
+- [README.md](README.md)
 
 Code:
 
@@ -63,6 +64,12 @@ Code:
 - [policy.ts](../../../agent/extensions/subagents/policy.ts)
 - [timeout.ts](../../../agent/extensions/subagents/timeout.ts)
 - [browser/index.ts](../../../agent/extensions/browser/index.ts)
+- [subagents/test/test_launch.ts](../../../agent/extensions/subagents/test/test_launch.ts)
+- [subagents/test/test_cmux.ts](../../../agent/extensions/subagents/test/test_cmux.ts)
+- [subagents/test/test_child.ts](../../../agent/extensions/subagents/test/test_child.ts)
+- [subagents/test/test_interaction.ts](../../../agent/extensions/subagents/test/test_interaction.ts)
+- [subagents/test/test_progress.ts](../../../agent/extensions/subagents/test/test_progress.ts)
+- [subagents/test/test_tool_surface.ts](../../../agent/extensions/subagents/test/test_tool_surface.ts)
 
 ## Read when
 
