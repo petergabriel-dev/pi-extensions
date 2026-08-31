@@ -86,7 +86,7 @@ try {
 	assert.deepEqual(buildSubagentCommandArgs(loadout, "do work"), [
 		"--no-extensions", "-e", loadout.extensionPath, "--tools", "read,grep",
 		"--append-system-prompt", loadout.appendSystemPrompt, "--session-id", "child-session",
-		"--no-approve", "--model", "openai/test-model", "--thinking", "high", "do work",
+		"--no-approve", "--model", "openai/test-model", "--thinking", "high", "--", "do work",
 	]);
 	assert.equal(buildSubagentCommandArgs(loadout, "do work").includes("--print"), false);
 

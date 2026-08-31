@@ -236,7 +236,7 @@ export function buildSubagentCommandArgs(loadout: SubagentLoadout, task: string)
 	];
 	if (loadout.model) args.push("--model", loadout.model);
 	if (loadout.thinkingLevel) args.push("--thinking", loadout.thinkingLevel);
-	args.push(task);
+	args.push("--", task);
 	return args;
 }
 
