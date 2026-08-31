@@ -155,7 +155,7 @@ cmux identify --json
 cmux new-surface --help
 ```
 
-`CmuxTransport` is required for production launches: it creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted interactive child command without `--print`. Start output, progress, list output, and failure follow-up identify cmux transport plus diagnostics log path. Binary lookup, socket, auth, or surface failures produce classified errors and close partial surfaces. `spawnProcess` is reserved for explicit test injection. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
+`CmuxTransport` is required for production launches: it creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted interactive child command without `--print`. Command delivery is followed by a bounded 30-second child `hello` handshake; missing hello fails the run with captured diagnostics. Start output, progress, list output, and failure follow-up identify cmux transport plus diagnostics log path. Binary lookup, socket, auth, or surface failures produce classified errors and close partial surfaces. `spawnProcess` is reserved for explicit test injection. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
 
 After any manual/live run, confirm teardown. Child processes must match child extension path, not parent Pi:
 
