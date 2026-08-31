@@ -50,6 +50,7 @@ export interface SubagentIpcConnectionOptions {
 	owner?: string;
 	logger?: SubagentIpcLogger;
 	onRequest?: (request: SubagentIpcRequest, connection: SubagentIpcConnection) => Promise<unknown> | unknown;
+	onHello?: (owner: string, payload: unknown) => void;
 	onOwner?: (owner: string, connection: SubagentIpcConnection) => boolean;
 	onDisconnect?: (owner: string | undefined, error?: Error) => void;
 }
@@ -303,6 +304,11 @@ export class SubagentIpcConnection {
 				return;
 			}
 			this.ownerValue = frame.owner;
+			try {
+				this.options.onHello?.(frame.owner, frame.payload);
+			} catch (error) {
+				this.logger("hello_callback_failed", { owner: frame.owner, error: errorFrom(error).message });
+			}
 		} else if (frame.owner !== this.ownerValue) {
 			this.logger("owner_mismatch_dropped", { requestId: frame.requestId, owner: frame.owner });
 			return;

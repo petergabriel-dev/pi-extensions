@@ -21,6 +21,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-ipc-"));
 const socketPath = resolveSubagentSocketPath("session-test", tempDir);
 const logs: string[] = [];
 const requests: SubagentIpcRequest[] = [];
+const hellos: Array<{ owner: string; payload: unknown }> = [];
 let disconnectedOwner: string | undefined;
 let resolveDisconnect: (() => void) | undefined;
 const disconnected = new Promise<void>((resolve) => { resolveDisconnect = resolve; });
@@ -29,6 +30,7 @@ const server = new SubagentIpcServer({
 	socketPath,
 	token: "token-for-test",
 	logger: (event) => logs.push(event),
+	onHello: (owner, payload) => { hellos.push({ owner, payload }); },
 	onRequest: (request, connection) => {
 		requests.push(request);
 		if ((request.type === "message" || request.type === "question") && (request.payload as { hang?: boolean })?.hang) return new Promise(() => undefined);
@@ -79,6 +81,13 @@ try {
 		owner: "child-test",
 		logger: (event) => logs.push(event),
 	});
+	assert.deepEqual(hellos, [{ owner: "child-test", payload: { pid: process.pid } }]);
+	await assert.rejects(SubagentIpcClient.connect({
+		socketPath,
+		token: server.token,
+		owner: "child-test",
+	}), /IPC connection closed|socket hang up/);
+	assert.equal(hellos.length, 1);
 	for (const type of ["ownership", "browser", "message", "question", "result", "spawn"] as const) {
 		const payload = { type };
 		assert.deepEqual(await client.request(type, payload), payload);
