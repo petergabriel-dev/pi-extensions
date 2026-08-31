@@ -6,6 +6,7 @@ import {
 	SubagentLaunchHost,
 	type SubagentLaunchHandle,
 	type SubagentLaunchOptions,
+	type SubagentResult,
 } from "../launch.ts";
 
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
@@ -68,16 +69,21 @@ const context = {
 
 const originalLaunch = SubagentLaunchHost.prototype.launch;
 const originalResume = SubagentLaunchHost.prototype.resume;
+const originalReadSurfaceTail = SubagentLaunchHost.prototype.readSurfaceTail;
 const originalClose = SubagentLaunchHost.prototype.close;
 let launched: SubagentLaunchOptions | undefined;
+const surfaceTailReads: string[] = [];
 let resumedTask: string | undefined;
 SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOptions): Promise<SubagentLaunchHandle> {
 	launched = options;
 	const failing = options.task === "failure task";
+	const running = options.task.startsWith("tail task");
 	const result = failing
 		? Promise.reject(new SubagentFailureError(options.owner, { transport: "cmux", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
-		: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result", sessionFile: "/tmp/sessions/child-surface.jsonl" });
-	if (!failing) queueMicrotask(() => { void options.onResult?.("surface result"); });
+		: running
+			? new Promise<SubagentResult>(() => undefined)
+			: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result", sessionFile: "/tmp/sessions/child-surface.jsonl" });
+	if (!failing && !running) queueMicrotask(() => { void options.onResult?.("surface result"); });
 	return {
 		owner: options.owner,
 		childSessionId: "child-surface",
@@ -107,6 +113,11 @@ SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options
 		request: async () => undefined,
 		kill: () => undefined,
 	};
+};
+SubagentLaunchHost.prototype.readSurfaceTail = async function (owner: string, _lines: number): Promise<string | undefined> {
+	surfaceTailReads.push(owner);
+	if (owner === "subagent-4") throw new Error("surface read failed");
+	return "live output";
 };
 SubagentLaunchHost.prototype.close = async function (): Promise<void> {};
 
@@ -161,10 +172,24 @@ try {
 	assert.equal(sentMessages.length, 3);
 	assert.match(sentMessages[2]!.content, /sentinel failure/);
 	assert.match(sentMessages[2]!.content, /subagent-2\.log/);
+
+	await registeredTools.get("subagent")!.execute("call-7", { task: "tail task one" }, new AbortController().signal, undefined, context);
+	await registeredTools.get("subagent")!.execute("call-8", { task: "tail task two" }, new AbortController().signal, undefined, context);
+	surfaceTailReads.length = 0;
+	await registeredTools.get("subagents_list")!.execute("call-9", {}, new AbortController().signal, undefined, context);
+	assert.deepEqual(surfaceTailReads, []);
+	const liveList = await registeredTools.get("subagents_list")!.execute("call-10", { tail: true }, new AbortController().signal, undefined, context);
+	assert.deepEqual(surfaceTailReads, ["subagent-3", "subagent-4"]);
+	const liveAgents = (liveList as { details: { agents: Array<{ owner: string; status: string; outputTail?: string }> } }).details.agents;
+	assert.equal(liveAgents.find((agent) => agent.owner === "subagent-3")?.outputTail, "live output");
+	assert.equal(liveAgents.find((agent) => agent.owner === "subagent-4")?.outputTail, undefined);
+	assert.equal(liveAgents.find((agent) => agent.owner === "subagent-2")?.outputTail, "sentinel output");
+	assert.match((liveList as { content: Array<{ text: string }> }).content[0]!.text, /Recent output: live output/);
 	await handlers.get("session_shutdown")?.({}, context);
 	console.log("subagent tool surface tests passed");
 } finally {
 	SubagentLaunchHost.prototype.launch = originalLaunch;
 	SubagentLaunchHost.prototype.resume = originalResume;
+	SubagentLaunchHost.prototype.readSurfaceTail = originalReadSurfaceTail;
 	SubagentLaunchHost.prototype.close = originalClose;
 }

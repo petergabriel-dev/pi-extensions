@@ -57,7 +57,9 @@ const SubagentParams = Type.Object({
 });
 type SubagentParams = Static<typeof SubagentParams>;
 
-const SubagentsListParams = Type.Object({});
+const SubagentsListParams = Type.Object({
+	tail: Type.Optional(Type.Boolean({ description: "Read live output from running cmux subagents." })),
+});
 type SubagentsListParams = Static<typeof SubagentsListParams>;
 
 const SubagentMessageParams = Type.Object({
@@ -473,6 +475,25 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	};
 
+	const readLiveTails = async (): Promise<void> => {
+		const activeHost = host;
+		if (!activeHost) return;
+		const liveRecords = [...records.values()].filter((record) => record.status === "running" || record.status === "waiting");
+		let next = 0;
+		const readLane = async (): Promise<void> => {
+			while (next < liveRecords.length) {
+				const record = liveRecords[next++]!;
+				try {
+					const tail = await activeHost.readSurfaceTail(record.owner, 20);
+					if (record.status === "running" || record.status === "waiting") record.outputTail = tail;
+				} catch {
+					if (record.status === "running" || record.status === "waiting") record.outputTail = undefined;
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(3, liveRecords.length) }, () => readLane()));
+	};
+
 	async function spawnNested(parentOwner: string, payload: unknown): Promise<unknown> {
 		const parent = records.get(parentOwner);
 		if (!parent) throw new Error(`Unknown parent subagent ${parentOwner}.`);
@@ -742,7 +763,8 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		label: "List Subagents",
 		description: "List running, waiting, completed, and failed async subagents.",
 		parameters: SubagentsListParams,
-		async execute(_toolCallId, _params: SubagentsListParams, _signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params: SubagentsListParams, _signal, _onUpdate, _ctx) {
+			if (params.tail) await readLiveTails();
 			const agents = [...records.values()].map((record) => ({
 				owner: record.owner,
 				childSessionId: record.childSessionId,

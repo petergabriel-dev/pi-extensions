@@ -9,6 +9,7 @@ import { CAVEMAN_PROMPT } from "../workflow-modes/caveman.ts";
 import { CmuxTransport, type CmuxLaunchOutcome, type CmuxSurfaceHandle } from "./cmux.ts";
 import {
 	createSubagentDiagnostics,
+	MAX_SUBAGENT_TAIL_BYTES,
 	redactSubagentText,
 	type SubagentDiagnostics,
 	type SubagentTransport,
@@ -418,6 +419,15 @@ export class SubagentLaunchHost {
 
 	getOwnershipSnapshot(): Record<string, string[]> {
 		return this.ownership.snapshot();
+	}
+
+	async readSurfaceTail(owner: string, lines: number): Promise<string | undefined> {
+		const run = this.runs.get(owner);
+		if (!run || run.resultSettled || !run.surface) return undefined;
+		const boundedLines = Number.isInteger(lines) ? Math.max(1, Math.min(100, lines)) : 20;
+		let output = redactSubagentText(await run.surface.readScreen(boundedLines), this.server.token);
+		while (Buffer.byteLength(output, "utf8") > MAX_SUBAGENT_TAIL_BYTES) output = output.slice(1);
+		return output || undefined;
 	}
 
 	private async start(loadout: SubagentLoadout, loadoutPath: string, runtime: SubagentRuntimeOptions): Promise<SubagentLaunchHandle> {
