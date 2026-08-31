@@ -143,6 +143,7 @@ interface SubagentRecord {
 	loadoutPath?: string;
 	transport?: SubagentTransport;
 	logPath?: string;
+	sessionFile?: string;
 	cmuxFailureReason?: string;
 	outputTail?: string;
 	handle?: SubagentLaunchHandle;
@@ -337,6 +338,7 @@ function failureMessage(record: SubagentRecord): string {
 		`Transport: ${record.transport ?? "unknown"}`,
 		`Log: ${record.logPath ?? "unavailable"}`,
 		`Error: ${record.error ?? "unknown error"}`,
+		...(record.sessionFile ? [`Transcript: ${record.sessionFile}`] : []),
 	];
 	if (record.cmuxFailureReason) lines.push(`Cmux failure: ${record.cmuxFailureReason}`);
 	if (record.outputTail) lines.push(`Recent output:\n${record.outputTail}`);
@@ -424,6 +426,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			if (status === "running") record.question = undefined;
 			record.progress?.setStatus(status);
 		},
+		onSessionFile: (sessionFile: string) => {
+			record.sessionFile = sessionFile;
+		},
 		onQuestion: (question: SubagentQuestion) => {
 			record.question = question;
 			record.progress?.setStatus("waiting");
@@ -441,10 +446,12 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		record.loadoutPath = handle.loadoutPath;
 		record.transport = handle.transport;
 		record.logPath = handle.logPath;
+		record.sessionFile = handle.sessionFile ?? record.sessionFile;
 		record.cmuxFailureReason = handle.cmuxFailureReason;
 		record.outputTail = undefined;
 		record.progress?.setTransport(handle.transport, handle.logPath);
 		void handle.result.then((result: SubagentResult) => {
+			record.sessionFile = result.sessionFile ?? record.sessionFile;
 			record.result = result.text;
 			record.finishedAt = Date.now();
 			if (steerToParent && !record.steered) steerResult(pi, record, result.text);
@@ -750,6 +757,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : undefined,
 				transport: record.transport,
 				logPath: record.logPath,
+				sessionFile: record.sessionFile,
 				cmuxFailureReason: record.cmuxFailureReason,
 				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,
 				error: record.error,
@@ -762,10 +770,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 					const elapsed = Math.max(0, (Date.parse(agent.finishedAt ?? new Date().toISOString()) - Date.parse(agent.startedAt)) / 1000).toFixed(1);
 					const transport = agent.transport ? ` transport=${agent.transport}` : "";
 					const log = agent.logPath ? ` log=${agent.logPath}` : "";
+					const sessionFile = agent.sessionFile ? ` transcript=${agent.sessionFile}` : "";
 					const result = agent.result ? `\n  Result: ${agent.result}` : "";
 					const error = agent.error ? `\n  Error: ${agent.error}` : "";
 					const tail = agent.outputTail ? `\n  Recent output: ${agent.outputTail}` : "";
-					return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log} elapsed=${elapsed}s${result}${error}${tail}`;
+					return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${result}${error}${tail}`;
 				}).join("\n\n");
 			return { content: [{ type: "text", text: truncateUtf8(text) }], details: { agents } };
 		},

@@ -27,6 +27,7 @@ import {
 } from "./ipc.ts";
 
 export const MAX_SUBAGENT_RESULT_BYTES = 50 * 1024;
+export const MAX_SUBAGENT_SESSION_FILE_BYTES = 4 * 1024;
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 const RUNTIME_DIR_MODE = 0o700;
 const LOADOUT_MODE = 0o600;
@@ -98,6 +99,7 @@ export interface SubagentLaunchOptions {
 	onResult?: (text: string) => void | Promise<void>;
 	onStatus?: (status: SubagentRunStatus) => void;
 	onQuestion?: (question: SubagentQuestion) => void | Promise<void>;
+	onSessionFile?: (sessionFile: string) => void;
 }
 
 export type SubagentSpawnProcess = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -120,6 +122,7 @@ export interface SubagentResult {
 	owner: string;
 	childSessionId: string;
 	text: string;
+	sessionFile?: string;
 }
 
 export interface SubagentLaunchHandle {
@@ -130,6 +133,7 @@ export interface SubagentLaunchHandle {
 	readonly transport: SubagentTransport;
 	readonly logPath: string;
 	readonly cmuxFailureReason?: string;
+	readonly sessionFile?: string;
 	readonly result: Promise<SubagentResult>;
 	request<T = unknown>(type: SubagentIpcMessageType, payload?: unknown): Promise<T>;
 	kill(): void;
@@ -141,6 +145,7 @@ interface SubagentRuntimeOptions {
 	onResult?: (text: string) => void | Promise<void>;
 	onStatus?: (status: SubagentRunStatus) => void;
 	onQuestion?: (question: SubagentQuestion) => void | Promise<void>;
+	onSessionFile?: (sessionFile: string) => void;
 }
 
 interface PendingQuestion {
@@ -167,6 +172,7 @@ interface RunState {
 	cleanup?: () => void;
 	slot?: AcquiredSubagentSlot;
 	pendingQuestion?: PendingQuestion;
+	sessionFile?: string;
 	handshakeTimer?: ReturnType<typeof setTimeout>;
 	helloReceived: boolean;
 	removeAbortListener?: () => void;
@@ -247,6 +253,10 @@ function isRecord(value: unknown): value is Record<string, any> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+export function boundedSubagentSessionFile(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_SUBAGENT_SESSION_FILE_BYTES ? value : undefined;
+}
+
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
 }
@@ -257,10 +267,12 @@ function validateIdentifier(value: string, label: string): void {
 
 function resultFromRequest(request: SubagentIpcRequest, childSessionId: string): SubagentResult | undefined {
 	if (request.type !== "result" || !isRecord(request.payload) || typeof request.payload.text !== "string") return undefined;
+	const sessionFile = boundedSubagentSessionFile(request.payload.sessionFile);
 	return {
 		owner: request.owner,
 		childSessionId: typeof request.payload.childSessionId === "string" ? request.payload.childSessionId : childSessionId,
 		text: truncateSubagentResult(request.payload.text),
+		...(sessionFile ? { sessionFile } : {}),
 	};
 }
 
@@ -317,7 +329,7 @@ export class SubagentLaunchHost {
 		this.server = new SubagentIpcServer({
 			socketPath: resolveSubagentSocketPath(options.parentSessionId, options.agentDir),
 			logger: options.logger,
-			onHello: (owner) => this.handleHello(owner),
+			onHello: (owner, payload) => this.handleHello(owner, payload),
 			onRequest: (request, connection) => this.handleRequest(request, connection),
 			onDisconnect: (owner, error) => this.handleDisconnect(owner, error),
 		});
@@ -375,7 +387,7 @@ export class SubagentLaunchHost {
 	async resume(
 		loadoutPath: string,
 		task: string,
-		options: Pick<SubagentLaunchOptions, "signal" | "onResult" | "onStatus" | "onQuestion"> = {},
+		options: Pick<SubagentLaunchOptions, "signal" | "onResult" | "onStatus" | "onQuestion" | "onSessionFile"> = {},
 	): Promise<SubagentLaunchHandle> {
 		if (this.closed) throw new Error("Subagent launch host is closed.");
 		if (!this.listening) await this.listen();
@@ -572,6 +584,7 @@ export class SubagentLaunchHost {
 			transport: run.transport,
 			logPath: run.diagnostics.logPath,
 			...(run.cmuxFailureReason ? { cmuxFailureReason: run.cmuxFailureReason } : {}),
+			...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
 			result,
 			request: (type, payload) => this.request(loadout.owner, type, payload),
 			kill: () => {
@@ -601,10 +614,22 @@ export class SubagentLaunchHost {
 		await this.server.close();
 	}
 
-	private handleHello(owner: string): void {
+	private updateSessionFile(run: RunState, value: unknown): void {
+		const sessionFile = boundedSubagentSessionFile(value);
+		if (!sessionFile || run.sessionFile === sessionFile) return;
+		run.sessionFile = sessionFile;
+		try {
+			run.options.onSessionFile?.(sessionFile);
+		} catch (error) {
+			this.options.logger?.("session_file_callback_failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+
+	private handleHello(owner: string, payload: unknown): void {
 		const run = this.runs.get(owner);
 		if (!run || run.resultSettled) return;
 		run.helloReceived = true;
+		this.updateSessionFile(run, isRecord(payload) ? payload.sessionFile : undefined);
 		clearHandshakeDeadline(run);
 	}
 
@@ -664,6 +689,7 @@ export class SubagentLaunchHost {
 		const result = resultFromRequest(request, run.childSessionId);
 		if (result) {
 			if (!run.resultSettled) {
+				this.updateSessionFile(run, result.sessionFile);
 				clearHandshakeDeadline(run);
 				run.resultSettled = true;
 				run.watchdog?.cancel();

@@ -67,6 +67,7 @@ export interface SubagentIpcClientOptions extends Omit<SubagentIpcConnectionOpti
 	socketPath: string;
 	owner: string;
 	connectTimeoutMs?: number;
+	helloPayload?: unknown;
 }
 
 export function createSubagentIpcToken(): string {
@@ -453,7 +454,7 @@ export class SubagentIpcClient {
 		});
 		const connection = new SubagentIpcConnection(socket, options);
 		try {
-			await connection.request("hello", { pid: process.pid }, { timeoutMs });
+			await connection.request("hello", options.helloPayload ?? { pid: process.pid }, { timeoutMs });
 		} catch (error) {
 			await connection.close().catch(() => undefined);
 			throw error;

@@ -4,7 +4,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { SubagentIpcClient, type SubagentIpcRequest } from "./ipc.ts";
-import { readSubagentLoadout, truncateSubagentResult } from "./launch.ts";
+import { boundedSubagentSessionFile, readSubagentLoadout, truncateSubagentResult } from "./launch.ts";
 import { MAX_SUBAGENT_DEPTH, validateSubagentAgentAllowlist } from "./policy.ts";
 
 const AskQuestionParams = Type.Object({
@@ -204,8 +204,15 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 		});
 	}
 
-	pi.on("session_start", async () => {
-		client = await SubagentIpcClient.connect({ socketPath, token, owner, onRequest: handleParentRequest });
+	pi.on("session_start", async (_event, ctx) => {
+		const sessionFile = boundedSubagentSessionFile(ctx.sessionManager.getSessionFile());
+		client = await SubagentIpcClient.connect({
+			socketPath,
+			token,
+			owner,
+			onRequest: handleParentRequest,
+			helloPayload: { pid: process.pid, ...(sessionFile ? { sessionFile } : {}) },
+		});
 	});
 
 	pi.on("agent_end", (event) => {
@@ -216,7 +223,8 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 	pi.on("agent_settled", (_event, ctx) => {
 		if (!client || resultSent) return;
 		resultSent = true;
-		void client.request("result", { childSessionId, text: latestResultText })
+		const sessionFile = boundedSubagentSessionFile(ctx.sessionManager.getSessionFile());
+		void client.request("result", { childSessionId, text: latestResultText, ...(sessionFile ? { sessionFile } : {}) })
 			.then(() => ctx.shutdown())
 			.catch(() => ctx.shutdown());
 	});

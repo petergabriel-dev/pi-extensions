@@ -76,7 +76,7 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 	const failing = options.task === "failure task";
 	const result = failing
 		? Promise.reject(new SubagentFailureError(options.owner, { transport: "cmux", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
-		: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result" });
+		: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result", sessionFile: "/tmp/sessions/child-surface.jsonl" });
 	if (!failing) queueMicrotask(() => { void options.onResult?.("surface result"); });
 	return {
 		owner: options.owner,
@@ -85,6 +85,7 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 		loadoutPath: "/tmp/surface-loadout.json",
 		transport: "cmux",
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
+		sessionFile: "/tmp/sessions/child-surface.jsonl",
 		result,
 		request: async () => undefined,
 		kill: () => undefined,
@@ -101,6 +102,7 @@ SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options
 		loadoutPath,
 		transport: "cmux",
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
+		sessionFile: "/tmp/sessions/child-surface.jsonl",
 		result,
 		request: async () => undefined,
 		kill: () => undefined,
@@ -122,10 +124,12 @@ try {
 
 	await new Promise((resolve) => setImmediate(resolve));
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
-	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string }> } }).details;
+	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string; sessionFile?: string }> } }).details;
 	assert.equal(listDetails.agents[0]?.status, "done");
 	assert.equal(listDetails.agents[0]?.transport, "cmux");
 	assert.match(listDetails.agents[0]?.logPath ?? "", /surface-test-session\/subagent-1\.log/);
+	assert.equal(listDetails.agents[0]?.sessionFile, "/tmp/sessions/child-surface.jsonl");
+	assert.match((listResult as { content: Array<{ text: string }> }).content[0]!.text, /transcript=\/tmp\/sessions\/child-surface\.jsonl/);
 	assert.equal(listDetails.agents[0]?.result, "surface result");
 	assert.equal(sentMessages.length, 1);
 	assert.match(sentMessages[0]!.content, /surface result/);

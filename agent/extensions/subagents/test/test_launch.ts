@@ -36,7 +36,7 @@ const read = (chunk) => {
     buffer = buffer.subarray(length + 4);
     if (response.kind !== "response") continue;
     if (response.requestId === "hello") {
-      socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "result", owner: process.env.PI_SUBAGENT_OWNER, type: "result", payload: { childSessionId: process.env.PI_SUBAGENT_CHILD_SESSION_ID, text: "child result" } }));
+      socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "result", owner: process.env.PI_SUBAGENT_OWNER, type: "result", payload: { childSessionId: process.env.PI_SUBAGENT_CHILD_SESSION_ID, text: "child result", sessionFile: "/tmp/child-session.jsonl" } }));
     } else if (response.requestId === "result") {
       socket.end();
     }
@@ -126,7 +126,7 @@ try {
 	assert.deepEqual(saved.subagentAgents, ["explorer"]);
 	assert.deepEqual(saved.fileOwnership, ["src/**"]);
 	assert.equal(fs.statSync(handle.loadoutPath).mode & 0o777, 0o600);
-	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result" });
+	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result", sessionFile: "/tmp/child-session.jsonl" });
 	assert.deepEqual(steered, ["child result"]);
 
 	let fallbackSpawned = false;

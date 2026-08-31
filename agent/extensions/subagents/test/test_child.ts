@@ -19,6 +19,7 @@ const previous = {
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 const tools = new Map<string, { execute: (...args: any[]) => Promise<unknown> }>();
 const sentMessages: string[] = [];
+const helloPayloads: unknown[] = [];
 const resultPayloads: unknown[] = [];
 const PARKED_DELAY_MS = 5_100;
 
@@ -48,6 +49,7 @@ fs.writeFileSync(loadoutPath, JSON.stringify(loadout));
 const server = new SubagentIpcServer({
 	socketPath,
 	token: "child-test-token",
+	onHello: (_owner, payload) => { helloPayloads.push(payload); },
 	onRequest: async (request) => {
 		if (request.type === "question") {
 			await delay(PARKED_DELAY_MS);
@@ -87,7 +89,9 @@ try {
 	assert.ok(tools.has("subagent"));
 	assert.ok(tools.has("browser_console"));
 	assert.ok(tools.has("browser_close"));
-	await handlers.get("session_start")?.({}, {});
+	const sessionFile = path.join(tempDir, "child-session.jsonl");
+	await handlers.get("session_start")?.({}, { sessionManager: { getSessionFile: () => sessionFile } });
+	assert.deepEqual(helloPayloads, [{ pid: process.pid, sessionFile }]);
 	const questionStartedAt = Date.now();
 	const questionResult = await tools.get("ask_question")!.execute("question-call", { question: "Continue?", options: ["yes", "no"] }, new AbortController().signal, undefined, {});
 	assert.ok(Date.now() - questionStartedAt >= PARKED_DELAY_MS - 250);
@@ -106,18 +110,30 @@ try {
 	assert.deepEqual(sentMessages, ["parent says hello"]);
 
 	let shutdownCount = 0;
-	const lifecycleContext = { shutdown: () => { shutdownCount += 1; } };
+	const lifecycleContext = { sessionManager: { getSessionFile: () => sessionFile }, shutdown: () => { shutdownCount += 1; } };
 	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "pre-retry" }] }] }, lifecycleContext);
 	assert.deepEqual(resultPayloads, []);
 	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "final result" }] }] }, lifecycleContext);
 	handlers.get("agent_settled")?.({}, lifecycleContext);
 	await delay(50);
-	assert.deepEqual(resultPayloads, [{ childSessionId: "child-session", text: "final result" }]);
+	assert.deepEqual(resultPayloads, [{ childSessionId: "child-session", text: "final result", sessionFile }]);
 	assert.equal(shutdownCount, 1);
 	handlers.get("agent_settled")?.({}, lifecycleContext);
 	await delay(10);
 	assert.equal(resultPayloads.length, 1);
 	assert.equal(shutdownCount, 1);
+
+	await handlers.get("session_shutdown")?.({}, {});
+	await delay(10);
+	handlers.clear();
+	subagentChildExtension(fakePi as never);
+	await handlers.get("session_start")?.({}, { sessionManager: { getSessionFile: () => undefined } });
+	assert.deepEqual(helloPayloads[1], { pid: process.pid });
+	const noSessionLifecycleContext = { sessionManager: { getSessionFile: () => undefined }, shutdown: () => { shutdownCount += 1; } };
+	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "no session file" }] }] }, noSessionLifecycleContext);
+	handlers.get("agent_settled")?.({}, noSessionLifecycleContext);
+	await delay(50);
+	assert.deepEqual(resultPayloads[1], { childSessionId: "child-session", text: "no session file" });
 	console.log("subagent child tests passed");
 } finally {
 	await handlers.get("session_shutdown")?.({}, {});
