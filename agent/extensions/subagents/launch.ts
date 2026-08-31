@@ -27,6 +27,7 @@ import {
 } from "./ipc.ts";
 
 export const MAX_SUBAGENT_RESULT_BYTES = 50 * 1024;
+const HANDSHAKE_TIMEOUT_MS = 30_000;
 const RUNTIME_DIR_MODE = 0o700;
 const LOADOUT_MODE = 0o600;
 const LOADOUT_VERSION = 1;
@@ -166,6 +167,8 @@ interface RunState {
 	cleanup?: () => void;
 	slot?: AcquiredSubagentSlot;
 	pendingQuestion?: PendingQuestion;
+	handshakeTimer?: ReturnType<typeof setTimeout>;
+	helloReceived: boolean;
 	removeAbortListener?: () => void;
 }
 
@@ -286,6 +289,12 @@ function terminateChild(child: ChildProcess): void {
 	killTimer.unref();
 }
 
+function clearHandshakeDeadline(run: RunState): void {
+	if (run.handshakeTimer === undefined) return;
+	clearTimeout(run.handshakeTimer);
+	run.handshakeTimer = undefined;
+}
+
 function terminateRun(run: RunState): void {
 	if (run.child) terminateChild(run.child);
 	void run.surface?.close();
@@ -308,6 +317,7 @@ export class SubagentLaunchHost {
 		this.server = new SubagentIpcServer({
 			socketPath: resolveSubagentSocketPath(options.parentSessionId, options.agentDir),
 			logger: options.logger,
+			onHello: (owner) => this.handleHello(owner),
 			onRequest: (request, connection) => this.handleRequest(request, connection),
 			onDisconnect: (owner, error) => this.handleDisconnect(owner, error),
 		});
@@ -457,6 +467,7 @@ export class SubagentLaunchHost {
 			diagnostics,
 			transport: "cmux",
 			slot,
+			helloReceived: false,
 		};
 		this.runs.set(loadout.owner, run);
 		const releaseRun = () => {
@@ -469,6 +480,7 @@ export class SubagentLaunchHost {
 		run.cleanup = releaseRun;
 		const finishChild = (error?: Error) => {
 			if (run.resultSettled || run.failureFinalizing) return;
+			clearHandshakeDeadline(run);
 			run.failureFinalizing = true;
 			run.resultSettled = true;
 			run.pendingQuestion?.reject(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
@@ -508,6 +520,12 @@ export class SubagentLaunchHost {
 				run.surface = undefined;
 				run.cleanup?.();
 				void surface.close();
+			} else if (!run.helloReceived) {
+				run.handshakeTimer = setTimeout(() => {
+					run.handshakeTimer = undefined;
+					finishChild(new Error(`Subagent ${loadout.owner} launched but never connected within ${HANDSHAKE_TIMEOUT_MS / 1_000} seconds.`));
+				}, HANDSHAKE_TIMEOUT_MS);
+				run.handshakeTimer.unref();
 			}
 		} else if (this.options.cmux === false && this.spawnProcess) {
 			// Test-only seam. Production never falls back to a headless child.
@@ -527,6 +545,7 @@ export class SubagentLaunchHost {
 		}
 		if (runtime.signal) {
 			const abort = () => {
+				clearHandshakeDeadline(run);
 				this.reapBrowserPage(run, loadout.owner);
 				run.watchdog?.cancel();
 				terminateRun(run);
@@ -567,6 +586,7 @@ export class SubagentLaunchHost {
 		this.closed = true;
 		process.off("exit", this.exitHandler);
 		for (const [owner, run] of this.runs) {
+			clearHandshakeDeadline(run);
 			this.reapBrowserPage(run, owner);
 			run.watchdog?.cancel();
 			terminateRun(run);
@@ -579,6 +599,13 @@ export class SubagentLaunchHost {
 			run.cleanup?.();
 		}
 		await this.server.close();
+	}
+
+	private handleHello(owner: string): void {
+		const run = this.runs.get(owner);
+		if (!run || run.resultSettled) return;
+		run.helloReceived = true;
+		clearHandshakeDeadline(run);
 	}
 
 	private async request<T>(owner: string, type: SubagentIpcMessageType, payload: unknown): Promise<T> {
@@ -637,6 +664,7 @@ export class SubagentLaunchHost {
 		const result = resultFromRequest(request, run.childSessionId);
 		if (result) {
 			if (!run.resultSettled) {
+				clearHandshakeDeadline(run);
 				run.resultSettled = true;
 				run.watchdog?.cancel();
 				run.diagnostics.close();
@@ -654,6 +682,7 @@ export class SubagentLaunchHost {
 	}
 
 	private async finalizeFailure(run: RunState, owner: string, error: Error): Promise<void> {
+		clearHandshakeDeadline(run);
 		const safeError = redactSubagentText(error.message, this.server.token);
 		if (run.surface) {
 			try {

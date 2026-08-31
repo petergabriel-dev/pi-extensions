@@ -4,9 +4,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { once } from "node:events";
+import { mock } from "node:test";
 
 import { CAVEMAN_PROMPT } from "../../workflow-modes/caveman.ts";
 import { CmuxTransport } from "../cmux.ts";
+import { SubagentIpcClient } from "../ipc.ts";
 import {
 	buildSubagentCommandArgs,
 	buildSubagentSystemPrompt,
@@ -218,6 +220,81 @@ try {
 	await exited;
 	assert.deepEqual(hostWithHangingChild.getOwnershipSnapshot(), {});
 	assert.ok(processToKill.exitCode !== null || processToKill.signalCode !== null);
+
+	mock.timers.enable();
+	try {
+		const healthySurface = {
+			surface: "surface:healthy",
+			readScreen: async () => "healthy output",
+			close: async () => undefined,
+		};
+		const healthyCmux = {
+			launch: async () => ({ transport: "cmux" as const, surface: healthySurface }),
+		} as unknown as CmuxTransport;
+		const healthyHost = new SubagentLaunchHost({ parentSessionId: "healthy", agentDir: tempDir, cmux: healthyCmux });
+		const healthy = await healthyHost.launch({
+			parentSessionId: "healthy",
+			owner: "worker-healthy",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "healthy handshake",
+			tools: ["read"],
+			cavemanEnabled: true,
+			childSessionId: "child-healthy",
+		});
+		const healthyClient = await SubagentIpcClient.connect({ socketPath: healthyHost.server.socketPath, token: healthyHost.server.token, owner: "worker-healthy" });
+		mock.timers.tick(30_000);
+		await healthyClient.request("result", { childSessionId: "child-healthy", text: "healthy result" });
+		assert.deepEqual(await healthy.result, { owner: "worker-healthy", childSessionId: "child-healthy", text: "healthy result" });
+		await healthyClient.close();
+		await healthyHost.close();
+
+		let timeoutSurfaceClosed = false;
+		const timeoutSurface = {
+			surface: "surface:timeout",
+			readScreen: async () => "booting output",
+			close: async () => { timeoutSurfaceClosed = true; },
+		};
+		const timeoutCmux = {
+			launch: async () => ({ transport: "cmux" as const, surface: timeoutSurface }),
+		} as unknown as CmuxTransport;
+		const reapedOwners: string[] = [];
+		const timeoutHost = new SubagentLaunchHost({
+			parentSessionId: "timeout",
+			agentDir: tempDir,
+			cmux: timeoutCmux,
+			onBrowser: (owner) => { reapedOwners.push(owner); },
+		});
+		const timedOut = await timeoutHost.launch({
+			parentSessionId: "timeout",
+			owner: "worker-timeout",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "missing handshake",
+			tools: ["read", "browser_close"],
+			cavemanEnabled: true,
+			childSessionId: "child-timeout",
+		});
+		mock.timers.tick(30_000);
+		await assert.rejects(timedOut.result, (error: unknown) => {
+			const failure = error as { message: string; info: { transport: string; logPath: string; tail: string } };
+			assert.equal(failure.info.transport, "cmux");
+			assert.equal(failure.info.logPath, timedOut.logPath);
+			assert.match(failure.message, /launched but never connected/);
+			assert.match(failure.info.tail, /booting output/);
+			return true;
+		});
+		assert.equal(timeoutSurfaceClosed, true);
+		assert.deepEqual(reapedOwners, ["worker-timeout"]);
+		assert.deepEqual(timeoutHost.getOwnershipSnapshot(), {});
+		assert.ok(fs.existsSync(timedOut.logPath));
+		assert.match(fs.readFileSync(timedOut.logPath, "utf8"), /booting output/);
+		await timeoutHost.close();
+	} finally {
+		mock.timers.reset();
+	}
 	await host.close();
 	console.log("subagent launch tests passed");
 } finally {
