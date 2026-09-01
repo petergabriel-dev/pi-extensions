@@ -13,7 +13,18 @@ import { Type, type Static } from "typebox";
 import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type AgentScope } from "./agents.ts";
 import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
 import { normalizeOwnership } from "./ownership.ts";
-import { validateSubagentAgentAllowlist, validateSubagentDepth, validateSubagentToolset } from "./policy.ts";
+import {
+	BROWSER_PROXY_BUILD_TOOLS,
+	BROWSER_PROXY_READ_ONLY_TOOLS,
+	READ_ONLY_EXPLORER_TOOLS,
+	REPOSITORY_READ_ONLY_TOOLS,
+	type BrowserProxyName,
+	validateSubagentAgentAllowlist,
+	validateSubagentDepth,
+	validateSubagentToolset,
+} from "./policy.ts";
+export { BROWSER_PROXY_BUILD_TOOLS, BROWSER_PROXY_READ_ONLY_TOOLS, READ_ONLY_EXPLORER_TOOLS, REPOSITORY_READ_ONLY_TOOLS } from "./policy.ts";
+export type { BrowserProxyName } from "./policy.ts";
 import { resolveSubagentTimeoutPolicy } from "./timeout-policy.ts";
 import {
 	SubagentFailureError,
@@ -85,36 +96,8 @@ interface SubagentsSettings {
 	maxTotalMs?: unknown;
 }
 
-export const READ_ONLY_EXPLORER_TOOLS = new Set([
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"browser_goto",
-	"browser_eval",
-	"browser_console",
-	"browser_network",
-	"browser_fill",
-	"browser_click",
-	"browser_screenshot",
-	"browser_close",
-]);
-
-export const BROWSER_PROXY_BUILD_TOOLS = [
-	"browser_goto",
-	"browser_eval",
-	"browser_console",
-	"browser_network",
-	"browser_fill",
-	"browser_click",
-	"browser_screenshot",
-	"browser_close",
-] as const;
-export const BROWSER_PROXY_READ_ONLY_TOOLS = ["browser_console", "browser_screenshot", "browser_network"] as const;
-export type BrowserProxyName = typeof BROWSER_PROXY_BUILD_TOOLS[number];
-
 export function validateExplorerTools(tools: string[] | undefined): string | undefined {
-	const activeTools = tools ?? ["read", "grep", "find", "ls"];
+	const activeTools = tools ?? REPOSITORY_READ_ONLY_TOOLS;
 	const unsafeTools = activeTools.filter((tool) => !READ_ONLY_EXPLORER_TOOLS.has(tool));
 	return unsafeTools.length > 0 ? `Explorer agent includes non-repository-read-only tool(s): ${unsafeTools.join(", ")}.` : undefined;
 }
@@ -124,7 +107,7 @@ export function browserProxyToolNames(mode: WorkflowMode | undefined): BrowserPr
 }
 
 export function augmentBrowserProxyTools(tools: string[] | undefined, names: readonly BrowserProxyName[]): string[] {
-	return [...new Set([...(tools ?? ["read", "grep", "find", "ls"]), ...names])];
+	return [...new Set([...(tools ?? REPOSITORY_READ_ONLY_TOOLS), ...names])];
 }
 
 interface SubagentRecord {

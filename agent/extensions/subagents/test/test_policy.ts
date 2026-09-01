@@ -10,10 +10,19 @@ import {
 import { OwnershipLockManager, ownershipOverlaps } from "../ownership.ts";
 
 assert.equal(subagentToolsRequireBuild(["read", "grep", "ask_question"]), false);
-assert.equal(subagentToolsRequireBuild(["read", "bash"]), true);
-assert.equal(validateSubagentToolset(["read", "grep"], "discuss"), undefined);
-assert.match(validateSubagentToolset(["read", "bash"], "discuss") ?? "", /mutating tool/);
-assert.equal(validateSubagentToolset(["read", "bash"], "build"), undefined);
+assert.equal(subagentToolsRequireBuild(["read", "powershell"]), true);
+assert.equal(
+	validateSubagentToolset(
+		["read", "grep", "find", "ls", "ask_question", "browser_console", "browser_screenshot", "browser_network"],
+		"discuss",
+	),
+	undefined,
+);
+for (const tool of ["bash", "edit", "write", "powershell"]) {
+	assert.match(validateSubagentToolset(["read", tool], "discuss") ?? "", new RegExp(tool));
+}
+assert.match(validateSubagentToolset(["read", "powershell"], "discuss") ?? "", /outside Build mode/);
+assert.equal(validateSubagentToolset(["read", "powershell"], "build"), undefined);
 
 assert.equal(validateSubagentAgentAllowlist(["explorer"], "explorer"), undefined);
 assert.match(validateSubagentAgentAllowlist(["explorer"], "worker") ?? "", /allowed child agents/);

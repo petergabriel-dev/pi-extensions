@@ -1,18 +1,28 @@
 export const MAX_SUBAGENT_DEPTH = 2;
 
-export const MUTATING_SUBAGENT_TOOLS = new Set([
-	"bash",
-	"edit",
-	"write",
-	"apply_patch",
-	"delete",
-	"move",
+export const REPOSITORY_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+export const BROWSER_PROXY_BUILD_TOOLS = [
 	"browser_goto",
 	"browser_eval",
+	"browser_console",
+	"browser_network",
 	"browser_fill",
 	"browser_click",
+	"browser_screenshot",
 	"browser_close",
-	"browser_kill",
+] as const;
+export const BROWSER_PROXY_READ_ONLY_TOOLS = ["browser_console", "browser_screenshot", "browser_network"] as const;
+export type BrowserProxyName = typeof BROWSER_PROXY_BUILD_TOOLS[number];
+
+export const READ_ONLY_EXPLORER_TOOLS = new Set<string>([
+	...REPOSITORY_READ_ONLY_TOOLS,
+	...BROWSER_PROXY_BUILD_TOOLS,
+]);
+const RESTRICTED_SUBAGENT_TOOLS = new Set<string>([
+	...REPOSITORY_READ_ONLY_TOOLS,
+	"ask_question",
+	"subagent",
+	...BROWSER_PROXY_READ_ONLY_TOOLS,
 ]);
 
 function normalize(value: string): string {
@@ -20,14 +30,14 @@ function normalize(value: string): string {
 }
 
 export function subagentToolsRequireBuild(tools: readonly string[]): boolean {
-	return tools.some((tool) => MUTATING_SUBAGENT_TOOLS.has(normalize(tool)));
+	return tools.some((tool) => !RESTRICTED_SUBAGENT_TOOLS.has(normalize(tool)));
 }
 
 export function validateSubagentToolset(tools: readonly string[], mode: string | undefined): string | undefined {
-	if (!subagentToolsRequireBuild(tools)) return undefined;
 	if (mode === "build") return undefined;
-	const mutating = tools.filter((tool) => MUTATING_SUBAGENT_TOOLS.has(normalize(tool)));
-	return `Subagent toolset includes mutating tool(s) outside Build mode: ${mutating.join(", ")}.`;
+	if (!subagentToolsRequireBuild(tools)) return undefined;
+	const restricted = tools.filter((tool) => !RESTRICTED_SUBAGENT_TOOLS.has(normalize(tool)));
+	return `Subagent toolset includes tool(s) not allowed outside Build mode: ${restricted.join(", ")}.`;
 }
 
 export function validateSubagentAgentAllowlist(allowed: readonly string[] | undefined, requested: string): string | undefined {
