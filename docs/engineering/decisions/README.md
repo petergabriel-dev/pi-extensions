@@ -37,3 +37,4 @@
 | ADR-0033 | Active | Pi-independent Cursor kit | changing Cursor commands, hooks, ADR skill, root spoke ownership, docs write-back workflow, or cross-harness bridge boundaries |
 | ADR-0034 | Active | Async out-of-process subagents | changing async child launch, IPC framing/auth, loadout resume, cmux transport, nested agent policy, browser proxy transport, ownership locks, progress, or parked-child timeout behavior |
 | ADR-0035 | Active | Ask-user-question defer-to-next-turn compaction | changing ask_user_question context defer, answer batching, queue drain or abort behavior, resume delivery, or Pi host compaction assumptions |
+| ADR-0036 | Active | Fail-closed subagent toolset policy | changing subagent tool validation, browser proxy loadouts, agent definitions, or workflow-mode launch gates |
