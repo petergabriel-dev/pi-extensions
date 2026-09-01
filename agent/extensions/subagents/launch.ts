@@ -17,7 +17,7 @@ import {
 import type { AgentRole, AgentConfig } from "./agents.ts";
 import { normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
 import { acquireSubagentSlot, type AcquiredSubagentSlot } from "./concurrency.ts";
-import { validateSubagentDepth } from "./policy.ts";
+import { subagentToolsMutateRepository, validateSubagentDepth } from "./policy.ts";
 import { createSubagentWatchdog, type SubagentWatchdog } from "./timeout.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_TOTAL_MS, type SubagentTimeoutPolicy } from "./timeout-policy.ts";
 import {
@@ -444,8 +444,10 @@ export class SubagentLaunchHost {
 			await this.server.closeOwner(loadout.owner);
 		}
 		const args = buildSubagentCommandArgs(loadout, runtime.task);
-		const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
-		if (!ownership.ok) throw new Error(`Subagent ownership overlaps ${ownership.conflict?.owner}: requested ${ownership.conflict?.requestedPath}, existing ${ownership.conflict?.existingPath}.`);
+		if (subagentToolsMutateRepository(loadout.tools)) {
+			const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
+			if (!ownership.ok) throw new Error(`Subagent ownership overlaps ${ownership.conflict?.owner}: requested ${ownership.conflict?.requestedPath}, existing ${ownership.conflict?.existingPath}.`);
+		}
 		let slot: AcquiredSubagentSlot;
 		try {
 			slot = await acquireSubagentSlot(loadout.cwd, runtime.signal);
@@ -671,9 +673,10 @@ export class SubagentLaunchHost {
 				this.releaseOwnership(request.owner);
 				return { accepted: true, released: true };
 			}
-			const paths = request.payload.paths;
-			if (paths !== undefined && (!Array.isArray(paths) || paths.some((item) => typeof item !== "string"))) throw new Error("Ownership paths are malformed.");
-			const acquired = this.acquireOwnership(request.owner, paths as string[] | undefined);
+			const requested = request.payload.paths as string[] | undefined;
+			if (requested !== undefined && (!Array.isArray(requested) || requested.some((item) => typeof item !== "string"))) throw new Error("Ownership paths are malformed.");
+			if (!subagentToolsMutateRepository(run.tools)) return { ok: true, paths: normalizeOwnership(requested) };
+			const acquired = this.acquireOwnership(request.owner, requested);
 			if (!acquired.ok) throw new Error(`Subagent ownership overlaps ${acquired.conflict?.owner}: requested ${acquired.conflict?.requestedPath}, existing ${acquired.conflict?.existingPath}.`);
 			return acquired;
 		}

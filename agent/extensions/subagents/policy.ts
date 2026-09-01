@@ -14,6 +14,10 @@ export const BROWSER_PROXY_BUILD_TOOLS = [
 export const BROWSER_PROXY_READ_ONLY_TOOLS = ["browser_console", "browser_screenshot", "browser_network"] as const;
 export type BrowserProxyName = typeof BROWSER_PROXY_BUILD_TOOLS[number];
 
+function normalize(value: string): string {
+	return value.trim().toLowerCase();
+}
+
 export const READ_ONLY_EXPLORER_TOOLS = new Set<string>([
 	...REPOSITORY_READ_ONLY_TOOLS,
 	...BROWSER_PROXY_BUILD_TOOLS,
@@ -24,13 +28,19 @@ const RESTRICTED_SUBAGENT_TOOLS = new Set<string>([
 	"subagent",
 	...BROWSER_PROXY_READ_ONLY_TOOLS,
 ]);
-
-function normalize(value: string): string {
-	return value.trim().toLowerCase();
-}
+const REPOSITORY_READ_ONLY_OWNERSHIP_TOOLS = new Set<string>([
+	...REPOSITORY_READ_ONLY_TOOLS,
+	"ask_question",
+	"subagent",
+	...BROWSER_PROXY_BUILD_TOOLS,
+].map(normalize));
 
 export function subagentToolsRequireBuild(tools: readonly string[]): boolean {
 	return tools.some((tool) => !RESTRICTED_SUBAGENT_TOOLS.has(normalize(tool)));
+}
+
+export function subagentToolsMutateRepository(tools: readonly string[]): boolean {
+	return tools.some((tool) => !REPOSITORY_READ_ONLY_OWNERSHIP_TOOLS.has(normalize(tool)));
 }
 
 export function validateSubagentToolset(tools: readonly string[], mode: string | undefined): string | undefined {

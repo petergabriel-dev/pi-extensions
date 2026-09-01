@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 
 import {
+	BROWSER_PROXY_BUILD_TOOLS,
 	MAX_SUBAGENT_DEPTH,
+	subagentToolsMutateRepository,
 	subagentToolsRequireBuild,
 	validateSubagentAgentAllowlist,
 	validateSubagentDepth,
@@ -11,6 +13,19 @@ import { OwnershipLockManager, ownershipOverlaps } from "../ownership.ts";
 
 assert.equal(subagentToolsRequireBuild(["read", "grep", "ask_question"]), false);
 assert.equal(subagentToolsRequireBuild(["read", "powershell"]), true);
+assert.equal(
+	subagentToolsMutateRepository([
+		" READ ",
+		"grep",
+		"find",
+		"ls",
+		"ASK_QUESTION",
+		"SubAgent",
+		...BROWSER_PROXY_BUILD_TOOLS.map((tool) => tool.toUpperCase()),
+	]),
+	false,
+);
+assert.equal(subagentToolsMutateRepository(["read", "unknown-tool"]), true);
 assert.equal(
 	validateSubagentToolset(
 		["read", "grep", "find", "ls", "ask_question", "browser_console", "browser_screenshot", "browser_network"],

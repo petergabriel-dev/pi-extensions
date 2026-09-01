@@ -117,7 +117,7 @@ function launchOptions(parentSessionId: string, owner: string, childSessionId?: 
 		agent,
 		cwd: process.cwd(),
 		task: "do work",
-		tools: ["read"],
+		tools: ["edit"],
 		cavemanEnabled: true,
 		...(childSessionId ? { childSessionId } : {}),
 	};

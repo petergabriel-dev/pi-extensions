@@ -125,9 +125,39 @@ try {
 	assert.equal(saved.depth, 0);
 	assert.deepEqual(saved.subagentAgents, ["explorer"]);
 	assert.deepEqual(saved.fileOwnership, ["src/**"]);
+	assert.deepEqual(host.getOwnershipSnapshot(), {});
 	assert.equal(fs.statSync(handle.loadoutPath).mode & 0o777, 0o600);
 	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result", sessionFile: "/tmp/child-session.jsonl" });
 	assert.deepEqual(steered, ["child result"]);
+
+	const nestedReaders = await Promise.all([
+		host.launch({
+			parentSessionId: "parent-session",
+			owner: "reader-wide",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "read repository",
+			tools: ["read"],
+			cavemanEnabled: true,
+			fileOwnership: ["agent/extensions/**"],
+			childSessionId: "child-reader-wide",
+		}),
+		host.launch({
+			parentSessionId: "parent-session",
+			owner: "reader-tests",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "read tests",
+			tools: ["read"],
+			cavemanEnabled: true,
+			fileOwnership: ["agent/extensions/**/__tests__/**"],
+			childSessionId: "child-reader-tests",
+		}),
+	]);
+	assert.deepEqual((await Promise.all(nestedReaders.map((reader) => reader.result))).map((result) => result.text), ["child result", "child result"]);
+	assert.deepEqual(host.getOwnershipSnapshot(), {});
 
 	const concurrentHost = new SubagentLaunchHost({
 		parentSessionId: "concurrent",
@@ -247,6 +277,44 @@ try {
 	assert.deepEqual(hostWithHangingChild.getOwnershipSnapshot(), {});
 	assert.ok(processToKill.exitCode !== null || processToKill.signalCode !== null);
 
+	const writerHost = new SubagentLaunchHost({ parentSessionId: "writers", agentDir: tempDir, spawnProcess: hangingSpawn, cmux: false });
+	try {
+		const unknownWriter = await writerHost.launch({
+			parentSessionId: "writers",
+			owner: "unknown-writer",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "unknown writer",
+			tools: ["read", "unknown-tool"],
+			cavemanEnabled: true,
+			fileOwnership: ["shared/**"],
+			childSessionId: "unknown-writer-child",
+		});
+		void unknownWriter.result.catch(() => undefined);
+		assert.deepEqual(writerHost.getOwnershipSnapshot(), { "unknown-writer": ["shared/**"] });
+		const writerProcess = hangingProcess;
+		assert.ok(writerProcess);
+		await assert.rejects(writerHost.launch({
+			parentSessionId: "writers",
+			owner: "known-writer",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "known writer",
+			tools: ["read", "edit"],
+			cavemanEnabled: true,
+			fileOwnership: ["shared/file.ts"],
+			childSessionId: "known-writer-child",
+		}), /ownership overlaps unknown-writer/);
+		assert.deepEqual(writerHost.getOwnershipSnapshot(), { "unknown-writer": ["shared/**"] });
+		const writerExited = once(writerProcess, "exit");
+		await writerHost.close();
+		await writerExited;
+	} finally {
+		await writerHost.close();
+	}
+
 	mock.timers.enable();
 	try {
 		const healthySurface = {
@@ -267,9 +335,12 @@ try {
 			task: "healthy handshake",
 			tools: ["read"],
 			cavemanEnabled: true,
+			fileOwnership: ["src/**"],
 			childSessionId: "child-healthy",
 		});
 		const healthyClient = await SubagentIpcClient.connect({ socketPath: healthyHost.server.socketPath, token: healthyHost.server.token, owner: "worker-healthy" });
+		assert.deepEqual(await healthyClient.request("ownership", { action: "acquire", paths: ["src/file.ts", " src/file.ts "] }), { ok: true, paths: ["src/file.ts"] });
+		assert.deepEqual(healthyHost.getOwnershipSnapshot(), {});
 		mock.timers.tick(30_000);
 		await healthyClient.request("result", { childSessionId: "child-healthy", text: "healthy result" });
 		assert.deepEqual(await healthy.result, { owner: "worker-healthy", childSessionId: "child-healthy", text: "healthy result" });
