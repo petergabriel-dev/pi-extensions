@@ -358,6 +358,7 @@ export class SubagentIpcServer {
 	private readonly server = net.createServer((socket) => this.accept(socket));
 	private readonly connections = new Map<string, SubagentIpcConnection>();
 	private listening = false;
+	private listenPromise: Promise<void> | undefined;
 
 	constructor(private readonly options: SubagentIpcServerOptions) {
 		this.socketPath = options.socketPath ?? resolveSubagentSocketPath(options.sessionId ?? crypto.randomUUID(), options.agentDir);
@@ -367,28 +368,59 @@ export class SubagentIpcServer {
 
 	async listen(): Promise<void> {
 		if (this.listening) return;
-		const directory = path.dirname(this.socketPath);
-		fs.mkdirSync(directory, { recursive: true, mode: IPC_SOCKET_DIR_MODE });
-		fs.chmodSync(directory, IPC_SOCKET_DIR_MODE);
-		if (fs.existsSync(this.socketPath)) {
-			if (!fs.lstatSync(this.socketPath).isSocket()) throw new Error(`IPC socket path is not a socket: ${this.socketPath}`);
-			fs.unlinkSync(this.socketPath);
-		}
-		await new Promise<void>((resolve, reject) => {
-			const onError = (error: Error) => {
-				this.server.off("listening", onListening);
-				reject(error);
-			};
-			const onListening = () => {
-				this.server.off("error", onError);
-				resolve();
-			};
-			this.server.once("error", onError);
-			this.server.once("listening", onListening);
-			this.server.listen(this.socketPath);
+		if (this.listenPromise) return this.listenPromise;
+		const promise = this.startListening().finally(() => {
+			if (this.listenPromise === promise) this.listenPromise = undefined;
 		});
-		fs.chmodSync(this.socketPath, IPC_SOCKET_MODE);
-		this.listening = true;
+		this.listenPromise = promise;
+		return promise;
+	}
+
+	private async startListening(): Promise<void> {
+		try {
+			const directory = path.dirname(this.socketPath);
+			fs.mkdirSync(directory, { recursive: true, mode: IPC_SOCKET_DIR_MODE });
+			fs.chmodSync(directory, IPC_SOCKET_DIR_MODE);
+			if (fs.existsSync(this.socketPath)) {
+				if (!fs.lstatSync(this.socketPath).isSocket()) throw new Error(`IPC socket path is not a socket: ${this.socketPath}`);
+				fs.unlinkSync(this.socketPath);
+			}
+			await new Promise<void>((resolve, reject) => {
+				const cleanup = () => {
+					this.server.off("error", onError);
+					this.server.off("listening", onListening);
+				};
+				const onError = (error: Error) => {
+					cleanup();
+					reject(error);
+				};
+				const onListening = () => {
+					cleanup();
+					resolve();
+				};
+				this.server.once("error", onError);
+				this.server.once("listening", onListening);
+				try {
+					this.server.listen(this.socketPath);
+				} catch (error) {
+					cleanup();
+					reject(errorFrom(error));
+				}
+			});
+			fs.chmodSync(this.socketPath, IPC_SOCKET_MODE);
+			this.listening = true;
+		} catch (error) {
+			await this.resetAfterListenFailure();
+			throw errorFrom(error);
+		}
+	}
+
+	private async resetAfterListenFailure(): Promise<void> {
+		this.listening = false;
+		if (this.server.listening) {
+			await new Promise<void>((resolve) => this.server.close(() => resolve()));
+		}
+		if (fs.existsSync(this.socketPath) && fs.lstatSync(this.socketPath).isSocket()) fs.unlinkSync(this.socketPath);
 	}
 
 	getConnection(owner: string): SubagentIpcConnection | undefined {

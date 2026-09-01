@@ -321,7 +321,6 @@ export class SubagentLaunchHost {
 	private readonly cmux: CmuxTransport | undefined;
 	private readonly ownership = new OwnershipLockManager();
 	private closed = false;
-	private listening = false;
 	private readonly exitHandler = () => {
 		for (const run of this.runs.values()) terminateRun(run);
 	};
@@ -343,12 +342,11 @@ export class SubagentLaunchHost {
 	async listen(): Promise<void> {
 		if (this.closed) throw new Error("Subagent launch host is closed.");
 		await this.server.listen();
-		this.listening = true;
 	}
 
 	async launch(options: SubagentLaunchOptions): Promise<SubagentLaunchHandle> {
 		if (this.closed) throw new Error("Subagent launch host is closed.");
-		if (!this.listening) await this.listen();
+		await this.server.listen();
 		validateIdentifier(options.owner, "owner");
 		validateIdentifier(options.parentSessionId, "parentSessionId");
 		if (options.parentSessionId !== this.options.parentSessionId) throw new Error("Subagent parent session does not match IPC host.");
@@ -391,7 +389,7 @@ export class SubagentLaunchHost {
 		options: Pick<SubagentLaunchOptions, "signal" | "onResult" | "onStatus" | "onQuestion" | "onSessionFile"> = {},
 	): Promise<SubagentLaunchHandle> {
 		if (this.closed) throw new Error("Subagent launch host is closed.");
-		if (!this.listening) await this.listen();
+		await this.server.listen();
 		if (!task.trim()) throw new Error("Subagent task is required.");
 		const loadout = readSubagentLoadout(loadoutPath);
 		validateIdentifier(loadout.owner, "owner");

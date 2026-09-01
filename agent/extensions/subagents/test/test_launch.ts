@@ -129,6 +129,32 @@ try {
 	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result", sessionFile: "/tmp/child-session.jsonl" });
 	assert.deepEqual(steered, ["child result"]);
 
+	const concurrentHost = new SubagentLaunchHost({
+		parentSessionId: "concurrent",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn,
+		cmux: false,
+	});
+	try {
+		const concurrentHandles = await Promise.all(
+			[0, 1, 2, 3].map((index) => concurrentHost.launch({
+				parentSessionId: "concurrent",
+				owner: `worker-concurrent-${index}`,
+				role: "worker",
+				agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+				cwd: process.cwd(),
+				task: `concurrent work ${index}`,
+				tools: ["read", "grep"],
+				cavemanEnabled: true,
+				childSessionId: `child-concurrent-${index}`,
+			})),
+		);
+		assert.equal(concurrentHandles.length, 4);
+		assert.deepEqual((await Promise.all(concurrentHandles.map((concurrentHandle) => concurrentHandle.result))).map((result) => result.text), ["child result", "child result", "child result", "child result"]);
+	} finally {
+		await concurrentHost.close();
+	}
+
 	let fallbackSpawned = false;
 	const unavailableHost = new SubagentLaunchHost({
 		parentSessionId: "fallback",

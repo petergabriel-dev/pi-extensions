@@ -73,6 +73,29 @@ try {
 
 	await server.listen();
 	assert.equal(fs.statSync(path.dirname(socketPath)).mode & 0o777, 0o700);
+
+	const concurrentSocketPath = resolveSubagentSocketPath("c", tempDir);
+	const concurrentServer = new SubagentIpcServer({ socketPath: concurrentSocketPath, token: "concurrent-token" });
+	try {
+		await Promise.all(Array.from({ length: 4 }, () => concurrentServer.listen()));
+		assert.equal(fs.existsSync(concurrentSocketPath), true);
+	} finally {
+		await concurrentServer.close();
+	}
+
+	const retrySocketPath = resolveSubagentSocketPath("r", tempDir);
+	fs.writeFileSync(retrySocketPath, "not a socket");
+	const retryServer = new SubagentIpcServer({ socketPath: retrySocketPath, token: "retry-token" });
+	try {
+		await assert.rejects(retryServer.listen(), /IPC socket path is not a socket/);
+		assert.equal(fs.existsSync(retrySocketPath), true);
+		fs.unlinkSync(retrySocketPath);
+		await retryServer.listen();
+		await retryServer.close();
+		await retryServer.listen();
+	} finally {
+		await retryServer.close();
+	}
 	assert.equal(fs.statSync(socketPath).mode & 0o777, 0o600);
 
 	const client = await SubagentIpcClient.connect({
