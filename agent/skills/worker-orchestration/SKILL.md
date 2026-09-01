@@ -63,7 +63,7 @@ For every worker, assign explicit ownership. Examples:
 
 If two workers might need the same file, do not run them in parallel. Either split further or assign one worker and keep the other read-only/explorer.
 
-## Use Explorers for Discovery
+## Explorer Contract
 
 Use explorer subagents for read-only discovery when:
 
@@ -71,7 +71,28 @@ Use explorer subagents for read-only discovery when:
 - You need architecture context across many files.
 - You want a worker to avoid spending implementation time searching.
 
-Workers may delegate discovery to explorers when allowed, but explorers are leaves. Do not ask explorers to edit, and do not ask workers to spawn another worker. A worker may use allowlisted `subagent` for explorer discovery only.
+Before spawning an explorer, write a compact contract:
+
+1. **Goal:** one concrete discovery outcome.
+2. **Scope:** exact files, directories, or component boundaries to inspect.
+3. **Read scope:** candidate paths and selected files; explorers never own mutation.
+4. **Inputs:** relevant task context or prior findings.
+5. **Constraints:** read-only tools, no edits, no broad scope expansion, no child agents.
+6. **Expected output:** Files Retrieved / Key Code / Architecture / Start Here / Open Questions.
+7. **Verification:** report tools used, limits reached, and whether files stayed untouched.
+
+Explorers are leaves. Do not ask them to edit or spawn another agent. Workers may delegate discovery only to their allowlisted explorer; otherwise ask the parent.
+
+## Staged Discovery Protocol
+
+1. **Inventory spawn:** ask an explorer for candidate paths only. It performs no file reads and uses ≤10 `grep`/`find`/`ls` search calls.
+2. **Parent selection:** the orchestrator reviews candidates, chooses files, and assigns the next narrow scope. Do not let the inventory child inspect files.
+3. **Inspect spawn:** ask an explorer to inspect ≤5 selected files with ≤10 `read` calls. Return findings so far plus what would be read next when the limit is reached.
+4. **Sequence narrowly:** discovery is inventory → selection → inspect. Prefer many small sequential spawns over a few broad ones; narrow reads inside owned worker scope remain allowed.
+
+These are default budgets and may be overridden per task. Put the chosen budgets in the task string: `SubagentParams` carries only `task`, `agent`, `agentScope`, and `fileOwnership` (`agent/extensions/subagents/index.ts:58-68`); no tool-level budget enforcement exists.
+
+`subagent_message` cannot interrupt a runaway child. It arrives as a `followUp` user message (`agent/extensions/subagents/child.ts:129`), so the child may finish its current plan first. Closing the cmux surface is the emergency stop; it produces a disconnected result rather than a final report. Verify child-process and surface cleanup afterward.
 
 ## Worker Spawn Checklist
 
