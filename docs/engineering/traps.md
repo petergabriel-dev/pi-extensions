@@ -59,6 +59,7 @@
 ## Plan-mode verification limits
 
 - **Plan sandbox is not a general test environment.** Repository/home writes and network are denied. `npm ci`, uncached `npx`, CCC init/index, live bridge IPC, and write-heavy tests require Build.
+- **Pi IPC socket tests are Build-only in this environment.** Plan sandbox denies socket binds with `listen EPERM`; run socket coverage in `agent/extensions/subagents/test/test_ipc.ts` and `agent/extensions/subagents/test/test_launch.ts` in Build.
 - **Sandbox failures can mimic code failures.** `EPERM` for temp/cache creation and `ENOTFOUND registry.npmjs.org` may indicate Plan restrictions. Rerun in Build before diagnosing source.
 - **CCC search is an external prerequisite and not filesystem-read-only.** Install/configure the separate `ccc` CLI before using `ccc_search`; it may start a daemon, write user/project index state, and contact an embedding provider. Use dedicated `ccc_search`; never broaden generic Bash sandbox permissions. Inspect `git diff` afterward: indexing can add ignored-project metadata such as `.gitignore` entries.
 - **CCC fallback is deliberate.** A timed-out or empty `ccc_search` result is not source evidence; retry with a narrower query, then use exact `rg`/`read` discovery when the index is unavailable.
@@ -120,6 +121,7 @@
 ## Pi subagents
 
 - **Child tool surface is explicit.** Out-of-process children launch with `--no-extensions` and `agent/extensions/subagents/child.ts`; only loadout-approved tools, `ask_question`, browser proxies, and allowlisted nested `subagent` are registered. Parent verifies toolset mode before launch.
+- **Injected tools must be in restricted allowlist.** Parent adds `ask_question` and, when configured, `subagent` before `validateSubagentToolset()` (`agent/extensions/subagents/index.ts:500-503`, `:609-613`). Omitting either from `agent/extensions/subagents/policy.ts` refuses otherwise valid non-Build launches.
 - **Child extension path follows module location.** `resolveSubagentExtensionPath()` derives `child.ts` from `import.meta.url` (`agent/extensions/subagents/launch.ts`); do not hard-code checkout paths. Source and npm installs have different absolute locations, and a missing path causes launch failure before child work starts.
 - **cmux send has shell-readiness race.** `new-surface` creates terminal without a command; `CmuxTransport` must poll `read-screen` for a shell prompt before `send`. If readiness or any cmux command fails, close the partial surface and reject with a classified binary, socket, auth, or surface error (`agent/extensions/subagents/cmux.ts`, `launch.ts`).
 - **Child lifecycle events have different contracts.** Global pi 0.84.3 runs against vendored coding-agent 0.80.9. Extension-level `agent_end` has no `willRetry`; cache its latest text there, then steer only on `agent_settled`, which fires after retry, compaction, and queued continuation settle.
