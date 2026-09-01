@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mock } from "node:test";
+import { performance } from "node:perf_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,6 +23,8 @@ const tools = new Map<string, { execute: (...args: any[]) => Promise<unknown> }>
 const sentMessages: string[] = [];
 const helloPayloads: unknown[] = [];
 const resultPayloads: unknown[] = [];
+const activityRequests: unknown[] = [];
+let rejectActivity = false;
 const PARKED_DELAY_MS = 5_100;
 
 function delay(ms: number): Promise<void> {
@@ -59,6 +63,11 @@ const server = new SubagentIpcServer({
 			await delay(PARKED_DELAY_MS);
 			return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
 		}
+		if (request.type === "activity") {
+			activityRequests.push(request.payload);
+			if (rejectActivity) throw new Error("activity refused");
+			return { accepted: true };
+		}
 		if (request.type === "browser") return { content: [{ type: "text", text: "browser result" }], details: { ok: true } };
 		if (request.type === "result") resultPayloads.push(request.payload);
 		return undefined;
@@ -89,9 +98,31 @@ try {
 	assert.ok(tools.has("subagent"));
 	assert.ok(tools.has("browser_console"));
 	assert.ok(tools.has("browser_close"));
+	assert.ok(handlers.has("tool_execution_start"));
+	assert.ok(handlers.has("tool_execution_update"));
+	assert.ok(handlers.has("message_update"));
+	assert.equal(handlers.has("tool_execution_end"), false);
 	const sessionFile = path.join(tempDir, "child-session.jsonl");
 	await handlers.get("session_start")?.({}, { sessionManager: { getSessionFile: () => sessionFile } });
 	assert.deepEqual(helloPayloads, [{ pid: process.pid, sessionFile }]);
+	let activityNow = 1_000;
+	mock.method(performance, "now", () => activityNow);
+	let shutdownCount = 0;
+	handlers.get("message_update")?.({}, {});
+	handlers.get("message_update")?.({}, {});
+	await delay(50);
+	assert.equal(activityRequests.length, 1);
+	activityNow += 30_000;
+	handlers.get("tool_execution_update")?.({}, {});
+	await delay(50);
+	assert.equal(activityRequests.length, 2);
+	rejectActivity = true;
+	activityNow += 30_000;
+	handlers.get("tool_execution_start")?.({}, {});
+	await delay(50);
+	assert.equal(activityRequests.length, 3);
+	assert.equal(shutdownCount, 0);
+	rejectActivity = false;
 	const questionStartedAt = Date.now();
 	const questionResult = await tools.get("ask_question")!.execute("question-call", { question: "Continue?", options: ["yes", "no"] }, new AbortController().signal, undefined, {});
 	assert.ok(Date.now() - questionStartedAt >= PARKED_DELAY_MS - 250);
@@ -109,7 +140,6 @@ try {
 	assert.deepEqual(await connection.request("message", { text: "parent says hello" }), { accepted: true });
 	assert.deepEqual(sentMessages, ["parent says hello"]);
 
-	let shutdownCount = 0;
 	const lifecycleContext = { sessionManager: { getSessionFile: () => sessionFile }, shutdown: () => { shutdownCount += 1; } };
 	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "pre-retry" }] }] }, lifecycleContext);
 	assert.deepEqual(resultPayloads, []);
@@ -136,6 +166,7 @@ try {
 	assert.deepEqual(resultPayloads[1], { childSessionId: "child-session", text: "no session file" });
 	console.log("subagent child tests passed");
 } finally {
+	mock.restoreAll();
 	await handlers.get("session_shutdown")?.({}, {});
 	await server.close();
 	for (const [key, value] of Object.entries(previous)) {

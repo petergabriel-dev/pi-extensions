@@ -69,6 +69,8 @@ try {
 	assert.deepEqual(decoder.push(encoded.subarray(7)), [frame]);
 	assert.ok(encoded.byteLength <= IPC_MAX_FRAME_BYTES + 4);
 	assert.deepEqual(parseSubagentIpcFrame(frame), frame);
+	const activityFrame = { ...frame, type: "activity" as const, payload: {} };
+	assert.deepEqual(parseSubagentIpcFrame(activityFrame), activityFrame);
 	assert.equal(parseSubagentIpcFrame({ ...frame, token: "" }), undefined);
 
 	await server.listen();
@@ -111,7 +113,7 @@ try {
 		owner: "child-test",
 	}), /IPC connection closed|socket hang up/);
 	assert.equal(hellos.length, 1);
-	for (const type of ["ownership", "browser", "message", "question", "result", "spawn"] as const) {
+	for (const type of ["ownership", "browser", "message", "question", "result", "spawn", "activity"] as const) {
 		const payload = { type };
 		assert.deepEqual(await client.request(type, payload), payload);
 	}

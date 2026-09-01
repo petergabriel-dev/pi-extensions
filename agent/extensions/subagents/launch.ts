@@ -658,6 +658,7 @@ export class SubagentLaunchHost {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
 		run.watchdog?.touch();
+		if (request.type === "activity") return { accepted: true };
 		if (request.type === "spawn") {
 			if (!this.options.onSpawn) throw new Error("Nested subagent spawning is unavailable.");
 			return this.options.onSpawn(request.owner, request.payload);

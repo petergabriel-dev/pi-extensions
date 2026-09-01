@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 import { Type, type Static, type TSchema } from "typebox";
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -66,6 +67,7 @@ const BrowserProxyParameters: Record<string, TSchema> = {
 	browser_close: BrowserEmptyParams,
 };
 const BROWSER_PROXY_NAMES = Object.keys(BrowserProxyParameters);
+const ACTIVITY_INTERVAL_MS = 30_000;
 
 type BrowserProxyName = keyof typeof BrowserProxyParameters;
 
@@ -117,6 +119,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 	let client: SubagentIpcClient | undefined;
 	let resultSent = false;
 	let latestResultText = "";
+	let lastActivityAt = -1;
 	let loadout;
 	try {
 		loadout = readSubagentLoadout(process.env.PI_SUBAGENT_LOADOUT ?? "");
@@ -131,6 +134,16 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 		}
 		throw new Error(`Unsupported parent IPC message: ${request.type}.`);
 	};
+	const sendActivity = (): void => {
+		if (!client) return;
+		const now = Math.trunc(performance.now());
+		if (lastActivityAt >= 0 && now - lastActivityAt < ACTIVITY_INTERVAL_MS) return;
+		lastActivityAt = now;
+		void client.request("activity").catch(() => undefined);
+	};
+	pi.on("tool_execution_start", sendActivity);
+	pi.on("tool_execution_update", sendActivity);
+	pi.on("message_update", sendActivity);
 
 	pi.registerTool({
 		name: "ask_question",

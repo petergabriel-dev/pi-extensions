@@ -347,6 +347,40 @@ try {
 		await healthyClient.close();
 		await healthyHost.close();
 
+		const activitySurface = {
+			surface: "surface:activity",
+			readScreen: async () => "activity output",
+			close: async () => undefined,
+		};
+		const activityCmux = {
+			launch: async () => ({ transport: "cmux" as const, surface: activitySurface }),
+		} as unknown as CmuxTransport;
+		const activityHost = new SubagentLaunchHost({
+			parentSessionId: "activity",
+			agentDir: tempDir,
+			cmux: activityCmux,
+			timeoutPolicy: { idleTimeoutMs: 100, maxTotalMs: 10_000 },
+		});
+		const activity = await activityHost.launch({
+			parentSessionId: "activity",
+			owner: "worker-activity",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "stay active",
+			tools: ["read"],
+			cavemanEnabled: true,
+			childSessionId: "child-activity",
+		});
+		const activityClient = await SubagentIpcClient.connect({ socketPath: activityHost.server.socketPath, token: activityHost.server.token, owner: "worker-activity" });
+		mock.timers.tick(90);
+		assert.deepEqual(await activityClient.request("activity"), { accepted: true });
+		mock.timers.tick(90);
+		await activityClient.request("result", { childSessionId: "child-activity", text: "active result" });
+		assert.deepEqual(await activity.result, { owner: "worker-activity", childSessionId: "child-activity", text: "active result" });
+		await activityClient.close();
+		await activityHost.close();
+
 		let timeoutSurfaceClosed = false;
 		const timeoutSurface = {
 			surface: "surface:timeout",
