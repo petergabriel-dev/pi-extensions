@@ -1,6 +1,6 @@
 # Subagent Follow-ups
 
-This backlog carries deferred audit items 3–6. Audit items 1–2 were fixed and recorded in the subagent policy/listen changes and engineering docs.
+This backlog carries deferred audit items 3, 4, and 6. Audit items 1–2 were fixed and recorded in the subagent policy/listen changes and engineering docs.
 
 ## 3. Add lifecycle race integration matrix
 
@@ -22,19 +22,9 @@ Verify ownership, watchdog, browser page, cmux surface, pending request, and par
 
 **Severity:** Medium — safety-boundary verification gap.
 
-**Evidence:** `agent/extensions/subagents/ownership.ts:13-23` trims, deduplicates, sorts, and compares lexical ownership paths/globs. `agent/extensions/subagents/test/test_policy.ts:33-40` covers ordinary glob overlap only; it does not define symlink aliases, case differences on case-insensitive filesystems, or alternate relative paths.
+**Open residue:** This change makes read-only children skip ownership locks, but writer ownership identity remains lexical. Symlink aliases, case differences on case-insensitive filesystems, and alternate relative paths remain undefined.
 
 **Follow-up:** Decide and test whether ownership identity uses lexical normalization, real paths, case folding, or a documented combination. Cover symlinked directories, case variants, and equivalent relative paths before changing the lock boundary.
-
-## 5. Improve worker finalization ergonomics
-
-**Severity:** Low — operational/documentation risk; no confirmed correctness defect.
-
-**Evidence:** `agent/extensions/subagents/timeout.ts:64-109` treats silent active work as idle while preserving a separate max-total cap. Waiting pauses timers at `:93-104`. `agent/extensions/subagents/launch.ts:570`, `:612`, `:703`, and `:739` cancel the watchdog on abort, host close, result, and failure finalization.
-
-The lead “worker finished yet reported idle timeout” is unconfirmed. Watchdog cancellation exists on all observed settle paths, so investigate notification ordering and finalization races rather than treating this as a defect.
-
-**Follow-up:** Bound audit/discovery tasks more tightly, use lower effort for discovery-only work where appropriate, and consider bounded finalization grace without weakening hard max-total limits.
 
 ## 6. Check generated-doc enforcement
 
