@@ -1,6 +1,6 @@
 # Pi Extensions
 
-`@lopezpetergabriel/pi-extensions@0.6.0` is a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+`@lopezpetergabriel/pi-extensions@0.7.0` is a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -8,18 +8,19 @@
 - Node.js `>=22.19.0`
 - npm and network access for the first bootstrap and uncached `npx` test dependencies
 - Optional: `ccc` for `ccc_search`; `gh` for live Review-mode GitHub checks
+- `cmux` on `PATH` for production subagent launches (required; no fallback transport)
 - For browser verification: Chromium, installed with `cd agent/extensions/browser && npx playwright install chromium`
 
 ## Install and try the package
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.6.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.6.0   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.6.0           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.7.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.7.0   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.7.0           # temporary try
 pi list
 ```
 
-These install commands pin `@0.6.0`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.7.0`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
