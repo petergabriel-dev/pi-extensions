@@ -21,6 +21,7 @@ export interface ResolvedDesignToken {
 }
 
 export interface DesignTokenIndex {
+	readonly tokenFiles: readonly string[];
 	readonly tokens: readonly ResolvedDesignToken[];
 	readonly byValue: ReadonlyMap<string, readonly ResolvedDesignToken[]>;
 }
@@ -134,7 +135,7 @@ export function createDesignTokenIndex(tokens: readonly DesignToken[]): DesignTo
 		if (!entries.some(entry => entry.name === token.name && entry.layer === token.layer && entry.theme === token.theme)) entries.push(token);
 		byValue.set(token.value, entries);
 	}
-	return { tokens: resolved, byValue };
+	return { tokenFiles: [], tokens: resolved, byValue };
 }
 
 function sameSources(left: readonly CachedTokenSource[], right: readonly CachedTokenSource[]): boolean {
@@ -168,7 +169,10 @@ export async function buildDesignTokenIndex(cwd: string, io: DesignIndexIO = def
 			sourceCache.set(path, source);
 			tokenSources.push(source);
 		}
-		const index = createDesignTokenIndex(tokenSources.flatMap(source => source.tokens));
+		const index = {
+			...createDesignTokenIndex(tokenSources.flatMap(source => source.tokens)),
+			tokenFiles: [...manifest.tokenFiles],
+		};
 		indexCache.set(root, { manifestMtimeMs, manifest, tokenSources, index });
 		return index;
 	} catch {
