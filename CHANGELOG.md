@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.7.1] - 2026-09-18
+
+### Added
+
+- Added design-token adherence advisories for successful source writes.
+
+### Changed
+
+- Added design-token advisory architecture docs and ADR-0037.
+
 ## [0.7.0] - 2026-09-02
 
 ### Breaking

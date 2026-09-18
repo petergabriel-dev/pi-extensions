@@ -1,6 +1,6 @@
 # Pi Extensions
 
-`@lopezpetergabriel/pi-extensions@0.7.0` is a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+`@lopezpetergabriel/pi-extensions@0.7.1` is a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -14,13 +14,13 @@
 ## Install and try the package
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.7.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.7.0   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.7.0           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.7.1
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.7.1   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.7.1           # temporary try
 pi list
 ```
 
-These install commands pin `@0.7.0`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.7.1`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
