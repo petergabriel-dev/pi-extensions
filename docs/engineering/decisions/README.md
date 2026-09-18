@@ -38,3 +38,4 @@
 | ADR-0034 | Active | Async out-of-process subagents | changing async child launch, IPC framing/auth, loadout resume, cmux transport, nested agent policy, browser proxy transport, ownership locks, progress, or parked-child timeout behavior |
 | ADR-0035 | Active | Ask-user-question defer-to-next-turn compaction | changing ask_user_question context defer, answer batching, queue drain or abort behavior, resume delivery, or Pi host compaction assumptions |
 | ADR-0036 | Active | Fail-closed subagent toolset policy | changing subagent tool validation, browser proxy loadouts, agent definitions, or workflow-mode launch gates |
+| ADR-0037 | Active | Design token adherence advisory on source writes | changing design-token parsing, source-write result handling, advisory scope or formatting, design-manifest permissions, or exact-match guidance |
