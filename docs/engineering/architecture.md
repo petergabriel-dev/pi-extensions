@@ -92,7 +92,7 @@ workflow-modes ──tool-call gate──> browser mutation tools
                                       ├──pure validator> engineering-docs filesystem helpers
                                       └──store calls───> personal-memory store
 
-edit/write lifecycle ───────────> filechanges + engineering-docs tracking
+edit/write lifecycle ───────────> filechanges + engineering-docs tracking/advisory
 agent_end ──────────────────────> notify + engineering-docs reminder
 
 static imports:
@@ -230,6 +230,7 @@ Each owner has independent console and network ring buffers capped at 1,000 entr
 - `docs_validate_tags` validates `[DOCS:*]` and ADR-action pairing.
 - Write permission is derived from live workflow state and fails closed before state is known; only Build/Off allow docs writes.
 - Successful edit/write results append branch-local tracking markers. `agent_end` may remind when source changed but engineering docs did not.
+- The same successful `write`/`edit` `tool_result` handler in `agent/extensions/engineering-docs/tracking.ts` invokes the read-only `design-adherence.ts` module after tracking side effects. The module builds a cached index from the valid design manifest and declared token files, scans only newly written text, and returns one optional advisory block; tracking appends it to existing tool content without replacing docs-tracking behavior.
 - `AGENTS.md` and `CLAUDE.md` are generated pointer spokes. Only marker blocks are extension-owned.
 
 ## Personal memory

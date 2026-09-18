@@ -117,6 +117,8 @@
 
 - `docs/design/` writes allow only Design/Build/Off; `docs/engineering/` writes remain Build/Off-only. Unknown mode fails closed for both.
 - Design manifest `tokenFiles` is sole permission to write token files outside `docs/design/` in Design mode.
+- Design-token adherence advisory is read-only and runs only with a valid `docs/design/manifest.json`; it reads only that manifest and validated `tokenFiles`, excludes `docs/design/**`, declared token files, ignored paths, and non-allowlisted extensions, and never reports legacy text.
+- Advisory failures, missing/invalid manifests, unreadable token files, and oversized text fail open by returning `undefined`. The advisory never blocks a write/edit, sets `isError`, or replaces tool content; any advisory is appended after the original content.
 
 - Root entrypoint spokes (`AGENTS.md`, `CLAUDE.md`) must never overwrite content outside the managed `pi-docs` marker block.
 - The managed spoke block remains a pure pointer to canonical `docs/engineering/` paths; hand-written workflow discipline may live outside markers but must not add generated project facts or summaries.
