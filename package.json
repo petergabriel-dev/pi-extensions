@@ -66,6 +66,7 @@
     "prepublishOnly": "npm test",
     "test:ask-user-question": "npx --yes tsx agent/extensions/ask-user-question/test/test_queue.ts && npx --yes tsx agent/extensions/ask-user-question/test/test_defer.ts",
     "test:extensions": "npm --prefix agent/extensions/browser test && npm --prefix agent/extensions/ccc-search test && npm --prefix agent/extensions/engineering-docs test && npm --prefix agent/extensions/personal-memory test && npm --prefix agent/extensions/subagents test && npm --prefix agent/extensions/workflow-modes test",
+    "smoke:subagents": "node agent/extensions/subagents/test/smoke/run-smoke.mjs",
     "typecheck": "npm --prefix agent/extensions/browser run typecheck && npm --prefix agent/extensions/ccc-search run typecheck && npm --prefix agent/extensions/personal-memory run typecheck && npm --prefix agent/extensions/subagents run typecheck && npm --prefix agent/extensions/workflow-modes run typecheck",
     "test:cursor": "node agent/cursor-bridge-client/test-cursor-readonly-hook.js",
     "test:cursor-kit": "node .cursor/hooks/test-docs-nudge.js"
