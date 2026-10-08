@@ -114,6 +114,56 @@ function makeWatchdog(idleMs = 100, maxTotalMs = 1_000) {
 }
 
 {
+	const { clock, fired, watchdog } = makeWatchdog(100, 1_000);
+	watchdog.toolStarted("tool-1");
+	clock.advance(500);
+	watchdog.touch();
+	assert.deepEqual(fired, []);
+	watchdog.toolEnded("tool-1");
+	clock.advance(99);
+	assert.deepEqual(fired, []);
+	clock.advance(1);
+	assert.deepEqual(fired, ["idle"]);
+}
+
+{
+	const { clock, fired, watchdog } = makeWatchdog(100, 250);
+	watchdog.toolStarted("silent-tool");
+	clock.advance(249);
+	assert.deepEqual(fired, []);
+	clock.advance(1);
+	assert.deepEqual(fired, ["max_total"]);
+}
+
+{
+	const { clock, fired, watchdog } = makeWatchdog(100, 1_000);
+	watchdog.toolStarted("tool-a");
+	clock.advance(80);
+	watchdog.toolStarted("tool-b");
+	clock.advance(20);
+	watchdog.toolEnded("tool-a");
+	watchdog.toolEnded("tool-a");
+	clock.advance(80);
+	assert.deepEqual(fired, []);
+	watchdog.toolEnded("tool-b");
+	clock.advance(99);
+	assert.deepEqual(fired, []);
+	clock.advance(1);
+	assert.deepEqual(fired, ["idle"]);
+}
+
+{
+	const { clock, fired, watchdog } = makeWatchdog(100, 1_000);
+	watchdog.toolStarted("tool-1");
+	clock.advance(250);
+	watchdog.clearTools();
+	clock.advance(99);
+	assert.deepEqual(fired, []);
+	clock.advance(1);
+	assert.deepEqual(fired, ["idle"]);
+}
+
+{
 	const { clock, fired, watchdog } = makeWatchdog(100, 500);
 	watchdog.cancel();
 	clock.advance(1_000);

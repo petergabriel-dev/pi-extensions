@@ -16,6 +16,9 @@ export interface SubagentWatchdogOptions {
 export interface SubagentWatchdog {
 	touch(): void;
 	setWaiting(waiting: boolean): void;
+	toolStarted(id: string): void;
+	toolEnded(id: string): void;
+	clearTools(): void;
 	cancel(): void;
 	readonly firedKind: SubagentTimeoutKind | undefined;
 	readonly waiting: boolean;
@@ -36,6 +39,7 @@ export function createSubagentWatchdog(options: SubagentWatchdogOptions): Subage
 	let firedKind: SubagentTimeoutKind | undefined;
 	let cancelled = false;
 	let waiting = false;
+	const openTools = new Set<string>();
 	let activeElapsedMs = 0;
 	let activeStartedAt = clock.now ? clock.now() : Date.now();
 
@@ -70,7 +74,7 @@ export function createSubagentWatchdog(options: SubagentWatchdogOptions): Subage
 
 	const armIdle = () => {
 		clearIdle();
-		if (cancelled || firedKind || waiting) return;
+		if (cancelled || firedKind || waiting || openTools.size > 0) return;
 		idleHandle = clock.setTimeout(() => fire("idle"), options.idleMs);
 	};
 
@@ -103,9 +107,24 @@ export function createSubagentWatchdog(options: SubagentWatchdogOptions): Subage
 			armMaxTotal();
 			armIdle();
 		},
+		toolStarted(id) {
+			if (cancelled || firedKind) return;
+			openTools.add(id);
+			clearIdle();
+		},
+		toolEnded(id) {
+			if (cancelled || firedKind || !openTools.delete(id)) return;
+			if (openTools.size === 0) armIdle();
+		},
+		clearTools() {
+			if (openTools.size === 0) return;
+			openTools.clear();
+			armIdle();
+		},
 		cancel() {
 			if (cancelled) return;
 			cancelled = true;
+			openTools.clear();
 			clearAll();
 		},
 		get firedKind() {
