@@ -11,7 +11,7 @@
 | ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
 | ADR-0008 | Superseded | Persistent-memory reconcile connection ownership and observability |  |
 | ADR-0009 | Superseded | Bridge staging validity and malformed quarantine |  |
-| ADR-0010 | Active | Global subagent idle timeout with max-total backstop | Changing subagent timeout policy, activity heartbeat, parked-child handling, or timeout debugging |
+| ADR-0010 | Active | Global subagent idle timeout with max-total backstop | Changing subagent RPC event activity, tool-open idle handling, parked-child policy, timeout settings, or timeout debugging |
 | ADR-0011 | Superseded | Per-Candidate Persistent-Memory Reconciliation |  |
 | ADR-0012 | Active | Per-mode ponytail lazy-senior-dev reflex |  |
 | ADR-0013 | Superseded | Manual Single-Writer Persistent-Memory Consolidation | changing persistent-memory lifecycle hooks, /memory consolidate/recover/reconcile, staging cleanup, dead-letter recovery, reinforcement, or mode-transition reminders |
@@ -35,7 +35,8 @@
 | ADR-0031 | Active | Subagent browser access | changing browser page ownership, browser:* proxy events, subagent browser tools, explorer capability validation, or workflow-mode browser gating |
 | ADR-0032 | Active | Ask-user-question UI serialization | changing ask_user_question modes, question UI ownership, queue or cancellation semantics, root test registration, worker extension loading, workflow-mode prompt composition, or question routing |
 | ADR-0033 | Active | Pi-independent Cursor kit | changing Cursor commands, hooks, ADR skill, root spoke ownership, docs write-back workflow, or cross-harness bridge boundaries |
-| ADR-0034 | Active | Async out-of-process subagents | changing async child launch, IPC framing/auth, loadout resume, cmux transport, nested agent policy, browser proxy transport, ownership locks, progress, or parked-child timeout behavior |
+| ADR-0034 | Superseded | Async out-of-process subagents | changing async child launch, IPC framing/auth, loadout resume, cmux transport, nested agent policy, browser proxy transport, ownership locks, progress, or parked-child timeout behavior |
 | ADR-0035 | Active | Ask-user-question defer-to-next-turn compaction | changing ask_user_question context defer, answer batching, queue drain or abort behavior, resume delivery, or Pi host compaction assumptions |
 | ADR-0036 | Active | Fail-closed subagent toolset policy | changing subagent tool validation, browser proxy loadouts, agent definitions, or workflow-mode launch gates |
 | ADR-0037 | Active | Design token adherence advisory on source writes | changing design-token parsing, source-write result handling, advisory scope or formatting, design-manifest permissions, or exact-match guidance |
+| ADR-0038 | Active | RPC-mode subagent transport | Changing RPC child launch, command readiness, result or question delivery, IPC token authentication, nested spawn/browser routing, event tails, lifecycle cleanup, or idle/max-total timeout behavior |

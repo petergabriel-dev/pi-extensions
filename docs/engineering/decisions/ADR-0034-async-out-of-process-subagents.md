@@ -1,7 +1,7 @@
 ---
 id: ADR-0034
 title: Async out-of-process subagents
-status: Active
+status: Superseded
 date: 2026-08-30
 decision: Run subagents as independent interactive Pi processes behind an authenticated parent-owned IPC host, with loadout snapshots, cmux-required presentation, a bounded 30-second hello handshake, real child transcript-path reporting, settled-only result steering, opt-in live tails, toolset/depth/ownership gates, and parent browser proxying.
 why: Separate processes remove stale parent ExtensionAPI coupling and keep delegation non-blocking while preserving bounded capabilities, resumable sessions, browser ownership, and parent context isolation. A bounded handshake turns silent startup hangs into classified failures; transcript paths avoid guessing from child IDs; opt-in tails preserve default list performance while enabling diagnosis.

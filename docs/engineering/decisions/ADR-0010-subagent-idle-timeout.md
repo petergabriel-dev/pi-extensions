@@ -2,12 +2,12 @@
 id: ADR-0010
 title: Global subagent idle timeout with max-total backstop
 status: Active
-date: 2026-08-27
-decision: Use global active-time idle and max-total watchdogs, with throttled child activity heartbeats touching idle time.
-why: Child tool calls do not cross IPC, so heartbeat-driven host visibility prevents read-only work from being mistaken for idleness without making silent work immortal.
-affects: agent/extensions/subagents/timeout-policy.ts, agent/extensions/subagents/launch.ts, agent/extensions/subagents/timeout.ts, agent/extensions/subagents/index.ts, agent/extensions/subagents/child.ts, agent/extensions/subagents/ipc.ts, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0010-subagent-idle-timeout.md
-consequences: Continuous event-driven child work can outlast the idle threshold; silent long-running tool calls remain bounded only by maxTotalMs.
-readWhen: Changing subagent timeout policy, activity heartbeat, parked-child handling, or timeout debugging
+date: 2026-10-08
+decision: Use global active-time idle and max-total watchdogs; RPC events touch idle, open tool IDs pause only idle while max-total keeps running, and parent questions pause both timers.
+why: RPC event monitoring makes child activity visible to the parent; open tool IDs prevent long silent calls from hitting idle timeout without allowing a wedged run to outlive max-total.
+affects: agent/extensions/subagents/timeout-policy.ts, agent/extensions/subagents/launch.ts, agent/extensions/subagents/timeout.ts, agent/extensions/subagents/index.ts, agent/extensions/subagents/child.ts, agent/extensions/subagents/rpc.ts, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0010-subagent-idle-timeout.md, docs/engineering/decisions/ADR-0038-rpc-mode-subagent-transport.md
+consequences: Open tools are not idle-killed; maxTotalMs remains hard backstop, including for tools that emit no further RPC events; parked questions pause both budgets.
+readWhen: Changing subagent RPC event activity, tool-open idle handling, parked-child policy, timeout settings, or timeout debugging
 supersedes: None
 ---
 
@@ -15,17 +15,16 @@ supersedes: None
 
 ## Decision
 
-- Subagent runs use an idle watchdog plus an active-time max-total watchdog, not one wall-clock timeout.
-- All child roles use one global `subagents` timeout policy: 600,000ms idle and 1,200,000ms max-total by default.
-- `ask_question` parks a child as `waiting`; parked time pauses both idle and max-total budgets. Answering resumes remaining active budget; cancellation, exit, disconnect, or host close releases the run.
-- Timeout values are settings-only. Role tools expose no per-call timeout fields. Invalid, out-of-range, non-integer, or inverted global values fall back to the full default policy.
-- Child sends a throttled `activity` heartbeat, at most once per 30 seconds, from `tool_execution_start`, `tool_execution_update`, and `message_update`; the authenticated IPC request touches the idle watchdog. No bare timer emits heartbeats.
+- Subagent runs use an idle watchdog plus an active-time max-total watchdog, not one wall-clock timeout. All child roles share settings-only defaults of 600,000ms idle and 1,200,000ms max-total.
+- Every supported RPC event received by the host touches idle time. `tool_execution_start` and `tool_execution_end` track open tool-call IDs; while any tool remains open, idle is paused and max-total continues. Ending the last tool re-arms idle; duplicate or unknown end IDs do not change the set.
+- `ask_question` parks a child as `waiting`; parked time pauses both idle and max-total budgets. Answering resumes remaining active budget; cancellation, process exit, or host close releases the run. Optional side-channel disconnect does not fail the run.
+- Invalid, out-of-range, non-integer, or inverted global timeout settings fall back to the full default policy. Role tools expose no per-call timeout fields.
 
 ## Why
 
-- Child tool calls execute in the child process and never cross IPC. IPC-request-only accounting made idle equivalent to total for read-only children, so event-driven heartbeats make continuous work visible without keeping a wedged child alive.
-- Per-call overrides would allow role behavior to diverge; one validated global policy keeps timing predictable across child roles and resume paths.
-- Active-time accounting prevents an unanswered parent question from consuming child budget while retaining a backstop for runaway active work.
+- The RPC event stream exposes child tool and assistant activity to the parent. Updating the watchdog from those events avoids treating active child work as idle without a separate activity IPC protocol.
+- A tool may remain silent while executing. Tracking open tool IDs pauses only idle during that call; max-total still bounds a hung tool and the complete run.
+- Per-call overrides would allow role behavior to diverge; one validated global policy keeps timing predictable across child roles and resume paths. Active-time accounting keeps an unanswered parent question from consuming either budget.
 
 ## Affects
 
@@ -34,24 +33,25 @@ Docs:
 - `docs/engineering/architecture.md`
 - `docs/engineering/invariants.md`
 - `docs/engineering/traps.md`
+- `docs/engineering/decisions/ADR-0038-rpc-mode-subagent-transport.md`
 
 Code:
 
 - `agent/extensions/subagents/timeout-policy.ts`
 - `agent/extensions/subagents/launch.ts`
 - `agent/extensions/subagents/timeout.ts`
+- `agent/extensions/subagents/rpc.ts`
 - `agent/extensions/subagents/index.ts`
 - `agent/extensions/subagents/child.ts`
-- `agent/extensions/subagents/ipc.ts`
 - Pi-owned `settings.json` resolved by `index.ts`
 
 ## Consequences
 
-- Good: throttled event-driven child activity resets idle timing; continuously active runaways still stop at 20 minutes, while parked questions do not consume either budget.
-- Good: all role-agent schemas and runtime paths share one policy without caller-selected divergence.
-- Bad/risk: a silent long-running single tool call emits no activity event, so `maxTotalMs` is its only backstop; dropped heartbeat failures are swallowed. A waiting child remains resource-consuming until answered or explicitly closed.
+- Good: live RPC events reset idle timing; a long-running open tool is not idle-killed, while continuously active or hung work still stops at configured `maxTotalMs` (20 minutes by default).
+- Good: all role-agent schemas and runtime paths share one policy without caller-selected divergence; parked questions consume neither budget.
+- Bad/risk: if a tool-end event is lost, idle remains paused until `clearTools()` or the max-total deadline. A waiting child remains resource-consuming until answered or explicitly closed.
 
 ## Read when
 
-- changing subagent timeout policy, activity heartbeat, role-agent schemas, or timeout diagnostics
-- adding a role-agent spawn path or handling timed-out child results
+- changing subagent RPC activity, open-tool idle handling, timeout policy, or timeout diagnostics
+- adding a role-agent spawn path, changing question-wait semantics, or handling timed-out child results
