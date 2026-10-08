@@ -21,5 +21,7 @@ export function resolveEffort(
 	parentLevel?: SubagentParentThinkingLevel,
 ): SubagentParentThinkingLevel | undefined {
 	const parsed = parseEffortLevel(settings?.effort?.[role]);
-	return parsed && parsed !== "inherit" ? parsed : parentLevel;
+	if (parsed === "inherit") return parentLevel;
+	if (parsed) return parsed;
+	return role === "explorer" ? "low" : parentLevel;
 }

@@ -20,5 +20,10 @@ assert.equal(resolveEffort({ effort: { worker: "xhihg" } }, "worker", "low"), "l
 assert.equal(resolveEffort(undefined, "worker", "medium"), "medium");
 assert.equal(resolveEffort({ effort: {} }, "worker"), undefined);
 assert.equal(resolveEffort({ effort: { worker: "inherit" } }, "worker", "high"), "high");
+assert.equal(resolveEffort(undefined, "explorer", "high"), "low");
+assert.equal(resolveEffort({ effort: { explorer: "inherit" } }, "explorer", "high"), "high");
+assert.equal(resolveEffort({ effort: { explorer: "invalid" } }, "explorer", "high"), "low");
+assert.equal(resolveEffort({ effort: { explorer: "minimal" } }, "explorer", "high"), "minimal");
+assert.equal(resolveEffort({ effort: { worker: "invalid" } }, "worker", "high"), "high");
 
 console.log("test_effort: ok");

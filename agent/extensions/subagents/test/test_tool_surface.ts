@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import subagentsExtension, { requestBrowserViaParent } from "../index.ts";
 import {
@@ -9,12 +12,18 @@ import {
 	type SubagentResult,
 } from "../launch.ts";
 
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+const agentDir = mkdtempSync(join(tmpdir(), "subagent-tool-surface-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 const eventHandlers = new Map<string, Set<(data: unknown) => void>>();
 const sentMessages: Array<{ content: string; options?: unknown }> = [];
 const registeredTools = new Map<string, { description?: string; execute: (...args: any[]) => Promise<unknown> }>();
 let sendUserMessageFailure: Error | undefined;
 const registeredCommands: string[] = [];
+const commandHandlers = new Map<string, (args: string, ctx: unknown) => unknown>();
+const notifications: string[] = [];
 const widgetRenders: unknown[] = [];
 let browserRequest: unknown;
 
@@ -48,8 +57,9 @@ const fakePi = {
 		if (sendUserMessageFailure) throw sendUserMessageFailure;
 		sentMessages.push({ content, options });
 	},
-	registerCommand(name: string) {
+	registerCommand(name: string, command?: { handler: (args: string, ctx: unknown) => unknown }) {
 		registeredCommands.push(name);
+		if (command) commandHandlers.set(name, command.handler);
 	},
 	registerTool(tool: { name: string; description?: string; execute: (...args: any[]) => Promise<unknown> }) {
 		registeredTools.set(tool.name, tool);
@@ -63,6 +73,9 @@ const context = {
 	ui: {
 		setWidget(_key: string, content: unknown) {
 			widgetRenders.push(content);
+		},
+		notify(message: string) {
+			notifications.push(message);
 		},
 	},
 	sessionManager: { getSessionId: () => "surface-test-session" },
@@ -130,6 +143,14 @@ try {
 	assert.match(registeredTools.get("subagent")?.description ?? "", /new parent turn.*End your turn instead of polling/);
 	assert.match(registeredTools.get("subagents_list")?.description ?? "", /when the user asks.*do not poll/);
 	assert.deepEqual(registeredCommands.sort(), ["subagent-effort", "subagent-model"]);
+	await commandHandlers.get("subagent-effort")!("explorer inherit", context);
+	let settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+	assert.equal(settings.subagents.effort.explorer, "inherit");
+	assert.match(notifications.at(-1) ?? "", /effective: medium/);
+	await commandHandlers.get("subagent-effort")!("worker inherit", context);
+	settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+	assert.equal(settings.subagents.effort.explorer, "inherit");
+	assert.equal(settings.subagents.effort.worker, undefined);
 	await handlers.get("session_start")?.({}, context);
 
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
@@ -227,4 +248,7 @@ try {
 	SubagentLaunchHost.prototype.resume = originalResume;
 	SubagentLaunchHost.prototype.readTail = originalReadTail;
 	SubagentLaunchHost.prototype.close = originalClose;
+	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	rmSync(agentDir, { recursive: true, force: true });
 }

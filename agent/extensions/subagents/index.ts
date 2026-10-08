@@ -191,7 +191,7 @@ function writeSubagentEffort(role: AgentRole, effort: string | "inherit"): void 
 	const settings = readSettings();
 	const subagents = readSubagentsSettings();
 	const configured = isRecord(subagents.effort) ? { ...subagents.effort } : {};
-	if (effort === "inherit") delete configured[role];
+	if (effort === "inherit" && role === "worker") delete configured[role];
 	else configured[role] = effort;
 	const nextSubagents = { ...subagents };
 	if (Object.keys(configured).length > 0) nextSubagents.effort = configured;
@@ -375,7 +375,7 @@ async function chooseSubagentEffort(args: string, ctx: ExtensionContext, pi: Ext
 		return ctx.ui.notify(`Unknown effort${selectedEffort ? `: ${selectedEffort}` : ""}.`, "warning");
 	}
 	writeSubagentEffort(role, selectedEffort);
-	if (selectedEffort === "inherit") return ctx.ui.notify(`Subagent ${role} effort: inherit (effective parent: ${parentThinkingLevel(pi) ?? "unknown"})`, "info");
+	if (selectedEffort === "inherit") return ctx.ui.notify(`Subagent ${role} effort: inherit (effective: ${parentThinkingLevel(pi) ?? "unknown"})`, "info");
 	ctx.ui.notify(`Subagent ${role} effort: ${selectedEffort}`, "info");
 }
 
