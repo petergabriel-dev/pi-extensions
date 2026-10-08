@@ -10,10 +10,7 @@ const IPC_SOCKET_MODE = 0o600;
 const MAX_IDENTIFIER_BYTES = 128;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
-export type SubagentIpcCoreMessageType = "hello" | "ownership" | "browser" | "spawn";
-export type SubagentIpcLegacyMessageType = "message" | "question" | "result" | "activity";
-// ponytail: Keep legacy IPC types until tasks 4–5 migrate child/launch callers; remove them after RPC integration.
-export type SubagentIpcMessageType = SubagentIpcCoreMessageType | SubagentIpcLegacyMessageType;
+export type SubagentIpcMessageType = "hello" | "ownership" | "browser" | "spawn";
 export type SubagentIpcLogger = (event: string, details?: Record<string, unknown>) => void;
 
 export interface SubagentIpcRequest<T = unknown> {
@@ -53,7 +50,6 @@ export interface SubagentIpcConnectionOptions {
 	owner?: string;
 	logger?: SubagentIpcLogger;
 	onRequest?: (request: SubagentIpcRequest, connection: SubagentIpcConnection) => Promise<unknown> | unknown;
-	/** ponytail: Legacy hello metadata remains until task 5 removes the handshake. */
 	onHello?: (owner: string, payload: unknown) => void;
 	onAuthenticate?: (owner: string, token: string, connection: SubagentIpcConnection) => boolean;
 	onDisconnect?: (owner: string | undefined, error?: Error) => void;
@@ -158,7 +154,7 @@ function validateIdentifier(value: string, label: string): void {
 }
 
 function isMessageType(value: unknown): value is SubagentIpcMessageType {
-	return value === "hello" || value === "ownership" || value === "browser" || value === "message" || value === "question" || value === "result" || value === "spawn" || value === "activity";
+	return value === "hello" || value === "ownership" || value === "browser" || value === "spawn";
 }
 
 function errorFrom(value: unknown): Error {
@@ -231,8 +227,7 @@ export class SubagentIpcConnection {
 		const requestId = options.requestId ?? crypto.randomUUID();
 		validateIdentifier(requestId, "requestId");
 		if (options.noDeadline !== undefined && typeof options.noDeadline !== "boolean") throw new Error("noDeadline must be a boolean.");
-		// ponytail: Keep question no-deadline support until task 4 moves ask_question to RPC UI.
-		if (options.noDeadline && type !== "spawn" && type !== "question") throw new Error("noDeadline is allowed only for spawn or question requests during RPC migration.");
+		if (options.noDeadline && type !== "spawn") throw new Error("noDeadline is allowed only for spawn requests.");
 		if (options.noDeadline && options.timeoutMs !== undefined) throw new Error("noDeadline requests cannot specify timeoutMs.");
 		const timeoutMs = options.noDeadline ? undefined : validateTimeout(options.timeoutMs, "timeoutMs");
 		const frame: SubagentIpcRequest = { kind: "request", token: this.tokenValue, requestId, owner: this.ownerValue, type, payload };
@@ -553,13 +548,6 @@ export class SubagentIpcClient {
 		if (!boundedString(options.token, MAX_IDENTIFIER_BYTES)) throw new Error("IPC token must be non-empty and at most 128 bytes.");
 		validateTimeout(options.connectTimeoutMs, "connectTimeoutMs");
 		return new SubagentIpcClient(options);
-	}
-
-	// ponytail: Keep eager connect for child.ts until task 4 switches it to create().
-	static async connect(options: SubagentIpcClientOptions): Promise<SubagentIpcClient> {
-		const client = SubagentIpcClient.create(options);
-		await client.ensureConnection();
-		return client;
 	}
 
 	get owner(): string | undefined {

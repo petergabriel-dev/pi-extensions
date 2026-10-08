@@ -69,7 +69,7 @@ const context = {
 
 const originalLaunch = SubagentLaunchHost.prototype.launch;
 const originalResume = SubagentLaunchHost.prototype.resume;
-const originalReadSurfaceTail = SubagentLaunchHost.prototype.readSurfaceTail;
+const originalReadTail = SubagentLaunchHost.prototype.readTail;
 const originalClose = SubagentLaunchHost.prototype.close;
 let launched: SubagentLaunchOptions | undefined;
 const surfaceTailReads: string[] = [];
@@ -79,7 +79,7 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 	const failing = options.task === "failure task";
 	const running = options.task.startsWith("tail task");
 	const result = failing
-		? Promise.reject(new SubagentFailureError(options.owner, { transport: "cmux", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
+		? Promise.reject(new SubagentFailureError(options.owner, { transport: "rpc", kind: "process", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
 		: running
 			? new Promise<SubagentResult>(() => undefined)
 			: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: "surface result", sessionFile: "/tmp/sessions/child-surface.jsonl" });
@@ -89,7 +89,7 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 		childSessionId: "child-surface",
 		pid: 123,
 		loadoutPath: "/tmp/surface-loadout.json",
-		transport: "cmux",
+		transport: "rpc",
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		sessionFile: "/tmp/sessions/child-surface.jsonl",
 		result,
@@ -106,7 +106,7 @@ SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options
 		childSessionId: "child-resumed",
 		pid: 124,
 		loadoutPath,
-		transport: "cmux",
+		transport: "rpc",
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		sessionFile: "/tmp/sessions/child-surface.jsonl",
 		result,
@@ -114,7 +114,7 @@ SubagentLaunchHost.prototype.resume = async function (loadoutPath, task, options
 		kill: () => undefined,
 	};
 };
-SubagentLaunchHost.prototype.readSurfaceTail = async function (owner: string, _lines: number): Promise<string | undefined> {
+SubagentLaunchHost.prototype.readTail = async function (owner: string, _lines: number): Promise<string | undefined> {
 	surfaceTailReads.push(owner);
 	if (owner === "subagent-4") throw new Error("surface read failed");
 	return "live output";
@@ -128,7 +128,7 @@ try {
 	await handlers.get("session_start")?.({}, context);
 
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
-	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over cmux/);
+	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over rpc/);
 	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /surface-test-session\/subagent-1\.log/);
 	assert.equal(launched?.owner, "subagent-1");
 	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close"]);
@@ -137,7 +137,7 @@ try {
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
 	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string; sessionFile?: string }> } }).details;
 	assert.equal(listDetails.agents[0]?.status, "done");
-	assert.equal(listDetails.agents[0]?.transport, "cmux");
+	assert.equal(listDetails.agents[0]?.transport, "rpc");
 	assert.match(listDetails.agents[0]?.logPath ?? "", /surface-test-session\/subagent-1\.log/);
 	assert.equal(listDetails.agents[0]?.sessionFile, "/tmp/sessions/child-surface.jsonl");
 	assert.match((listResult as { content: Array<{ text: string }> }).content[0]!.text, /transcript=\/tmp\/sessions\/child-surface\.jsonl/);
@@ -160,13 +160,13 @@ try {
 	assert.match(sentMessages[1]!.content, /resumed result/);
 
 	const failureResult = await registeredTools.get("subagent")!.execute("call-5", { task: "failure task" }, new AbortController().signal, undefined, context);
-	assert.match((failureResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over cmux/);
+	assert.match((failureResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over rpc/);
 	await new Promise((resolve) => setImmediate(resolve));
 	const failureList = await registeredTools.get("subagents_list")!.execute("call-6", {}, new AbortController().signal, undefined, context);
 	const failureAgents = (failureList as { details: { agents: Array<{ owner: string; status: string; transport?: string; logPath?: string; outputTail?: string }> } }).details.agents;
 	const failureAgent = failureAgents.find((agent) => agent.owner === "subagent-2");
 	assert.equal(failureAgent?.status, "failed");
-	assert.equal(failureAgent?.transport, "cmux");
+	assert.equal(failureAgent?.transport, "rpc");
 	assert.match(failureAgent?.logPath ?? "", /subagent-2\.log/);
 	assert.equal(failureAgent?.outputTail, "sentinel output");
 	assert.equal(sentMessages.length, 3);
@@ -190,6 +190,6 @@ try {
 } finally {
 	SubagentLaunchHost.prototype.launch = originalLaunch;
 	SubagentLaunchHost.prototype.resume = originalResume;
-	SubagentLaunchHost.prototype.readSurfaceTail = originalReadSurfaceTail;
+	SubagentLaunchHost.prototype.readTail = originalReadTail;
 	SubagentLaunchHost.prototype.close = originalClose;
 }

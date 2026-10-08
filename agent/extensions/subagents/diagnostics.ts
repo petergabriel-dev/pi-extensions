@@ -8,7 +8,7 @@ export const MAX_SUBAGENT_TAIL_BYTES = 8 * 1_024;
 export const SUBAGENT_RUNTIME_DIR_MODE = 0o700;
 export const SUBAGENT_LOG_MODE = 0o600;
 
-export type SubagentTransport = "cmux" | "headless";
+export type SubagentTransport = "rpc";
 
 export interface SubagentDiagnosticsOptions {
 	parentSessionId: string;

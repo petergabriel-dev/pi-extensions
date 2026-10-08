@@ -1,12 +1,10 @@
 import * as crypto from "node:crypto";
-import { type ChildProcess, type SpawnOptions } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CAVEMAN_PROMPT } from "../workflow-modes/caveman.ts";
-import { CmuxTransport, type CmuxLaunchOutcome, type CmuxSurfaceHandle } from "./cmux.ts";
 import {
 	createSubagentDiagnostics,
 	MAX_SUBAGENT_TAIL_BYTES,
@@ -23,16 +21,24 @@ import { DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_TOTAL_MS, type SubagentTimeoutPoli
 import {
 	resolveSubagentSocketPath,
 	SubagentIpcServer,
-	type SubagentIpcMessageType,
 	type SubagentIpcRequest,
 } from "./ipc.ts";
+import {
+	SubagentRpcError,
+	SubagentRpcProcess,
+	type SubagentRpcErrorKind,
+	type SubagentRpcEvent,
+	type SubagentRpcSpawnProcess,
+} from "./rpc.ts";
 
 export const MAX_SUBAGENT_RESULT_BYTES = 50 * 1024;
 export const MAX_SUBAGENT_SESSION_FILE_BYTES = 4 * 1024;
-const HANDSHAKE_TIMEOUT_MS = 30_000;
+const RPC_PROMPT_TIMEOUT_MS = 30_000;
 const RUNTIME_DIR_MODE = 0o700;
 const LOADOUT_MODE = 0o600;
 const LOADOUT_VERSION = 1;
+const MAX_RPC_TOOL_CALL_ID_BYTES = 128;
+const FIRE_AND_FORGET_UI_METHODS = new Set(["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"]);
 
 export interface SubagentLoadout {
 	version: typeof LOADOUT_VERSION;
@@ -64,17 +70,17 @@ export type SubagentRunStatus = "running" | "waiting";
 
 export interface SubagentFailureInfo {
 	transport: SubagentTransport;
+	kind: SubagentRpcErrorKind;
 	logPath: string;
 	error: string;
 	tail: string;
-	cmuxFailureReason?: string;
 }
 
 export class SubagentFailureError extends Error {
 	readonly info: SubagentFailureInfo;
 
 	constructor(owner: string, info: SubagentFailureInfo) {
-		super(`Subagent ${owner} failed over ${info.transport}. Log: ${info.logPath}. Error: ${info.error}${info.cmuxFailureReason ? ` Cmux failure: ${info.cmuxFailureReason}` : ""}${info.tail ? `\nRecent output:\n${info.tail}` : ""}`);
+		super(`Subagent ${owner} failed over ${info.transport} (${info.kind}). Log: ${info.logPath}. Error: ${info.error}${info.tail ? `\nRecent output:\n${info.tail}` : ""}`);
 		this.name = "SubagentFailureError";
 		this.info = info;
 	}
@@ -103,17 +109,14 @@ export interface SubagentLaunchOptions {
 	onSessionFile?: (sessionFile: string) => void;
 }
 
-export type SubagentSpawnProcess = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+export type SubagentSpawnProcess = SubagentRpcSpawnProcess;
 
 export interface SubagentLaunchHostOptions {
 	parentSessionId: string;
 	agentDir?: string;
 	logger?: (event: string, details?: Record<string, unknown>) => void;
-	command?: string;
-	/** Test-only process injection; production launches use cmux interactive transport. */
+	/** Test-only process injection; production always uses process.execPath and the parent Pi CLI script. */
 	spawnProcess?: SubagentSpawnProcess;
-	/** Test-only cmux bypass when paired with spawnProcess. */
-	cmux?: CmuxTransport | false;
 	onSpawn?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 	onBrowser?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 	timeoutPolicy?: SubagentTimeoutPolicy;
@@ -133,10 +136,9 @@ export interface SubagentLaunchHandle {
 	readonly loadoutPath: string;
 	readonly transport: SubagentTransport;
 	readonly logPath: string;
-	readonly cmuxFailureReason?: string;
 	readonly sessionFile?: string;
 	readonly result: Promise<SubagentResult>;
-	request<T = unknown>(type: SubagentIpcMessageType, payload?: unknown): Promise<T>;
+	request(type: "message", payload?: unknown): Promise<void>;
 	kill(): void;
 }
 
@@ -161,23 +163,25 @@ interface RunState {
 	watchdog?: SubagentWatchdog;
 	childSessionId: string;
 	ipcToken: string;
-	child?: ChildProcess;
-	surface?: CmuxSurfaceHandle;
+	rpc?: SubagentRpcProcess;
 	loadoutPath: string;
 	resolveResult: (result: SubagentResult) => void;
 	rejectResult: (error: Error) => void;
 	resultSettled: boolean;
+	settling?: boolean;
 	failureFinalizing?: boolean;
+	finalizePromise?: Promise<void>;
 	diagnostics: SubagentDiagnostics;
 	transport: SubagentTransport;
-	cmuxFailureReason?: string;
 	cleanup?: () => void;
 	slot?: AcquiredSubagentSlot;
 	pendingQuestion?: PendingQuestion;
 	sessionFile?: string;
-	handshakeTimer?: ReturnType<typeof setTimeout>;
-	helloReceived: boolean;
+	sessionFilePromise?: Promise<void>;
 	removeAbortListener?: () => void;
+	browserReaped?: boolean;
+	tail: string;
+	tailPending: string;
 }
 
 export function truncateSubagentResult(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
@@ -236,7 +240,7 @@ export function readSubagentLoadout(loadoutPath: string): SubagentLoadout {
 	return { ...value, depth } as SubagentLoadout;
 }
 
-export function buildSubagentCommandArgs(loadout: SubagentLoadout, task: string): string[] {
+export function buildSubagentCommandArgs(loadout: SubagentLoadout): string[] {
 	const args = [
 		"--no-extensions",
 		"-e", loadout.extensionPath,
@@ -247,7 +251,6 @@ export function buildSubagentCommandArgs(loadout: SubagentLoadout, task: string)
 	];
 	if (loadout.model) args.push("--model", loadout.model);
 	if (loadout.thinkingLevel) args.push("--thinking", loadout.thinkingLevel);
-	args.push("--", task);
 	return args;
 }
 
@@ -267,76 +270,122 @@ function validateIdentifier(value: string, label: string): void {
 	if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value) || value.length > 128) throw new Error(`${label} must contain only letters, numbers, underscores, and hyphens.`);
 }
 
-function resultFromRequest(request: SubagentIpcRequest, childSessionId: string): SubagentResult | undefined {
-	if (request.type !== "result" || !isRecord(request.payload) || typeof request.payload.text !== "string") return undefined;
-	const sessionFile = boundedSubagentSessionFile(request.payload.sessionFile);
+function errorAsRpcError(error: unknown, kind: SubagentRpcErrorKind = "process"): SubagentRpcError {
+	return error instanceof SubagentRpcError
+		? error
+		: new SubagentRpcError(kind, error instanceof Error ? error.message : String(error));
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			operation,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new SubagentRpcError("launch", message)), timeoutMs);
+				timer.unref();
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+function utf8Suffix(text: string, maxBytes: number): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	let suffix = text.slice(-maxBytes);
+	while (Buffer.byteLength(suffix, "utf8") > maxBytes) suffix = suffix.slice(1);
+	return suffix;
+}
+
+function appendBoundedTail(current: string, text: string): string {
+	const summary = utf8Suffix(text, MAX_SUBAGENT_TAIL_BYTES);
+	let output = `${current}${summary}\n`;
+	while (Buffer.byteLength(output, "utf8") > MAX_SUBAGENT_TAIL_BYTES) output = output.slice(1);
+	return output;
+}
+
+function appendRunTail(run: RunState, text: string): void {
+	const boundedText = utf8Suffix(text, MAX_SUBAGENT_TAIL_BYTES + Buffer.byteLength(run.ipcToken, "utf8"));
+	const combined = redactSubagentText(`${run.tailPending}${boundedText}`, run.ipcToken);
+	let heldLength = 0;
+	const maxPrefix = Math.min(run.ipcToken.length - 1, combined.length);
+	for (let length = maxPrefix; length > 0; length -= 1) {
+		if (run.ipcToken.startsWith(combined.slice(-length))) {
+			heldLength = length;
+			break;
+		}
+	}
+	const split = combined.length - heldLength;
+	run.tail = appendBoundedTail(run.tail, combined.slice(0, split));
+	run.tailPending = combined.slice(split);
+}
+
+function flushRunTail(run: RunState): void {
+	if (!run.tailPending) return;
+	run.tail = appendBoundedTail(run.tail, redactSubagentText(run.tailPending, run.ipcToken));
+	run.tailPending = "";
+}
+
+function contentText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (!Array.isArray(value)) return "";
+	return value.flatMap((item: unknown) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : []).join("");
+}
+
+function summarizeRpcEvent(event: SubagentRpcEvent): string {
+	if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+		const action = event.type === "tool_execution_start" ? "started" : "ended";
+		const name = typeof event.toolName === "string" ? event.toolName.slice(0, 200) : "tool";
+		return `${action}: ${name}`;
+	}
+	if (event.type === "message_end" && isRecord(event.message)) {
+		const text = contentText(event.message.content);
+		return text ? `${typeof event.message.role === "string" ? event.message.role : "message"}: ${utf8Suffix(text, MAX_SUBAGENT_TAIL_BYTES)}` : event.type;
+	}
+	if (event.type === "message_update" && isRecord(event.assistantMessageEvent) && event.assistantMessageEvent.type === "text_delta" && typeof event.assistantMessageEvent.delta === "string") {
+		return event.assistantMessageEvent.delta;
+	}
+	return `event: ${event.type}`;
+}
+
+function questionFromUiRequest(id: string, method: string, payload: Record<string, unknown>, token: string): SubagentQuestion | undefined {
+	if (method !== "input" && method !== "select") return undefined;
+	if (typeof payload.title !== "string" || Buffer.byteLength(payload.title, "utf8") > MAX_SUBAGENT_RESULT_BYTES) return undefined;
+	const question = payload.title.trim();
+	if (!question) return undefined;
+	const safeQuestion = redactSubagentText(question, token);
+	if (method === "input") return { questionId: id, question: safeQuestion };
+	if (!Array.isArray(payload.options) || payload.options.length === 0 || payload.options.length > 20 || payload.options.some((option) => typeof option !== "string" || Buffer.byteLength(option, "utf8") > 1_000 || !option.trim())) return undefined;
 	return {
-		owner: request.owner,
-		childSessionId: typeof request.payload.childSessionId === "string" ? request.payload.childSessionId : childSessionId,
-		text: truncateSubagentResult(request.payload.text),
-		...(sessionFile ? { sessionFile } : {}),
+		questionId: id,
+		question: safeQuestion,
+		options: payload.options.map((option: string) => redactSubagentText(option.trim(), token)),
 	};
 }
 
-function questionFromRequest(request: SubagentIpcRequest): SubagentQuestion | undefined {
-	if (request.type !== "question" || !isRecord(request.payload) || typeof request.payload.questionId !== "string" || typeof request.payload.question !== "string") return undefined;
-	try {
-		validateIdentifier(request.payload.questionId, "questionId");
-	} catch {
-		return undefined;
-	}
-	const question = request.payload.question.trim();
-	if (!question || Buffer.byteLength(question, "utf8") > MAX_SUBAGENT_RESULT_BYTES) return undefined;
-	if (request.payload.options !== undefined) {
-		if (!Array.isArray(request.payload.options) || request.payload.options.length > 20 || request.payload.options.some((option) => typeof option !== "string" || !option.trim() || Buffer.byteLength(option, "utf8") > 1_000)) return undefined;
-		return { questionId: request.payload.questionId, question, options: request.payload.options.map((option) => option.trim()) };
-	}
-	return { questionId: request.payload.questionId, question };
-}
-
-function terminateChild(child: ChildProcess): void {
-	if (child.exitCode !== null || child.signalCode !== null) return;
-	child.kill("SIGTERM");
-	const killTimer = setTimeout(() => {
-		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-	}, 500);
-	killTimer.unref();
-}
-
-function clearHandshakeDeadline(run: RunState): void {
-	if (run.handshakeTimer === undefined) return;
-	clearTimeout(run.handshakeTimer);
-	run.handshakeTimer = undefined;
-}
-
-function terminateRun(run: RunState): void {
-	if (run.child) terminateChild(run.child);
-	void run.surface?.close();
+function validateToolCallId(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_RPC_TOOL_CALL_ID_BYTES;
 }
 
 export class SubagentLaunchHost {
 	readonly server: SubagentIpcServer;
 	private readonly runs = new Map<string, RunState>();
-	private readonly command: string;
 	private readonly spawnProcess: SubagentSpawnProcess | undefined;
-	private readonly cmux: CmuxTransport | undefined;
 	private readonly ownership = new OwnershipLockManager();
 	private closed = false;
 	private readonly exitHandler = () => {
-		for (const run of this.runs.values()) terminateRun(run);
+		for (const run of this.runs.values()) void run.rpc?.stop();
 	};
 
 	constructor(private readonly options: SubagentLaunchHostOptions) {
 		this.server = new SubagentIpcServer({
 			socketPath: resolveSubagentSocketPath(options.parentSessionId, options.agentDir),
-			logger: options.logger,
-			onHello: (owner, payload) => this.handleHello(owner, payload),
+			logger: (event, details) => this.log(event, details),
 			onRequest: (request, connection) => this.handleRequest(request, connection),
 			onDisconnect: (owner, error) => this.handleDisconnect(owner, error),
 		});
-		this.command = options.command ?? "pi";
 		this.spawnProcess = options.spawnProcess;
-		this.cmux = options.cmux === false ? undefined : options.cmux ?? new CmuxTransport({ logger: options.logger });
 		process.on("exit", this.exitHandler);
 	}
 
@@ -402,7 +451,7 @@ export class SubagentLaunchHost {
 
 	answerQuestion(owner: string, questionId: string, answer: string): boolean {
 		const run = this.runs.get(owner);
-		if (!run?.pendingQuestion || run.pendingQuestion.question.questionId !== questionId || !answer.trim() || Buffer.byteLength(answer, "utf8") > MAX_SUBAGENT_RESULT_BYTES) return false;
+		if (!run || run.resultSettled || !run.pendingQuestion || run.pendingQuestion.question.questionId !== questionId || Buffer.byteLength(answer, "utf8") > MAX_SUBAGENT_RESULT_BYTES || !answer.trim()) return false;
 		run.pendingQuestion.resolve(answer);
 		return true;
 	}
@@ -420,11 +469,11 @@ export class SubagentLaunchHost {
 		return this.ownership.snapshot();
 	}
 
-	async readSurfaceTail(owner: string, lines: number): Promise<string | undefined> {
+	async readTail(owner: string, lines: number): Promise<string | undefined> {
 		const run = this.runs.get(owner);
-		if (!run || run.resultSettled || !run.surface) return undefined;
+		if (!run || run.resultSettled) return undefined;
 		const boundedLines = Number.isInteger(lines) ? Math.max(1, Math.min(100, lines)) : 20;
-		let output = redactSubagentText(await run.surface.readScreen(boundedLines), run.ipcToken);
+		let output = run.tail.split("\n").filter(Boolean).slice(-boundedLines).join("\n");
 		while (Buffer.byteLength(output, "utf8") > MAX_SUBAGENT_TAIL_BYTES) output = output.slice(1);
 		return output || undefined;
 	}
@@ -436,16 +485,15 @@ export class SubagentLaunchHost {
 		if (existing) {
 			if (!existing.resultSettled) throw new Error(`Subagent owner already exists: ${loadout.owner}`);
 			await this.server.closeOwner(loadout.owner);
-			terminateRun(existing);
+			await existing.rpc?.stop();
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
 			existing.slot?.release();
 		} else {
-			// Result cleanup releases the run before the child socket necessarily emits close.
 			await this.server.closeOwner(loadout.owner);
 		}
 		await this.server.revokeRun(loadout.owner);
-		const args = buildSubagentCommandArgs(loadout, runtime.task);
+		const args = buildSubagentCommandArgs(loadout);
 		if (subagentToolsMutateRepository(loadout.tools)) {
 			const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
 			if (!ownership.ok) throw new Error(`Subagent ownership overlaps ${ownership.conflict?.owner}: requested ${ownership.conflict?.requestedPath}, existing ${ownership.conflict?.existingPath}.`);
@@ -499,9 +547,10 @@ export class SubagentLaunchHost {
 			rejectResult,
 			resultSettled: false,
 			diagnostics,
-			transport: "cmux",
+			transport: "rpc",
 			slot,
-			helloReceived: false,
+			tail: "",
+			tailPending: "",
 		};
 		this.runs.set(loadout.owner, run);
 		const releaseRun = () => {
@@ -512,132 +561,123 @@ export class SubagentLaunchHost {
 			run.slot?.release();
 			void this.server.revokeRun(loadout.owner).catch((error) => {
 				const message = error instanceof Error ? error.message : String(error);
-				this.options.logger?.("ipc_revoke_failed", { owner: loadout.owner, error: redactSubagentText(message, run.ipcToken) });
+				this.log("ipc_revoke_failed", { owner: loadout.owner, error: redactSubagentText(message, run.ipcToken) });
 			});
 		};
 		run.cleanup = releaseRun;
 		const finishChild = (error?: Error) => {
 			if (run.resultSettled || run.failureFinalizing) return;
-			clearHandshakeDeadline(run);
+			run.settling = false;
 			run.failureFinalizing = true;
 			run.resultSettled = true;
-			run.pendingQuestion?.reject(error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
-			void this.finalizeFailure(run, loadout.owner, error ?? new Error(`Subagent ${loadout.owner} exited before returning a result.`));
+			const failure = error ?? new SubagentRpcError("process", `Subagent ${loadout.owner} exited before returning a result.`);
+			run.pendingQuestion?.reject(failure);
+			run.watchdog?.clearTools();
+			run.watchdog?.cancel();
+			run.finalizePromise = this.finalizeFailure(run, loadout.owner, failure);
+			void run.finalizePromise;
 		};
 		run.watchdog = createSubagentWatchdog({
 			idleMs: this.options.timeoutPolicy?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
 			maxTotalMs: this.options.timeoutPolicy?.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS,
-			onFire: (kind) => finishChild(new Error(`Subagent ${loadout.owner} ${kind === "idle" ? "idle" : "maximum total"} timeout exceeded.`)),
+			onFire: (kind) => finishChild(new SubagentRpcError("process", `Subagent ${loadout.owner} ${kind === "idle" ? "idle" : "maximum total"} timeout exceeded.`)),
 		});
-		const attachChild = (child: ChildProcess): void => {
-			run.child = child;
-			child.stdout?.on("data", (chunk: Buffer | string) => run.diagnostics.append("stdout", chunk));
-			child.stderr?.on("data", (chunk: Buffer | string) => run.diagnostics.append("stderr", chunk));
-			child.once("error", (error) => finishChild(error));
-			child.once("exit", (code, signal) => finishChild(new Error(`Subagent ${loadout.owner} exited (${code ?? signal ?? "unknown"}).`)));
-		};
-
-		let transport: SubagentTransport = "cmux";
-		let cmuxFailureReason: string | undefined;
-		let surface: CmuxSurfaceHandle | undefined;
-		try {
-			if (this.cmux) {
-				const outcome: CmuxLaunchOutcome = await this.cmux.launch({ cwd: loadout.cwd, title: loadout.agentName, command: this.command, args, env: environment });
-				if (outcome.transport !== "cmux") throw new Error(outcome.reason);
-				transport = outcome.transport;
-				surface = outcome.surface;
-			}
-		} catch (error) {
-			cmuxFailureReason = redactSubagentText(error instanceof Error ? error.message : String(error), ipcToken);
-		}
-		run.transport = transport;
-		run.cmuxFailureReason = cmuxFailureReason;
-		if (surface) {
-			run.surface = surface;
-			if (run.resultSettled) {
-				run.surface = undefined;
-				run.cleanup?.();
-				void surface.close();
-			} else if (!run.helloReceived) {
-				run.handshakeTimer = setTimeout(() => {
-					run.handshakeTimer = undefined;
-					finishChild(new Error(`Subagent ${loadout.owner} launched but never connected within ${HANDSHAKE_TIMEOUT_MS / 1_000} seconds.`));
-				}, HANDSHAKE_TIMEOUT_MS);
-				run.handshakeTimer.unref();
-			}
-		} else if (this.options.cmux === false && this.spawnProcess) {
-			// Test-only seam. Production never falls back to a headless child.
-			transport = "headless";
-			run.transport = transport;
-			try {
-				attachChild(this.spawnProcess(this.command, args, {
-					cwd: loadout.cwd,
-					env: { ...process.env, ...environment },
-					stdio: ["ignore", "pipe", "pipe"],
-				}));
-			} catch (error) {
-				finishChild(error instanceof Error ? error : new Error(String(error)));
-			}
-		} else {
-			finishChild(new Error(`Subagent ${loadout.owner} could not start interactive cmux session${cmuxFailureReason ? `: ${cmuxFailureReason}` : "."}`));
-		}
+		const abort = () => this.abortRun(run, loadout.owner);
 		if (runtime.signal) {
-			const abort = () => {
-				clearHandshakeDeadline(run);
-				this.reapBrowserPage(run, loadout.owner);
-				run.watchdog?.cancel();
-				terminateRun(run);
-				run.diagnostics.close();
-				if (!run.resultSettled) {
-					run.resultSettled = true;
-					run.rejectResult(new Error(`Subagent ${loadout.owner} aborted.`));
-					releaseRun();
-				}
-			};
 			if (runtime.signal.aborted) abort();
 			else {
 				runtime.signal.addEventListener("abort", abort, { once: true });
 				run.removeAbortListener = () => runtime.signal?.removeEventListener("abort", abort);
 			}
 		}
-		runtime.onStatus?.("running");
+		this.reportStatus(run, "running");
 		void result.catch(() => undefined);
-		return {
+
+		const makeHandle = (): SubagentLaunchHandle => ({
 			owner: loadout.owner,
 			childSessionId: loadout.childSessionId,
-			pid: run.child?.pid,
+			pid: run.rpc?.child.pid,
 			loadoutPath,
 			transport: run.transport,
 			logPath: run.diagnostics.logPath,
-			...(run.cmuxFailureReason ? { cmuxFailureReason: run.cmuxFailureReason } : {}),
 			...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
 			result,
 			request: (type, payload) => this.request(loadout.owner, type, payload),
 			kill: () => {
 				const current = this.runs.get(loadout.owner);
-				if (current) terminateRun(current);
+				if (current) this.abortRun(current, loadout.owner);
 			},
-		};
+		});
+
+		if (run.resultSettled) return makeHandle();
+		try {
+			run.rpc = new SubagentRpcProcess({
+				args,
+				cwd: loadout.cwd,
+				env: environment,
+				spawnProcess: this.spawnProcess,
+				logger: (event, details) => this.log(`rpc_${event}`, { owner: loadout.owner, ...details }),
+				stderrSink: (chunk) => run.diagnostics.append("stderr", chunk),
+				onEvent: (event) => this.handleRpcEvent(run, loadout.owner, event),
+				onUiRequest: (id, method, payload) => this.handleUiRequest(run, loadout.owner, id, method, payload),
+				onExit: (code, signal) => {
+					if (!run.resultSettled && !run.settling && !run.failureFinalizing) {
+						finishChild(new SubagentRpcError("process", `Subagent ${loadout.owner} exited (${code ?? signal ?? "unknown"}) before agent_settled.`));
+					}
+				},
+			});
+		} catch (error) {
+			finishChild(errorAsRpcError(error, "launch"));
+			return makeHandle();
+		}
+
+		try {
+			const prompt = await withTimeout(
+				run.rpc.prompt(runtime.task),
+				RPC_PROMPT_TIMEOUT_MS,
+				`RPC prompt readiness timed out after ${RPC_PROMPT_TIMEOUT_MS / 1_000} seconds.`,
+			);
+			if (run.resultSettled) return makeHandle();
+			if (prompt.disposition === "handled") throw new SubagentRpcError("launch", "Prompt handled without a run.");
+			await this.readSessionFile(run);
+		} catch (error) {
+			finishChild(errorAsRpcError(error, "launch"));
+		}
+		return makeHandle();
 	}
 
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
 		process.off("exit", this.exitHandler);
-		for (const [owner, run] of this.runs) {
-			clearHandshakeDeadline(run);
+		const runs = [...this.runs.entries()];
+		const stops: Promise<void>[] = [];
+		for (const [owner, run] of runs) {
 			this.reapBrowserPage(run, owner);
+			flushRunTail(run);
+			run.watchdog?.clearTools();
 			run.watchdog?.cancel();
-			terminateRun(run);
-			run.diagnostics.close();
 			if (!run.resultSettled) {
 				run.resultSettled = true;
 				run.pendingQuestion?.reject(new Error(`Subagent ${owner} host closed.`));
 				run.rejectResult(new Error(`Subagent ${owner} host closed.`));
 			}
+			if (run.rpc) stops.push(run.rpc.stop().finally(() => run.diagnostics.close()));
+			else run.diagnostics.close();
 			run.cleanup?.();
 		}
+		await Promise.all(stops);
+		await Promise.all(runs.map(([, run]) => run.finalizePromise).filter((promise): promise is Promise<void> => promise !== undefined));
 		await this.server.close();
+	}
+
+	private async readSessionFile(run: RunState): Promise<void> {
+		if (!run.sessionFilePromise) {
+			const rpc = run.rpc;
+			if (!rpc) throw new SubagentRpcError("process", "RPC process is unavailable.");
+			run.sessionFilePromise = rpc.getState().then((state) => this.updateSessionFile(run, state.sessionFile));
+		}
+		return run.sessionFilePromise;
 	}
 
 	private updateSessionFile(run: RunState, value: unknown): void {
@@ -647,38 +687,149 @@ export class SubagentLaunchHost {
 		try {
 			run.options.onSessionFile?.(sessionFile);
 		} catch (error) {
-			this.options.logger?.("session_file_callback_failed", { error: error instanceof Error ? error.message : String(error) });
+			const message = error instanceof Error ? error.message : String(error);
+			this.log("session_file_callback_failed", { error: redactSubagentText(message, run.ipcToken) });
 		}
 	}
 
-	private handleHello(owner: string, payload: unknown): void {
-		const run = this.runs.get(owner);
-		if (!run || run.resultSettled) return;
-		run.helloReceived = true;
-		this.updateSessionFile(run, isRecord(payload) ? payload.sessionFile : undefined);
-		clearHandshakeDeadline(run);
+	private handleRpcEvent(run: RunState, owner: string, event: SubagentRpcEvent): void {
+		if (run.resultSettled || run.failureFinalizing) return;
+		run.watchdog?.touch();
+		appendRunTail(run, summarizeRpcEvent(event));
+		if (event.type === "tool_execution_start" && validateToolCallId(event.toolCallId)) run.watchdog?.toolStarted(event.toolCallId);
+		if (event.type === "tool_execution_end" && validateToolCallId(event.toolCallId)) run.watchdog?.toolEnded(event.toolCallId);
+		if (event.type === "agent_settled") void this.settleRun(run, owner);
 	}
 
-	private async request<T>(owner: string, type: SubagentIpcMessageType, payload: unknown): Promise<T> {
-		const connection = this.server.getConnection(owner);
-		if (!connection) throw new Error(`Subagent ${owner} is not connected.`);
-		return connection.request<T>(type, payload);
+	private async settleRun(run: RunState, owner: string): Promise<void> {
+		if (run.resultSettled || run.settling || run.failureFinalizing) return;
+		run.settling = true;
+		run.watchdog?.clearTools();
+		run.pendingQuestion?.reject(new Error(`Subagent ${owner} settled while a question was pending.`));
+		try {
+			await this.readSessionFile(run);
+			const text = await run.rpc!.getLastAssistantText();
+			if (run.resultSettled) return;
+			if (text) appendRunTail(run, text);
+			flushRunTail(run);
+			run.watchdog?.cancel();
+			const result: SubagentResult = {
+				owner,
+				childSessionId: run.childSessionId,
+				text: truncateSubagentResult(text ?? ""),
+				...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
+			};
+			run.resultSettled = true;
+			run.settling = false;
+			run.diagnostics.close();
+			run.resolveResult(result);
+			void Promise.resolve().then(() => run.options.onResult?.(result.text)).catch((error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				this.log("result_steering_failed", { owner, error: redactSubagentText(message, run.ipcToken) });
+			});
+			this.reapBrowserPage(run, owner);
+			const stopping = run.rpc?.stop();
+			run.cleanup?.();
+			void stopping;
+		} catch (error) {
+			run.settling = false;
+			if (!run.resultSettled) {
+				const failure = errorAsRpcError(error);
+				run.failureFinalizing = true;
+				run.resultSettled = true;
+				run.finalizePromise = this.finalizeFailure(run, owner, failure);
+				void run.finalizePromise;
+			}
+		}
+	}
+
+	private async handleUiRequest(run: RunState, owner: string, id: string, method: string, payload: Record<string, unknown>): Promise<void> {
+		const rpc = run.rpc;
+		if (!rpc) return;
+		if (FIRE_AND_FORGET_UI_METHODS.has(method)) return;
+		const question = questionFromUiRequest(id, method, payload, run.ipcToken);
+		if (!question || run.resultSettled || run.pendingQuestion || !run.options.onQuestion) {
+			try { await rpc.respondUi(id, { cancelled: true }); } catch { /* Process may already be stopping. */ }
+			return;
+		}
+		const answer = new Promise<string>((resolve, reject) => {
+			run.pendingQuestion = { question, resolve, reject };
+		});
+		this.reportStatus(run, "waiting");
+		run.watchdog?.setWaiting(true);
+		try {
+			await run.options.onQuestion(question);
+			const value = await answer;
+			if (!run.resultSettled) await rpc.respondUi(id, { value });
+		} catch {
+			if (!run.resultSettled) {
+				try { await rpc.respondUi(id, { cancelled: true }); } catch { /* Process may already be stopping. */ }
+			}
+		} finally {
+			if (run.pendingQuestion?.question.questionId === id) run.pendingQuestion = undefined;
+			run.watchdog?.setWaiting(false);
+			if (!run.resultSettled) this.reportStatus(run, "running");
+		}
+	}
+
+	private async request(owner: string, type: "message", payload: unknown): Promise<void> {
+		const run = this.runs.get(owner);
+		if (!run || run.resultSettled || !run.rpc) throw new Error(`Subagent ${owner} is not running.`);
+		if (type !== "message" || !isRecord(payload) || typeof payload.text !== "string" || Buffer.byteLength(payload.text, "utf8") > MAX_SUBAGENT_RESULT_BYTES || !payload.text.trim()) throw new Error("Subagent message is malformed.");
+		try {
+			await run.rpc.followUp(payload.text);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(redactSubagentText(message, run.ipcToken));
+		}
+	}
+
+	private abortRun(run: RunState, owner: string): void {
+		if (run.resultSettled) return;
+		run.resultSettled = true;
+		run.pendingQuestion?.reject(new Error(`Subagent ${owner} aborted.`));
+		run.watchdog?.clearTools();
+		run.watchdog?.cancel();
+		this.reapBrowserPage(run, owner);
+		flushRunTail(run);
+		run.rejectResult(new Error(`Subagent ${owner} aborted.`));
+		const rpc = run.rpc;
+		const abortCommand = rpc?.abort().catch(() => undefined);
+		run.cleanup?.();
+		if (rpc && abortCommand) {
+			void (async () => {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					await Promise.race([
+						abortCommand,
+						new Promise<void>((resolve) => {
+							timer = setTimeout(resolve, 250);
+							timer.unref();
+						}),
+					]);
+				} finally {
+					if (timer) clearTimeout(timer);
+					await rpc.stop().catch(() => undefined);
+					run.diagnostics.close();
+				}
+			})();
+		} else run.diagnostics.close();
 	}
 
 	private reapBrowserPage(run: RunState, owner: string): void {
-		if (!run.tools.includes("browser_close") || !this.options.onBrowser) return;
-		void Promise.resolve(this.options.onBrowser(owner, { tool: "browser_close", params: {} })).catch((error) => this.options.logger?.("browser_reap_failed", { owner, error: error instanceof Error ? error.message : String(error) }));
+		if (run.browserReaped || !run.tools.includes("browser_close") || !this.options.onBrowser) return;
+		run.browserReaped = true;
+		void Promise.resolve().then(() => this.options.onBrowser!(owner, { tool: "browser_close", params: {} })).catch((error) => {
+			const message = error instanceof Error ? error.message : String(error);
+			this.log("browser_reap_failed", { owner, error: redactSubagentText(message, run.ipcToken) });
+		});
 	}
 
 	private async handleRequest(request: SubagentIpcRequest, _connection: unknown): Promise<unknown> {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
-		if (run.resultSettled) {
-			if (request.type === "result") return { accepted: true };
-			throw new Error(`Subagent ${request.owner} is already settled.`);
-		}
+		if (run.resultSettled) throw new Error(`Subagent ${request.owner} is already settled.`);
 		run.watchdog?.touch();
-		if (request.type === "activity") return { accepted: true };
 		if (request.type === "spawn") {
 			if (!this.options.onSpawn) throw new Error("Nested subagent spawning is unavailable.");
 			return this.options.onSpawn(request.owner, request.payload);
@@ -701,82 +852,47 @@ export class SubagentLaunchHost {
 			if (!acquired.ok) throw new Error(`Subagent ownership overlaps ${acquired.conflict?.owner}: requested ${acquired.conflict?.requestedPath}, existing ${acquired.conflict?.existingPath}.`);
 			return acquired;
 		}
-		const question = questionFromRequest(request);
-		if (question) {
-			if (run.pendingQuestion) throw new Error(`Subagent ${request.owner} already has a pending question.`);
-			const answer = new Promise<string>((resolve, reject) => {
-				run.pendingQuestion = { question, resolve, reject };
-			});
-			run.options.onStatus?.("waiting");
-			run.watchdog?.setWaiting(true);
-			try {
-				await run.options.onQuestion?.(question);
-				return { questionId: question.questionId, answer: await answer };
-			} finally {
-				run.watchdog?.setWaiting(false);
-				if (run.pendingQuestion?.question.questionId === question.questionId) run.pendingQuestion = undefined;
-				if (!run.resultSettled) run.options.onStatus?.("running");
-			}
-		}
-		const result = resultFromRequest(request, run.childSessionId);
-		if (result) {
-			if (!run.resultSettled) {
-				this.updateSessionFile(run, result.sessionFile);
-				clearHandshakeDeadline(run);
-				run.resultSettled = true;
-				void this.server.revokeRun(request.owner, { disconnect: false });
-				run.watchdog?.cancel();
-				run.diagnostics.close();
-				run.resolveResult(result);
-				void Promise.resolve(run.options.onResult?.(result.text)).catch((error) => this.options.logger?.("result_steering_failed", { error: String(error) }));
-				this.reapBrowserPage(run, request.owner);
-				const surface = run.surface;
-				run.surface = undefined;
-				// Let the IPC layer send the result ACK before closing its socket.
-				setImmediate(() => run.cleanup?.());
-				if (surface) void surface.close();
-			}
-			return { accepted: true };
-		}
 		throw new Error(`Unsupported child IPC message: ${request.type}.`);
 	}
 
 	private async finalizeFailure(run: RunState, owner: string, error: Error): Promise<void> {
-		clearHandshakeDeadline(run);
-		const safeError = redactSubagentText(error.message, run.ipcToken);
-		if (run.surface) {
-			try {
-				run.diagnostics.append("cmux", await run.surface.readScreen(20));
-			} catch (captureError) {
-				this.options.logger?.("cmux_capture_failed", {
-					owner,
-					error: redactSubagentText(captureError instanceof Error ? captureError.message : String(captureError), run.ipcToken),
-				});
-			}
-		}
+		const failure = errorAsRpcError(error);
+		try { await run.rpc?.stop(); } catch { /* Failure cleanup must continue. */ }
+		flushRunTail(run);
 		run.diagnostics.close();
-		const failure = new SubagentFailureError(owner, {
+		const safeError = redactSubagentText(failure.message, run.ipcToken);
+		const failed = new SubagentFailureError(owner, {
 			transport: run.transport,
+			kind: failure.kind,
 			logPath: run.diagnostics.logPath,
 			error: safeError,
 			tail: run.diagnostics.tail(),
-			...(run.cmuxFailureReason ? { cmuxFailureReason: run.cmuxFailureReason } : {}),
 		});
+		run.watchdog?.clearTools();
 		run.watchdog?.cancel();
 		this.reapBrowserPage(run, owner);
-		terminateRun(run);
 		run.cleanup?.();
-		run.rejectResult(failure);
+		run.rejectResult(failed);
 	}
 
-	private handleDisconnect(owner: string | undefined, error?: Error): void {
+	private handleDisconnect(owner: string | undefined, _error?: Error): void {
 		if (!owner) return;
 		const run = this.runs.get(owner);
 		if (!run || run.resultSettled) return;
-		const disconnectError = error
-			? new Error(redactSubagentText(error.message, run.ipcToken))
-			: new Error(`Subagent ${owner} IPC connection closed.`);
-		run.pendingQuestion?.reject(disconnectError);
-		this.options.logger?.("ipc_disconnected", { owner });
+		this.log("ipc_disconnected", { owner });
+	}
+
+	private reportStatus(run: RunState, status: SubagentRunStatus): void {
+		try {
+			run.options.onStatus?.(status);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.log("status_callback_failed", { error: redactSubagentText(message, run.ipcToken) });
+		}
+	}
+
+	private log(event: string, details?: Record<string, unknown>): void {
+		try { this.options.logger?.(event, details); }
+		catch { /* Logging must not interrupt lifecycle cleanup. */ }
 	}
 }

@@ -33,8 +33,8 @@ const server = new SubagentIpcServer({
 	onHello: (owner, payload) => { hellos.push({ owner, payload }); },
 	onRequest: (request, connection) => {
 		requests.push(request);
-		if ((request.type === "message" || request.type === "question") && (request.payload as { hang?: boolean })?.hang) return new Promise(() => undefined);
-		if (request.type === "result" && (request.payload as { probe?: string })?.probe === "correlation") {
+		if (request.type === "spawn" && (request.payload as { hang?: boolean })?.hang) return new Promise(() => undefined);
+		if (request.type === "browser" && (request.payload as { probe?: string })?.probe === "correlation") {
 			connection.respond(request, { ignored: true }, { requestId: "wrong-request-id" });
 			connection.respond(request, { ignored: true }, { owner: "wrong-owner" });
 			return { matched: true };
@@ -73,8 +73,8 @@ try {
 		token: "token",
 		requestId: "request-1",
 		owner: "child-test",
-		type: "result" as const,
-		payload: { text: "split safely" },
+		type: "browser" as const,
+		payload: { tool: "browser_console" },
 	};
 	const encoded = encodeSubagentIpcFrame(frame);
 	const decoder = new SubagentIpcFrameDecoder();
@@ -83,8 +83,9 @@ try {
 	assert.deepEqual(decoder.push(encoded.subarray(7)), [frame]);
 	assert.ok(encoded.byteLength <= IPC_MAX_FRAME_BYTES + 4);
 	assert.deepEqual(parseSubagentIpcFrame(frame), frame);
-	const activityFrame = { ...frame, type: "activity" as const, payload: {} };
-	assert.deepEqual(parseSubagentIpcFrame(activityFrame), activityFrame);
+	for (const legacyType of ["message", "question", "result", "activity"]) {
+		assert.equal(parseSubagentIpcFrame({ ...frame, type: legacyType }), undefined);
+	}
 	assert.equal(parseSubagentIpcFrame({ ...frame, token: "" }), undefined);
 	assert.notEqual(childToken, ownerAToken);
 	assert.throws(() => server.registerRun("child-test"), /already registered/);
@@ -122,16 +123,20 @@ try {
 	}
 	assert.equal(fs.statSync(socketPath).mode & 0o777, 0o600);
 
-	const client = await SubagentIpcClient.connect({
+	const client = SubagentIpcClient.create({
 		socketPath,
 		token: childToken,
 		owner: "child-test",
 		logger: (event) => logs.push(event),
 	});
+	assert.equal(server.getConnection("child-test"), undefined);
+	assert.deepEqual(await client.request("ownership", { lazy: true }), { lazy: true });
 	assert.deepEqual(hellos, [{ owner: "child-test", payload: { pid: process.pid } }]);
-	await assert.rejects(SubagentIpcClient.connect({ socketPath, token: childToken, owner: "child-test" }), /IPC connection closed|socket hang up/);
+	const duplicateClient = SubagentIpcClient.create({ socketPath, token: childToken, owner: "child-test" });
+	await assert.rejects(duplicateClient.request("ownership"), /IPC connection closed|socket hang up/);
+	await duplicateClient.close();
 	assert.equal(hellos.length, 1);
-	for (const type of ["ownership", "browser", "message", "question", "result", "spawn", "activity"] as const) {
+	for (const type of ["ownership", "browser", "spawn"] as const) {
 		const payload = { type };
 		assert.deepEqual(await client.request(type, payload), payload);
 	}
@@ -149,7 +154,7 @@ try {
 	assert.equal(hellos.some((hello) => hello.owner === "owner-b"), false);
 	ownerClaim.destroy();
 
-	const invalidFirstFrame = await sendHello("child-test", childToken, "no-hello", "result");
+	const invalidFirstFrame = await sendHello("child-test", childToken, "no-hello", "browser");
 	await delay(25);
 	assert.equal(requests.some((request) => request.requestId === "no-hello"), false);
 	invalidFirstFrame.destroy();
@@ -160,14 +165,13 @@ try {
 	assert.equal(hellos.some((hello) => hello.owner === "revoked-owner"), false);
 	revoked.destroy();
 
-	assert.deepEqual(await client.request("result", { probe: "correlation" }), { matched: true });
+	assert.deepEqual(await client.request("browser", { probe: "correlation" }), { matched: true });
 	assert.ok(logs.includes("correlation_mismatch"));
 	assert.ok(logs.includes("owner_mismatch_dropped"));
-	await assert.rejects(client.request("message", { hang: true }, { noDeadline: true }), /only for spawn or question requests/);
-	await assert.rejects(client.request("browser", {}, { noDeadline: true }), /only for spawn or question requests/);
-	await assert.rejects(client.request("message", { hang: true }, { timeoutMs: 25 }), /timed out after 25 milliseconds/);
+	await assert.rejects(client.request("browser", {}, { noDeadline: true }), /only for spawn requests/);
+	await assert.rejects(client.request("spawn", { hang: true }, { timeoutMs: 25 }), /timed out after 25 milliseconds/);
 	let noDeadlineSettled = false;
-	const noDeadline = client.request("question", { hang: true }, { noDeadline: true });
+	const noDeadline = client.request("spawn", { hang: true }, { noDeadline: true });
 	void noDeadline.then(() => { noDeadlineSettled = true; }, () => { noDeadlineSettled = true; });
 	await delay(50);
 	assert.equal(noDeadlineSettled, false);
@@ -187,7 +191,7 @@ try {
 	const lazyPayload = { tool: "browser_goto" };
 	assert.deepEqual(await lazy.request("browser", lazyPayload), lazyPayload);
 	assert.ok(server.getConnection("lazy-child"));
-	const pendingAtRevoke = lazy.request("question", { hang: true }, { noDeadline: true });
+	const pendingAtRevoke = lazy.request("spawn", { hang: true }, { noDeadline: true });
 	const pendingAtRevokeRejected = assert.rejects(pendingAtRevoke, (error: unknown) => error instanceof SubagentIpcDisconnectedError);
 	await delay(25);
 	await server.revokeRun("lazy-child");

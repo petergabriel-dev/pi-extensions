@@ -69,7 +69,7 @@ const SubagentParams = Type.Object({
 type SubagentParams = Static<typeof SubagentParams>;
 
 const SubagentsListParams = Type.Object({
-	tail: Type.Optional(Type.Boolean({ description: "Read live output from running cmux subagents." })),
+	tail: Type.Optional(Type.Boolean({ description: "Read live output from running subagents." })),
 });
 type SubagentsListParams = Static<typeof SubagentsListParams>;
 
@@ -129,7 +129,6 @@ interface SubagentRecord {
 	transport?: SubagentTransport;
 	logPath?: string;
 	sessionFile?: string;
-	cmuxFailureReason?: string;
 	outputTail?: string;
 	handle?: SubagentLaunchHandle;
 	question?: SubagentQuestion;
@@ -325,7 +324,6 @@ function failureMessage(record: SubagentRecord): string {
 		`Error: ${record.error ?? "unknown error"}`,
 		...(record.sessionFile ? [`Transcript: ${record.sessionFile}`] : []),
 	];
-	if (record.cmuxFailureReason) lines.push(`Cmux failure: ${record.cmuxFailureReason}`);
 	if (record.outputTail) lines.push(`Recent output:\n${record.outputTail}`);
 	return lines.join("\n");
 }
@@ -432,7 +430,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		record.transport = handle.transport;
 		record.logPath = handle.logPath;
 		record.sessionFile = handle.sessionFile ?? record.sessionFile;
-		record.cmuxFailureReason = handle.cmuxFailureReason;
 		record.outputTail = undefined;
 		record.progress?.setTransport(handle.transport, handle.logPath);
 		void handle.result.then((result: SubagentResult) => {
@@ -449,7 +446,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			if (error instanceof SubagentFailureError) {
 				record.transport = error.info.transport;
 				record.logPath = error.info.logPath;
-				record.cmuxFailureReason = error.info.cmuxFailureReason;
 				record.outputTail = error.info.tail;
 			}
 			record.progress?.setFailure(record.error);
@@ -467,7 +463,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			while (next < liveRecords.length) {
 				const record = liveRecords[next++]!;
 				try {
-					const tail = await activeHost.readSurfaceTail(record.owner, 20);
+					const tail = await activeHost.readTail(record.owner, 20);
 					if (record.status === "running" || record.status === "waiting") record.outputTail = tail;
 				} catch {
 					if (record.status === "running" || record.status === "waiting") record.outputTail = undefined;
@@ -669,7 +665,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 						status: record.status,
 						transport: handle.transport,
 						logPath: handle.logPath,
-						...(handle.cmuxFailureReason ? { cmuxFailureReason: handle.cmuxFailureReason } : {}),
 					},
 				};
 			} catch (error) {
@@ -763,7 +758,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				transport: record.transport,
 				logPath: record.logPath,
 				sessionFile: record.sessionFile,
-				cmuxFailureReason: record.cmuxFailureReason,
 				result: record.result ? truncateUtf8(record.result, 2_000) : undefined,
 				error: record.error,
 				outputTail: record.outputTail,

@@ -1,68 +1,35 @@
 import assert from "node:assert/strict";
-import { spawn, type SpawnOptions } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { mock } from "node:test";
 
 import { CAVEMAN_PROMPT } from "../../workflow-modes/caveman.ts";
-import { CmuxTransport } from "../cmux.ts";
-import { SubagentIpcClient } from "../ipc.ts";
 import {
 	buildSubagentCommandArgs,
 	buildSubagentSystemPrompt,
 	MAX_SUBAGENT_RESULT_BYTES,
 	readSubagentLoadout,
 	resolveSubagentExtensionPath,
+	SubagentFailureError,
 	SubagentLaunchHost,
 	truncateSubagentResult,
 	type SubagentLoadout,
 } from "../launch.ts";
+import { resolvePiCliPath } from "../rpc.ts";
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-launch-"));
-const captured: { command?: string; args?: string[]; options?: SpawnOptions } = {};
-const childScript = `
-const net = require("node:net");
-let buffer = Buffer.alloc(0);
-const socket = net.createConnection(process.env.PI_SUBAGENT_SOCKET);
-const frame = (value) => { const body = Buffer.from(JSON.stringify(value)); const out = Buffer.alloc(4 + body.length); out.writeUInt32BE(body.length); body.copy(out, 4); return out; };
-const read = (chunk) => {
-  buffer = Buffer.concat([buffer, chunk]);
-  while (buffer.length >= 4) {
-    const length = buffer.readUInt32BE(0);
-    if (buffer.length < length + 4) return;
-    const response = JSON.parse(buffer.subarray(4, length + 4).toString());
-    buffer = buffer.subarray(length + 4);
-    if (response.kind !== "response") continue;
-    if (response.requestId === "hello") {
-      socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "result", owner: process.env.PI_SUBAGENT_OWNER, type: "result", payload: { childSessionId: process.env.PI_SUBAGENT_CHILD_SESSION_ID, text: "child result", sessionFile: "/tmp/child-session.jsonl" } }));
-    } else if (response.requestId === "result") {
-      socket.end();
-    }
-  }
-};
-socket.on("connect", () => socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "hello", owner: process.env.PI_SUBAGENT_OWNER, type: "hello", payload: { pid: process.pid } })));
-socket.on("data", read);
-`;
-const disconnectScript = `
-const net = require("node:net");
-const socket = net.createConnection(process.env.PI_SUBAGENT_SOCKET);
-const frame = (value) => { const body = Buffer.from(JSON.stringify(value)); const out = Buffer.alloc(4 + body.length); out.writeUInt32BE(body.length); body.copy(out, 4); return out; };
-process.stderr.write("sentinel stderr " + process.env.PI_SUBAGENT_TOKEN + "\\n");
-socket.on("connect", () => socket.write(frame({ kind: "request", token: process.env.PI_SUBAGENT_TOKEN, requestId: "hello", owner: process.env.PI_SUBAGENT_OWNER, type: "hello", payload: { pid: process.pid } })));
-socket.on("data", () => { socket.destroy(); setTimeout(() => process.exit(0), 10); });
-`;
-const hangingScript = `setInterval(() => {}, 1000);`;
-let hangingProcess: ReturnType<typeof spawn> | undefined;
-
-function fakeSpawn(command: string, args: readonly string[], options: SpawnOptions) {
-	captured.command = command;
-	captured.args = [...args];
-	captured.options = options;
-	return spawn(process.execPath, ["-e", childScript], options);
+interface SpawnCall {
+	command: string;
+	args: string[];
+	options: SpawnOptions;
+	child: ChildProcess;
 }
 
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-launch-"));
+const fixturePath = fileURLToPath(new URL("./fixtures/fake-rpc-child.mjs", import.meta.url));
 const loadout: SubagentLoadout = {
 	version: 1,
 	parentSessionId: "parent-session",
@@ -81,398 +48,247 @@ const loadout: SubagentLoadout = {
 	createdAt: new Date().toISOString(),
 };
 
+function fakeSpawn(modes: string[], calls: SpawnCall[], onSpawn?: () => void): (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess {
+	let index = 0;
+	return (command, args, options) => {
+		const mode = modes[Math.min(index, modes.length - 1)]!;
+		index += 1;
+		const child = spawn(process.execPath, [fixturePath, "--fixture-mode", mode], options);
+		calls.push({ command, args: [...args], options, child });
+		onSpawn?.();
+		return child;
+	};
+}
+
+function launchOptions(parentSessionId: string, owner: string, task = "do work") {
+	return {
+		parentSessionId,
+		owner,
+		role: "worker" as const,
+		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+		cwd: process.cwd(),
+		task,
+		tools: ["read", "grep"],
+		cavemanEnabled: true,
+		childSessionId: `${owner}-session`,
+	};
+}
+
+async function waitForExit(child: ChildProcess): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	await once(child, "exit");
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!(await predicate())) {
+		if (Date.now() >= deadline) throw new Error("Timed out waiting for RPC child event.");
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}
+
 try {
 	assert.ok(loadout.appendSystemPrompt.includes(CAVEMAN_PROMPT.trim()));
 	assert.equal(buildSubagentSystemPrompt("Agent rules", false), "Agent rules");
 	assert.ok(Buffer.byteLength(truncateSubagentResult("x".repeat(MAX_SUBAGENT_RESULT_BYTES + 100)), "utf8") <= MAX_SUBAGENT_RESULT_BYTES);
-	assert.deepEqual(buildSubagentCommandArgs(loadout, "do work"), [
+	assert.deepEqual(buildSubagentCommandArgs(loadout), [
 		"--no-extensions", "-e", loadout.extensionPath, "--tools", "read,grep",
 		"--append-system-prompt", loadout.appendSystemPrompt, "--session-id", "child-session",
-		"--no-approve", "--model", "openai/test-model", "--thinking", "high", "--", "do work",
+		"--no-approve", "--model", "openai/test-model", "--thinking", "high",
 	]);
-	assert.equal(buildSubagentCommandArgs(loadout, "do work").includes("--print"), false);
 
+	const calls: SpawnCall[] = [];
 	const steered: string[] = [];
 	const host = new SubagentLaunchHost({
 		parentSessionId: "parent-session",
 		agentDir: tempDir,
-		command: "pi",
-		spawnProcess: fakeSpawn,
-		cmux: false,
+		spawnProcess: fakeSpawn(["launch"], calls),
 	});
-	const handle = await host.launch({
-		parentSessionId: "parent-session",
-		owner: "worker-one",
-		role: "worker",
-		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-		cwd: process.cwd(),
-		task: "do work",
-		tools: ["read", "grep"],
-		cavemanEnabled: true,
-		depth: 0,
-		subagentAgents: ["explorer"],
-		fileOwnership: ["src/**"],
-		childSessionId: "child-session",
-		thinkingLevel: "high",
-		onResult: (text) => { steered.push(text); },
+	try {
+		const handle = await host.launch({
+			...launchOptions("parent-session", "worker-one"),
+			subagentAgents: ["explorer"],
+			fileOwnership: ["src/**"],
+			onResult: (text) => { steered.push(text); throw new Error("steering callback failed"); },
+		});
+		assert.equal(handle.transport, "rpc");
+		assert.equal(calls[0]?.command, process.execPath);
+		assert.equal(calls[0]?.args[0], resolvePiCliPath());
+		assert.deepEqual(calls[0]?.args.slice(1, 3), ["--mode", "rpc"]);
+		assert.equal(calls[0]?.args.includes("--no-extensions"), true);
+		assert.equal(calls[0]?.args.includes("do work"), false);
+		assert.equal(calls[0]?.args.includes("--print"), false);
+		assert.equal(calls[0]?.options.env?.PI_SUBAGENT_OWNER, "worker-one");
+		assert.equal(typeof calls[0]?.options.env?.PI_SUBAGENT_TOKEN, "string");
+		assert.deepEqual(calls[0]?.options.stdio, ["pipe", "pipe", "pipe"]);
+		const saved = readSubagentLoadout(handle.loadoutPath);
+		assert.deepEqual(saved.tools, ["read", "grep"]);
+		assert.equal(saved.cavemanEnabled, true);
+		assert.equal(saved.depth, 0);
+		assert.deepEqual(saved.subagentAgents, ["explorer"]);
+		assert.deepEqual(saved.fileOwnership, ["src/**"]);
+		assert.equal(fs.statSync(handle.loadoutPath).mode & 0o777, 0o600);
+		assert.deepEqual(await handle.result, {
+			owner: "worker-one",
+			childSessionId: "worker-one-session",
+			text: "fake assistant result",
+			sessionFile: "/tmp/fake-child-session.jsonl",
+		});
+		await waitFor(() => steered.length === 1);
+		assert.deepEqual(steered, ["fake assistant result"]);
+		await waitForExit(calls[0]!.child);
+		assert.deepEqual(host.getOwnershipSnapshot(), {});
+	} finally {
+		await host.close();
+	}
+
+	const handledCalls: SpawnCall[] = [];
+	const handledHost = new SubagentLaunchHost({
+		parentSessionId: "handled",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["handled", "result"], handledCalls),
 	});
-	assert.equal(captured.command, "pi");
-	assert.equal(captured.args?.includes("--no-extensions"), true);
-	assert.equal(captured.options?.env?.PI_SUBAGENT_OWNER, "worker-one");
-	const saved = readSubagentLoadout(handle.loadoutPath);
-	assert.deepEqual(saved.tools, ["read", "grep"]);
-	assert.equal(saved.cavemanEnabled, true);
-	assert.equal(saved.depth, 0);
-	assert.deepEqual(saved.subagentAgents, ["explorer"]);
-	assert.deepEqual(saved.fileOwnership, ["src/**"]);
-	assert.deepEqual(host.getOwnershipSnapshot(), {});
-	assert.equal(fs.statSync(handle.loadoutPath).mode & 0o777, 0o600);
-	assert.deepEqual(await handle.result, { owner: "worker-one", childSessionId: "child-session", text: "child result", sessionFile: "/tmp/child-session.jsonl" });
-	assert.deepEqual(steered, ["child result"]);
+	try {
+		const handled = await handledHost.launch({
+			...launchOptions("handled", "writer-handled"),
+			tools: ["edit"],
+			fileOwnership: ["shared/**"],
+		});
+		await assert.rejects(handled.result, (error: unknown) => {
+			assert.ok(error instanceof SubagentFailureError);
+			assert.equal(error.info.kind, "launch");
+			assert.match(error.info.error, /handled without a run/);
+			assert.match(error.info.logPath, /writer-handled\.log/);
+			return true;
+		});
+		assert.deepEqual(handledHost.getOwnershipSnapshot(), {});
+		const recovered = await handledHost.launch({
+			...launchOptions("handled", "writer-recovered"),
+			tools: ["edit"],
+			fileOwnership: ["shared/**"],
+		});
+		assert.equal((await recovered.result).text, "fake assistant result");
+		await waitForExit(handledCalls[1]!.child);
+		assert.deepEqual(handledHost.getOwnershipSnapshot(), {});
+	} finally {
+		await handledHost.close();
+	}
 
-	const nestedReaders = await Promise.all([
-		host.launch({
-			parentSessionId: "parent-session",
-			owner: "reader-wide",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "read repository",
-			tools: ["read"],
-			cavemanEnabled: true,
-			fileOwnership: ["agent/extensions/**"],
-			childSessionId: "child-reader-wide",
-		}),
-		host.launch({
-			parentSessionId: "parent-session",
-			owner: "reader-tests",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "read tests",
-			tools: ["read"],
-			cavemanEnabled: true,
-			fileOwnership: ["agent/extensions/**/__tests__/**"],
-			childSessionId: "child-reader-tests",
-		}),
-	]);
-	assert.deepEqual((await Promise.all(nestedReaders.map((reader) => reader.result))).map((result) => result.text), ["child result", "child result"]);
-	assert.deepEqual(host.getOwnershipSnapshot(), {});
+	const timeoutCalls: SpawnCall[] = [];
+	let spawned!: () => void;
+	const spawnObserved = new Promise<void>((resolve) => { spawned = resolve; });
+	const timeoutHost = new SubagentLaunchHost({
+		parentSessionId: "readiness",
+		agentDir: tempDir,
+		timeoutPolicy: { idleTimeoutMs: 600_000, maxTotalMs: 1_200_000 },
+		spawnProcess: fakeSpawn(["ready-hang"], timeoutCalls, () => spawned()),
+	});
+	mock.timers.enable();
+	try {
+		const pendingLaunch = timeoutHost.launch(launchOptions("readiness", "worker-readiness"));
+		await spawnObserved;
+		mock.timers.tick(30_000);
+		const timedOut = await pendingLaunch;
+		await assert.rejects(timedOut.result, (error: unknown) => {
+			assert.ok(error instanceof SubagentFailureError);
+			assert.equal(error.info.kind, "launch");
+			assert.match(error.info.error, /prompt readiness timed out after 30 seconds/);
+			return true;
+		});
+		await waitForExit(timeoutCalls[0]!.child);
+		assert.deepEqual(timeoutHost.getOwnershipSnapshot(), {});
+	} finally {
+		await timeoutHost.close();
+		mock.timers.reset();
+	}
 
+	const failureCalls: SpawnCall[] = [];
+	const failureHost = new SubagentLaunchHost({
+		parentSessionId: "failure",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["exit-before-settle"], failureCalls),
+	});
+	try {
+		const failed = await failureHost.launch({
+			...launchOptions("failure", "worker-failure"),
+			tools: ["edit"],
+			fileOwnership: ["failure/**"],
+		});
+		await assert.rejects(failed.result, (error: unknown) => {
+			assert.ok(error instanceof SubagentFailureError);
+			assert.equal(error.info.kind, "process");
+			assert.equal(error.info.logPath, failed.logPath);
+			assert.equal(error.message.includes(failureCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "missing"), false);
+			assert.match(error.info.tail, /sentinel stderr/);
+			assert.equal(error.info.tail.includes(failureCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "missing"), false);
+			return true;
+		});
+		await waitForExit(failureCalls[0]!.child);
+		const log = fs.readFileSync(failed.logPath, "utf8");
+		assert.match(log, /sentinel stderr/);
+		assert.equal(log.includes(failureCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "missing"), false);
+		assert.ok(Buffer.byteLength(log, "utf8") <= 1_024 * 1_024);
+		assert.deepEqual(failureHost.getOwnershipSnapshot(), {});
+	} finally {
+		await failureHost.close();
+	}
+
+	const tailCalls: SpawnCall[] = [];
+	const tailHost = new SubagentLaunchHost({
+		parentSessionId: "tail",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["tail"], tailCalls),
+	});
+	try {
+		const tailHandle = await tailHost.launch(launchOptions("tail", "worker-tail"));
+		await waitFor(async () => Boolean(await tailHost.readTail("worker-tail", 20)));
+		const tail = await tailHost.readTail("worker-tail", 20);
+		assert.match(tail ?? "", /tail sentinel/);
+		assert.equal(tail?.includes(tailCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "missing"), false);
+		assert.ok(Buffer.byteLength(tail ?? "", "utf8") <= 8 * 1024);
+		await tailHost.close();
+		await assert.rejects(tailHandle.result, /host closed/);
+		await waitForExit(tailCalls[0]!.child);
+	} finally {
+		await tailHost.close();
+	}
+
+	const abortCalls: SpawnCall[] = [];
+	const abortHost = new SubagentLaunchHost({
+		parentSessionId: "abort",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["abort"], abortCalls),
+	});
+	try {
+		const aborted = await abortHost.launch({
+			...launchOptions("abort", "writer-abort"),
+			tools: ["edit"],
+			fileOwnership: ["abort/**"],
+		});
+		aborted.kill();
+		await assert.rejects(aborted.result, /aborted/);
+		await waitForExit(abortCalls[0]!.child);
+		assert.deepEqual(abortHost.getOwnershipSnapshot(), {});
+		assert.ok(abortCalls[0]!.child.exitCode !== null || abortCalls[0]!.child.signalCode !== null);
+	} finally {
+		await abortHost.close();
+	}
+
+	const concurrentCalls: SpawnCall[] = [];
 	const concurrentHost = new SubagentLaunchHost({
 		parentSessionId: "concurrent",
 		agentDir: tempDir,
-		spawnProcess: fakeSpawn,
-		cmux: false,
+		spawnProcess: fakeSpawn(["launch"], concurrentCalls),
 	});
 	try {
-		const concurrentHandles = await Promise.all(
-			[0, 1, 2, 3].map((index) => concurrentHost.launch({
-				parentSessionId: "concurrent",
-				owner: `worker-concurrent-${index}`,
-				role: "worker",
-				agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-				cwd: process.cwd(),
-				task: `concurrent work ${index}`,
-				tools: ["read", "grep"],
-				cavemanEnabled: true,
-				childSessionId: `child-concurrent-${index}`,
-			})),
-		);
-		assert.equal(concurrentHandles.length, 4);
-		assert.deepEqual((await Promise.all(concurrentHandles.map((concurrentHandle) => concurrentHandle.result))).map((result) => result.text), ["child result", "child result", "child result", "child result"]);
+		const handles = await Promise.all([0, 1, 2, 3].map((index) => concurrentHost.launch(launchOptions("concurrent", `worker-${index}`, `work ${index}`))));
+		assert.deepEqual((await Promise.all(handles.map((handle) => handle.result))).map((result) => result.text), Array(4).fill("fake assistant result"));
+		await Promise.all(concurrentCalls.map((call) => waitForExit(call.child)));
+		assert.deepEqual(concurrentHost.getOwnershipSnapshot(), {});
 	} finally {
 		await concurrentHost.close();
 	}
 
-	let fallbackSpawned = false;
-	const unavailableHost = new SubagentLaunchHost({
-		parentSessionId: "fallback",
-		agentDir: tempDir,
-		spawnProcess: () => { fallbackSpawned = true; throw new Error("headless spawn must not run"); },
-		cmux: new CmuxTransport({ run: async () => { throw new Error("cmux socket refused"); } }),
-	});
-	const unavailable = await unavailableHost.launch({
-		parentSessionId: "fallback",
-		owner: "worker-fallback",
-		role: "worker",
-		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-		cwd: process.cwd(),
-		task: "do fallback work",
-		tools: ["read", "grep"],
-		cavemanEnabled: true,
-		childSessionId: "child-fallback",
-	});
-	assert.equal(unavailable.transport, "cmux");
-	assert.equal(unavailable.cmuxFailureReason, "cmux socket unreachable.");
-	await assert.rejects(unavailable.result, (error: unknown) => {
-		assert.equal((error as { name?: string }).name, "SubagentFailureError");
-		assert.equal((error as { info: { transport: string } }).info.transport, "cmux");
-		assert.equal((error as { info: { cmuxFailureReason?: string } }).info.cmuxFailureReason, "cmux socket unreachable.");
-		assert.match((error as { message: string }).message, /Log: .*\.log/);
-		return true;
-	});
-	assert.equal(fallbackSpawned, false);
-	assert.deepEqual(unavailableHost.getOwnershipSnapshot(), {});
-	await unavailableHost.close();
-
-	const failureHost = new SubagentLaunchHost({
-		parentSessionId: "failure",
-		agentDir: tempDir,
-		spawnProcess: (_command, _args, options) => spawn(process.execPath, ["-e", disconnectScript], options),
-		cmux: false,
-	});
-	const failed = await failureHost.launch({
-		parentSessionId: "failure",
-		owner: "worker-failure",
-		role: "worker",
-		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-		cwd: process.cwd(),
-		task: "disconnect",
-		tools: ["read", "grep"],
-		cavemanEnabled: true,
-		childSessionId: "child-failure",
-	});
-	await assert.rejects(failed.result, (error: unknown) => {
-		assert.equal((error as { name?: string }).name, "SubagentFailureError");
-		assert.equal((error as { info: { transport: string } }).info.transport, "headless");
-		assert.equal((error as { message: string }).message.includes("0123456789"), false);
-		assert.match((error as { info: { tail: string } }).info.tail, /sentinel stderr/);
-		return true;
-	});
-	const failureLog = fs.readFileSync(failed.logPath, "utf8");
-	assert.equal(failureLog.includes("0123456789"), false);
-	assert.match(failureLog, /sentinel stderr/);
-	assert.ok(Buffer.byteLength(failureLog, "utf8") <= 1_024 * 1_024);
-	await failureHost.close();
-
-	const hangingSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
-		captured.command = command;
-		captured.args = [...args];
-		captured.options = options;
-		hangingProcess = spawn(process.execPath, ["-e", hangingScript], options);
-		return hangingProcess!;
-	};
-	const hostWithHangingChild = new SubagentLaunchHost({ parentSessionId: "hanging", agentDir: tempDir, spawnProcess: hangingSpawn, cmux: false });
-	const hanging = await hostWithHangingChild.launch({
-		parentSessionId: "hanging",
-		owner: "worker-hanging",
-		role: "worker",
-		agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-		cwd: process.cwd(),
-		task: "do work",
-		tools: ["read", "grep"],
-		cavemanEnabled: true,
-		fileOwnership: ["hanging/**"],
-		childSessionId: "child-hanging",
-		thinkingLevel: "high",
-	});
-	assert.ok(hanging.pid);
-	assert.ok(hangingProcess);
-	const processToKill = hangingProcess;
-	void hanging.result.catch(() => undefined);
-	const exited = once(processToKill, "exit");
-	await hostWithHangingChild.close();
-	await exited;
-	assert.deepEqual(hostWithHangingChild.getOwnershipSnapshot(), {});
-	assert.ok(processToKill.exitCode !== null || processToKill.signalCode !== null);
-
-	const writerHost = new SubagentLaunchHost({ parentSessionId: "writers", agentDir: tempDir, spawnProcess: hangingSpawn, cmux: false });
-	try {
-		const unknownWriter = await writerHost.launch({
-			parentSessionId: "writers",
-			owner: "unknown-writer",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "unknown writer",
-			tools: ["read", "unknown-tool"],
-			cavemanEnabled: true,
-			fileOwnership: ["shared/**"],
-			childSessionId: "unknown-writer-child",
-		});
-		void unknownWriter.result.catch(() => undefined);
-		assert.deepEqual(writerHost.getOwnershipSnapshot(), { "unknown-writer": ["shared/**"] });
-		const writerProcess = hangingProcess;
-		assert.ok(writerProcess);
-		await assert.rejects(writerHost.launch({
-			parentSessionId: "writers",
-			owner: "known-writer",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "known writer",
-			tools: ["read", "edit"],
-			cavemanEnabled: true,
-			fileOwnership: ["shared/file.ts"],
-			childSessionId: "known-writer-child",
-		}), /ownership overlaps unknown-writer/);
-		assert.deepEqual(writerHost.getOwnershipSnapshot(), { "unknown-writer": ["shared/**"] });
-		const writerExited = once(writerProcess, "exit");
-		await writerHost.close();
-		await writerExited;
-	} finally {
-		await writerHost.close();
-	}
-
-	const disconnectSurface = { surface: "surface:disconnect", readScreen: async () => "", close: async () => undefined };
-	let disconnectToken = "";
-	const disconnectHost = new SubagentLaunchHost({
-		parentSessionId: "disconnect",
-		agentDir: tempDir,
-		cmux: { launch: async ({ env }: { env: Record<string, string> }) => {
-			disconnectToken = env.PI_SUBAGENT_TOKEN;
-			return { transport: "cmux" as const, surface: disconnectSurface };
-		} } as unknown as CmuxTransport,
-	});
-	try {
-		const disconnectedRun = await disconnectHost.launch({
-			parentSessionId: "disconnect",
-			owner: "worker-disconnect",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "disconnect IPC only",
-			tools: ["read"],
-			cavemanEnabled: true,
-			fileOwnership: [],
-			childSessionId: "child-disconnect",
-		});
-		assert.ok(disconnectToken);
-		const disconnectClient = await SubagentIpcClient.connect({ socketPath: disconnectHost.server.socketPath, token: disconnectToken, owner: "worker-disconnect" });
-		let runSettled = false;
-		void disconnectedRun.result.then(() => { runSettled = true; }, () => { runSettled = true; });
-		await disconnectClient.close();
-		await new Promise((resolve) => setTimeout(resolve, 25));
-		assert.equal(runSettled, false);
-		await disconnectHost.close();
-		await assert.rejects(disconnectedRun.result, /host closed/);
-	} finally {
-		await disconnectHost.close();
-	}
-
-	mock.timers.enable();
-	try {
-		const healthySurface = {
-			surface: "surface:healthy",
-			readScreen: async () => "healthy output",
-			close: async () => undefined,
-		};
-		let healthyToken = "";
-		const healthyCmux = {
-			launch: async ({ env }: { env: Record<string, string> }) => {
-				healthyToken = env.PI_SUBAGENT_TOKEN;
-				return { transport: "cmux" as const, surface: healthySurface };
-			},
-		} as unknown as CmuxTransport;
-		const healthyHost = new SubagentLaunchHost({ parentSessionId: "healthy", agentDir: tempDir, cmux: healthyCmux });
-		const healthy = await healthyHost.launch({
-			parentSessionId: "healthy",
-			owner: "worker-healthy",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "healthy handshake",
-			tools: ["read"],
-			cavemanEnabled: true,
-			fileOwnership: ["src/**"],
-			childSessionId: "child-healthy",
-		});
-		assert.ok(healthyToken);
-		const healthyClient = await SubagentIpcClient.connect({ socketPath: healthyHost.server.socketPath, token: healthyToken, owner: "worker-healthy" });
-		assert.deepEqual(await healthyClient.request("ownership", { action: "acquire", paths: ["src/file.ts", " src/file.ts "] }), { ok: true, paths: ["src/file.ts"] });
-		assert.deepEqual(healthyHost.getOwnershipSnapshot(), {});
-		mock.timers.tick(30_000);
-		await healthyClient.request("result", { childSessionId: "child-healthy", text: "healthy result" });
-		assert.deepEqual(await healthy.result, { owner: "worker-healthy", childSessionId: "child-healthy", text: "healthy result" });
-		await healthyClient.close();
-		await healthyHost.close();
-
-		const activitySurface = {
-			surface: "surface:activity",
-			readScreen: async () => "activity output",
-			close: async () => undefined,
-		};
-		let activityToken = "";
-		const activityCmux = {
-			launch: async ({ env }: { env: Record<string, string> }) => {
-				activityToken = env.PI_SUBAGENT_TOKEN;
-				return { transport: "cmux" as const, surface: activitySurface };
-			},
-		} as unknown as CmuxTransport;
-		const activityHost = new SubagentLaunchHost({
-			parentSessionId: "activity",
-			agentDir: tempDir,
-			cmux: activityCmux,
-			timeoutPolicy: { idleTimeoutMs: 100, maxTotalMs: 10_000 },
-		});
-		const activity = await activityHost.launch({
-			parentSessionId: "activity",
-			owner: "worker-activity",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "stay active",
-			tools: ["read"],
-			cavemanEnabled: true,
-			childSessionId: "child-activity",
-		});
-		assert.ok(activityToken);
-		const activityClient = await SubagentIpcClient.connect({ socketPath: activityHost.server.socketPath, token: activityToken, owner: "worker-activity" });
-		mock.timers.tick(90);
-		assert.deepEqual(await activityClient.request("activity"), { accepted: true });
-		mock.timers.tick(90);
-		await activityClient.request("result", { childSessionId: "child-activity", text: "active result" });
-		assert.deepEqual(await activity.result, { owner: "worker-activity", childSessionId: "child-activity", text: "active result" });
-		await activityClient.close();
-		await activityHost.close();
-
-		let timeoutSurfaceClosed = false;
-		const timeoutSurface = {
-			surface: "surface:timeout",
-			readScreen: async () => "booting output",
-			close: async () => { timeoutSurfaceClosed = true; },
-		};
-		const timeoutCmux = {
-			launch: async () => ({ transport: "cmux" as const, surface: timeoutSurface }),
-		} as unknown as CmuxTransport;
-		const reapedOwners: string[] = [];
-		const timeoutHost = new SubagentLaunchHost({
-			parentSessionId: "timeout",
-			agentDir: tempDir,
-			cmux: timeoutCmux,
-			onBrowser: (owner) => { reapedOwners.push(owner); },
-		});
-		const timedOut = await timeoutHost.launch({
-			parentSessionId: "timeout",
-			owner: "worker-timeout",
-			role: "worker",
-			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
-			cwd: process.cwd(),
-			task: "missing handshake",
-			tools: ["read", "browser_close"],
-			cavemanEnabled: true,
-			childSessionId: "child-timeout",
-		});
-		mock.timers.tick(30_000);
-		await assert.rejects(timedOut.result, (error: unknown) => {
-			const failure = error as { message: string; info: { transport: string; logPath: string; tail: string } };
-			assert.equal(failure.info.transport, "cmux");
-			assert.equal(failure.info.logPath, timedOut.logPath);
-			assert.match(failure.message, /launched but never connected/);
-			assert.match(failure.info.tail, /booting output/);
-			return true;
-		});
-		assert.equal(timeoutSurfaceClosed, true);
-		assert.deepEqual(reapedOwners, ["worker-timeout"]);
-		assert.deepEqual(timeoutHost.getOwnershipSnapshot(), {});
-		assert.ok(fs.existsSync(timedOut.logPath));
-		assert.match(fs.readFileSync(timedOut.logPath, "utf8"), /booting output/);
-		await timeoutHost.close();
-	} finally {
-		mock.timers.reset();
-	}
-	await host.close();
 	console.log("subagent launch tests passed");
 } finally {
 	fs.rmSync(tempDir, { recursive: true, force: true });
