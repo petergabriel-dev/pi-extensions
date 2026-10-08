@@ -16,7 +16,7 @@ import type { AgentRole, AgentConfig } from "./agents.ts";
 import { normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
 import { acquireSubagentSlot, type AcquiredSubagentSlot } from "./concurrency.ts";
 import { subagentToolsMutateRepository, validateSubagentDepth } from "./policy.ts";
-import { createSubagentWatchdog, type SubagentWatchdog } from "./timeout.ts";
+import { createSubagentWatchdog, type SubagentWatchdog, type SubagentWatchdogClock } from "./timeout.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_TOTAL_MS, type SubagentTimeoutPolicy } from "./timeout-policy.ts";
 import {
 	resolveSubagentSocketPath,
@@ -117,6 +117,8 @@ export interface SubagentLaunchHostOptions {
 	logger?: (event: string, details?: Record<string, unknown>) => void;
 	/** Test-only process injection; production always uses process.execPath and the parent Pi CLI script. */
 	spawnProcess?: SubagentSpawnProcess;
+	/** Test-only deterministic watchdog clock. */
+	watchdogClock?: SubagentWatchdogClock;
 	onSpawn?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 	onBrowser?: (owner: string, payload: unknown) => Promise<unknown> | unknown;
 	timeoutPolicy?: SubagentTimeoutPolicy;
@@ -580,6 +582,7 @@ export class SubagentLaunchHost {
 		run.watchdog = createSubagentWatchdog({
 			idleMs: this.options.timeoutPolicy?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
 			maxTotalMs: this.options.timeoutPolicy?.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS,
+			clock: this.options.watchdogClock,
 			onFire: (kind) => finishChild(new SubagentRpcError("process", `Subagent ${loadout.owner} ${kind === "idle" ? "idle" : "maximum total"} timeout exceeded.`)),
 		});
 		const abort = () => this.abortRun(run, loadout.owner);

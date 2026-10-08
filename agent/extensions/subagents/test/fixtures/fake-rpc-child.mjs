@@ -48,7 +48,7 @@ function sendIpcFrame(socket, record) {
 	socket.write(frame);
 }
 
-function startBrowserRequest() {
+function startIpcRequest(type, requestId, payload) {
 	const socket = net.createConnection(process.env.PI_SUBAGENT_SOCKET);
 	let ipcBuffer = Buffer.alloc(0);
 	socket.on("error", () => undefined);
@@ -72,17 +72,25 @@ function startBrowserRequest() {
 				sendIpcFrame(socket, {
 					kind: "request",
 					token: process.env.PI_SUBAGENT_TOKEN,
-					requestId: "browser",
+					requestId,
 					owner: process.env.PI_SUBAGENT_OWNER,
-					type: "browser",
-					payload: { tool: "browser_console", params: { clear: false } },
+					type,
+					payload,
 				});
-			} else if (response.requestId === "browser") {
+			} else if (response.requestId === requestId) {
 				socket.end();
 				finishRun();
 			}
 		}
 	});
+}
+
+function startBrowserRequest() {
+	startIpcRequest("browser", "browser", { tool: "browser_console", params: { clear: false } });
+}
+
+function startSpawnRequest() {
+	startIpcRequest("spawn", "spawn", { agentName: "explorer", task: "nested task" });
 }
 
 function handleCommand(command) {
@@ -124,6 +132,10 @@ function handleCommand(command) {
 		}
 		if (mode === "browser") {
 			startBrowserRequest();
+			return;
+		}
+		if (mode === "nested-spawn") {
+			startSpawnRequest();
 			return;
 		}
 		if (mode === "exit-before-settle") {
