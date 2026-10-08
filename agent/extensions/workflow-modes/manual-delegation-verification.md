@@ -11,46 +11,41 @@ Scope: behavioral acceptance for async delegation guidance and the out-of-proces
 
 ## Automated verification
 
-Run from repository root with scratch writes outside the repository:
+Run from repository root after bootstrap:
 
 ```bash
-cd agent/extensions/subagents
-TMPDIR=/tmp npm test
-npm run typecheck
-cd ../../..
-npm run check:workspace
-npm run check:package
+npm --prefix agent/extensions/subagents test
+npm --prefix agent/extensions/subagents run typecheck
+npm run check
 git diff --check
 git status --short
 ```
 
-The subagent suite covers diagnostics permissions/bounds/redaction, bounded versus no-deadline IPC, child question/nested-spawn behavior, cmux fallback and screen capture, progress state, failure follow-up, ownership, browser proxying, and teardown.
+The subagent suite covers RPC framing/commands/UI, per-run IPC authentication and lazy connection, child question/nested-spawn behavior, lifecycle races, watchdogs, progress, failure follow-up, ownership, browser proxying, and teardown. Root `npm test` runs the full configured gate after bootstrap; it does not run the installed-Pi smoke.
 
-## Live cmux acceptance
+## Live RPC acceptance
 
-Run after `/reload` in the active cmux Pi session:
+From repository root, run:
 
-1. Confirm `cmux identify --json` and `cmux new-surface --help` work.
-2. Launch one architecture-audit `subagent` with `agent: "worker"`, no edit request, and explicit ownership if needed. Audit task must call `ask_question`, wait for parent input, then report exactly three findings.
-3. Confirm launch output identifies `cmux` and reports a Pi-owned diagnostics log path. The new tab must be named and unfocused.
-4. Call `subagents_list`. Confirm owner, `running`/`waiting` state, transport, log path, and question ID appear.
-5. Leave question unanswered for at least 10 seconds. Confirm child remains `waiting`; parked time must not trigger idle or max-total watchdogs.
-6. Reply with matching `subagent_message` owner and question ID. Confirm child resumes and final result arrives as one parent follow-up.
-7. Confirm final result closes the cmux surface and no child or failed tab remains.
+```bash
+npm run smoke:subagents
+```
+
+The smoke resolves installed Pi through global npm metadata, binds its scripted endpoint and test page to loopback, filters inherited Pi/API-secret environment variables, creates a fresh `0700` `PI_CODING_AGENT_DIR` instead of normal `~/.pi` state, and removes it after the run. It exercises parent-to-explorer launch, a child question answered with `subagent_message`, worker-to-nested-explorer spawn, and browser proxy navigation to a local page. It verifies child-process cleanup and fails if the expected final response does not arrive within 120 seconds. Expect `Subagent RPC smoke passed against installed Pi <version>` and `Browser smoke: PASS`; if Chromium is unavailable, the smoke must print an explicit `Browser smoke: SKIP` while the other checks pass. This checkout's successful live run used installed Pi 1.1.0.
+
+For classified failure-path acceptance, run `npm run smoke:subagents -- --break-final`; expect a nonzero exit with `[protocol]`, no leftover child process, and temporary state cleanup.
 
 ## Failure acceptance
 
-Use the focused fake-child and injected-cmux tests, or an equivalent disposable run, to force stderr output followed by disconnect. Confirm exactly one failure follow-up includes transport, secure log path, actionable error, and bounded recent output. Confirm the exact IPC token is absent from log, tail, screen snapshot, and displayed failure. Confirm failed cmux surfaces auto-close and headless fallback reports its reason. Do not retry automatically.
+The fake RPC child and lifecycle suite cover pre-settle process exit, readiness timeout, handled prompts, abort, late settlement, and side-channel disconnect. Confirm failures remain classified, include a secure log path and bounded tail, and never expose the per-run token. A side-channel disconnect must not fail the child run. Do not retry automatically.
 
 ## Teardown
 
-After every live run, inspect only disposable runtime state and child processes:
+The smoke verifies child-process exit and removes its temporary agent directory. For manual runs, inspect only disposable child processes and Git state:
 
 ```bash
 ps -axo pid=,command= | grep '[a]gent/extensions/subagents/child.ts' || true
-find "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/subagents" -type s -print 2>/dev/null || true
-cmux list-pane-surfaces --json 2>/dev/null || true
 git status --short
 ```
 
-Terminate only listed disposable child PIDs. Remove only disposable `PI_CODING_AGENT_DIR` contents after children exit. Close any surface left by a failed manual run with `cmux close-surface --surface <surface-ref>`. Runtime sockets, loadouts, logs, sessions, and credentials never belong in Git.
+Terminate only listed disposable child PIDs. Remove only a disposable `PI_CODING_AGENT_DIR` after children exit; never delete normal user state. Runtime sockets, loadouts, logs, sessions, and credentials never belong in Git.

@@ -15,7 +15,7 @@ pi remove npm:@lopezpetergabriel/pi-extensions
 
 Install commands pin the exact `@0.7.1` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
-The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Production subagent launches require `cmux` on `PATH`; there is no fallback transport. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
+The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Subagent children launch through the parent Pi CLI in RPC mode; no separate terminal transport binary is required. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
 The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README.md, LICENSE, CHANGELOG.md, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
@@ -119,59 +119,36 @@ Use `--no-session` for a disposable parent session:
 
 `--no-session` disables session persistence only. Commands such as `/login`, `/settings`, `/trust`, `/remember`, and bridge `save_memory` still target shared Pi-owned user state unless `PI_CODING_AGENT_DIR` is overridden.
 
-## Async subagent workflow
+## RPC subagent workflow
 
-`subagent` starts child Pi as a separate process and returns immediately. Parent writes authenticated runtime state outside the repository:
+`subagent` starts a child Pi process and returns immediately. The parent launches it with `process.execPath` and the parent CLI script resolved from `process.argv[1]`, using `--mode rpc`; it does not resolve `pi` from `PATH`. The child receives `--no-extensions`, the module-relative child extension, the exact `--tools` allowlist, `--append-system-prompt`, `--session-id`, `--no-approve`, and optional model/thinking settings. The parent sends the task through RPC `prompt`, not as a positional CLI argument.
 
-- Unix socket: `$PI_CODING_AGENT_DIR/subagents/<parent-session>.sock`, mode `0600`.
-- Loadout: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.json`, mode `0600`.
-- Diagnostics: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.log`, mode `0600`; directory mode `0700`; persistent log cap 1 MiB; recent-output tail cap 8 KiB. Child stdout/stderr and failed cmux screen capture are token-redacted before persistence or display. No full environment/auth data is logged.
-- Child process: interactive `pi --no-extensions -e <resolved-agent/extensions/subagents/child.ts> --tools <allowlist> --append-system-prompt <agent-prompt> --session-id <child-session> --no-approve [--model <provider/id>] [--thinking <level>] <task>` launched in cmux.
+Parent-owned runtime state stays outside the repository:
 
-Normal IPC requests retain bounded client deadlines. Parent-parked `question` and nested `spawn` requests explicitly use no-deadline waits; socket disconnect, host close, cancellation, and owner reaping still reject them. No-deadline mode is not valid for ordinary messages, results, browser, ownership, or hello requests.
+- Unix socket: `$PI_CODING_AGENT_DIR/subagents/<parent-session>.sock`; parent-session socket mode `0600`, directory mode `0700`.
+- Loadout: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.json`; file mode `0600`.
+- Diagnostics: `$PI_CODING_AGENT_DIR/subagents/<parent-session>/<owner>.log`; file mode `0600`, directory mode `0700`, persistent cap 1 MiB. Recent event/text tail is capped at 8 KiB. Child stderr is piped only to this log, never the parent TTY; the exact token is redacted from logs, tail, and failure text, and no full environment/auth data is logged.
 
-Do not hand-run that child command without a live parent socket, random token, owner, and loadout. Use the parent tool for normal launches. `resolveSubagentExtensionPath()` derives the source or npm path from module location, so do not hard-code it.
+The parent registers a random IPC token for each run, bound to that owner. The first `hello` frame authenticates the pair; it does not indicate child readiness. Child IPC connects lazily for nested `spawn`, owner-scoped `browser`, and `ownership` requests. Frames are capped at 256 KiB. Questions, follow-ups, results, and activity use RPC; a side-channel disconnect does not fail a run. Only nested `spawn` may use `noDeadline`.
 
-Subagent tests avoid external cmux surfaces. They use the explicit `cmux: false` plus `spawnProcess` seam or inject failing cmux runners, then verify IPC, result delivery, question parking/resume, loadout resume, ownership cleanup, browser proxy routing, and child teardown:
+The RPC `prompt` response is readiness and is bounded to 30 seconds. A missing `disposition` means `started`; `handled` means no run started and fails launch. Process exit before `agent_settled` is a classified failure. Final result text is fetched with `get_last_assistant_text` only after `agent_settled`; `get_state` supplies the child session file. `subagent_message` sends RPC `follow_up`. Child `ask_question` uses RPC extension UI without a dialog timeout; `undefined` becomes a cancellation tool error.
+
+Every supported RPC event touches the watchdog. Open tool-call IDs pause idle timeout while max-total continues; parent question waiting pauses both budgets. Every launched run settles exactly once and releases its RPC process, ownership lock, concurrency slot, watchdog, browser page, pending question/IPC requests, and per-run token. RPC children exit on stdin EOF. Cancellation sends RPC `abort`, closes stdin, then escalates to `SIGTERM` after one second and `SIGKILL` 500ms later. Do not hand-run the child command without the parent loadout and socket; use the parent tool for launches.
+
+Run focused tests from the repository root:
 
 ```bash
 npm --prefix agent/extensions/subagents test
 npm --prefix agent/extensions/subagents run typecheck
 ```
 
-To test from a disposable Pi state, keep sessions, sockets, loadouts, logs, and credentials outside the repository:
+Run the installed-Pi live smoke separately:
 
 ```bash
-umask 077
-SUBAGENT_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-subagents.XXXXXX")"
-trap 'rm -rf "$SUBAGENT_TEST_DIR"' EXIT INT TERM
-PI_CODING_AGENT_DIR="$SUBAGENT_TEST_DIR" ./bin/pi-workspace --no-session
+npm run smoke:subagents
 ```
 
-Inside cmux, verify CLI reachability before launching:
-
-```bash
-cmux identify --json
-cmux new-surface --help
-```
-
-`CmuxTransport` is required for production launches: it creates an unfocused terminal surface, renames its tab, polls `read-screen` for a shell prompt, then sends the quoted interactive child command without `--print`. Command delivery is followed by a bounded 30-second child `hello` handshake; missing hello fails the run with captured diagnostics. Start output, progress, list output, and failure follow-up identify cmux transport plus diagnostics log path. Binary lookup, socket, auth, or surface failures produce classified errors and close partial surfaces. `spawnProcess` is reserved for explicit test injection. Never assume `new-surface` accepts a command argument; command delivery uses `cmux send` after readiness.
-
-After any manual/live run, confirm teardown. Child processes must match child extension path, not parent Pi:
-
-```bash
-ps -axo pid=,command= | grep '[a]gent/extensions/subagents/child.ts' || true
-find "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/subagents" -type s -print 2>/dev/null || true
-git status --short
-```
-
-If a stray child remains, terminate only listed child PIDs, then recheck:
-
-```bash
-ps -axo pid=,command= | grep '[a]gent/extensions/subagents/child.ts' | awk '{print $1}' | while read -r pid; do kill "$pid"; done
-```
-
-Do not delete broad `.pi/` state or normal user sessions. Remove only the disposable `PI_CODING_AGENT_DIR` after all child processes exit. Clean cmux tabs with `cmux close-surface --surface <surface-ref>` when host teardown did not close them. A failed run should leave no failed tab: use its reported log path and bounded tail for diagnosis, then retry only through an explicit new `subagent` or `subagent_message` action.
+The smoke resolves installed Pi through global npm metadata, binds its scripted endpoint and test page to loopback, filters inherited Pi/API-secret environment variables, uses a fresh `0700` `PI_CODING_AGENT_DIR` instead of normal `~/.pi` state, and deletes that directory afterward. It exercises parent-to-explorer launch, question/`subagent_message` round-trip, worker-to-nested-explorer spawn, and browser proxy navigation to a local page. It verifies no child processes remain; its main-response deadline is 120 seconds. This checkout's smoke passed on installed Pi 1.1.0; unit/type tests use vendored Pi 0.80.9. Browser reports explicit `PASS` or `SKIP` when Chromium is unavailable. The smoke is not part of `npm test`; `npm test` remains the full automated gate after `npm run bootstrap`.
 
 ## Standard verification gate
 
@@ -186,7 +163,7 @@ GitHub Actions runs the same bootstrap and `npm test` gate for pull requests and
 This runs:
 
 1. Workspace inventory/integrity check.
-2. Focused ask-user-question queue test, then CCC, engineering-docs, personal-memory, subagent-timeout, and workflow-mode tests.
+2. Focused ask-user-question queue test, then CCC, engineering-docs, personal-memory, subagent RPC/timeout/lifecycle, and workflow-mode tests.
 3. Configured TypeScript checks.
 4. Cursor read-only hook and neutral Cursor-kit tests.
 
@@ -227,7 +204,7 @@ done
 | `filechanges` | Package load/inventory; no dedicated unit suite | Make disposable `edit`/`write`, inspect cumulative diff, verify accept keeps and decline restores/deletes. |
 | `notify` | Package load/inventory; no dedicated unit suite | Finish one assistant turn and confirm terminal-native “Ready for input” notification. |
 | `personal-memory` | `npm --prefix agent/extensions/personal-memory test` and `npm --prefix agent/extensions/personal-memory run typecheck` | In isolated Pi home, save slug, inspect generated `MEMORY.md`, fetch one entry. |
-| `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | Debug/live role runs only when explicitly needed; worker must refuse outside Build. |
+| `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | `npm run smoke:subagents` exercises installed-Pi RPC launch, question round-trip, nested spawn, and browser proxy; browser reports explicit PASS/SKIP. Smoke is separate from `npm test`. |
 | `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
 | `ask-user-question` | `npm run test:ask-user-question` | Queue test covers FIFO order, batch cancellation, abort re-check, drain reset, and per-question Skip progression. |
 | Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff plus `read_plan_tasks`/`tick_plan_task`. |

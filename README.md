@@ -4,11 +4,10 @@
 
 ## Requirements
 
-- Pi CLI on `PATH`
+- Pi CLI on `PATH` (subagent children use its RPC mode)
 - Node.js `>=22.19.0`
 - npm and network access for the first bootstrap and uncached `npx` test dependencies
 - Optional: `ccc` for `ccc_search`; `gh` for live Review-mode GitHub checks
-- `cmux` on `PATH` for production subagent launches (required; no fallback transport)
 - For browser verification: Chromium, installed with `cd agent/extensions/browser && npx playwright install chromium`
 
 ## Install and try the package
@@ -76,7 +75,7 @@ The focused commands are useful while iterating; `npm test` runs the complete co
 - `filechanges` — branch-local tracking and accept/decline rollback for successful Pi `edit`/`write` mutations.
 - `notify` — terminal-native “Ready for input” notifications.
 - `personal-memory` — user-global indexed memory and `/remember`.
-- `subagents` — isolated child Pi processes with tool, ownership, and workflow-mode policy.
+- `subagents` — isolated RPC child Pi processes with tool, ownership, and workflow-mode policy.
 - `workflow-modes` — `/mode`, `/plan`, `/caveman`, prompt composition, and read-only/mutation gates.
 
 ### Skills and agents
