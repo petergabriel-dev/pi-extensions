@@ -52,7 +52,6 @@ fs.writeFileSync(loadoutPath, JSON.stringify(loadout));
 
 const server = new SubagentIpcServer({
 	socketPath,
-	token: "child-test-token",
 	onHello: (_owner, payload) => { helloPayloads.push(payload); },
 	onRequest: async (request) => {
 		if (request.type === "question") {
@@ -73,6 +72,7 @@ const server = new SubagentIpcServer({
 		return undefined;
 	},
 });
+const childToken = server.registerRun("child-owner");
 const fakePi = {
 	on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
 		handlers.set(name, handler);
@@ -86,7 +86,7 @@ const fakePi = {
 };
 
 process.env.PI_SUBAGENT_SOCKET = socketPath;
-process.env.PI_SUBAGENT_TOKEN = server.token;
+process.env.PI_SUBAGENT_TOKEN = childToken;
 process.env.PI_SUBAGENT_OWNER = "child-owner";
 process.env.PI_SUBAGENT_CHILD_SESSION_ID = "child-session";
 process.env.PI_SUBAGENT_LOADOUT = loadoutPath;

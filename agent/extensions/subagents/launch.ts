@@ -160,6 +160,7 @@ interface RunState {
 	tools: string[];
 	watchdog?: SubagentWatchdog;
 	childSessionId: string;
+	ipcToken: string;
 	child?: ChildProcess;
 	surface?: CmuxSurfaceHandle;
 	loadoutPath: string;
@@ -423,7 +424,7 @@ export class SubagentLaunchHost {
 		const run = this.runs.get(owner);
 		if (!run || run.resultSettled || !run.surface) return undefined;
 		const boundedLines = Number.isInteger(lines) ? Math.max(1, Math.min(100, lines)) : 20;
-		let output = redactSubagentText(await run.surface.readScreen(boundedLines), this.server.token);
+		let output = redactSubagentText(await run.surface.readScreen(boundedLines), run.ipcToken);
 		while (Buffer.byteLength(output, "utf8") > MAX_SUBAGENT_TAIL_BYTES) output = output.slice(1);
 		return output || undefined;
 	}
@@ -443,6 +444,7 @@ export class SubagentLaunchHost {
 			// Result cleanup releases the run before the child socket necessarily emits close.
 			await this.server.closeOwner(loadout.owner);
 		}
+		await this.server.revokeRun(loadout.owner);
 		const args = buildSubagentCommandArgs(loadout, runtime.task);
 		if (subagentToolsMutateRepository(loadout.tools)) {
 			const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
@@ -455,9 +457,17 @@ export class SubagentLaunchHost {
 			this.ownership.release(loadout.owner);
 			throw error;
 		}
+		let ipcToken: string;
+		try {
+			ipcToken = this.server.registerRun(loadout.owner);
+		} catch (error) {
+			this.ownership.release(loadout.owner);
+			slot.release();
+			throw error;
+		}
 		const environment: Record<string, string> = {
 			PI_SUBAGENT_SOCKET: this.server.socketPath,
-			PI_SUBAGENT_TOKEN: this.server.token,
+			PI_SUBAGENT_TOKEN: ipcToken,
 			PI_SUBAGENT_OWNER: loadout.owner,
 			PI_SUBAGENT_PARENT_SESSION_ID: loadout.parentSessionId,
 			PI_SUBAGENT_CHILD_SESSION_ID: loadout.childSessionId,
@@ -465,8 +475,9 @@ export class SubagentLaunchHost {
 		};
 		let diagnostics: SubagentDiagnostics;
 		try {
-			diagnostics = createSubagentDiagnostics({ parentSessionId: loadout.parentSessionId, owner: loadout.owner, token: this.server.token, agentDir: this.options.agentDir });
+			diagnostics = createSubagentDiagnostics({ parentSessionId: loadout.parentSessionId, owner: loadout.owner, token: ipcToken, agentDir: this.options.agentDir });
 		} catch (error) {
+			void this.server.revokeRun(loadout.owner).catch(() => undefined);
 			this.ownership.release(loadout.owner);
 			slot.release();
 			throw error;
@@ -482,6 +493,7 @@ export class SubagentLaunchHost {
 			options: runtime,
 			tools: loadout.tools,
 			childSessionId: loadout.childSessionId,
+			ipcToken,
 			loadoutPath,
 			resolveResult,
 			rejectResult,
@@ -498,6 +510,10 @@ export class SubagentLaunchHost {
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
 			run.slot?.release();
+			void this.server.revokeRun(loadout.owner).catch((error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				this.options.logger?.("ipc_revoke_failed", { owner: loadout.owner, error: redactSubagentText(message, run.ipcToken) });
+			});
 		};
 		run.cleanup = releaseRun;
 		const finishChild = (error?: Error) => {
@@ -532,7 +548,7 @@ export class SubagentLaunchHost {
 				surface = outcome.surface;
 			}
 		} catch (error) {
-			cmuxFailureReason = redactSubagentText(error instanceof Error ? error.message : String(error), this.server.token);
+			cmuxFailureReason = redactSubagentText(error instanceof Error ? error.message : String(error), ipcToken);
 		}
 		run.transport = transport;
 		run.cmuxFailureReason = cmuxFailureReason;
@@ -657,6 +673,10 @@ export class SubagentLaunchHost {
 	private async handleRequest(request: SubagentIpcRequest, _connection: unknown): Promise<unknown> {
 		const run = this.runs.get(request.owner);
 		if (!run) throw new Error(`Unknown subagent owner: ${request.owner}.`);
+		if (run.resultSettled) {
+			if (request.type === "result") return { accepted: true };
+			throw new Error(`Subagent ${request.owner} is already settled.`);
+		}
 		run.watchdog?.touch();
 		if (request.type === "activity") return { accepted: true };
 		if (request.type === "spawn") {
@@ -704,6 +724,7 @@ export class SubagentLaunchHost {
 				this.updateSessionFile(run, result.sessionFile);
 				clearHandshakeDeadline(run);
 				run.resultSettled = true;
+				void this.server.revokeRun(request.owner, { disconnect: false });
 				run.watchdog?.cancel();
 				run.diagnostics.close();
 				run.resolveResult(result);
@@ -711,7 +732,8 @@ export class SubagentLaunchHost {
 				this.reapBrowserPage(run, request.owner);
 				const surface = run.surface;
 				run.surface = undefined;
-				run.cleanup?.();
+				// Let the IPC layer send the result ACK before closing its socket.
+				setImmediate(() => run.cleanup?.());
 				if (surface) void surface.close();
 			}
 			return { accepted: true };
@@ -721,14 +743,14 @@ export class SubagentLaunchHost {
 
 	private async finalizeFailure(run: RunState, owner: string, error: Error): Promise<void> {
 		clearHandshakeDeadline(run);
-		const safeError = redactSubagentText(error.message, this.server.token);
+		const safeError = redactSubagentText(error.message, run.ipcToken);
 		if (run.surface) {
 			try {
 				run.diagnostics.append("cmux", await run.surface.readScreen(20));
 			} catch (captureError) {
 				this.options.logger?.("cmux_capture_failed", {
 					owner,
-					error: redactSubagentText(captureError instanceof Error ? captureError.message : String(captureError), this.server.token),
+					error: redactSubagentText(captureError instanceof Error ? captureError.message : String(captureError), run.ipcToken),
 				});
 			}
 		}
@@ -750,11 +772,11 @@ export class SubagentLaunchHost {
 	private handleDisconnect(owner: string | undefined, error?: Error): void {
 		if (!owner) return;
 		const run = this.runs.get(owner);
-		if (!run || run.resultSettled || run.failureFinalizing) return;
-		run.failureFinalizing = true;
-		run.resultSettled = true;
-		const disconnectError = error ?? new Error(`Subagent ${owner} disconnected.`);
+		if (!run || run.resultSettled) return;
+		const disconnectError = error
+			? new Error(redactSubagentText(error.message, run.ipcToken))
+			: new Error(`Subagent ${owner} IPC connection closed.`);
 		run.pendingQuestion?.reject(disconnectError);
-		void this.finalizeFailure(run, owner, disconnectError);
+		this.options.logger?.("ipc_disconnected", { owner });
 	}
 }

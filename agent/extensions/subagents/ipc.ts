@@ -10,7 +10,10 @@ const IPC_SOCKET_MODE = 0o600;
 const MAX_IDENTIFIER_BYTES = 128;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
-export type SubagentIpcMessageType = "hello" | "ownership" | "browser" | "message" | "question" | "result" | "spawn" | "activity";
+export type SubagentIpcCoreMessageType = "hello" | "ownership" | "browser" | "spawn";
+export type SubagentIpcLegacyMessageType = "message" | "question" | "result" | "activity";
+// ponytail: Keep legacy IPC types until tasks 4–5 migrate child/launch callers; remove them after RPC integration.
+export type SubagentIpcMessageType = SubagentIpcCoreMessageType | SubagentIpcLegacyMessageType;
 export type SubagentIpcLogger = (event: string, details?: Record<string, unknown>) => void;
 
 export interface SubagentIpcRequest<T = unknown> {
@@ -46,26 +49,27 @@ export interface SubagentIpcResponseOptions {
 }
 
 export interface SubagentIpcConnectionOptions {
-	token: string;
+	token?: string;
 	owner?: string;
 	logger?: SubagentIpcLogger;
 	onRequest?: (request: SubagentIpcRequest, connection: SubagentIpcConnection) => Promise<unknown> | unknown;
+	/** ponytail: Legacy hello metadata remains until task 5 removes the handshake. */
 	onHello?: (owner: string, payload: unknown) => void;
-	onOwner?: (owner: string, connection: SubagentIpcConnection) => boolean;
+	onAuthenticate?: (owner: string, token: string, connection: SubagentIpcConnection) => boolean;
 	onDisconnect?: (owner: string | undefined, error?: Error) => void;
 }
 
-export interface SubagentIpcServerOptions extends Omit<SubagentIpcConnectionOptions, "token" | "owner" | "onOwner" | "onDisconnect"> {
-	token?: string;
+export interface SubagentIpcServerOptions extends Omit<SubagentIpcConnectionOptions, "token" | "owner" | "onAuthenticate" | "onDisconnect"> {
 	socketPath?: string;
 	sessionId?: string;
 	agentDir?: string;
 	onDisconnect?: (owner: string | undefined, error?: Error) => void;
 }
 
-export interface SubagentIpcClientOptions extends Omit<SubagentIpcConnectionOptions, "onOwner"> {
+export interface SubagentIpcClientOptions extends Omit<SubagentIpcConnectionOptions, "onAuthenticate"> {
 	socketPath: string;
 	owner: string;
+	token: string;
 	connectTimeoutMs?: number;
 	helloPayload?: unknown;
 }
@@ -137,6 +141,16 @@ function boundedString(value: unknown, maxBytes: number): value is string {
 	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maxBytes;
 }
 
+function tokensMatch(expected: string | undefined, actual: string): boolean {
+	if (!expected) return false;
+	const expectedBytes = Buffer.from(expected, "utf8");
+	const actualBytes = Buffer.from(actual, "utf8");
+	const comparable = Buffer.alloc(expectedBytes.byteLength);
+	actualBytes.copy(comparable, 0, 0, expectedBytes.byteLength);
+	const equal = crypto.timingSafeEqual(expectedBytes, comparable);
+	return equal && actualBytes.byteLength === expectedBytes.byteLength;
+}
+
 function validateIdentifier(value: string, label: string): void {
 	if (!boundedString(value, MAX_IDENTIFIER_BYTES) || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value)) {
 		throw new Error(`${label} must contain only letters, numbers, underscores, and hyphens.`);
@@ -180,12 +194,15 @@ export class SubagentIpcConnection {
 	private readonly pending = new Map<string, PendingRequest>();
 	private readonly logger: SubagentIpcLogger;
 	private ownerValue: string | undefined;
+	private tokenValue: string | undefined;
 	private closed = false;
+	private revoked = false;
 	private disconnectError: Error | undefined;
 
 	constructor(private readonly socket: net.Socket, private readonly options: SubagentIpcConnectionOptions) {
 		this.logger = options.logger ?? defaultLogger;
 		this.ownerValue = options.owner;
+		this.tokenValue = options.token;
 		socket.setNoDelay(true);
 		socket.on("data", (chunk) => this.receive(chunk));
 		socket.on("error", (error) => this.finish(errorFrom(error)));
@@ -200,17 +217,25 @@ export class SubagentIpcConnection {
 		return this.closed;
 	}
 
+	revoke(): void {
+		if (this.revoked) return;
+		this.revoked = true;
+		this.socket.destroy();
+	}
+
 	async request<T = unknown>(type: SubagentIpcMessageType, payload: unknown = {}, options: SubagentIpcRequestOptions = {}): Promise<T> {
-		if (this.closed) throw this.disconnectError ?? new SubagentIpcDisconnectedError();
+		if (this.closed || this.revoked) throw this.disconnectError ?? new SubagentIpcDisconnectedError();
 		if (!isMessageType(type)) throw new Error(`Unsupported IPC message type: ${String(type)}.`);
 		if (!this.ownerValue) throw new Error("IPC owner is not established.");
+		if (!this.tokenValue) throw new Error("IPC token is not established.");
 		const requestId = options.requestId ?? crypto.randomUUID();
 		validateIdentifier(requestId, "requestId");
 		if (options.noDeadline !== undefined && typeof options.noDeadline !== "boolean") throw new Error("noDeadline must be a boolean.");
-		if (options.noDeadline && type !== "question" && type !== "spawn") throw new Error("noDeadline is allowed only for question or spawn requests.");
+		// ponytail: Keep question no-deadline support until task 4 moves ask_question to RPC UI.
+		if (options.noDeadline && type !== "spawn" && type !== "question") throw new Error("noDeadline is allowed only for spawn or question requests during RPC migration.");
 		if (options.noDeadline && options.timeoutMs !== undefined) throw new Error("noDeadline requests cannot specify timeoutMs.");
 		const timeoutMs = options.noDeadline ? undefined : validateTimeout(options.timeoutMs, "timeoutMs");
-		const frame: SubagentIpcRequest = { kind: "request", token: this.options.token, requestId, owner: this.ownerValue, type, payload };
+		const frame: SubagentIpcRequest = { kind: "request", token: this.tokenValue, requestId, owner: this.ownerValue, type, payload };
 		return new Promise<T>((resolve, reject) => {
 			const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
 				this.pending.delete(requestId);
@@ -230,7 +255,7 @@ export class SubagentIpcConnection {
 	respond(request: SubagentIpcRequest, result?: unknown, options: SubagentIpcResponseOptions = {}): void {
 		this.sendResponse({
 			kind: "response",
-			token: this.options.token,
+			token: this.tokenValue!,
 			requestId: options.requestId ?? request.requestId,
 			owner: options.owner ?? this.ownerValue ?? request.owner,
 			ok: true,
@@ -241,7 +266,7 @@ export class SubagentIpcConnection {
 	respondError(request: SubagentIpcRequest, error: unknown): void {
 		this.sendResponse({
 			kind: "response",
-			token: this.options.token,
+			token: this.tokenValue!,
 			requestId: request.requestId,
 			owner: this.ownerValue ?? request.owner,
 			ok: false,
@@ -258,6 +283,7 @@ export class SubagentIpcConnection {
 	}
 
 	private receive(chunk: Buffer | string): void {
+		if (this.revoked) return;
 		let values: unknown[];
 		try {
 			values = this.decoder.push(Buffer.from(chunk));
@@ -272,9 +298,33 @@ export class SubagentIpcConnection {
 				this.logger("invalid_frame", { reason: "schema" });
 				continue;
 			}
-			if (frame.token !== this.options.token) {
-				this.logger("unauthenticated_frame_dropped", { requestId: frame.requestId, owner: frame.owner });
-				continue;
+			if (!this.ownerValue) {
+				if (frame.kind !== "request" || frame.type !== "hello") {
+					this.logger("authentication_rejected", { reason: "first_frame" });
+					this.socket.destroy();
+					return;
+				}
+				let authenticated = false;
+				try { authenticated = this.options.onAuthenticate?.(frame.owner, frame.token, this) ?? false; }
+				catch { authenticated = false; }
+				if (!authenticated) {
+					this.logger("authentication_rejected", { reason: "owner_or_token" });
+					this.socket.destroy();
+					return;
+				}
+				this.ownerValue = frame.owner;
+				this.tokenValue = frame.token;
+				try { this.options.onHello?.(frame.owner, frame.payload); }
+				catch { this.logger("hello_callback_failed", {}); }
+			} else {
+				if (frame.token !== this.tokenValue) {
+					this.logger("unauthenticated_frame_dropped", {});
+					continue;
+				}
+				if (frame.owner !== this.ownerValue) {
+					this.logger("owner_mismatch_dropped", {});
+					continue;
+				}
 			}
 			if (frame.kind === "response") this.receiveResponse(frame);
 			else this.receiveRequest(frame);
@@ -284,7 +334,7 @@ export class SubagentIpcConnection {
 	private receiveResponse(frame: SubagentIpcResponse): void {
 		const pending = this.pending.get(frame.requestId);
 		if (!pending || pending.owner !== frame.owner || frame.owner !== this.ownerValue) {
-			this.logger("correlation_mismatch", { requestId: frame.requestId, owner: frame.owner });
+			this.logger("correlation_mismatch", {});
 			return;
 		}
 		this.pending.delete(frame.requestId);
@@ -294,24 +344,8 @@ export class SubagentIpcConnection {
 	}
 
 	private receiveRequest(frame: SubagentIpcRequest): void {
-		if (!this.ownerValue) {
-			if (frame.type !== "hello") {
-				this.logger("owner_not_established", { requestId: frame.requestId, owner: frame.owner });
-				return;
-			}
-			if (this.options.onOwner && !this.options.onOwner(frame.owner, this)) {
-				this.logger("duplicate_owner_rejected", { owner: frame.owner });
-				this.socket.destroy();
-				return;
-			}
-			this.ownerValue = frame.owner;
-			try {
-				this.options.onHello?.(frame.owner, frame.payload);
-			} catch (error) {
-				this.logger("hello_callback_failed", { owner: frame.owner, error: errorFrom(error).message });
-			}
-		} else if (frame.owner !== this.ownerValue) {
-			this.logger("owner_mismatch_dropped", { requestId: frame.requestId, owner: frame.owner });
+		if (frame.owner !== this.ownerValue || frame.token !== this.tokenValue) {
+			this.logger("owner_mismatch_dropped", {});
 			return;
 		}
 
@@ -330,7 +364,7 @@ export class SubagentIpcConnection {
 	}
 
 	private sendResponse(response: SubagentIpcResponse): void {
-		if (this.closed) return;
+		if (this.closed || this.revoked) return;
 		try {
 			this.socket.write(encodeSubagentIpcFrame(response));
 		} catch (error) {
@@ -348,25 +382,54 @@ export class SubagentIpcConnection {
 			pending.reject(failure);
 		}
 		this.pending.clear();
-		this.options.onDisconnect?.(this.ownerValue, error);
+		try { this.options.onDisconnect?.(this.ownerValue, error); }
+		catch { this.logger("disconnect_callback_failed", {}); }
 	}
 }
 
 export class SubagentIpcServer {
 	readonly socketPath: string;
-	readonly token: string;
 	private readonly server = net.createServer((socket) => this.accept(socket));
+	private readonly runTokens = new Map<string, string>();
 	private readonly connections = new Map<string, SubagentIpcConnection>();
+	private readonly sockets = new Set<SubagentIpcConnection>();
 	private listening = false;
+	private closing = false;
 	private listenPromise: Promise<void> | undefined;
+	private closePromise: Promise<void> | undefined;
 
 	constructor(private readonly options: SubagentIpcServerOptions) {
 		this.socketPath = options.socketPath ?? resolveSubagentSocketPath(options.sessionId ?? crypto.randomUUID(), options.agentDir);
-		this.token = options.token ?? createSubagentIpcToken();
-		if (!boundedString(this.token, MAX_IDENTIFIER_BYTES)) throw new Error("IPC token must be non-empty and at most 128 bytes.");
+	}
+
+	registerRun(owner: string): string {
+		validateIdentifier(owner, "owner");
+		if (this.closing) throw new Error("Subagent IPC server is closed.");
+		if (this.runTokens.has(owner)) throw new Error(`Subagent IPC owner is already registered: ${owner}`);
+		const token = createSubagentIpcToken();
+		this.runTokens.set(owner, token);
+		return token;
+	}
+
+	async revokeRun(owner: string, options: { disconnect?: boolean } = {}): Promise<void> {
+		this.runTokens.delete(owner);
+		if (options.disconnect === false) return;
+		const connection = this.connections.get(owner);
+		if (!connection) return;
+		connection.revoke();
+		await connection.close();
 	}
 
 	async listen(): Promise<void> {
+		if (this.closing && this.closePromise) {
+			const closePromise = this.closePromise;
+			await closePromise;
+			if (this.closePromise === closePromise) {
+				this.closing = false;
+				this.closePromise = undefined;
+			}
+		}
+		if (this.closing) throw new Error("Subagent IPC server is closed.");
 		if (this.listening) return;
 		if (this.listenPromise) return this.listenPromise;
 		const promise = this.startListening().finally(() => {
@@ -431,8 +494,19 @@ export class SubagentIpcServer {
 		await this.connections.get(owner)?.close();
 	}
 
-	async close(): Promise<void> {
-		await Promise.all([...this.connections.values()].map((connection) => connection.close()));
+	close(): Promise<void> {
+		if (this.closePromise) return this.closePromise;
+		this.closing = true;
+		this.runTokens.clear();
+		this.closePromise = this.finishClose();
+		return this.closePromise;
+	}
+
+	private async finishClose(): Promise<void> {
+		await this.listenPromise?.catch(() => undefined);
+		const connections = [...this.sockets];
+		for (const connection of connections) connection.revoke();
+		await Promise.all(connections.map((connection) => connection.close()));
 		this.connections.clear();
 		if (this.listening) {
 			await new Promise<void>((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()));
@@ -442,75 +516,132 @@ export class SubagentIpcServer {
 	}
 
 	private accept(socket: net.Socket): void {
+		if (this.closing) {
+			socket.destroy();
+			return;
+		}
 		let connection: SubagentIpcConnection;
 		connection = new SubagentIpcConnection(socket, {
 			...this.options,
-			token: this.token,
-			onOwner: (owner) => {
-				if (this.connections.has(owner)) return false;
+			onAuthenticate: (owner, token) => {
+				const expectedToken = this.runTokens.get(owner);
+				if (this.closing || !expectedToken || this.connections.has(owner) || !tokensMatch(expectedToken, token)) return false;
 				this.connections.set(owner, connection);
 				return true;
 			},
 			onDisconnect: (owner, error) => {
+				this.sockets.delete(connection);
 				if (owner && this.connections.get(owner) === connection) this.connections.delete(owner);
-				this.options.onDisconnect?.(owner, error);
+				try { this.options.onDisconnect?.(owner, error); }
+				catch { /* Disconnect observers cannot interrupt IPC cleanup. */ }
 			},
 		});
+		this.sockets.add(connection);
 	}
 }
 
 export class SubagentIpcClient {
-	private constructor(private readonly connection: SubagentIpcConnection) {}
+	private connection: SubagentIpcConnection | undefined;
+	private socket: net.Socket | undefined;
+	private connecting: Promise<SubagentIpcConnection> | undefined;
+	private closed = false;
 
-	static async connect(options: SubagentIpcClientOptions): Promise<SubagentIpcClient> {
+	private constructor(private readonly options: SubagentIpcClientOptions) {}
+
+	static create(options: SubagentIpcClientOptions): SubagentIpcClient {
 		validateIdentifier(options.owner, "owner");
-		const timeoutMs = validateTimeout(options.connectTimeoutMs, "connectTimeoutMs");
-		const socket = net.createConnection(options.socketPath);
-		await new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				socket.destroy();
-				reject(new Error(`IPC connection timed out after ${timeoutMs} milliseconds.`));
-			}, timeoutMs);
-			const onConnect = () => {
-				clearTimeout(timer);
-				socket.off("error", onError);
-				resolve();
-			};
-			const onError = (error: Error) => {
-				clearTimeout(timer);
-				socket.off("connect", onConnect);
-				reject(error);
-			};
-			socket.once("connect", onConnect);
-			socket.once("error", onError);
-		});
-		const connection = new SubagentIpcConnection(socket, options);
-		try {
-			await connection.request("hello", options.helloPayload ?? { pid: process.pid }, { timeoutMs });
-		} catch (error) {
-			await connection.close().catch(() => undefined);
-			throw error;
-		}
-		return new SubagentIpcClient(connection);
+		if (!boundedString(options.token, MAX_IDENTIFIER_BYTES)) throw new Error("IPC token must be non-empty and at most 128 bytes.");
+		validateTimeout(options.connectTimeoutMs, "connectTimeoutMs");
+		return new SubagentIpcClient(options);
+	}
+
+	// ponytail: Keep eager connect for child.ts until task 4 switches it to create().
+	static async connect(options: SubagentIpcClientOptions): Promise<SubagentIpcClient> {
+		const client = SubagentIpcClient.create(options);
+		await client.ensureConnection();
+		return client;
 	}
 
 	get owner(): string | undefined {
-		return this.connection.owner;
+		return this.options.owner;
 	}
 
 	get isClosed(): boolean {
-		return this.connection.isClosed;
+		return this.closed || this.connection?.isClosed === true;
 	}
 
-	request<T = unknown>(type: SubagentIpcMessageType, payload?: unknown, options?: SubagentIpcRequestOptions): Promise<T> {
-		return this.connection.request<T>(type, payload, options);
+	async request<T = unknown>(type: SubagentIpcMessageType, payload?: unknown, options?: SubagentIpcRequestOptions): Promise<T> {
+		const connection = await this.ensureConnection();
+		return connection.request<T>(type, payload, options);
 	}
 
 	respond(request: SubagentIpcRequest, result?: unknown, options?: SubagentIpcResponseOptions): void {
+		if (!this.connection || this.connection.isClosed) throw new SubagentIpcDisconnectedError();
 		this.connection.respond(request, result, options);
 	}
 
-	close(): Promise<void> {
-		return this.connection.close();
+	async close(): Promise<void> {
+		if (this.closed) return;
+		this.closed = true;
+		if (this.connection) await this.connection.close();
+		else this.socket?.destroy();
+	}
+
+	private ensureConnection(): Promise<SubagentIpcConnection> {
+		if (this.closed) return Promise.reject(new SubagentIpcDisconnectedError());
+		if (this.connection && !this.connection.isClosed) return Promise.resolve(this.connection);
+		if (this.connecting) return this.connecting;
+		const connecting = this.openConnection().finally(() => {
+			if (this.connecting === connecting) this.connecting = undefined;
+		});
+		this.connecting = connecting;
+		return connecting;
+	}
+
+	private async openConnection(): Promise<SubagentIpcConnection> {
+		const timeoutMs = validateTimeout(this.options.connectTimeoutMs, "connectTimeoutMs");
+		const socket = net.createConnection(this.options.socketPath);
+		this.socket = socket;
+		await new Promise<void>((resolve, reject) => {
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout>;
+			const cleanup = () => {
+				clearTimeout(timer);
+				socket.off("connect", onConnect);
+				socket.off("error", onError);
+				socket.off("close", onClose);
+			};
+			const finish = (error?: Error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				if (error) reject(error);
+				else resolve();
+			};
+			const onConnect = () => finish();
+			const onError = (error: Error) => finish(error);
+			const onClose = () => finish(new SubagentIpcDisconnectedError());
+			timer = setTimeout(() => {
+				finish(new Error(`IPC connection timed out after ${timeoutMs} milliseconds.`));
+				socket.destroy();
+			}, timeoutMs);
+			socket.once("connect", onConnect);
+			socket.once("error", onError);
+			socket.once("close", onClose);
+		});
+		if (this.closed) {
+			socket.destroy();
+			throw new SubagentIpcDisconnectedError();
+		}
+		const connection = new SubagentIpcConnection(socket, this.options);
+		this.connection = connection;
+		try {
+			await connection.request("hello", this.options.helloPayload ?? { pid: process.pid }, { timeoutMs });
+		} catch (error) {
+			await connection.close().catch(() => undefined);
+			if (this.connection === connection) this.connection = undefined;
+			throw error;
+		}
+		return connection;
 	}
 }

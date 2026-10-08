@@ -315,6 +315,42 @@ try {
 		await writerHost.close();
 	}
 
+	const disconnectSurface = { surface: "surface:disconnect", readScreen: async () => "", close: async () => undefined };
+	let disconnectToken = "";
+	const disconnectHost = new SubagentLaunchHost({
+		parentSessionId: "disconnect",
+		agentDir: tempDir,
+		cmux: { launch: async ({ env }: { env: Record<string, string> }) => {
+			disconnectToken = env.PI_SUBAGENT_TOKEN;
+			return { transport: "cmux" as const, surface: disconnectSurface };
+		} } as unknown as CmuxTransport,
+	});
+	try {
+		const disconnectedRun = await disconnectHost.launch({
+			parentSessionId: "disconnect",
+			owner: "worker-disconnect",
+			role: "worker",
+			agent: { name: "worker", systemPrompt: "Agent rules", model: "openai/test-model" },
+			cwd: process.cwd(),
+			task: "disconnect IPC only",
+			tools: ["read"],
+			cavemanEnabled: true,
+			fileOwnership: [],
+			childSessionId: "child-disconnect",
+		});
+		assert.ok(disconnectToken);
+		const disconnectClient = await SubagentIpcClient.connect({ socketPath: disconnectHost.server.socketPath, token: disconnectToken, owner: "worker-disconnect" });
+		let runSettled = false;
+		void disconnectedRun.result.then(() => { runSettled = true; }, () => { runSettled = true; });
+		await disconnectClient.close();
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(runSettled, false);
+		await disconnectHost.close();
+		await assert.rejects(disconnectedRun.result, /host closed/);
+	} finally {
+		await disconnectHost.close();
+	}
+
 	mock.timers.enable();
 	try {
 		const healthySurface = {
@@ -322,8 +358,12 @@ try {
 			readScreen: async () => "healthy output",
 			close: async () => undefined,
 		};
+		let healthyToken = "";
 		const healthyCmux = {
-			launch: async () => ({ transport: "cmux" as const, surface: healthySurface }),
+			launch: async ({ env }: { env: Record<string, string> }) => {
+				healthyToken = env.PI_SUBAGENT_TOKEN;
+				return { transport: "cmux" as const, surface: healthySurface };
+			},
 		} as unknown as CmuxTransport;
 		const healthyHost = new SubagentLaunchHost({ parentSessionId: "healthy", agentDir: tempDir, cmux: healthyCmux });
 		const healthy = await healthyHost.launch({
@@ -338,7 +378,8 @@ try {
 			fileOwnership: ["src/**"],
 			childSessionId: "child-healthy",
 		});
-		const healthyClient = await SubagentIpcClient.connect({ socketPath: healthyHost.server.socketPath, token: healthyHost.server.token, owner: "worker-healthy" });
+		assert.ok(healthyToken);
+		const healthyClient = await SubagentIpcClient.connect({ socketPath: healthyHost.server.socketPath, token: healthyToken, owner: "worker-healthy" });
 		assert.deepEqual(await healthyClient.request("ownership", { action: "acquire", paths: ["src/file.ts", " src/file.ts "] }), { ok: true, paths: ["src/file.ts"] });
 		assert.deepEqual(healthyHost.getOwnershipSnapshot(), {});
 		mock.timers.tick(30_000);
@@ -352,8 +393,12 @@ try {
 			readScreen: async () => "activity output",
 			close: async () => undefined,
 		};
+		let activityToken = "";
 		const activityCmux = {
-			launch: async () => ({ transport: "cmux" as const, surface: activitySurface }),
+			launch: async ({ env }: { env: Record<string, string> }) => {
+				activityToken = env.PI_SUBAGENT_TOKEN;
+				return { transport: "cmux" as const, surface: activitySurface };
+			},
 		} as unknown as CmuxTransport;
 		const activityHost = new SubagentLaunchHost({
 			parentSessionId: "activity",
@@ -372,7 +417,8 @@ try {
 			cavemanEnabled: true,
 			childSessionId: "child-activity",
 		});
-		const activityClient = await SubagentIpcClient.connect({ socketPath: activityHost.server.socketPath, token: activityHost.server.token, owner: "worker-activity" });
+		assert.ok(activityToken);
+		const activityClient = await SubagentIpcClient.connect({ socketPath: activityHost.server.socketPath, token: activityToken, owner: "worker-activity" });
 		mock.timers.tick(90);
 		assert.deepEqual(await activityClient.request("activity"), { accepted: true });
 		mock.timers.tick(90);

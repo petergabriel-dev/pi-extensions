@@ -14,6 +14,7 @@ import {
 	SubagentIpcDisconnectedError,
 	SubagentIpcFrameDecoder,
 	SubagentIpcServer,
+	type SubagentIpcMessageType,
 	type SubagentIpcRequest,
 } from "../ipc.ts";
 
@@ -22,13 +23,12 @@ const socketPath = resolveSubagentSocketPath("session-test", tempDir);
 const logs: string[] = [];
 const requests: SubagentIpcRequest[] = [];
 const hellos: Array<{ owner: string; payload: unknown }> = [];
+const disconnectedOwners: Array<string | undefined> = [];
 let disconnectedOwner: string | undefined;
 let resolveDisconnect: (() => void) | undefined;
 const disconnected = new Promise<void>((resolve) => { resolveDisconnect = resolve; });
-
 const server = new SubagentIpcServer({
 	socketPath,
-	token: "token-for-test",
 	logger: (event) => logs.push(event),
 	onHello: (owner, payload) => { hellos.push({ owner, payload }); },
 	onRequest: (request, connection) => {
@@ -42,15 +42,29 @@ const server = new SubagentIpcServer({
 		return request.payload;
 	},
 	onDisconnect: (owner) => {
+		disconnectedOwners.push(owner);
 		if (owner === "child-test") {
 			disconnectedOwner = owner;
 			resolveDisconnect?.();
 		}
 	},
 });
+const childToken = server.registerRun("child-test");
+const ownerAToken = server.registerRun("owner-a");
+server.registerRun("owner-b");
+const revokedToken = server.registerRun("revoked-owner");
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendHello(owner: string, token: string, requestId: string, type: SubagentIpcMessageType = "hello"): Promise<net.Socket> {
+	const socket = net.createConnection(socketPath);
+	socket.on("error", () => undefined);
+	await once(socket, "connect");
+	const frame: SubagentIpcRequest = { kind: "request", token, requestId, owner, type, payload: {} };
+	socket.write(encodeSubagentIpcFrame(frame));
+	return socket;
 }
 
 try {
@@ -72,12 +86,20 @@ try {
 	const activityFrame = { ...frame, type: "activity" as const, payload: {} };
 	assert.deepEqual(parseSubagentIpcFrame(activityFrame), activityFrame);
 	assert.equal(parseSubagentIpcFrame({ ...frame, token: "" }), undefined);
+	assert.notEqual(childToken, ownerAToken);
+	assert.throws(() => server.registerRun("child-test"), /already registered/);
 
 	await server.listen();
 	assert.equal(fs.statSync(path.dirname(socketPath)).mode & 0o777, 0o700);
 
+	const cancellingClient = SubagentIpcClient.create({ socketPath: path.join(tempDir, "not-listening.sock"), token: childToken, owner: "pending-connect", connectTimeoutMs: 5_000 });
+	const pendingConnect = cancellingClient.request("browser");
+	const pendingConnectRejected = assert.rejects(pendingConnect);
+	await cancellingClient.close();
+	await Promise.race([pendingConnectRejected, delay(250).then(() => { throw new Error("Closing a lazy IPC client did not cancel connect."); })]);
+
 	const concurrentSocketPath = resolveSubagentSocketPath("c", tempDir);
-	const concurrentServer = new SubagentIpcServer({ socketPath: concurrentSocketPath, token: "concurrent-token" });
+	const concurrentServer = new SubagentIpcServer({ socketPath: concurrentSocketPath });
 	try {
 		await Promise.all(Array.from({ length: 4 }, () => concurrentServer.listen()));
 		assert.equal(fs.existsSync(concurrentSocketPath), true);
@@ -87,7 +109,7 @@ try {
 
 	const retrySocketPath = resolveSubagentSocketPath("r", tempDir);
 	fs.writeFileSync(retrySocketPath, "not a socket");
-	const retryServer = new SubagentIpcServer({ socketPath: retrySocketPath, token: "retry-token" });
+	const retryServer = new SubagentIpcServer({ socketPath: retrySocketPath });
 	try {
 		await assert.rejects(retryServer.listen(), /IPC socket path is not a socket/);
 		assert.equal(fs.existsSync(retrySocketPath), true);
@@ -102,35 +124,47 @@ try {
 
 	const client = await SubagentIpcClient.connect({
 		socketPath,
-		token: server.token,
+		token: childToken,
 		owner: "child-test",
 		logger: (event) => logs.push(event),
 	});
 	assert.deepEqual(hellos, [{ owner: "child-test", payload: { pid: process.pid } }]);
-	await assert.rejects(SubagentIpcClient.connect({
-		socketPath,
-		token: server.token,
-		owner: "child-test",
-	}), /IPC connection closed|socket hang up/);
+	await assert.rejects(SubagentIpcClient.connect({ socketPath, token: childToken, owner: "child-test" }), /IPC connection closed|socket hang up/);
 	assert.equal(hellos.length, 1);
 	for (const type of ["ownership", "browser", "message", "question", "result", "spawn", "activity"] as const) {
 		const payload = { type };
 		assert.deepEqual(await client.request(type, payload), payload);
 	}
+	assert.deepEqual(await client.request("spawn", { nested: true }, { noDeadline: true }), { nested: true });
 
-	const unauthenticated = net.createConnection(socketPath);
-	unauthenticated.on("error", () => undefined);
-	await once(unauthenticated, "connect");
-	unauthenticated.write(encodeSubagentIpcFrame({ ...frame, token: "wrong-token", owner: "attacker" }));
+	const unauthenticated = await sendHello("attacker", "wrong-token", "unauthenticated");
 	await delay(25);
 	assert.equal(requests.some((request) => request.owner === "attacker"), false);
-	assert.ok(logs.includes("unauthenticated_frame_dropped"));
+	assert.ok(logs.includes("authentication_rejected"));
 	unauthenticated.destroy();
 
-	assert.deepEqual(await client.request("result", { probe: "correlation" }), { matched: true });
-	assert.ok(logs.filter((event) => event === "correlation_mismatch").length >= 2);
+	const ownerClaim = await sendHello("owner-b", ownerAToken, "claim-other-owner");
+	await delay(25);
+	assert.equal(server.getConnection("owner-b"), undefined);
+	assert.equal(hellos.some((hello) => hello.owner === "owner-b"), false);
+	ownerClaim.destroy();
 
-	await assert.rejects(client.request("message", { hang: true }, { noDeadline: true }), /only for question or spawn/);
+	const invalidFirstFrame = await sendHello("child-test", childToken, "no-hello", "result");
+	await delay(25);
+	assert.equal(requests.some((request) => request.requestId === "no-hello"), false);
+	invalidFirstFrame.destroy();
+
+	await server.revokeRun("revoked-owner");
+	const revoked = await sendHello("revoked-owner", revokedToken, "revoked-token");
+	await delay(25);
+	assert.equal(hellos.some((hello) => hello.owner === "revoked-owner"), false);
+	revoked.destroy();
+
+	assert.deepEqual(await client.request("result", { probe: "correlation" }), { matched: true });
+	assert.ok(logs.includes("correlation_mismatch"));
+	assert.ok(logs.includes("owner_mismatch_dropped"));
+	await assert.rejects(client.request("message", { hang: true }, { noDeadline: true }), /only for spawn or question requests/);
+	await assert.rejects(client.request("browser", {}, { noDeadline: true }), /only for spawn or question requests/);
 	await assert.rejects(client.request("message", { hang: true }, { timeoutMs: 25 }), /timed out after 25 milliseconds/);
 	let noDeadlineSettled = false;
 	const noDeadline = client.request("question", { hang: true }, { noDeadline: true });
@@ -146,7 +180,33 @@ try {
 	]);
 	assert.equal(disconnectedOwner, "child-test");
 
+	const lazyToken = server.registerRun("lazy-child");
+	const lazy = SubagentIpcClient.create({ socketPath, token: lazyToken, owner: "lazy-child" });
+	assert.equal(server.getConnection("lazy-child"), undefined);
+	assert.equal(lazy.isClosed, false);
+	const lazyPayload = { tool: "browser_goto" };
+	assert.deepEqual(await lazy.request("browser", lazyPayload), lazyPayload);
+	assert.ok(server.getConnection("lazy-child"));
+	const pendingAtRevoke = lazy.request("question", { hang: true }, { noDeadline: true });
+	const pendingAtRevokeRejected = assert.rejects(pendingAtRevoke, (error: unknown) => error instanceof SubagentIpcDisconnectedError);
+	await delay(25);
+	await server.revokeRun("lazy-child");
+	await pendingAtRevokeRejected;
+	assert.equal(server.getConnection("lazy-child"), undefined);
+	const lazyHelloCount = hellos.filter((hello) => hello.owner === "lazy-child").length;
+	const lateClient = await sendHello("lazy-child", lazyToken, "late-after-revoke");
+	await delay(25);
+	assert.equal(hellos.filter((hello) => hello.owner === "lazy-child").length, lazyHelloCount);
+	lateClient.destroy();
+	await lazy.close();
+	assert.ok(disconnectedOwners.includes("lazy-child"));
+
+	const idleSocket = net.createConnection(socketPath);
+	idleSocket.on("error", () => undefined);
+	await once(idleSocket, "connect");
+	const idleSocketClosed = once(idleSocket, "close");
 	await server.close();
+	await idleSocketClosed;
 	assert.equal(fs.existsSync(socketPath), false);
 	console.log("subagent IPC tests passed");
 } finally {
