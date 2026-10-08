@@ -386,6 +386,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let hostSessionId: string | undefined;
 	let activeContext: ExtensionContext | undefined;
 	const records = new Map<string, SubagentRecord>();
+	let lastListSignature: string | undefined;
 
 	const ensureHost = (ctx: ExtensionContext): SubagentLaunchHost => {
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -580,7 +581,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: SUBAGENT_TOOL_NAME,
 		label: "Subagent",
-		description: "Start one async subagent. Returns immediately; final result arrives as a new parent turn.",
+		description: "Start one async subagent. Returns immediately; result arrives as a new parent turn. End your turn instead of polling.",
 		parameters: SubagentParams,
 		async execute(_toolCallId, params: SubagentParams, signal, _onUpdate, ctx) {
 			const agentName = params.agent?.trim() || "worker";
@@ -655,7 +656,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				});
 				attachHandle(record, handle);
 				return {
-					content: [{ type: "text", text: `Subagent ${owner} started asynchronously over ${handle.transport}. Log: ${handle.logPath}. Result will arrive as a new parent turn.` }],
+					content: [{ type: "text", text: `Subagent ${owner} started asynchronously over ${handle.transport}. Log: ${handle.logPath}. Result arrives as a new parent turn; end your turn instead of polling.` }],
 					details: {
 						ok: true,
 						owner,
@@ -739,7 +740,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: SUBAGENTS_LIST_TOOL_NAME,
 		label: "List Subagents",
-		description: "List running, waiting, completed, and failed async subagents.",
+		description: "List subagent status, transcripts, or logs when the user asks. Results arrive automatically as a new turn; do not poll.",
 		parameters: SubagentsListParams,
 		async execute(_toolCallId, params: SubagentsListParams, _signal, _onUpdate, _ctx) {
 			if (params.tail) await readLiveTails();
@@ -763,18 +764,38 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				outputTail: record.outputTail,
 				question: record.question,
 			}));
-			const text = agents.length === 0
-				? "No subagents."
-				: agents.map((agent) => {
-					const elapsed = Math.max(0, (Date.parse(agent.finishedAt ?? new Date().toISOString()) - Date.parse(agent.startedAt)) / 1000).toFixed(1);
-					const transport = agent.transport ? ` transport=${agent.transport}` : "";
-					const log = agent.logPath ? ` log=${agent.logPath}` : "";
-					const sessionFile = agent.sessionFile ? ` transcript=${agent.sessionFile}` : "";
-					const result = agent.result ? `\n  Result: ${agent.result}` : "";
-					const error = agent.error ? `\n  Error: ${agent.error}` : "";
-					const tail = agent.outputTail ? `\n  Recent output: ${agent.outputTail}` : "";
-					return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${result}${error}${tail}`;
-				}).join("\n\n");
+			const signature = agents
+				.map((agent) => `${agent.owner}:${agent.status}${agent.question ? `:${agent.question.questionId}` : ""}`)
+				.sort()
+				.join("\n");
+			const noChange = !params.tail && signature === lastListSignature;
+			lastListSignature = signature;
+			const text = noChange
+				? [
+					...(agents.length === 0 ? ["No subagents."] : agents.map((agent) => {
+						const resultDelivered = records.get(agent.owner)?.steered === true;
+						const question = agent.question ? ` question=${agent.question.questionId}` : "";
+						const transcript = agent.error?.startsWith("Result steering failed") ? ` transcript=${agent.sessionFile ?? "unavailable"}` : "";
+						const result = agent.result && !resultDelivered ? `\n  Result: ${truncateUtf8(agent.result, 2_000)}` : "";
+						return `${agent.owner} [${agent.status}]${question}${resultDelivered ? " result delivered as follow-up turn" : ""}${transcript}${result}`;
+					})),
+					"No change since last check. Results arrive automatically as a new turn; end your turn instead of polling.",
+				].join("\n")
+				: agents.length === 0
+					? "No subagents."
+					: agents.map((agent) => {
+						const elapsed = Math.max(0, (Date.parse(agent.finishedAt ?? new Date().toISOString()) - Date.parse(agent.startedAt)) / 1000).toFixed(1);
+						const transport = agent.transport ? ` transport=${agent.transport}` : "";
+						const log = agent.logPath ? ` log=${agent.logPath}` : "";
+						const deliveryFailed = agent.error?.startsWith("Result steering failed") === true;
+						const sessionFile = agent.sessionFile ? ` transcript=${agent.sessionFile}` : deliveryFailed ? " transcript=unavailable" : "";
+						const resultDelivered = records.get(agent.owner)?.steered === true;
+						const result = agent.result && !resultDelivered ? `\n  Result: ${truncateUtf8(agent.result, 2_000)}` : "";
+						const delivered = resultDelivered ? " result delivered as follow-up turn" : "";
+						const error = agent.error ? `\n  Error: ${agent.error}` : "";
+						const tail = agent.outputTail ? `\n  Recent output: ${agent.outputTail}` : "";
+						return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${delivered}${result}${error}${tail}`;
+					}).join("\n\n");
 			return { content: [{ type: "text", text: truncateUtf8(text) }], details: { agents } };
 		},
 	});
