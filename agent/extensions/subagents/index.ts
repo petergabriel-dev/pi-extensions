@@ -681,7 +681,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: SUBAGENT_MESSAGE_TOOL_NAME,
 		label: "Message Subagent",
-		description: "Send message to a live subagent, answer its pending question, or resume a finished subagent session.",
+		description: "Message a live subagent for delivery at its next tool boundary; abort is the only hard stop. Also answer pending questions or resume finished sessions.",
 		parameters: SubagentMessageParams,
 		async execute(_toolCallId, params: SubagentMessageParams, signal, _onUpdate, ctx) {
 			const owner = params.owner.trim();

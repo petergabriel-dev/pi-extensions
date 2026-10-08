@@ -507,7 +507,7 @@ async function testLateResultAfterRecordEviction(): Promise<void> {
 			await lateHandle.request("message", { text: "late result after eviction" });
 			const outcome = await within("late evicted result", lateSettlement.promise);
 			assert.equal(outcome.ok, true);
-			assert.equal(outcome.value.text, "follow-up: late result after eviction");
+			assert.equal(outcome.value.text, "steer: late result after eviction");
 			await eventually(() => sentMessages.filter((message) => message.includes("late result after eviction")).length === 1, "late parent result delivery");
 			const after = await listTool.execute("list-after", {}, new AbortController().signal, undefined, context) as { details: { agents: Array<{ owner: string }> } };
 			assert.equal(after.details.agents.length, 100);

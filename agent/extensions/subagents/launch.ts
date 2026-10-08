@@ -780,7 +780,7 @@ export class SubagentLaunchHost {
 		if (!run || run.resultSettled || !run.rpc) throw new Error(`Subagent ${owner} is not running.`);
 		if (type !== "message" || !isRecord(payload) || typeof payload.text !== "string" || Buffer.byteLength(payload.text, "utf8") > MAX_SUBAGENT_RESULT_BYTES || !payload.text.trim()) throw new Error("Subagent message is malformed.");
 		try {
-			await run.rpc.followUp(payload.text);
+			await run.rpc.steer(payload.text);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(redactSubagentText(message, run.ipcToken));

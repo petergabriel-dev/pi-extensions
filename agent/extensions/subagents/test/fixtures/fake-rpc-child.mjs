@@ -8,6 +8,7 @@ let input = "";
 let outputQueue = Promise.resolve();
 let lastAssistantText = process.env.FAKE_RESULT ?? "fake assistant result";
 const uiResponses = [];
+let lateSteerTimer;
 
 function enqueueBytes(bytes, cuts = []) {
 	outputQueue = outputQueue.then(async () => {
@@ -113,6 +114,12 @@ function handleCommand(command) {
 		if (mode === "ready-hang") return;
 		const disposition = mode === "handled" ? "handled" : mode === "missing-disposition" ? undefined : "started";
 		commandResponse(command, disposition === undefined ? undefined : { disposition });
+		if (mode === "late-steer") {
+			sendRecord({ type: "agent_end" });
+			lateSteerTimer = setTimeout(() => finishRun(), 500);
+			void outputQueue.then(() => process.stderr.write("late-steer-ready"));
+			return;
+		}
 		if (mode === "handled" || mode === "missing-disposition" || mode === "follow-up" || mode === "wait" || mode === "abort" || mode === "ready-hang") return;
 		if (mode === "roundtrip" || mode === "stderr") {
 			sendRecord({ type: "message_update", marker: "separator:\u2028\u2029" }, "\n", true);
@@ -173,16 +180,17 @@ function handleCommand(command) {
 		}
 		return;
 	}
-	if (command.type === "follow_up") {
-		if (mode === "follow-up") {
-			lastAssistantText = `follow-up: ${command.message}`;
+	if (command.type === "follow_up" || command.type === "steer") {
+		if (mode === "follow-up" || mode === "wait") {
+			lastAssistantText = `${command.type === "steer" ? "steer" : "follow-up"}: ${command.message}`;
 			commandResponse(command);
 			finishRun();
 			return;
 		}
-		if (mode === "wait") {
+		if (mode === "late-steer" && command.type === "steer") {
+			clearTimeout(lateSteerTimer);
+			lastAssistantText = `steer: ${command.message}`;
 			commandResponse(command);
-			lastAssistantText = `follow-up: ${command.message}`;
 			finishRun();
 			return;
 		}
@@ -226,5 +234,6 @@ process.stdin.on("data", (chunk) => {
 });
 
 process.stdin.on("end", () => {
+	clearTimeout(lateSteerTimer);
 	if (mode !== "ignore-term") outputQueue.finally(() => process.exit(0));
 });

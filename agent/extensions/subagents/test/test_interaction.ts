@@ -12,6 +12,7 @@ interface SpawnCall {
 	args: string[];
 	options: SpawnOptions;
 	child: ChildProcess;
+	stderr: string[];
 }
 
 const tempDir = fs.mkdtempSync(path.join("/tmp", "pi-si-"));
@@ -24,7 +25,9 @@ function spawnMode(mode: string, calls: SpawnCall[], results: string[] = []): (c
 		const result = results[index];
 		const env = { ...(options.env ?? {}), ...(result ? { FAKE_RESULT: result } : {}) };
 		const child = spawn(process.execPath, [fixturePath, "--fixture-mode", mode], { ...options, env });
-		calls.push({ args: [...args], options: { ...options, env }, child });
+		const stderr: string[] = [];
+		if (mode === "late-steer") child.stderr?.on("data", (chunk) => stderr.push(chunk.toString("utf8")));
+		calls.push({ args: [...args], options: { ...options, env }, child, stderr });
 		index += 1;
 		return child;
 	};
@@ -128,10 +131,32 @@ try {
 	try {
 		const messageHandle = await messageHost.launch(launchOptions("message", "message-owner", "message-child"));
 		await messageHandle.request("message", { text: "parent message" });
-		assert.equal((await messageHandle.result).text, "follow-up: parent message");
+		assert.equal((await messageHandle.result).text, "steer: parent message");
 		await waitForExit(messageCalls[0]!.child);
 	} finally {
 		await messageHost.close();
+	}
+
+	const lateSteerCalls: SpawnCall[] = [];
+	let lateSteerResultCount = 0;
+	const lateSteerHost = new SubagentLaunchHost({
+		parentSessionId: "late-steer",
+		agentDir: tempDir,
+		spawnProcess: spawnMode("late-steer", lateSteerCalls),
+	});
+	try {
+		const lateSteerHandle = await lateSteerHost.launch({
+			...launchOptions("late-steer", "late-steer-owner"),
+			onResult: () => { lateSteerResultCount += 1; },
+		});
+		await waitFor(() => lateSteerCalls[0]?.stderr.join("").includes("late-steer-ready") === true);
+		await lateSteerHandle.request("message", { text: "parent message near settlement" });
+		assert.equal((await lateSteerHandle.result).text, "steer: parent message near settlement");
+		await waitForExit(lateSteerCalls[0]!.child);
+		await waitFor(() => lateSteerResultCount === 1);
+		assert.equal(lateSteerResultCount, 1);
+	} finally {
+		await lateSteerHost.close();
 	}
 
 	const browserRequests: Array<{ owner: string; payload: unknown }> = [];
@@ -179,7 +204,7 @@ try {
 		await client.close();
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		await disconnected.request("message", { text: "continue" });
-		assert.equal((await disconnected.result).text, "follow-up: continue");
+		assert.equal((await disconnected.result).text, "steer: continue");
 		await waitForExit(disconnectCalls[0]!.child);
 	} finally {
 		await disconnectHost.close();
