@@ -1,11 +1,8 @@
-import * as crypto from "node:crypto";
-import { performance } from "node:perf_hooks";
-
 import { Type, type Static, type TSchema } from "typebox";
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { SubagentIpcClient, type SubagentIpcRequest } from "./ipc.ts";
-import { boundedSubagentSessionFile, readSubagentLoadout, truncateSubagentResult } from "./launch.ts";
+import { SubagentIpcClient } from "./ipc.ts";
+import { readSubagentLoadout } from "./launch.ts";
 import { MAX_SUBAGENT_DEPTH, validateSubagentAgentAllowlist } from "./policy.ts";
 
 const AskQuestionParams = Type.Object({
@@ -67,8 +64,6 @@ const BrowserProxyParameters: Record<string, TSchema> = {
 	browser_close: BrowserEmptyParams,
 };
 const BROWSER_PROXY_NAMES = Object.keys(BrowserProxyParameters);
-const ACTIVITY_INTERVAL_MS = 30_000;
-
 type BrowserProxyName = keyof typeof BrowserProxyParameters;
 
 function browserProxyTimeout(params: Record<string, unknown>): number {
@@ -88,21 +83,10 @@ function requestBrowserProxy(client: SubagentIpcClient, tool: BrowserProxyName, 
 			void client.request("browser", { tool: "browser_close", params: {} }, { timeoutMs: 2_000 }).catch(() => undefined);
 			finish(() => reject(new Error("Browser proxy request aborted.")));
 		};
-		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
 		request.then((value) => finish(() => resolve(value)), (error) => finish(() => reject(error)));
 	});
-}
-
-function lastAssistantText(messages: readonly unknown[]): string {
-	for (const rawMessage of [...messages].reverse()) {
-		const message = rawMessage as { role?: unknown; content?: unknown };
-		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-		return message.content
-			.map((part) => (part && typeof part === "object" && (part as { type?: unknown }).type === "text" ? String((part as { text?: unknown }).text ?? "") : ""))
-			.filter(Boolean)
-			.join("\n");
-	}
-	return "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -116,54 +100,29 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 	const childSessionId = process.env.PI_SUBAGENT_CHILD_SESSION_ID;
 	if (!socketPath || !token || !owner || !childSessionId) return;
 
-	let client: SubagentIpcClient | undefined;
-	let resultSent = false;
-	let latestResultText = "";
-	let lastActivityAt = -1;
 	let loadout;
 	try {
 		loadout = readSubagentLoadout(process.env.PI_SUBAGENT_LOADOUT ?? "");
 	} catch {
 		loadout = undefined;
 	}
-	const handleParentRequest = async (request: SubagentIpcRequest): Promise<unknown> => {
-		if (request.type === "message") {
-			if (!isRecord(request.payload) || typeof request.payload.text !== "string" || !request.payload.text.trim()) throw new Error("Parent message must contain non-empty text.");
-			pi.sendUserMessage(request.payload.text, { deliverAs: "followUp" });
-			return { accepted: true };
-		}
-		throw new Error(`Unsupported parent IPC message: ${request.type}.`);
+	let client: SubagentIpcClient | undefined;
+	const getClient = (): SubagentIpcClient => {
+		client ??= SubagentIpcClient.create({ socketPath, token, owner });
+		return client;
 	};
-	const sendActivity = (): void => {
-		if (!client) return;
-		const now = Math.trunc(performance.now());
-		if (lastActivityAt >= 0 && now - lastActivityAt < ACTIVITY_INTERVAL_MS) return;
-		lastActivityAt = now;
-		void client.request("activity").catch(() => undefined);
-	};
-	pi.on("tool_execution_start", sendActivity);
-	pi.on("tool_execution_update", sendActivity);
-	pi.on("message_update", sendActivity);
 
 	pi.registerTool({
 		name: "ask_question",
 		label: "Ask Parent",
-		description: "Ask parent for information. Child pauses until parent replies through subagent_message.",
+		description: "Ask parent for information through the RPC dialog.",
 		parameters: AskQuestionParams,
-		async execute(_toolCallId, params: AskQuestionParams) {
-			if (!client) return { content: [{ type: "text", text: "Parent IPC is not connected." }], details: { ok: false, questionId: undefined as string | undefined } };
-			const questionId = crypto.randomUUID();
-			try {
-				const response = await client.request<{ answer?: unknown }>("question", {
-					questionId,
-					question: params.question.trim(),
-					...(params.options ? { options: params.options.map((option) => option.trim()) } : {}),
-				}, { noDeadline: true });
-				if (!isRecord(response) || typeof response.answer !== "string") throw new Error("Parent returned malformed question answer.");
-				return { content: [{ type: "text", text: response.answer }], details: { ok: true, questionId } };
-			} catch (error) {
-				return { content: [{ type: "text", text: `Parent question failed: ${error instanceof Error ? error.message : String(error)}` }], details: { ok: false, questionId } };
-			}
+		async execute(_toolCallId, params: AskQuestionParams, _signal, _onUpdate, ctx) {
+			const question = params.question.trim();
+			const options = params.options?.map((option) => option.trim());
+			const answer = options?.length ? await ctx.ui.select(question, options) : await ctx.ui.input(question);
+			if (answer === undefined) throw new Error("Parent question was cancelled.");
+			return { content: [{ type: "text", text: answer }], details: { ok: true } };
 		}
 	});
 
@@ -175,12 +134,11 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 			description: "Start an allowlisted nested subagent and wait for its result.",
 			parameters: NestedSubagentParams,
 			async execute(_toolCallId, params: NestedSubagentParams) {
-				if (!client) return { content: [{ type: "text", text: "Parent IPC is not connected." }], details: { ok: false } };
 				const agentName = params.agent?.trim() || allowedAgents[0]!;
 				const allowlistError = validateSubagentAgentAllowlist(allowedAgents, agentName);
 				if (allowlistError) return { content: [{ type: "text", text: allowlistError }], details: { ok: false, error: allowlistError } };
 				try {
-					const response = await client.request<{ text?: unknown }>("spawn", {
+					const response = await getClient().request<{ text?: unknown }>("spawn", {
 						agent: agentName,
 						task: params.task.trim(),
 						...(params.fileOwnership ? { fileOwnership: params.fileOwnership } : {}),
@@ -204,9 +162,8 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 			description: `Run ${toolName} through parent browser session.`,
 			parameters,
 			async execute(_toolCallId, params: unknown, signal) {
-				if (!client) return { content: [{ type: "text", text: "Parent IPC is not connected." }], details: { ok: false, tool: toolName } };
 				try {
-					const result = await requestBrowserProxy(client, toolName, isRecord(params) ? params : {}, signal);
+					const result = await requestBrowserProxy(getClient(), toolName, isRecord(params) ? params : {}, signal);
 					if (isRecord(result) && Array.isArray(result.content)) return result as unknown as AgentToolResult<unknown>;
 					return { content: [{ type: "text", text: JSON.stringify(result) }], details: { ok: true, tool: toolName, result } };
 				} catch (error) {
@@ -216,33 +173,4 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 			},
 		});
 	}
-
-	pi.on("session_start", async (_event, ctx) => {
-		const sessionFile = boundedSubagentSessionFile(ctx.sessionManager.getSessionFile());
-		client = await SubagentIpcClient.connect({
-			socketPath,
-			token,
-			owner,
-			onRequest: handleParentRequest,
-			helloPayload: { pid: process.pid, ...(sessionFile ? { sessionFile } : {}) },
-		});
-	});
-
-	pi.on("agent_end", (event) => {
-		if (resultSent) return;
-		latestResultText = truncateSubagentResult(lastAssistantText(event.messages));
-	});
-
-	pi.on("agent_settled", (_event, ctx) => {
-		if (!client || resultSent) return;
-		resultSent = true;
-		const sessionFile = boundedSubagentSessionFile(ctx.sessionManager.getSessionFile());
-		void client.request("result", { childSessionId, text: latestResultText, ...(sessionFile ? { sessionFile } : {}) })
-			.then(() => ctx.shutdown())
-			.catch(() => ctx.shutdown());
-	});
-
-	pi.on("session_shutdown", () => {
-		void client?.close();
-	});
 }

@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { mock } from "node:test";
-import { performance } from "node:perf_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +6,7 @@ import * as path from "node:path";
 import subagentChildExtension from "../child.ts";
 import { resolveSubagentSocketPath, SubagentIpcServer } from "../ipc.ts";
 import type { SubagentLoadout } from "../launch.ts";
+import { MAX_SUBAGENT_DEPTH } from "../policy.ts";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-child-"));
 const socketPath = resolveSubagentSocketPath("child-test", tempDir);
@@ -19,16 +18,36 @@ const previous = {
 	loadout: process.env.PI_SUBAGENT_LOADOUT,
 };
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-const tools = new Map<string, { execute: (...args: any[]) => Promise<unknown> }>();
-const sentMessages: string[] = [];
-const helloPayloads: unknown[] = [];
-const resultPayloads: unknown[] = [];
-const activityRequests: unknown[] = [];
-let rejectActivity = false;
-const PARKED_DELAY_MS = 5_100;
+const tools = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>();
+const requestTypes: string[] = [];
+const nestedRequests: unknown[] = [];
+const browserCalls: Array<{ tool: string; params: Record<string, unknown> }> = [];
+let browserCloseCount = 0;
+let resolveSlowBrowserStart!: () => void;
+let resolveBrowserClose!: () => void;
+let resolvePreAbortedBrowserStart!: () => void;
+let resolvePreAbortedBrowserClose!: () => void;
+const slowBrowserStarted = new Promise<void>((resolve) => { resolveSlowBrowserStart = resolve; });
+const browserCloseRequested = new Promise<void>((resolve) => { resolveBrowserClose = resolve; });
+const preAbortedBrowserStarted = new Promise<void>((resolve) => { resolvePreAbortedBrowserStart = resolve; });
+const preAbortedBrowserCloseRequested = new Promise<void>((resolve) => { resolvePreAbortedBrowserClose = resolve; });
 
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function makePi(
+	toolMap = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>(),
+	handlerMap = new Map<string, (event: unknown, ctx: unknown) => unknown>(),
+) {
+	return {
+		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
+			handlerMap.set(name, handler);
+		},
+		registerTool(tool: { name: string; parameters: unknown; execute: (...args: any[]) => Promise<unknown> }) {
+			toolMap.set(tool.name, tool);
+		},
+	};
 }
 
 const loadoutPath = path.join(tempDir, "loadout.json");
@@ -41,7 +60,7 @@ const loadout: SubagentLoadout = {
 	agentName: "worker",
 	cwd: process.cwd(),
 	extensionPath: "child.ts",
-	tools: ["read", "ask_question", "subagent", "browser_console", "browser_close"],
+	tools: ["read", "ask_question", "subagent", "browser_console", "browser_close", "browser_eval"],
 	appendSystemPrompt: "Agent rules",
 	cavemanEnabled: true,
 	depth: 0,
@@ -52,38 +71,32 @@ fs.writeFileSync(loadoutPath, JSON.stringify(loadout));
 
 const server = new SubagentIpcServer({
 	socketPath,
-	onHello: (_owner, payload) => { helloPayloads.push(payload); },
 	onRequest: async (request) => {
-		if (request.type === "question") {
-			await delay(PARKED_DELAY_MS);
-			return { answer: "yes" };
-		}
+		requestTypes.push(request.type);
 		if (request.type === "spawn") {
-			await delay(PARKED_DELAY_MS);
+			nestedRequests.push(request.payload);
 			return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
 		}
-		if (request.type === "activity") {
-			activityRequests.push(request.payload);
-			if (rejectActivity) throw new Error("activity refused");
-			return { accepted: true };
+		if (request.type === "browser" && isRecord(request.payload) && typeof request.payload.tool === "string") {
+			const tool = request.payload.tool;
+			const params = isRecord(request.payload.params) ? request.payload.params : {};
+			browserCalls.push({ tool, params });
+			if (tool === "browser_eval") {
+				if (params.expression === "pre-aborted") resolvePreAbortedBrowserStart();
+				else resolveSlowBrowserStart();
+				return new Promise(() => undefined);
+			}
+			if (tool === "browser_close") {
+				if (browserCloseCount++ === 0) resolveBrowserClose();
+				else resolvePreAbortedBrowserClose();
+				return { accepted: true };
+			}
+			if (tool === "browser_console") return { content: [{ type: "text", text: "browser result" }], details: { ok: true } };
 		}
-		if (request.type === "browser") return { content: [{ type: "text", text: "browser result" }], details: { ok: true } };
-		if (request.type === "result") resultPayloads.push(request.payload);
 		return undefined;
 	},
 });
 const childToken = server.registerRun("child-owner");
-const fakePi = {
-	on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
-		handlers.set(name, handler);
-	},
-	registerTool(tool: { name: string; execute: (...args: any[]) => Promise<unknown> }) {
-		tools.set(tool.name, tool);
-	},
-	sendUserMessage(content: string) {
-		sentMessages.push(content);
-	},
-};
 
 process.env.PI_SUBAGENT_SOCKET = socketPath;
 process.env.PI_SUBAGENT_TOKEN = childToken;
@@ -92,82 +105,93 @@ process.env.PI_SUBAGENT_CHILD_SESSION_ID = "child-session";
 process.env.PI_SUBAGENT_LOADOUT = loadoutPath;
 
 try {
+	const noEnvHandlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const noEnvTools = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>();
+	const noEnvPi = makePi(noEnvTools, noEnvHandlers);
+	delete process.env.PI_SUBAGENT_TOKEN;
+	subagentChildExtension(noEnvPi as never);
+	assert.equal(noEnvHandlers.size, 0);
+	assert.equal(noEnvTools.size, 0);
+	process.env.PI_SUBAGENT_TOKEN = childToken;
+
 	await server.listen();
-	subagentChildExtension(fakePi as never);
-	assert.ok(tools.has("ask_question"));
-	assert.ok(tools.has("subagent"));
-	assert.ok(tools.has("browser_console"));
-	assert.ok(tools.has("browser_close"));
-	assert.ok(handlers.has("tool_execution_start"));
-	assert.ok(handlers.has("tool_execution_update"));
-	assert.ok(handlers.has("message_update"));
-	assert.equal(handlers.has("tool_execution_end"), false);
-	const sessionFile = path.join(tempDir, "child-session.jsonl");
-	await handlers.get("session_start")?.({}, { sessionManager: { getSessionFile: () => sessionFile } });
-	assert.deepEqual(helloPayloads, [{ pid: process.pid, sessionFile }]);
-	let activityNow = 1_000;
-	mock.method(performance, "now", () => activityNow);
-	let shutdownCount = 0;
-	handlers.get("message_update")?.({}, {});
-	handlers.get("message_update")?.({}, {});
-	await delay(50);
-	assert.equal(activityRequests.length, 1);
-	activityNow += 30_000;
-	handlers.get("tool_execution_update")?.({}, {});
-	await delay(50);
-	assert.equal(activityRequests.length, 2);
-	rejectActivity = true;
-	activityNow += 30_000;
-	handlers.get("tool_execution_start")?.({}, {});
-	await delay(50);
-	assert.equal(activityRequests.length, 3);
-	assert.equal(shutdownCount, 0);
-	rejectActivity = false;
-	const questionStartedAt = Date.now();
-	const questionResult = await tools.get("ask_question")!.execute("question-call", { question: "Continue?", options: ["yes", "no"] }, new AbortController().signal, undefined, {});
-	assert.ok(Date.now() - questionStartedAt >= PARKED_DELAY_MS - 250);
-	assert.deepEqual((questionResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "yes" });
-	const nestedStartedAt = Date.now();
-	const nestedResult = await tools.get("subagent")!.execute("nested-call", { agent: "explorer", task: "inspect" }, new AbortController().signal, undefined, {});
-	assert.ok(Date.now() - nestedStartedAt >= PARKED_DELAY_MS - 250);
+	subagentChildExtension(makePi(tools, handlers) as never);
+	assert.deepEqual([...tools.keys()].sort(), ["ask_question", "browser_close", "browser_console", "browser_eval", "subagent"]);
+	assert.equal(handlers.size, 0);
+	assert.equal(server.getConnection("child-owner"), undefined);
+
+	const selectCalls: unknown[][] = [];
+	const inputCalls: unknown[][] = [];
+	const answeringContext = {
+		ui: {
+			select: async (...args: [string, string[]]) => { selectCalls.push(args); return "yes"; },
+			input: async (...args: [string]) => { inputCalls.push(args); return "free answer"; },
+		},
+	};
+	const askQuestion = tools.get("ask_question")!.execute;
+	const selected = await askQuestion("question-select", { question: " Choose? ", options: [" yes ", " no "] }, undefined, undefined, answeringContext);
+	assert.deepEqual((selected as { content: Array<{ text: string }> }).content[0], { type: "text", text: "yes" });
+	const typed = await askQuestion("question-input", { question: " Give details? " }, undefined, undefined, answeringContext);
+	assert.deepEqual((typed as { content: Array<{ text: string }> }).content[0], { type: "text", text: "free answer" });
+	assert.deepEqual(selectCalls, [["Choose?", ["yes", "no"]]]);
+	assert.deepEqual(inputCalls, [["Give details?"]]);
+	assert.equal(server.getConnection("child-owner"), undefined);
+
+	await assert.rejects(
+		askQuestion("question-cancel-select", { question: "Choose?", options: ["yes"] }, undefined, undefined, { ui: { select: async () => undefined } }),
+		/cancelled/,
+	);
+	await assert.rejects(
+		askQuestion("question-cancel-input", { question: "Type?" }, undefined, undefined, { ui: { input: async () => undefined } }),
+		/cancelled/,
+	);
+
+	const nestedResult = await tools.get("subagent")!.execute("nested-call", { agent: "explorer", task: " inspect " }, undefined, undefined, {});
 	assert.deepEqual((nestedResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "nested result" });
-	const refusedResult = await tools.get("subagent")!.execute("nested-refused", { agent: "worker", task: "inspect" }, new AbortController().signal, undefined, {});
+	assert.deepEqual(nestedRequests, [{ agent: "explorer", task: "inspect" }]);
+	assert.ok(server.getConnection("child-owner"));
+
+	const refusedResult = await tools.get("subagent")!.execute("nested-refused", { agent: "worker", task: "inspect" }, undefined, undefined, {});
 	assert.match((refusedResult as { content: Array<{ text: string }> }).content[0]!.text, /allowed child agents/);
-	const browserResult = await tools.get("browser_console")!.execute("browser-call", { clear: false }, new AbortController().signal, undefined, {});
+	const browserResult = await tools.get("browser_console")!.execute("browser-call", { clear: false }, undefined, undefined, {});
 	assert.deepEqual((browserResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "browser result" });
-	const connection = server.getConnection("child-owner");
-	assert.ok(connection);
-	assert.deepEqual(await connection.request("message", { text: "parent says hello" }), { accepted: true });
-	assert.deepEqual(sentMessages, ["parent says hello"]);
 
-	const lifecycleContext = { sessionManager: { getSessionFile: () => sessionFile }, shutdown: () => { shutdownCount += 1; } };
-	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "pre-retry" }] }] }, lifecycleContext);
-	assert.deepEqual(resultPayloads, []);
-	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "final result" }] }] }, lifecycleContext);
-	handlers.get("agent_settled")?.({}, lifecycleContext);
-	await delay(50);
-	assert.deepEqual(resultPayloads, [{ childSessionId: "child-session", text: "final result", sessionFile }]);
-	assert.equal(shutdownCount, 1);
-	handlers.get("agent_settled")?.({}, lifecycleContext);
-	await delay(10);
-	assert.equal(resultPayloads.length, 1);
-	assert.equal(shutdownCount, 1);
+	const browserAbort = new AbortController();
+	const abortedBrowserCall = tools.get("browser_eval")!.execute("browser-abort", { expression: "1 + 1" }, browserAbort.signal, undefined, {});
+	await slowBrowserStarted;
+	browserAbort.abort();
+	const abortedBrowserResult = await abortedBrowserCall as { content: Array<{ text: string }> };
+	assert.match(abortedBrowserResult.content[0]!.text, /aborted/);
+	await browserCloseRequested;
+	assert.ok(browserCalls.some((call) => call.tool === "browser_close"));
+	const preAbortedBrowser = new AbortController();
+	preAbortedBrowser.abort();
+	const preAbortedBrowserCall = tools.get("browser_eval")!.execute("browser-pre-aborted", { expression: "pre-aborted" }, preAbortedBrowser.signal, undefined, {});
+	await Promise.all([preAbortedBrowserStarted, preAbortedBrowserCloseRequested]);
+	const preAbortedResult = await preAbortedBrowserCall as { content: Array<{ text: string }> };
+	assert.match(preAbortedResult.content[0]!.text, /aborted/);
+	assert.deepEqual(requestTypes.filter((type) => type === "question" || type === "activity" || type === "result" || type === "message"), []);
 
-	await handlers.get("session_shutdown")?.({}, {});
-	await delay(10);
-	handlers.clear();
-	subagentChildExtension(fakePi as never);
-	await handlers.get("session_start")?.({}, { sessionManager: { getSessionFile: () => undefined } });
-	assert.deepEqual(helloPayloads[1], { pid: process.pid });
-	const noSessionLifecycleContext = { sessionManager: { getSessionFile: () => undefined }, shutdown: () => { shutdownCount += 1; } };
-	handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "no session file" }] }] }, noSessionLifecycleContext);
-	handlers.get("agent_settled")?.({}, noSessionLifecycleContext);
-	await delay(50);
-	assert.deepEqual(resultPayloads[1], { childSessionId: "child-session", text: "no session file" });
+	const maxDepthOwner = "max-depth-owner";
+	const maxDepthToken = server.registerRun(maxDepthOwner);
+	const maxDepthLoadout: SubagentLoadout = {
+		...loadout,
+		owner: maxDepthOwner,
+		childSessionId: "max-depth-child",
+		tools: ["read", "ask_question", "browser_console"],
+		depth: MAX_SUBAGENT_DEPTH,
+	};
+	fs.writeFileSync(loadoutPath, JSON.stringify(maxDepthLoadout));
+	process.env.PI_SUBAGENT_TOKEN = maxDepthToken;
+	process.env.PI_SUBAGENT_OWNER = maxDepthOwner;
+	process.env.PI_SUBAGENT_CHILD_SESSION_ID = "max-depth-child";
+	const maxDepthTools = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>();
+	subagentChildExtension(makePi(maxDepthTools) as never);
+	assert.deepEqual([...maxDepthTools.keys()].sort(), ["ask_question", "browser_console"]);
+	assert.equal(server.getConnection(maxDepthOwner), undefined);
+
 	console.log("subagent child tests passed");
 } finally {
-	mock.restoreAll();
-	await handlers.get("session_shutdown")?.({}, {});
 	await server.close();
 	for (const [key, value] of Object.entries(previous)) {
 		const envKey = key === "socket" ? "PI_SUBAGENT_SOCKET" : key === "token" ? "PI_SUBAGENT_TOKEN" : key === "owner" ? "PI_SUBAGENT_OWNER" : key === "child" ? "PI_SUBAGENT_CHILD_SESSION_ID" : "PI_SUBAGENT_LOADOUT";
