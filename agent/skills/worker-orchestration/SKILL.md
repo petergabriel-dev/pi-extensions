@@ -92,7 +92,7 @@ Explorers are leaves. Do not ask them to edit or spawn another agent. Workers ma
 
 These are default budgets and may be overridden per task. Put the chosen budgets in the task string: `SubagentParams` carries only `task`, `agent`, `agentScope`, and `fileOwnership` (`agent/extensions/subagents/index.ts:58-68`); no tool-level budget enforcement exists.
 
-`subagent_message` cannot interrupt a runaway child. It arrives as a `followUp` user message (`agent/extensions/subagents/launch.ts`), so the child may finish its current plan first. Parent cancellation sends RPC `abort`, closes child stdin, then escalates to `SIGTERM` after one second and `SIGKILL` 500ms later. Verify child-process and lifecycle-resource cleanup afterward.
+`subagent_message` cannot interrupt a running tool. For a live child it sends RPC `steer`, delivered at the child's next tool boundary; use abort as the hard stop. Parent cancellation sends RPC `abort`, closes child stdin, then escalates to `SIGTERM` after one second and `SIGKILL` 500ms later. Verify child-process and lifecycle-resource cleanup afterward.
 
 ## Worker Spawn Checklist
 

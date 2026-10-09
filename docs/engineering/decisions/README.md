@@ -39,4 +39,4 @@
 | ADR-0035 | Active | Ask-user-question defer-to-next-turn compaction | changing ask_user_question context defer, answer batching, queue drain or abort behavior, resume delivery, or Pi host compaction assumptions |
 | ADR-0036 | Active | Fail-closed subagent toolset policy | changing subagent tool validation, browser proxy loadouts, agent definitions, or workflow-mode launch gates |
 | ADR-0037 | Active | Design token adherence advisory on source writes | changing design-token parsing, source-write result handling, advisory scope or formatting, design-manifest permissions, or exact-match guidance |
-| ADR-0038 | Active | RPC-mode subagent transport | Changing RPC child launch, command readiness, result or question delivery, IPC token authentication, nested spawn/browser routing, event tails, lifecycle cleanup, or idle/max-total timeout behavior |
+| ADR-0038 | Active | RPC-mode subagent transport | Changing RPC child launch, readiness, result/list delivery, live steering, role effort defaults, stderr diagnostics, IPC token authentication, nested spawn/browser routing, event tails, lifecycle cleanup, or idle/max-total timeout behavior |

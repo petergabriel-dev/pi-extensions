@@ -62,6 +62,15 @@ npm run test:cursor-kit
 
 The focused commands are useful while iterating; `npm test` runs the complete configured gate after bootstrap.
 
+## Subagent overrides
+
+```text
+/subagent-model <explorer|worker> <provider/model|inherit>
+/subagent-effort <explorer|worker> <off|minimal|low|medium|high|xhigh|inherit>
+```
+
+Overrides are per role and stored in Pi settings. Explorer effort defaults to `low`; worker effort inherits the parent when unset. Explicit explorer `inherit` restores parent effort instead of the default.
+
 ## Contents
 
 ### Extensions

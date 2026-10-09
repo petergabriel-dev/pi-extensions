@@ -8,6 +8,11 @@ All notable changes to this project are documented here.
 
 - Removed `cmux`-based subagent launches in favor of Pi RPC; side-channel tokens are now per-run and owner-bound.
 
+### Changed
+
+- Deliver subagent results once through automatic follow-up turns; list output omits delivered result bodies and discourages polling.
+- Route live subagent messages through next-tool-boundary RPC steer; default explorer effort to `low` and prefix/filter bounded child diagnostics safely.
+
 ## [0.7.1] - 2026-09-18
 
 ### Added

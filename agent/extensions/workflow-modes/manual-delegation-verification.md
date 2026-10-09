@@ -25,6 +25,8 @@ The subagent suite covers RPC framing/commands/UI, per-run IPC authentication an
 
 ## Live RPC acceptance
 
+For no-poll delivery acceptance, start a Build-mode workspace session with `./bin/pi-workspace --no-session`, launch a multi-step explorer task, then end the parent turn without calling `subagents_list`. Confirm the result arrives once as the automatic follow-up turn. Use `subagents_list` only when the user requests status, transcript, or log lookup; a repeated unchanged call should return the no-change nudge rather than another result body. If steering is tested, send `subagent_message` while the child still has a tool boundary and confirm delivery before its final answer.
+
 From repository root, run:
 
 ```bash
