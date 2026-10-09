@@ -525,7 +525,7 @@ export class SubagentLaunchHost {
 		};
 		let diagnostics: SubagentDiagnostics;
 		try {
-			diagnostics = createSubagentDiagnostics({ parentSessionId: loadout.parentSessionId, owner: loadout.owner, token: ipcToken, agentDir: this.options.agentDir });
+			diagnostics = createSubagentDiagnostics({ parentSessionId: loadout.parentSessionId, childSessionId: loadout.childSessionId, owner: loadout.owner, token: ipcToken, agentDir: this.options.agentDir });
 		} catch (error) {
 			void this.server.revokeRun(loadout.owner).catch(() => undefined);
 			this.ownership.release(loadout.owner);

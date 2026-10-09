@@ -7,11 +7,18 @@ export const MAX_SUBAGENT_LOG_BYTES = 1_024 * 1_024;
 export const MAX_SUBAGENT_TAIL_BYTES = 8 * 1_024;
 export const SUBAGENT_RUNTIME_DIR_MODE = 0o700;
 export const SUBAGENT_LOG_MODE = 0o600;
+const MAX_PARTIAL_LINE_BYTES = 64 * 1024;
+
+interface PendingDiagnosticLine {
+	text: string;
+	prefixed: boolean;
+}
 
 export type SubagentTransport = "rpc";
 
 export interface SubagentDiagnosticsOptions {
 	parentSessionId: string;
+	childSessionId: string;
 	owner: string;
 	token: string;
 	agentDir?: string;
@@ -44,6 +51,20 @@ function truncateTail(text: string): string {
 	return output;
 }
 
+function splitForTokenHoldback(text: string, token: string): number {
+	const holdBytes = Math.max(0, Buffer.byteLength(token, "utf8") - 1);
+	let split = text.length;
+	while (split > 0 && Buffer.byteLength(text.slice(split), "utf8") < holdBytes) split -= 1;
+	while (split > 0 && Buffer.byteLength(text.slice(split), "utf8") > holdBytes) split += 1;
+	for (let length = Math.min(token.length - 1, split); length > 0; length -= 1) {
+		if (token.startsWith(text.slice(split - length, split))) {
+			split -= length;
+			break;
+		}
+	}
+	return split;
+}
+
 function regularFileOrMissing(filePath: string): void {
 	if (fs.existsSync(filePath) && !fs.lstatSync(filePath).isFile()) throw new Error(`Subagent diagnostics path is not a regular file: ${filePath}`);
 }
@@ -51,8 +72,9 @@ function regularFileOrMissing(filePath: string): void {
 class BoundedSubagentDiagnostics implements SubagentDiagnostics {
 	readonly logPath: string;
 	private readonly token: string;
+	private readonly childSessionId: string;
 	private readonly file: number;
-	private readonly pending = new Map<string, string>();
+	private readonly pending = new Map<string, PendingDiagnosticLine>();
 	private tailValue = "";
 	private logBytes = 0;
 	private closed = false;
@@ -60,6 +82,7 @@ class BoundedSubagentDiagnostics implements SubagentDiagnostics {
 	constructor(options: SubagentDiagnosticsOptions) {
 		this.logPath = resolveSubagentDiagnosticsPath(options.parentSessionId, options.owner, options.agentDir);
 		this.token = options.token;
+		this.childSessionId = options.childSessionId;
 		const directory = path.dirname(this.logPath);
 		fs.mkdirSync(directory, { recursive: true, mode: SUBAGENT_RUNTIME_DIR_MODE });
 		fs.chmodSync(directory, SUBAGENT_RUNTIME_DIR_MODE);
@@ -80,39 +103,52 @@ class BoundedSubagentDiagnostics implements SubagentDiagnostics {
 		const label = source.trim() || "output";
 		const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
 		if (!text) return;
-		const previous = this.pending.get(label) ?? "";
-		const combined = `${previous}${text}`;
-		const holdBytes = Math.max(0, Buffer.byteLength(this.token, "utf8") - 1);
-		let safe = combined;
-		if (holdBytes > 0 && Buffer.byteLength(combined, "utf8") > holdBytes) {
-			let split = combined.length;
-			while (split > 0 && Buffer.byteLength(combined.slice(split), "utf8") < holdBytes) split -= 1;
-			while (split > 0 && Buffer.byteLength(combined.slice(split), "utf8") > holdBytes) split += 1;
-			safe = combined.slice(0, split);
-			this.pending.set(label, combined.slice(split));
-		} else if (holdBytes > 0) {
-			this.pending.set(label, combined);
-			safe = "";
-		} else {
-			this.pending.delete(label);
+		const pending = this.pending.get(label) ?? { text: "", prefixed: false };
+		let combined = `${pending.text}${text}`;
+		let newline = combined.indexOf("\n");
+		while (newline !== -1) {
+			this.writeLine(label, combined.slice(0, newline), pending.prefixed, true);
+			combined = combined.slice(newline + 1);
+			pending.text = "";
+			pending.prefixed = false;
+			newline = combined.indexOf("\n");
 		}
-		if (safe) this.write(`[${label}] ${redactSubagentText(safe, this.token)}`);
+		pending.text = combined;
+		while (Buffer.byteLength(pending.text, "utf8") > MAX_PARTIAL_LINE_BYTES) {
+			const split = splitForTokenHoldback(pending.text, this.token);
+			if (split === 0) break;
+			const safe = pending.text.slice(0, split);
+			pending.text = pending.text.slice(split);
+			this.write(`${pending.prefixed ? "" : `[${label}] `}${redactSubagentText(safe, this.token)}`);
+			pending.prefixed = true;
+		}
+		if (pending.text || pending.prefixed) this.pending.set(label, pending);
+		else this.pending.delete(label);
 	}
 
 	tail(): string {
-	let pendingText = "";
-	for (const [source, value] of this.pending) pendingText += `[${source}] ${redactSubagentText(value, this.token)}`;
-	return truncateTail(`${this.tailValue}${pendingText}`);
+		let pendingText = "";
+		for (const [source, line] of this.pending) {
+			if (line.text) pendingText += `${line.prefixed ? "" : `[${source}] `}${line.text}`;
+		}
+		return truncateTail(redactSubagentText(`${this.tailValue}${pendingText}`, this.token));
 	}
 
 	close(): void {
 		if (this.closed) return;
-		for (const [source, value] of this.pending) {
-			if (value) this.write(`[${source}] ${redactSubagentText(value, this.token)}`);
+		for (const [source, line] of this.pending) {
+			if (line.text) this.writeLine(source, line.text, line.prefixed, false);
 		}
 		this.pending.clear();
 		this.closed = true;
 		try { fs.closeSync(this.file); } catch { /* best effort */ }
+	}
+
+	private writeLine(source: string, line: string, prefixed: boolean, newline: boolean): void {
+		const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+		const warning = `Warning: No project session found with id '${this.childSessionId}'; creating a new session with that id.`;
+		if (!prefixed && source === "stderr" && text === warning) return;
+		this.write(`${prefixed ? "" : `[${source}] `}${redactSubagentText(text, this.token)}${newline ? "\n" : ""}`);
 	}
 
 	private write(text: string): void {
