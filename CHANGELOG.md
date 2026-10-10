@@ -8,8 +8,13 @@ All notable changes to this project are documented here.
 
 - Removed `cmux`-based subagent launches in favor of Pi RPC; side-channel tokens are now per-run and owner-bound.
 
+### Added
+
+- Add `/agents` TUI overlay for recent/live child activity, pending-question answers, and steering running children.
+
 ### Changed
 
+- Relay child questions directly to the user with nested-owner labels and exactly-once answers; queue a redacted main-agent `nextTurn` note without prompting the parent model.
 - Deliver subagent results once through automatic follow-up turns; list output omits delivered result bodies and discourages polling.
 - Route live subagent messages through next-tool-boundary RPC steer; default explorer effort to `low` and prefix/filter bounded child diagnostics safely.
 

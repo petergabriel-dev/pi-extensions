@@ -62,7 +62,7 @@ npm run test:cursor-kit
 
 The focused commands are useful while iterating; `npm test` runs the complete configured gate after bootstrap.
 
-## Subagent overrides
+## Subagent controls
 
 ```text
 /subagent-model <explorer|worker> <provider/model|inherit>
@@ -70,6 +70,8 @@ The focused commands are useful while iterating; `npm test` runs the complete co
 ```
 
 Overrides are per role and stored in Pi settings. Explorer effort defaults to `low`; worker effort inherits the parent when unset. Explicit explorer `inherit` restores parent effort instead of the default.
+
+In a saved interactive TUI session, `/agents` lists child runs in tree order and opens a live view of recent redacted RPC items. Arrow keys or PageUp/PageDown scroll; Enter answers a pending child question or steers a running child; Esc closes. Finished children are read-only. Child questions are relayed to the user automatically, and dismissing a dialog leaves the question pending. `/agents` requires the interactive TUI.
 
 ## Contents
 
@@ -84,7 +86,7 @@ Overrides are per role and stored in Pi settings. Explorer effort defaults to `l
 - `filechanges` — branch-local tracking and accept/decline rollback for successful Pi `edit`/`write` mutations.
 - `notify` — terminal-native “Ready for input” notifications.
 - `personal-memory` — user-global indexed memory and `/remember`.
-- `subagents` — isolated RPC child Pi processes with tool, ownership, and workflow-mode policy.
+- `subagents` — isolated RPC child Pi processes, automatic user question relay, and the `/agents` TUI overlay.
 - `workflow-modes` — `/mode`, `/plan`, `/caveman`, prompt composition, and read-only/mutation gates.
 
 ### Skills and agents
