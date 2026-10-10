@@ -11,6 +11,8 @@ import { CAVEMAN_PROMPT } from "../../workflow-modes/caveman.ts";
 import {
 	buildSubagentCommandArgs,
 	buildSubagentSystemPrompt,
+	MAX_SUBAGENT_ITEM_BYTES,
+	MAX_SUBAGENT_ITEMS,
 	MAX_SUBAGENT_RESULT_BYTES,
 	readSubagentLoadout,
 	resolveSubagentExtensionPath,
@@ -26,6 +28,14 @@ interface SpawnCall {
 	args: string[];
 	options: SpawnOptions;
 	child: ChildProcess;
+}
+
+interface ItemRunForTest {
+	itemBuffer: { listeners: Set<unknown> };
+}
+
+function itemListeners(host: SubagentLaunchHost, owner: string): Set<unknown> | undefined {
+	return (host as unknown as { runs: Map<string, ItemRunForTest> }).runs.get(owner)?.itemBuffer.listeners;
 }
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-launch-"));
@@ -142,6 +152,114 @@ try {
 		await host.close();
 	}
 
+	const itemCalls: SpawnCall[] = [];
+	const questions: Array<{ question: string }> = [];
+	const itemHost = new SubagentLaunchHost({
+		parentSessionId: "items",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["items"], itemCalls),
+	});
+	try {
+		const handle = await itemHost.launch({
+			...launchOptions("items", "worker-items"),
+			onQuestion: (question) => { questions.push(question); },
+		});
+		const listeners = itemListeners(itemHost, "worker-items");
+		assert.ok(listeners);
+		const token = itemCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "";
+		assert.ok(token);
+		let notifications = 0;
+		let tokenLeaked = false;
+		const unsubscribe = itemHost.subscribeItems("worker-items", (snapshot) => {
+			notifications += 1;
+			tokenLeaked ||= snapshot.some((item) => item.text.includes(token));
+		});
+		assert.equal(listeners.size, 1);
+		const temporaryUnsubscribe = itemHost.subscribeItems("worker-items", () => undefined);
+		assert.equal(listeners.size, 2);
+		temporaryUnsubscribe();
+		assert.equal(listeners.size, 1);
+		await waitFor(() => itemHost.readItems("worker-items").some((item) => item.kind === "question"));
+		assert.equal(questions.length, 1);
+		assert.equal(questions[0]?.question, "Choose [REDACTED]");
+		assert.equal(itemHost.answerQuestion("worker-items", "item-question", "yes"), true);
+		await handle.request("message", { text: "user steer text" });
+		await handle.result;
+		await waitForExit(itemCalls[0]!.child);
+
+		const items = itemHost.readItems("worker-items");
+		assert.equal(items.filter((item) => item.kind === "text").length, 1);
+		assert.equal(items.find((item) => item.kind === "text")?.text, "message end [REDACTED]");
+		assert.equal(items.filter((item) => item.kind === "thinking").length, 1);
+		assert.equal(items.find((item) => item.kind === "thinking")?.text, "thinking final");
+		assert.equal(items.filter((item) => item.kind === "tool").length, 1);
+		assert.match(items.find((item) => item.kind === "tool")?.text ?? "", /read .*error \(23ms\)/);
+		assert.ok(items.some((item) => item.kind === "user" && item.text.includes("user steer text")));
+		assert.equal(items.find((item) => item.kind === "question")?.text, "Choose [REDACTED]\nOptions: safe");
+		const statuses = items.filter((item) => item.kind === "status").map((item) => item.text);
+		assert.ok(statuses.includes("running") && statuses.includes("waiting") && statuses.includes("done"));
+		assert.ok(items.every((item) => !item.text.includes(token)));
+		assert.ok(items.every((item) => Buffer.byteLength(JSON.stringify(item), "utf8") <= MAX_SUBAGENT_ITEM_BYTES));
+		assert.ok(items.length <= MAX_SUBAGENT_ITEMS);
+		assert.ok(notifications > 1);
+		assert.equal(tokenLeaked, false);
+		assert.equal(listeners.size, 0);
+		unsubscribe();
+		assert.equal(listeners.size, 0);
+	} finally {
+		await itemHost.close();
+	}
+
+	const capCalls: SpawnCall[] = [];
+	const capHost = new SubagentLaunchHost({
+		parentSessionId: "item-cap",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["item-cap"], capCalls),
+	});
+	try {
+		const capped = await capHost.launch(launchOptions("item-cap", "worker-item-cap"));
+		await capped.result;
+		await waitForExit(capCalls[0]!.child);
+		const items = capHost.readItems("worker-item-cap");
+		assert.equal(items.length, MAX_SUBAGENT_ITEMS);
+		assert.equal(items.some((item) => item.text.includes("user-0")), false);
+		assert.ok(items.some((item) => item.text.includes("user-204")));
+		const longItem = items.find((item) => item.kind === "user" && item.text.endsWith("tail-marker"));
+		assert.ok(longItem);
+		assert.equal(longItem.text.startsWith("long-prefix:"), false);
+		assert.ok(items.every((item) => Buffer.byteLength(JSON.stringify(item), "utf8") <= MAX_SUBAGENT_ITEM_BYTES));
+	} finally {
+		await capHost.close();
+	}
+
+	const nestedCalls: SpawnCall[] = [];
+	let nestedHost!: SubagentLaunchHost;
+	let nestedHandle: Awaited<ReturnType<SubagentLaunchHost["launch"]>> | undefined;
+	nestedHost = new SubagentLaunchHost({
+		parentSessionId: "nested-items",
+		agentDir: tempDir,
+		spawnProcess: fakeSpawn(["nested-spawn", "launch"], nestedCalls),
+		onSpawn: async () => {
+			nestedHandle = await nestedHost.launch(launchOptions("nested-items", "nested-child"));
+			return { started: true };
+		},
+	});
+	try {
+		const parent = await nestedHost.launch(launchOptions("nested-items", "parent-child"));
+		await waitFor(() => nestedHandle !== undefined);
+		const nested = nestedHandle;
+		assert.ok(nested);
+		await Promise.all([parent.result, nested.result]);
+		await Promise.all(nestedCalls.map((call) => waitForExit(call.child)));
+		const parentItems = nestedHost.readItems("parent-child");
+		const nestedItems = nestedHost.readItems("nested-child");
+		assert.ok(parentItems.some((item) => item.kind === "text"));
+		assert.equal(parentItems.some((item) => item.kind === "tool"), false);
+		assert.ok(nestedItems.some((item) => item.kind === "tool"));
+	} finally {
+		await nestedHost.close();
+	}
+
 	const handledCalls: SpawnCall[] = [];
 	const handledHost = new SubagentLaunchHost({
 		parentSessionId: "handled",
@@ -206,7 +324,7 @@ try {
 	const failureHost = new SubagentLaunchHost({
 		parentSessionId: "failure",
 		agentDir: tempDir,
-		spawnProcess: fakeSpawn(["exit-before-settle"], failureCalls),
+		spawnProcess: fakeSpawn(["fail-later"], failureCalls),
 	});
 	try {
 		const failed = await failureHost.launch({
@@ -214,6 +332,11 @@ try {
 			tools: ["edit"],
 			fileOwnership: ["failure/**"],
 		});
+		const failureListeners = itemListeners(failureHost, "worker-failure");
+		assert.ok(failureListeners);
+		failureHost.subscribeItems("worker-failure", () => undefined);
+		assert.equal(failureListeners.size, 1);
+		await failed.request("message", { text: "trigger failure" });
 		await assert.rejects(failed.result, (error: unknown) => {
 			assert.ok(error instanceof SubagentFailureError);
 			assert.equal(error.info.kind, "process");
@@ -223,6 +346,7 @@ try {
 			assert.equal(error.info.tail.includes(failureCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "missing"), false);
 			return true;
 		});
+		assert.equal(failureListeners.size, 0);
 		await waitForExit(failureCalls[0]!.child);
 		const log = fs.readFileSync(failed.logPath, "utf8");
 		assert.match(log, /sentinel stderr/);
@@ -241,12 +365,18 @@ try {
 	});
 	try {
 		const tailHandle = await tailHost.launch(launchOptions("tail", "worker-tail"));
+		const tailListeners = itemListeners(tailHost, "worker-tail");
+		assert.ok(tailListeners);
+		tailHost.subscribeItems("worker-tail", () => undefined);
+		assert.equal(tailListeners.size, 1);
 		await waitFor(async () => Boolean(await tailHost.readTail("worker-tail", 20)));
 		const tail = await tailHost.readTail("worker-tail", 20);
 		assert.match(tail ?? "", /tail sentinel/);
 		assert.equal(tail?.includes(tailCalls[0]?.options.env?.PI_SUBAGENT_TOKEN ?? "missing"), false);
 		assert.ok(Buffer.byteLength(tail ?? "", "utf8") <= 8 * 1024);
 		await tailHost.close();
+		assert.equal(tailListeners.size, 0);
+		assert.deepEqual(tailHost.readItems("worker-tail"), []);
 		await assert.rejects(tailHandle.result, /host closed/);
 		await waitForExit(tailCalls[0]!.child);
 	} finally {
@@ -265,8 +395,13 @@ try {
 			tools: ["edit"],
 			fileOwnership: ["abort/**"],
 		});
+		const abortListeners = itemListeners(abortHost, "writer-abort");
+		assert.ok(abortListeners);
+		abortHost.subscribeItems("writer-abort", () => undefined);
+		assert.equal(abortListeners.size, 1);
 		aborted.kill();
 		await assert.rejects(aborted.result, /aborted/);
+		assert.equal(abortListeners.size, 0);
 		await waitForExit(abortCalls[0]!.child);
 		assert.deepEqual(abortHost.getOwnershipSnapshot(), {});
 		assert.ok(abortCalls[0]!.child.exitCode !== null || abortCalls[0]!.child.signalCode !== null);

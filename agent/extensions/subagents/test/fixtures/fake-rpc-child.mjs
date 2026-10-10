@@ -145,11 +145,32 @@ function handleCommand(command) {
 			startSpawnRequest();
 			return;
 		}
+		if (mode === "items") {
+			const token = process.env.PI_SUBAGENT_TOKEN;
+			sendRecord({ type: "message_start", message: { role: "assistant", content: [] } });
+			sendRecord({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: `draft ${token.slice(0, 12)}` } });
+			sendRecord({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: `${token.slice(12)} tail` } });
+			sendRecord({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 1, delta: "thinking draft" } });
+			sendRecord({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: `text end ${token}` } });
+			sendRecord({ type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 1, content: "thinking end" } });
+			sendRecord({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `message end ${token}` }, { type: "thinking", thinking: "thinking final" }] } });
+			sendRecord({ type: "tool_execution_start", toolCallId: "item-tool", toolName: "read", args: { path: `private/${token}` } });
+			sendRecord({ type: "tool_execution_end", toolCallId: "item-tool", toolName: "read", isError: true, durationMs: 23 });
+			sendRecord({ type: "extension_ui_request", id: "item-question", method: "select", title: `Choose ${token}`, options: ["safe"] });
+			return;
+		}
+		if (mode === "item-cap") {
+			for (let index = 0; index < 205; index += 1) sendRecord({ type: "message_end", message: { role: "user", content: `user-${index}` } });
+			sendRecord({ type: "message_end", message: { role: "user", content: `long-prefix:${"\u0000".repeat(5_000)}tail-marker` } });
+			finishRun();
+			return;
+		}
 		if (mode === "exit-before-settle") {
 			process.stderr.write(`sentinel stderr ${process.env.PI_SUBAGENT_TOKEN}\n`);
 			setTimeout(() => process.exit(23), 25);
 			return;
 		}
+		if (mode === "fail-later") return;
 		if (mode === "tail") {
 			const token = process.env.PI_SUBAGENT_TOKEN;
 			sendRecord({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `tail sentinel ${token.slice(0, 32)}` } });
@@ -181,6 +202,19 @@ function handleCommand(command) {
 		return;
 	}
 	if (command.type === "follow_up" || command.type === "steer") {
+		if (mode === "fail-later" && command.type === "steer") {
+			commandResponse(command);
+			process.stderr.write(`sentinel stderr ${process.env.PI_SUBAGENT_TOKEN}\n`);
+			setTimeout(() => process.exit(23), 25);
+			return;
+		}
+		if (mode === "items" && command.type === "steer") {
+			commandResponse(command);
+			sendRecord({ type: "message_start", message: { role: "user", content: command.message } });
+			sendRecord({ type: "message_end", message: { role: "user", content: command.message } });
+			sendRecord({ type: "agent_settled" });
+			return;
+		}
 		if (mode === "follow-up" || mode === "wait") {
 			lastAssistantText = `${command.type === "steer" ? "steer" : "follow-up"}: ${command.message}`;
 			commandResponse(command);

@@ -33,6 +33,10 @@ import {
 
 export const MAX_SUBAGENT_RESULT_BYTES = 50 * 1024;
 export const MAX_SUBAGENT_SESSION_FILE_BYTES = 4 * 1024;
+export const MAX_SUBAGENT_ITEMS = 200;
+export const MAX_SUBAGENT_ITEM_BYTES = 2 * 1024;
+const MAX_SUBAGENT_ITEM_HISTORY_RUNS = 100;
+const MAX_SUBAGENT_TOOL_ARGS_BYTES = 384;
 const RPC_PROMPT_TIMEOUT_MS = 30_000;
 const RUNTIME_DIR_MODE = 0o700;
 const LOADOUT_MODE = 0o600;
@@ -159,6 +163,28 @@ interface PendingQuestion {
 	reject: (error: Error) => void;
 }
 
+export type SubagentItemKind = "text" | "thinking" | "tool" | "user" | "question" | "status";
+
+export interface SubagentItem {
+	kind: SubagentItemKind;
+	text: string;
+}
+
+export type SubagentItemListener = (items: readonly SubagentItem[]) => void;
+
+interface ToolItemState {
+	item: SubagentItem;
+	name: string;
+	args: string;
+}
+
+interface RunItemBuffer {
+	items: SubagentItem[];
+	listeners: Set<SubagentItemListener>;
+	contentItems: Map<number, SubagentItem>;
+	toolItems: Map<string, ToolItemState>;
+}
+
 interface RunState {
 	options: SubagentRuntimeOptions;
 	tools: string[];
@@ -184,6 +210,7 @@ interface RunState {
 	browserReaped?: boolean;
 	tail: string;
 	tailPending: string;
+	itemBuffer: RunItemBuffer;
 }
 
 export function truncateSubagentResult(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
@@ -329,6 +356,46 @@ function flushRunTail(run: RunState): void {
 	run.tailPending = "";
 }
 
+function suffixBoundary(text: string, start: number): number {
+	const current = text.charCodeAt(start);
+	const previous = text.charCodeAt(start - 1);
+	return start > 0 && start < text.length && current >= 0xdc00 && current <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff
+		? start + 1
+		: start;
+}
+
+function boundedItemText(kind: SubagentItemKind, text: string, token: string): string {
+	const redacted = redactSubagentText(text, token);
+	const firstCandidate = suffixBoundary(redacted, Math.max(0, redacted.length - MAX_SUBAGENT_ITEM_BYTES));
+	let low = 0;
+	let high = redacted.length - firstCandidate;
+	while (low < high) {
+		const length = Math.ceil((low + high) / 2);
+		const start = suffixBoundary(redacted, redacted.length - length);
+		const candidate = { kind, text: redacted.slice(start) };
+		if (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= MAX_SUBAGENT_ITEM_BYTES) low = length;
+		else high = length - 1;
+	}
+	const start = suffixBoundary(redacted, redacted.length - low);
+	return redacted.slice(start);
+}
+
+function copySubagentItems(items: readonly SubagentItem[]): SubagentItem[] {
+	return items.map((item) => ({ ...item }));
+}
+
+function summarizeToolArgs(value: unknown): string {
+	if (value === undefined) return "";
+	let summary: string;
+	try {
+		const serialized = JSON.stringify(value);
+		summary = serialized ?? String(value);
+	} catch {
+		summary = "[unavailable]";
+	}
+	return utf8Suffix(summary, MAX_SUBAGENT_TOOL_ARGS_BYTES);
+}
+
 function contentText(value: unknown): string {
 	if (typeof value === "string") return value;
 	if (!Array.isArray(value)) return "";
@@ -373,6 +440,7 @@ function validateToolCallId(value: unknown): value is string {
 export class SubagentLaunchHost {
 	readonly server: SubagentIpcServer;
 	private readonly runs = new Map<string, RunState>();
+	private readonly itemHistory = new Map<string, SubagentItem[]>();
 	private readonly spawnProcess: SubagentSpawnProcess | undefined;
 	private readonly ownership = new OwnershipLockManager();
 	private closed = false;
@@ -480,6 +548,28 @@ export class SubagentLaunchHost {
 		return output || undefined;
 	}
 
+	readItems(owner: string): SubagentItem[] {
+		if (this.closed) return [];
+		const items = this.runs.get(owner)?.itemBuffer.items ?? this.itemHistory.get(owner) ?? [];
+		return copySubagentItems(items);
+	}
+
+	subscribeItems(owner: string, listener: SubagentItemListener): () => void {
+		const run = this.runs.get(owner);
+		if (this.closed || !run || run.resultSettled || run.failureFinalizing) {
+			this.notifyItemListener(listener, this.readItems(owner));
+			return () => undefined;
+		}
+		run.itemBuffer.listeners.add(listener);
+		this.notifyItemListener(listener, run.itemBuffer.items);
+		let subscribed = true;
+		return () => {
+			if (!subscribed) return;
+			subscribed = false;
+			run.itemBuffer.listeners.delete(listener);
+		};
+	}
+
 	private async start(loadout: SubagentLoadout, loadoutPath: string, runtime: SubagentRuntimeOptions): Promise<SubagentLaunchHandle> {
 		const depthError = validateSubagentDepth(loadout.depth);
 		if (depthError) throw new Error(depthError);
@@ -488,6 +578,8 @@ export class SubagentLaunchHost {
 			if (!existing.resultSettled) throw new Error(`Subagent owner already exists: ${loadout.owner}`);
 			await this.server.closeOwner(loadout.owner);
 			await existing.rpc?.stop();
+			this.retainItemHistory(loadout.owner, existing.itemBuffer.items);
+			existing.itemBuffer.listeners.clear();
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
 			existing.slot?.release();
@@ -553,11 +645,14 @@ export class SubagentLaunchHost {
 			slot,
 			tail: "",
 			tailPending: "",
+			itemBuffer: { items: [], listeners: new Set(), contentItems: new Map(), toolItems: new Map() },
 		};
 		this.runs.set(loadout.owner, run);
 		const releaseRun = () => {
 			run.removeAbortListener?.();
 			if (this.runs.get(loadout.owner) !== run) return;
+			this.retainItemHistory(loadout.owner, run.itemBuffer.items);
+			run.itemBuffer.listeners.clear();
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
 			run.slot?.release();
@@ -661,10 +756,12 @@ export class SubagentLaunchHost {
 			run.watchdog?.clearTools();
 			run.watchdog?.cancel();
 			if (!run.resultSettled) {
+				this.appendRunItem(run, "status", "closed");
 				run.resultSettled = true;
 				run.pendingQuestion?.reject(new Error(`Subagent ${owner} host closed.`));
 				run.rejectResult(new Error(`Subagent ${owner} host closed.`));
 			}
+			run.itemBuffer.listeners.clear();
 			if (run.rpc) stops.push(run.rpc.stop().finally(() => run.diagnostics.close()));
 			else run.diagnostics.close();
 			run.cleanup?.();
@@ -672,6 +769,7 @@ export class SubagentLaunchHost {
 		await Promise.all(stops);
 		await Promise.all(runs.map(([, run]) => run.finalizePromise).filter((promise): promise is Promise<void> => promise !== undefined));
 		await this.server.close();
+		this.itemHistory.clear();
 	}
 
 	private async readSessionFile(run: RunState): Promise<void> {
@@ -699,9 +797,139 @@ export class SubagentLaunchHost {
 		if (run.resultSettled || run.failureFinalizing) return;
 		run.watchdog?.touch();
 		appendRunTail(run, summarizeRpcEvent(event));
+		this.recordItemEvent(run, event);
 		if (event.type === "tool_execution_start" && validateToolCallId(event.toolCallId)) run.watchdog?.toolStarted(event.toolCallId);
 		if (event.type === "tool_execution_end" && validateToolCallId(event.toolCallId)) run.watchdog?.toolEnded(event.toolCallId);
 		if (event.type === "agent_settled") void this.settleRun(run, owner);
+	}
+
+	private notifyItemListener(listener: SubagentItemListener, items: readonly SubagentItem[]): void {
+		try { listener(copySubagentItems(items)); }
+		catch { /* Item observers must not interrupt child execution. */ }
+	}
+
+	private notifyItemBuffer(buffer: RunItemBuffer): void {
+		for (const listener of [...buffer.listeners]) this.notifyItemListener(listener, buffer.items);
+	}
+
+	private retainItemHistory(owner: string, items: readonly SubagentItem[]): void {
+		this.itemHistory.delete(owner);
+		this.itemHistory.set(owner, copySubagentItems(items));
+		while (this.itemHistory.size > MAX_SUBAGENT_ITEM_HISTORY_RUNS) {
+			const oldest = this.itemHistory.keys().next().value;
+			if (oldest === undefined) break;
+			this.itemHistory.delete(oldest);
+		}
+	}
+
+	private forgetItemReferences(buffer: RunItemBuffer, item: SubagentItem): void {
+		for (const [index, contentItem] of buffer.contentItems) if (contentItem === item) buffer.contentItems.delete(index);
+		for (const [toolCallId, tool] of buffer.toolItems) if (tool.item === item) buffer.toolItems.delete(toolCallId);
+	}
+
+	private appendRunItem(run: RunState, kind: SubagentItemKind, text: string): SubagentItem {
+		const item = { kind, text: boundedItemText(kind, text, run.ipcToken) };
+		const buffer = run.itemBuffer;
+		buffer.items.push(item);
+		while (buffer.items.length > MAX_SUBAGENT_ITEMS) this.forgetItemReferences(buffer, buffer.items.shift()!);
+		this.notifyItemBuffer(buffer);
+		return item;
+	}
+
+	private replaceRunItem(run: RunState, previous: SubagentItem, kind: SubagentItemKind, text: string): SubagentItem {
+		const buffer = run.itemBuffer;
+		const index = buffer.items.indexOf(previous);
+		if (index === -1) return this.appendRunItem(run, kind, text);
+		const item = { kind, text: boundedItemText(kind, text, run.ipcToken) };
+		buffer.items[index] = item;
+		for (const [contentIndex, contentItem] of buffer.contentItems) if (contentItem === previous) buffer.contentItems.set(contentIndex, item);
+		for (const [toolCallId, tool] of buffer.toolItems) {
+			if (tool.item === previous) buffer.toolItems.set(toolCallId, { ...tool, item });
+		}
+		this.notifyItemBuffer(buffer);
+		return item;
+	}
+
+	private removeRunItem(run: RunState, item: SubagentItem): void {
+		const buffer = run.itemBuffer;
+		const index = buffer.items.indexOf(item);
+		if (index === -1) return;
+		buffer.items.splice(index, 1);
+		this.forgetItemReferences(buffer, item);
+		this.notifyItemBuffer(buffer);
+	}
+
+	private updateContentItem(run: RunState, index: number, kind: "text" | "thinking", text: string, append = false): SubagentItem {
+		const buffer = run.itemBuffer;
+		const previous = buffer.contentItems.get(index);
+		const value = append && previous?.kind === kind ? previous.text + text : text;
+		const item = previous
+			? this.replaceRunItem(run, previous, kind, value)
+			: this.appendRunItem(run, kind, value);
+		buffer.contentItems.set(index, item);
+		return item;
+	}
+
+	private recordItemEvent(run: RunState, event: SubagentRpcEvent): void {
+		if (event.type === "message_start") {
+			run.itemBuffer.contentItems.clear();
+			return;
+		}
+		if (event.type === "message_update") {
+			if (!isRecord(event.assistantMessageEvent)) return;
+			const update = event.assistantMessageEvent;
+			if (typeof update.contentIndex !== "number" || !Number.isInteger(update.contentIndex) || update.contentIndex < 0) return;
+			if (update.type === "text_delta" && typeof update.delta === "string" && update.delta) this.updateContentItem(run, update.contentIndex, "text", update.delta, true);
+			else if (update.type === "text_end" && typeof update.content === "string") this.updateContentItem(run, update.contentIndex, "text", update.content);
+			else if (update.type === "thinking_delta" && typeof update.delta === "string" && update.delta) this.updateContentItem(run, update.contentIndex, "thinking", update.delta, true);
+			else if (update.type === "thinking_end" && typeof update.content === "string") this.updateContentItem(run, update.contentIndex, "thinking", update.content);
+			return;
+		}
+		if (event.type === "message_end") {
+			if (!isRecord(event.message)) return;
+			const message = event.message;
+			if (message.role === "user") {
+				const text = contentText(message.content);
+				if (text) this.appendRunItem(run, "user", text);
+			} else if (message.role === "assistant") {
+				const blocks = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content : [];
+				const seen = new Set<number>();
+				for (let index = 0; index < blocks.length; index += 1) {
+					const block = blocks[index];
+					if (!isRecord(block)) continue;
+					if (block.type === "text" && typeof block.text === "string") {
+						seen.add(index);
+						this.updateContentItem(run, index, "text", block.text);
+					} else if (block.type === "thinking" && typeof block.thinking === "string") {
+						seen.add(index);
+						this.updateContentItem(run, index, "thinking", block.thinking);
+					}
+				}
+				for (const [index, item] of [...run.itemBuffer.contentItems]) if (!seen.has(index)) this.removeRunItem(run, item);
+			}
+			run.itemBuffer.contentItems.clear();
+			return;
+		}
+		if (event.type === "tool_execution_start" && validateToolCallId(event.toolCallId)) {
+			const name = redactSubagentText(typeof event.toolName === "string" ? event.toolName.slice(0, 200) : "tool", run.ipcToken);
+			const args = redactSubagentText(summarizeToolArgs(event.args), run.ipcToken);
+			const previous = run.itemBuffer.toolItems.get(event.toolCallId);
+			const text = `${name}${args ? ` ${args}` : ""} — running`;
+			const item = previous ? this.replaceRunItem(run, previous.item, "tool", text) : this.appendRunItem(run, "tool", text);
+			run.itemBuffer.toolItems.set(event.toolCallId, { item, name, args });
+			return;
+		}
+		if (event.type === "tool_execution_end" && validateToolCallId(event.toolCallId)) {
+			const previous = run.itemBuffer.toolItems.get(event.toolCallId);
+			const name = previous?.name ?? redactSubagentText(typeof event.toolName === "string" ? event.toolName.slice(0, 200) : "tool", run.ipcToken);
+			const args = previous?.args ?? redactSubagentText(summarizeToolArgs(event.args), run.ipcToken);
+			const result = event.isError === true ? "error" : "ok";
+			const duration = typeof event.durationMs === "number" && Number.isFinite(event.durationMs) ? ` (${Math.max(0, Math.round(event.durationMs))}ms)` : "";
+			const text = `${name}${args ? ` ${args}` : ""} — ${result}${duration}`;
+			if (previous) this.replaceRunItem(run, previous.item, "tool", text);
+			else this.appendRunItem(run, "tool", text);
+			run.itemBuffer.toolItems.delete(event.toolCallId);
+		}
 	}
 
 	private async settleRun(run: RunState, owner: string): Promise<void> {
@@ -722,6 +950,7 @@ export class SubagentLaunchHost {
 				text: truncateSubagentResult(text ?? ""),
 				...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
 			};
+			this.appendRunItem(run, "status", "done");
 			run.resultSettled = true;
 			run.settling = false;
 			run.diagnostics.close();
@@ -751,6 +980,10 @@ export class SubagentLaunchHost {
 		if (!rpc) return;
 		if (FIRE_AND_FORGET_UI_METHODS.has(method)) return;
 		const question = questionFromUiRequest(id, method, payload, run.ipcToken);
+		if (question) {
+			const options = question.options?.length ? `\nOptions: ${question.options.join(" | ")}` : "";
+			this.appendRunItem(run, "question", `${question.question}${options}`);
+		}
 		if (!question || run.resultSettled || run.pendingQuestion || !run.options.onQuestion) {
 			try { await rpc.respondUi(id, { cancelled: true }); } catch { /* Process may already be stopping. */ }
 			return;
@@ -789,6 +1022,7 @@ export class SubagentLaunchHost {
 
 	private abortRun(run: RunState, owner: string): void {
 		if (run.resultSettled) return;
+		this.appendRunItem(run, "status", "aborted");
 		run.resultSettled = true;
 		run.pendingQuestion?.reject(new Error(`Subagent ${owner} aborted.`));
 		run.watchdog?.clearTools();
@@ -860,6 +1094,8 @@ export class SubagentLaunchHost {
 
 	private async finalizeFailure(run: RunState, owner: string, error: Error): Promise<void> {
 		const failure = errorAsRpcError(error);
+		this.appendRunItem(run, "status", "failed");
+		run.itemBuffer.listeners.clear();
 		try { await run.rpc?.stop(); } catch { /* Failure cleanup must continue. */ }
 		flushRunTail(run);
 		run.diagnostics.close();
@@ -886,6 +1122,7 @@ export class SubagentLaunchHost {
 	}
 
 	private reportStatus(run: RunState, status: SubagentRunStatus): void {
+		this.appendRunItem(run, "status", status);
 		try {
 			run.options.onStatus?.(status);
 		} catch (error) {
