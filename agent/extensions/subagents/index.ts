@@ -29,11 +29,13 @@ import { resolveSubagentTimeoutPolicy } from "./timeout-policy.ts";
 import {
 	SubagentFailureError,
 	SubagentLaunchHost,
+	type SubagentItem,
 	type SubagentLaunchHandle,
 	type SubagentQuestion,
 	type SubagentResult,
 } from "./launch.ts";
 import type { SubagentTransport } from "./diagnostics.ts";
+import { orderSubagentTree, SubagentOverlayComponent, type SubagentOverlaySource } from "./overlay.ts";
 import {
 	clearSubagentProgress,
 	setSubagentProgressContext,
@@ -125,6 +127,7 @@ interface SubagentRecord {
 	parentOwner?: string;
 	startedAt: number;
 	finishedAt?: number;
+	effort?: string;
 	loadoutPath?: string;
 	transport?: SubagentTransport;
 	logPath?: string;
@@ -419,6 +422,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	const questionQueue: QuestionRelay[] = [];
 	let activeQuestionRelay: QuestionRelay | undefined;
 	let lastListSignature: string | undefined;
+	const agentsOverlays = new Set<SubagentOverlayComponent>();
+	const cancelAgentsOverlays = (): void => {
+		for (const overlay of agentsOverlays) overlay.cancel();
+		agentsOverlays.clear();
+	};
 
 	const clearQuestionRelays = (owner?: string): void => {
 		for (const [key, relay] of questionRelays) {
@@ -667,6 +675,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			childSessionId: "pending",
 			agentName: agent.name,
 			role: inferRole(agent),
+			effort: configuredEffort(pi, inferRole(agent)),
 			status: "running",
 			task: payload.task.trim(),
 			tools,
@@ -713,12 +722,14 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		cancelAgentsOverlays();
 		activeContext = ctx;
 		setSubagentProgressContext(ctx);
 		ensureHost(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
+		cancelAgentsOverlays();
 		clearQuestionRelays();
 		activeContext = undefined;
 		const closing = host;
@@ -737,6 +748,109 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("subagent-effort", {
 		description: "Choose per-role subagent thinking levels for explorer and worker.",
 		handler: (args, ctx) => chooseSubagentEffort(args, ctx, pi),
+	});
+	pi.registerCommand("agents", {
+		description: "Watch, steer, and answer subagents.",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/agents requires the interactive TUI.", "warning");
+				return;
+			}
+			const sessionId = ctx.sessionManager.getSessionId();
+			const children = orderSubagentTree([...records.values()]);
+			if (children.length === 0) {
+				ctx.ui.notify("No subagents to watch.", "info");
+				return;
+			}
+			const options = children.map((record) => {
+				const badge = record.question ? " · ? question" : "";
+				const label = `${"  ".repeat(record.depth)}${record.owner} — ${record.agentName} [${record.status}]${badge}`;
+				return host?.redactText(record.owner, label) ?? label;
+			});
+			let selected: string | undefined;
+			try {
+				selected = await ctx.ui.select("Subagents", options);
+			} catch {
+				try { activeContext?.ui.notify("Could not open the subagent picker; session may have changed.", "warning"); }
+				catch { /* Session may already be disposed. */ }
+				return;
+			}
+			if (!selected) return;
+			const record = children[options.indexOf(selected)];
+			if (!record) return;
+
+			const isCurrentSession = (): boolean => {
+				try {
+					return !!activeContext && activeContext.sessionManager.getSessionId() === sessionId && hostSessionId === sessionId;
+				} catch {
+					return false;
+				}
+			};
+			const source: SubagentOverlaySource = {
+				getRecord: () => isCurrentSession() && records.get(record.owner) === record ? record : undefined,
+				readItems: () => isCurrentSession() && records.get(record.owner) === record ? host?.readItems(record.owner) ?? [] : [],
+				subscribeItems: (listener: (items: readonly SubagentItem[]) => void) => {
+					const currentHost = host;
+					return isCurrentSession() && records.get(record.owner) === record && currentHost
+						? currentHost.subscribeItems(record.owner, listener)
+						: () => undefined;
+				},
+				redactText: (text) => host?.redactText(record.owner, text) ?? text,
+				answerQuestion: (questionId, answer) => {
+					const currentRecord = source.getRecord();
+					return !!currentRecord?.question && currentRecord.question.questionId === questionId
+						&& answerPendingQuestion(record.owner, questionId, answer, host);
+				},
+				steer: async (message) => {
+					const currentRecord = source.getRecord();
+					const activeRecord = records.get(record.owner);
+					const currentHost = host;
+					if (!currentRecord || activeRecord !== currentRecord || currentRecord.status !== "running" || !activeRecord.handle || !currentHost) {
+						throw new Error("Subagent is no longer running.");
+					}
+					const handle = activeRecord.handle;
+					const text = message.trim();
+					if (!text) throw new Error("Steer message is empty.");
+					await handle.request("message", { text });
+					if (!isCurrentSession()) throw new Error("Steer reached child, but parent session changed before its note could be delivered.");
+					try {
+						pi.sendMessage(
+							{ customType: "subagent-steer", content: `User told ${record.owner}: ${currentHost.redactText(record.owner, text)}`, display: true },
+							{ deliverAs: "nextTurn" },
+						);
+					} catch {
+						try { activeContext?.ui.notify("Steer reached child, but parent note could not be queued.", "warning"); }
+						catch { /* Session may already be disposed. */ }
+					}
+				},
+			};
+			const currentContext = activeContext;
+			if (!currentContext || !isCurrentSession()) {
+				try { currentContext?.ui.notify("Session changed; reopen /agents.", "warning"); }
+				catch { /* Session may already be disposed. */ }
+				return;
+			}
+			let overlay: SubagentOverlayComponent | undefined;
+			try {
+				await currentContext.ui.custom<void>(
+					(tui, theme, _keybindings, done) => {
+						const component = new SubagentOverlayComponent(tui, theme, record, source, done);
+						overlay = component;
+						agentsOverlays.add(component);
+						return component;
+					},
+					{ overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "80%", margin: 1 } },
+				);
+			} catch {
+				try { activeContext?.ui.notify("Could not open /agents overlay; session may have changed.", "warning"); }
+				catch { /* Session may already be disposed. */ }
+			} finally {
+				if (overlay) {
+					agentsOverlays.delete(overlay);
+					overlay.dispose();
+				}
+			}
+		},
 	});
 
 	pi.registerTool({
@@ -776,12 +890,14 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			const ownership = normalizeOwnership(params.fileOwnership);
 
 			const owner = nextOwner();
+			const effort = configuredEffort(pi, role);
 			const progress = startSubagentProgress(role, { name: owner });
 			const record: SubagentRecord = {
 				owner,
 				childSessionId: "pending",
 				agentName: agent.name,
 				role,
+				effort,
 				status: "running",
 				task: params.task.trim(),
 				tools,
@@ -809,7 +925,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 					tools,
 					cavemanEnabled: workflow.cavemanEnabled,
 					model: selectedModel ? modelReference(selectedModel) : undefined,
-					thinkingLevel: configuredEffort(pi, role),
+					thinkingLevel: effort,
 					depth: 0,
 					subagentAgents: agent.subagentAgents,
 					fileOwnership: ownership,

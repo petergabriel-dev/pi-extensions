@@ -20,6 +20,7 @@ const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 const eventHandlers = new Map<string, Set<(data: unknown) => void>>();
 const sentMessages: Array<{ content: string; options?: unknown }> = [];
 const sentContextMessages: Array<{ message: { customType?: string; content?: string; display?: boolean }; options?: unknown }> = [];
+const steeredMessages: Array<{ owner: string; text: string }> = [];
 const answerCalls: Array<{ owner: string; questionId: string; answer: string }> = [];
 const answeredQuestionKeys = new Set<string>();
 const launchedByOwner = new Map<string, SubagentLaunchOptions>();
@@ -35,6 +36,8 @@ const commandHandlers = new Map<string, (args: string, ctx: unknown) => unknown>
 const notifications: string[] = [];
 const widgetRenders: unknown[] = [];
 let browserRequest: unknown;
+let overlayComponent: { handleInput?(data: string): void; render?(width: number): string[]; dispose?(): void } | undefined;
+let overlayOptions: unknown;
 
 const events = {
 	on(name: string, handler: (data: unknown) => void) {
@@ -86,17 +89,44 @@ const context = {
 		select(title: string, options: string[], opts?: { signal?: AbortSignal }) {
 			selectCalls.push({ title, options: [...options], signal: opts?.signal });
 			return new Promise<string | undefined>((resolve) => {
-				selectResolvers.push(resolve);
-				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+				let settled = false;
+				const settle = (value: string | undefined) => {
+					if (settled) return;
+					settled = true;
+					const index = selectResolvers.indexOf(settle);
+					if (index >= 0) selectResolvers.splice(index, 1);
+					resolve(value);
+				};
+				selectResolvers.push(settle);
+				opts?.signal?.addEventListener("abort", () => settle(undefined), { once: true });
+				if (opts?.signal?.aborted) settle(undefined);
 			});
 		},
 		input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }) {
 			inputCalls.push({ title, placeholder, signal: opts?.signal });
 			return new Promise<string | undefined>((resolve) => {
-				inputResolvers.push(resolve);
-				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+				let settled = false;
+				const settle = (value: string | undefined) => {
+					if (settled) return;
+					settled = true;
+					const index = inputResolvers.indexOf(settle);
+					if (index >= 0) inputResolvers.splice(index, 1);
+					resolve(value);
+				};
+				inputResolvers.push(settle);
+				opts?.signal?.addEventListener("abort", () => settle(undefined), { once: true });
+				if (opts?.signal?.aborted) settle(undefined);
 			});
 		},
+		custom<T>(factory: (...args: any[]) => unknown, options: unknown): Promise<T> {
+			overlayOptions = options;
+			return new Promise<T>((resolve) => {
+				const tui = { terminal: { rows: 30, columns: 80 }, requestRender() {} };
+				const theme = { fg: (_color: string, text: string) => text };
+				overlayComponent = factory(tui, theme, {}, () => resolve(undefined as T)) as typeof overlayComponent;
+			});
+		},
+
 		setWidget(_key: string, content: unknown) {
 			widgetRenders.push(content);
 		},
@@ -140,7 +170,10 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 		logPath: "/tmp/subagents/surface-test-session/subagent-1.log",
 		sessionFile: "/tmp/sessions/child-surface.jsonl",
 		result,
-		request: async () => undefined,
+		request: async (_type, payload) => {
+			const text = (payload as { text?: string } | undefined)?.text;
+			if (text) steeredMessages.push({ owner: options.owner, text });
+		},
 		kill: () => undefined,
 	};
 };
@@ -210,7 +243,13 @@ try {
 	assert.match(registeredTools.get("subagent")?.description ?? "", /new parent turn.*End your turn instead of polling/);
 	assert.match(registeredTools.get("subagents_list")?.description ?? "", /when the user asks.*do not poll/);
 	assert.match(registeredTools.get("subagent_message")?.description ?? "", /Child questions are routed to the user automatically; answer a pending question only when the user tells you to/);
-	assert.deepEqual(registeredCommands.sort(), ["subagent-effort", "subagent-model"]);
+	assert.deepEqual(registeredCommands.sort(), ["agents", "subagent-effort", "subagent-model"]);
+	const selectCountBeforeNonTuiAgents = selectCalls.length;
+	context.mode = "rpc";
+	await commandHandlers.get("agents")!("", context);
+	assert.match(notifications.at(-1) ?? "", /\/agents requires the interactive TUI/);
+	assert.equal(selectCalls.length, selectCountBeforeNonTuiAgents);
+	context.mode = "tui";
 	await commandHandlers.get("subagent-effort")!("explorer inherit", context);
 	let settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
 	assert.equal(settings.subagents.effort.explorer, "inherit");
@@ -388,6 +427,26 @@ try {
 	assert.ok(sentContextMessages.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "nextTurn" })));
 
 	context.hasUI = true;
+	const openAgentsOverlay = commandHandlers.get("agents")!("", context) as Promise<void>;
+	await waitFor(() => selectCalls.length === 4, "agents child picker");
+	assert.ok(selectCalls[3]!.options.some((option) => option.startsWith(`  ${nestedOwner} — explorer [running]`)), "picker should indent nested children");
+	const selectedAgent = selectCalls[3]!.options.find((option) => option.includes("subagent-3 — worker [running]"));
+	assert.ok(selectedAgent, "picker should list running children");
+	resolveNextSelect(selectedAgent);
+	await waitFor(() => overlayComponent !== undefined, "agents overlay");
+	assert.deepEqual(overlayOptions, { overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "80%", margin: 1 } });
+	for (const character of "hello ipc-secret") overlayComponent!.handleInput?.(character);
+	assert.doesNotMatch(overlayComponent?.render?.(80)?.join("\n") ?? "", /ipc-secret/, "overlay input must redact the IPC token");
+	overlayComponent!.handleInput?.("\r");
+	await waitFor(() => sentContextMessages.some(({ message }) => message.customType === "subagent-steer"), "steer parent note");
+	assert.deepEqual(steeredMessages.at(-1), { owner: "subagent-3", text: "hello ipc-secret" });
+	assert.deepEqual(sentContextMessages.at(-1), {
+		message: { customType: "subagent-steer", content: "User told subagent-3: hello [REDACTED]", display: true },
+		options: { deliverAs: "nextTurn" },
+	});
+	overlayComponent!.handleInput?.("\u001b");
+	await openAgentsOverlay;
+
 	const questionOwners = [parentOwner, nestedOwner, toolAnswerOwner, dismissedOwner, noUiOwner];
 	for (const owner of questionOwners) {
 		const resolve = pendingResults.get(owner);
