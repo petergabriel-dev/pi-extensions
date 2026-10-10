@@ -9,7 +9,7 @@ Use this skill when coordinating worker subagents for implementation work.
 
 ## Current Pi Surface
 
-Parent starts work with `subagent` using `agent: "worker"`; discovery uses `agent: "explorer"`. After `subagent`, end your turn; results arrive as a new turn. Use `subagents_list` only when the user asks for status or to find a transcript or log; use `subagent_message` for live steering and question answers. Nested children use `subagent` only when their agent definition allowlists the child and depth remains bounded.
+Parent starts work with `subagent` using `agent: "worker"`; discovery uses `agent: "explorer"`. After `subagent`, end your turn; results arrive as a new turn. Use `subagents_list` only when the user asks for status or to find a transcript or log; use `subagent_message` for live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks. Nested children use `subagent` only when their agent definition allowlists the child and depth remains bounded.
 
 ## Core Model
 

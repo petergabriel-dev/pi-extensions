@@ -521,9 +521,16 @@ export class SubagentLaunchHost {
 
 	answerQuestion(owner: string, questionId: string, answer: string): boolean {
 		const run = this.runs.get(owner);
-		if (!run || run.resultSettled || !run.pendingQuestion || run.pendingQuestion.question.questionId !== questionId || Buffer.byteLength(answer, "utf8") > MAX_SUBAGENT_RESULT_BYTES || !answer.trim()) return false;
-		run.pendingQuestion.resolve(answer);
+		const pending = run?.pendingQuestion;
+		if (!run || run.resultSettled || !pending || pending.question.questionId !== questionId || Buffer.byteLength(answer, "utf8") > MAX_SUBAGENT_RESULT_BYTES || !answer.trim()) return false;
+		run.pendingQuestion = undefined;
+		pending.resolve(answer);
 		return true;
+	}
+
+	redactText(owner: string, text: string): string {
+		const run = this.runs.get(owner);
+		return run ? redactSubagentText(text, run.ipcToken) : text;
 	}
 
 	acquireOwnership(owner: string, paths: readonly string[] | undefined): OwnershipAcquireResult {

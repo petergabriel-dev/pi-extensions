@@ -88,6 +88,7 @@ try {
 		await new Promise((resolve) => setTimeout(resolve, 400));
 		assert.equal(questionSettled, false);
 		assert.equal(questionHost.answerQuestion("question-owner", "question-ui-1", "yes"), true);
+		assert.equal(questionHost.answerQuestion("question-owner", "question-ui-1", "no"), false);
 		assert.deepEqual(await questionHandle.result, {
 			owner: "question-owner",
 			childSessionId: "question-child",

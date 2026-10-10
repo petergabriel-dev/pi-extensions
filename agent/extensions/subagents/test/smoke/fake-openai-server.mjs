@@ -42,7 +42,8 @@ export async function startFakeOpenAIServer({ browserAvailable, browserUrl, brea
 		parentExplorerStarted: false,
 		questionAsked: false,
 		questionAnswered: false,
-		parentAnsweredQuestion: false,
+		questionDialogAnswered: false,
+		parentQuestionNoteSeen: false,
 		workerStarted: false,
 		nestedExplorerStarted: false,
 		browserCallIssued: false,
@@ -90,11 +91,22 @@ export async function startFakeOpenAIServer({ browserAvailable, browserUrl, brea
 			let answer;
 
 			try {
-				const waitingIndex = allText.lastIndexOf("is waiting for an answer.");
 				const firstResultIndex = allText.lastIndexOf("Subagent subagent-1 finished.");
 				const workerResultIndex = allText.lastIndexOf("Subagent subagent-2 finished.");
+				const hasQuestionNote = allText.includes("explorer subagent-1 asked: Choose a color for the RPC smoke test.") && allText.includes("User answered: green");
 
-				if (isParent && workerResultIndex > firstResultIndex && workerResultIndex > waitingIndex) {
+				if (isParent && firstResultIndex >= 0) {
+					if (!hasQuestionNote) throw new Error("Child completion turn omitted relayed question note.");
+					if (!state.parentQuestionNoteSeen) {
+						state.parentQuestionNoteSeen = true;
+						state.trace.push("parent:question-note");
+					}
+				}
+				if (isParent && allText.includes("User answered: green") && firstResultIndex < 0) {
+					throw new Error("Relayed question note started a parent turn before the child result.");
+				}
+
+				if (isParent && workerResultIndex > firstResultIndex) {
 					state.finalResponseSent = true;
 					state.trace.push("parent:final");
 					if (breakFinal) {
@@ -102,17 +114,6 @@ export async function startFakeOpenAIServer({ browserAvailable, browserUrl, brea
 						answer = { text: "" };
 					} else {
 						answer = { text: `RPC_SMOKE_FINAL: question=green; browser=${browserAvailable ? "PASS" : "SKIPPED"}` };
-					}
-				} else if (isParent && waitingIndex > firstResultIndex) {
-					if (lastCallName === "subagent_message") {
-						answer = { text: "QUESTION_ANSWER_SENT" };
-					} else {
-						const owner = allText.match(/Subagent\s+(subagent-\d+)\s+is waiting/)?.[1];
-						const questionId = allText.match(/Question ID:\s*([^\s]+)/)?.[1];
-						if (!owner || !questionId) throw new Error("Parent question follow-up lacked owner or question ID.");
-						state.parentAnsweredQuestion = true;
-						state.trace.push("parent:answer-question");
-						answer = { call: { name: "subagent_message", args: { owner, questionId, message: "green" } } };
 					}
 				} else if (isParent && firstResultIndex >= 0) {
 					if (!state.workerStarted) {

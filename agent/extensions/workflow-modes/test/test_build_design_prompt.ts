@@ -29,7 +29,7 @@ writeFileSync(join(cwd, "docs/design/manifest.json"), "{}");
 if (!composeWorkflowPrompt("build", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("manifest failed to inject design block");
 const buildPrompt = composeWorkflowPrompt("build", true, undefined, cwd);
 if (!buildPrompt?.includes("workflow_plan_tick") || !buildPrompt.includes("authoritative queue") || !buildPrompt.includes("immutable seed text")) throw new Error("Build prompt omitted tracker queue rules");
-if (!buildPrompt?.includes("end your turn; results arrive as a new turn") || !buildPrompt.includes("only when the user asks for status or to find a transcript or log") || !buildPrompt.includes("live steering and answering child questions")) throw new Error("Build prompt omitted automatic delegation delivery guidance");
+if (!buildPrompt?.includes("end your turn; results arrive as a new turn") || !buildPrompt.includes("only when the user asks for status or to find a transcript or log") || !buildPrompt.includes("live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks")) throw new Error("Build prompt omitted automatic delegation delivery guidance");
 if (composeWorkflowPrompt("design", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("non-build mode used cwd");
 for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
 	const message = composeModeMessage(mode);

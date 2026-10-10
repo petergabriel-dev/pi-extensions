@@ -163,6 +163,10 @@ function createRpcDriver(child) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
+		respondUi(id, value) {
+			if (closed || child.stdin.destroyed || child.stdin.writableEnded) throw new Error("Pi RPC process is closed.");
+			child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id, value })}\n`);
+		},
 		command(type, fields = {}) {
 			if (closed || child.stdin.destroyed || child.stdin.writableEnded) return Promise.reject(new Error("Pi RPC process is closed."));
 			const id = `smoke-${nextId++}`;
@@ -329,6 +333,23 @@ async function main() {
 		], { cwd: repositoryRoot, env, stdio: ["pipe", "pipe", "pipe"] });
 		driver = createRpcDriver(child);
 		driver.listen((event) => {
+			if (event.type === "extension_ui_request" && event.method === "select" && typeof event.title === "string" && event.title.includes("Choose a color for the RPC smoke test.")) {
+				if (fake.state.questionDialogAnswered) {
+					fake.state.errors.push("Question select dialog opened more than once.");
+					return;
+				}
+				if (event.title !== "explorer subagent-1 asks: Choose a color for the RPC smoke test." || !Array.isArray(event.options) || !event.options.includes("green")) {
+					fake.state.errors.push(`Unexpected relayed question dialog: ${JSON.stringify(event)}`);
+					return;
+				}
+				try {
+					driver.respondUi(event.id, "green");
+					fake.state.questionDialogAnswered = true;
+					fake.state.trace.push("driver:answer-question-dialog");
+				} catch (error) {
+					fake.state.errors.push(error instanceof Error ? error.message : String(error));
+				}
+			}
 			if (event.type === "agent_settled") {
 				if (parentFinalSeen) finalSettled = true;
 				if (fake.state.brokenFinalSent) brokenFinalSettled = true;
@@ -359,8 +380,10 @@ async function main() {
 		assert.match(final?.text ?? "", /RPC_SMOKE_FINAL:/u, "parent RPC transcript must contain final smoke text");
 		assert.equal(fake.state.parentExplorerStarted, true, "parent must spawn explorer");
 		assert.equal(fake.state.questionAsked, true, "explorer must ask parent a question");
-		assert.equal(fake.state.parentAnsweredQuestion, true, "parent must answer child through subagent_message");
+		assert.equal(fake.state.questionDialogAnswered, true, "smoke driver must answer relayed extension UI select");
 		assert.equal(fake.state.questionAnswered, true, "child must receive selected answer through RPC UI");
+		assert.equal(fake.state.parentQuestionNoteSeen, true, "main agent must receive quiet nextTurn note");
+		assert.equal(driver.events.filter((event) => event.type === "tool_execution_start" && event.toolName === "subagent_message").length, 0, "parent model must not call subagent_message to answer question");
 		assert.equal(fake.state.workerStarted, true, "parent must spawn worker");
 		assert.equal(fake.state.nestedExplorerStarted, true, "worker must spawn allowlisted nested explorer");
 		if (chromium.available) {

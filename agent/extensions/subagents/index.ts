@@ -132,11 +132,21 @@ interface SubagentRecord {
 	outputTail?: string;
 	handle?: SubagentLaunchHandle;
 	question?: SubagentQuestion;
+	answeredQuestionIds: Set<string>;
 	result?: string;
 	error?: string;
 	browserReadOnly: boolean;
 	steered: boolean;
 	progress?: ProgressHandle;
+}
+
+interface QuestionRelay {
+	key: string;
+	record: SubagentRecord;
+	question: SubagentQuestion;
+	label: string;
+	state: "queued" | "open" | "dismissed" | "answered" | "closed";
+	controller?: AbortController;
 }
 
 function isWorkflowMode(value: unknown): value is WorkflowMode {
@@ -297,6 +307,25 @@ function nextOwner(): string {
 	return `subagent-${++ownerCounter}`;
 }
 
+function questionRelayKey(owner: string, questionId: string): string {
+	return `${owner}\u0000${questionId}`;
+}
+
+function questionChainLabel(record: SubagentRecord, records: Map<string, SubagentRecord>): string {
+	const ancestors: SubagentRecord[] = [];
+	const visited = new Set([record.owner]);
+	let parentOwner = record.parentOwner;
+	while (parentOwner && !visited.has(parentOwner)) {
+		visited.add(parentOwner);
+		const parent = records.get(parentOwner);
+		if (!parent) break;
+		ancestors.push(parent);
+		parentOwner = parent.parentOwner;
+	}
+	const via = ancestors.map((ancestor) => `${ancestor.agentName} ${ancestor.owner}`).join(" via ");
+	return `${record.agentName} ${record.owner}${via ? ` (via ${via})` : ""}`;
+}
+
 function resultMessage(record: SubagentRecord, text: string): string {
 	return `Subagent ${record.owner} finished.\n\n${truncateUtf8(text)}`;
 }
@@ -386,11 +415,138 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let hostSessionId: string | undefined;
 	let activeContext: ExtensionContext | undefined;
 	const records = new Map<string, SubagentRecord>();
+	const questionRelays = new Map<string, QuestionRelay>();
+	const questionQueue: QuestionRelay[] = [];
+	let activeQuestionRelay: QuestionRelay | undefined;
 	let lastListSignature: string | undefined;
+
+	const clearQuestionRelays = (owner?: string): void => {
+		for (const [key, relay] of questionRelays) {
+			if (owner && relay.record.owner !== owner) continue;
+			questionRelays.delete(key);
+			relay.state = "closed";
+			relay.record.question = undefined;
+			relay.controller?.abort();
+		}
+		for (let index = questionQueue.length - 1; index >= 0; index -= 1) {
+			if (!owner || questionQueue[index]?.record.owner === owner) questionQueue.splice(index, 1);
+		}
+		if (activeQuestionRelay && (!owner || activeQuestionRelay.record.owner === owner) && activeQuestionRelay.state !== "answered") {
+			activeQuestionRelay.state = "closed";
+			activeQuestionRelay.record.question = undefined;
+			activeQuestionRelay.controller?.abort();
+		}
+	};
+
+	const notifyQuestionPending = (relay: QuestionRelay): void => {
+		const ctx = activeContext;
+		if (!ctx) return;
+		const label = host?.redactText(relay.record.owner, relay.label) ?? relay.label;
+		try { ctx.ui.notify(`${label}: question remains pending; answer later with /agents.`, "warning"); }
+		catch { /* UI may be disposed during session replacement. */ }
+	};
+
+	const answerRelay = (relay: QuestionRelay, answer: string, answerHost: SubagentLaunchHost | undefined): boolean => {
+		if (relay.state === "answered" || relay.state === "closed" || !answerHost) return false;
+		const value = answer.trim();
+		if (!value) return false;
+		const label = answerHost.redactText(relay.record.owner, relay.label);
+		const question = answerHost.redactText(relay.record.owner, relay.question.question);
+		const safeAnswer = answerHost.redactText(relay.record.owner, value);
+		if (!answerHost.answerQuestion(relay.record.owner, relay.question.questionId, value)) return false;
+		relay.state = "answered";
+		questionRelays.delete(relay.key);
+		relay.record.answeredQuestionIds.add(relay.question.questionId);
+		relay.record.question = undefined;
+		const queuedIndex = questionQueue.indexOf(relay);
+		if (queuedIndex >= 0) questionQueue.splice(queuedIndex, 1);
+		relay.controller?.abort();
+		try {
+			pi.sendMessage(
+				{ customType: "subagent-question", content: `${label} asked: ${question}\nUser answered: ${safeAnswer}`, display: true },
+				{ deliverAs: "nextTurn" },
+			);
+		} catch {
+			try { activeContext?.ui.notify("Answer reached child, but parent note could not be queued.", "warning"); }
+			catch { /* Session may already be disposed. */ }
+		}
+		return true;
+	};
+
+	const answerPendingQuestion = (owner: string, questionId: string, answer: string, answerHost: SubagentLaunchHost | undefined): boolean => {
+		const relay = questionRelays.get(questionRelayKey(owner, questionId));
+		return relay ? answerRelay(relay, answer, answerHost) : false;
+	};
+
+	const showQuestionDialog = async (relay: QuestionRelay, ctx: ExtensionContext, controller: AbortController): Promise<void> => {
+		try {
+			const activeHost = host;
+			const label = activeHost?.redactText(relay.record.owner, relay.label) ?? relay.label;
+			const question = activeHost?.redactText(relay.record.owner, relay.question.question) ?? relay.question.question;
+			const title = `${label} asks: ${question}`;
+			let answer: string | undefined;
+			if (relay.question.options?.length) {
+				const selected = await ctx.ui.select(title, [...relay.question.options, "Other…"], { signal: controller.signal });
+				answer = selected === "Other…"
+					? await ctx.ui.input(title, "Type another answer", { signal: controller.signal })
+					: selected;
+			} else {
+				answer = await ctx.ui.input(title, "Type an answer", { signal: controller.signal });
+			}
+			if (relay.state !== "open" || controller.signal.aborted) return;
+			if (!answer?.trim() || !answerPendingQuestion(relay.record.owner, relay.question.questionId, answer, host)) {
+				relay.state = "dismissed";
+				notifyQuestionPending(relay);
+			}
+		} catch {
+			if (relay.state === "open" && !controller.signal.aborted) {
+				relay.state = "dismissed";
+				notifyQuestionPending(relay);
+			}
+		} finally {
+			if (activeQuestionRelay === relay) activeQuestionRelay = undefined;
+			relay.controller = undefined;
+			if (relay.state === "open") {
+				relay.state = "dismissed";
+				notifyQuestionPending(relay);
+			}
+			pumpQuestionQueue();
+		}
+	};
+
+	function pumpQuestionQueue(): void {
+		if (activeQuestionRelay) return;
+		while (questionQueue.length > 0) {
+			const relay = questionQueue.shift()!;
+			if (relay.state !== "queued") continue;
+			const ctx = activeContext;
+			if (!ctx?.hasUI) {
+				relay.state = "dismissed";
+				notifyQuestionPending(relay);
+				continue;
+			}
+			const controller = new AbortController();
+			relay.controller = controller;
+			relay.state = "open";
+			activeQuestionRelay = relay;
+			void showQuestionDialog(relay, ctx, controller);
+			return;
+		}
+	}
+
+	const enqueueQuestion = (record: SubagentRecord, question: SubagentQuestion): void => {
+		const key = questionRelayKey(record.owner, question.questionId);
+		if (questionRelays.has(key) || record.answeredQuestionIds.has(question.questionId)) return;
+		const relay: QuestionRelay = { key, record, question, label: questionChainLabel(record, records), state: "queued" };
+		questionRelays.set(key, relay);
+		questionQueue.push(relay);
+		pumpQuestionQueue();
+	};
 
 	const ensureHost = (ctx: ExtensionContext): SubagentLaunchHost => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (host && hostSessionId === sessionId) return host;
+		if (host) clearQuestionRelays();
 		const previous = host;
 		host = new SubagentLaunchHost({ parentSessionId: sessionId, timeoutPolicy: resolveSubagentTimeoutPolicy(readSubagentsSettings()), onSpawn: spawnNested, onBrowser: (owner, payload) => requestBrowserViaParent(pi, owner, payload, records.get(owner)?.browserReadOnly ?? false) });
 		hostSessionId = sessionId;
@@ -409,18 +565,17 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			record.status = status;
 			if (status === "running") record.question = undefined;
 			record.progress?.setStatus(status);
+			record.progress?.setActivity(status === "waiting" ? "question pending" : "running");
 		},
 		onSessionFile: (sessionFile: string) => {
 			record.sessionFile = sessionFile;
 		},
 		onQuestion: (question: SubagentQuestion) => {
+			record.status = "waiting";
 			record.question = question;
 			record.progress?.setStatus("waiting");
-			const options = question.options?.length ? `\nOptions: ${question.options.join(", ")}` : "";
-			pi.sendUserMessage(
-				`Subagent ${record.owner} is waiting for an answer.\nQuestion ID: ${question.questionId}\n${question.question}${options}\n\nReply with subagent_message using owner ${record.owner} and this questionId.`,
-				{ deliverAs: "followUp" },
-			);
+			record.progress?.setActivity("question pending");
+			enqueueQuestion(record, question);
 		},
 	});
 
@@ -434,6 +589,8 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		record.outputTail = undefined;
 		record.progress?.setTransport(handle.transport, handle.logPath);
 		void handle.result.then((result: SubagentResult) => {
+			clearQuestionRelays(record.owner);
+			record.question = undefined;
 			record.sessionFile = result.sessionFile ?? record.sessionFile;
 			record.result = result.text;
 			record.finishedAt = Date.now();
@@ -441,6 +598,8 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			record.status = !steerToParent || record.steered ? "done" : "failed";
 			record.progress?.finish(record.status === "done" ? "done" : "failed");
 		}).catch((error: unknown) => {
+			clearQuestionRelays(record.owner);
+			record.question = undefined;
 			record.status = "failed";
 			record.finishedAt = Date.now();
 			record.error = error instanceof SubagentFailureError ? error.info.error : error instanceof Error ? error.message : String(error);
@@ -518,6 +677,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			browserReadOnly: workflow.mode !== "build",
 			parentOwner,
 			startedAt: Date.now(),
+			answeredQuestionIds: new Set(),
 			steered: false,
 			progress: startSubagentProgress(inferRole(agent), { name: owner, parentId: parentOwner, depth }),
 		};
@@ -559,6 +719,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		clearQuestionRelays();
 		activeContext = undefined;
 		const closing = host;
 		host = undefined;
@@ -630,6 +791,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				agentScope,
 				browserReadOnly: workflow.mode !== "build",
 				startedAt: Date.now(),
+				answeredQuestionIds: new Set(),
 				steered: false,
 				progress,
 			};
@@ -681,21 +843,25 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: SUBAGENT_MESSAGE_TOOL_NAME,
 		label: "Message Subagent",
-		description: "Message a live subagent for delivery at its next tool boundary; abort is the only hard stop. Also answer pending questions or resume finished sessions.",
+		description: "Message a live subagent for delivery at its next tool boundary; abort is the only hard stop. Child questions are routed to the user automatically; answer a pending question only when the user tells you to. Also resume finished sessions.",
 		parameters: SubagentMessageParams,
 		async execute(_toolCallId, params: SubagentMessageParams, signal, _onUpdate, ctx) {
 			const owner = params.owner.trim();
 			const message = params.message.trim();
 			const record = records.get(owner);
 			if (!record) return { content: [{ type: "text", text: `Unknown subagent ${owner}.` }], details: { ok: false, error: "Unknown subagent" } };
+			if (params.questionId && record.answeredQuestionIds.has(params.questionId)) {
+				return { content: [{ type: "text", text: `Question ${params.questionId} was already answered.` }], details: { ok: false, error: "Already answered", owner, questionId: params.questionId } };
+			}
 			if (record.status === "waiting") {
-				if (!record.question || params.questionId !== record.question.questionId) {
-					return { content: [{ type: "text", text: `Subagent ${owner} is waiting for question ${record.question?.questionId ?? "(unknown)"}.` }], details: { ok: false, error: "Question ID mismatch", questionId: record.question?.questionId } };
+				const pending = record.question;
+				if (!pending || params.questionId !== pending.questionId) {
+					return { content: [{ type: "text", text: `Subagent ${owner} is waiting for question ${pending?.questionId ?? "(unknown)"}.` }], details: { ok: false, error: "Question ID mismatch", questionId: pending?.questionId } };
 				}
-				if (!ensureHost(ctx).answerQuestion(owner, record.question.questionId, message)) {
-					return { content: [{ type: "text", text: `Could not answer question ${record.question.questionId}; child may have exited.` }], details: { ok: false, error: "Question is no longer pending" } };
+				if (!answerPendingQuestion(owner, pending.questionId, message, ensureHost(ctx))) {
+					return { content: [{ type: "text", text: `Could not answer question ${pending.questionId}; child may have exited.` }], details: { ok: false, error: "Question is no longer pending" } };
 				}
-				return { content: [{ type: "text", text: `Answer delivered to ${owner}.` }], details: { ok: true, owner, questionId: record.question.questionId } };
+				return { content: [{ type: "text", text: `Answer delivered to ${owner}.` }], details: { ok: true, owner, questionId: pending.questionId } };
 			}
 
 			if (record.status === "running") {
@@ -774,7 +940,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				? [
 					...(agents.length === 0 ? ["No subagents."] : agents.map((agent) => {
 						const resultDelivered = records.get(agent.owner)?.steered === true;
-						const question = agent.question ? ` question=${agent.question.questionId}` : "";
+						const question = agent.question ? ` ? question-pending=${agent.question.questionId}` : "";
 						const transcript = agent.error?.startsWith("Result steering failed") ? ` transcript=${agent.sessionFile ?? "unavailable"}` : "";
 						const result = agent.result && !resultDelivered ? `\n  Result: ${truncateUtf8(agent.result, 2_000)}` : "";
 						return `${agent.owner} [${agent.status}]${question}${resultDelivered ? " result delivered as follow-up turn" : ""}${transcript}${result}`;
@@ -792,9 +958,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 						const resultDelivered = records.get(agent.owner)?.steered === true;
 						const result = agent.result && !resultDelivered ? `\n  Result: ${truncateUtf8(agent.result, 2_000)}` : "";
 						const delivered = resultDelivered ? " result delivered as follow-up turn" : "";
+						const question = agent.question ? ` ? question-pending=${agent.question.questionId}` : "";
 						const error = agent.error ? `\n  Error: ${agent.error}` : "";
 						const tail = agent.outputTail ? `\n  Recent output: ${agent.outputTail}` : "";
-						return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${delivered}${result}${error}${tail}`;
+						return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${question}${delivered}${result}${error}${tail}`;
 					}).join("\n\n");
 			return { content: [{ type: "text", text: truncateUtf8(text) }], details: { agents } };
 		},

@@ -19,6 +19,15 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 const eventHandlers = new Map<string, Set<(data: unknown) => void>>();
 const sentMessages: Array<{ content: string; options?: unknown }> = [];
+const sentContextMessages: Array<{ message: { customType?: string; content?: string; display?: boolean }; options?: unknown }> = [];
+const answerCalls: Array<{ owner: string; questionId: string; answer: string }> = [];
+const answeredQuestionKeys = new Set<string>();
+const launchedByOwner = new Map<string, SubagentLaunchOptions>();
+const pendingResults = new Map<string, (result: SubagentResult) => void>();
+const selectCalls: Array<{ title: string; options: string[]; signal?: AbortSignal }> = [];
+const inputCalls: Array<{ title: string; placeholder?: string; signal?: AbortSignal }> = [];
+const selectResolvers: Array<(value: string | undefined) => void> = [];
+const inputResolvers: Array<(value: string | undefined) => void> = [];
 const registeredTools = new Map<string, { description?: string; execute: (...args: any[]) => Promise<unknown> }>();
 let sendUserMessageFailure: Error | undefined;
 const registeredCommands: string[] = [];
@@ -53,6 +62,9 @@ const fakePi = {
 	},
 	events,
 	getThinkingLevel: () => "medium",
+	sendMessage(message: { customType?: string; content?: string; display?: boolean }, options?: unknown) {
+		sentContextMessages.push({ message, options });
+	},
 	sendUserMessage(content: string, options?: unknown) {
 		if (sendUserMessageFailure) throw sendUserMessageFailure;
 		sentMessages.push({ content, options });
@@ -71,6 +83,20 @@ const context = {
 	mode: "tui",
 	hasUI: true,
 	ui: {
+		select(title: string, options: string[], opts?: { signal?: AbortSignal }) {
+			selectCalls.push({ title, options: [...options], signal: opts?.signal });
+			return new Promise<string | undefined>((resolve) => {
+				selectResolvers.push(resolve);
+				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+			});
+		},
+		input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }) {
+			inputCalls.push({ title, placeholder, signal: opts?.signal });
+			return new Promise<string | undefined>((resolve) => {
+				inputResolvers.push(resolve);
+				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+			});
+		},
 		setWidget(_key: string, content: unknown) {
 			widgetRenders.push(content);
 		},
@@ -86,18 +112,23 @@ const originalLaunch = SubagentLaunchHost.prototype.launch;
 const originalResume = SubagentLaunchHost.prototype.resume;
 const originalReadTail = SubagentLaunchHost.prototype.readTail;
 const originalClose = SubagentLaunchHost.prototype.close;
+const originalAnswerQuestion = SubagentLaunchHost.prototype.answerQuestion;
+const originalRedactText = SubagentLaunchHost.prototype.redactText;
 let launched: SubagentLaunchOptions | undefined;
+let launchHost: SubagentLaunchHost | undefined;
 const surfaceTailReads: string[] = [];
 let resumedTask: string | undefined;
 SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOptions): Promise<SubagentLaunchHandle> {
 	launched = options;
+	launchHost = this;
+	launchedByOwner.set(options.owner, options);
 	const failing = options.task === "failure task";
-	const running = options.task.startsWith("tail task");
+	const running = options.task.startsWith("tail task") || options.task.startsWith("question task");
 	const taskResultText = options.task === "delivery failure task" ? "x".repeat(3_000) : "surface result";
 	const result = failing
 		? Promise.reject(new SubagentFailureError(options.owner, { transport: "rpc", kind: "process", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
 		: running
-			? new Promise<SubagentResult>(() => undefined)
+			? new Promise<SubagentResult>((resolve) => { pendingResults.set(options.owner, resolve); })
 			: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: taskResultText, sessionFile: "/tmp/sessions/child-surface.jsonl" });
 	if (!failing && !running) queueMicrotask(() => { void options.onResult?.(taskResultText); });
 	return {
@@ -135,13 +166,50 @@ SubagentLaunchHost.prototype.readTail = async function (owner: string, _lines: n
 	if (owner === "subagent-4") throw new Error("surface read failed");
 	return "live output";
 };
+SubagentLaunchHost.prototype.answerQuestion = function (owner: string, questionId: string, answer: string): boolean {
+	const key = `${owner}\\u0000${questionId}`;
+	if (answeredQuestionKeys.has(key)) return false;
+	answeredQuestionKeys.add(key);
+	answerCalls.push({ owner, questionId, answer });
+	launchedByOwner.get(owner)?.onStatus?.("running");
+	return true;
+};
+SubagentLaunchHost.prototype.redactText = function (_owner: string, text: string): string {
+	return text.replaceAll("ipc-secret", "[REDACTED]");
+};
 SubagentLaunchHost.prototype.close = async function (): Promise<void> {};
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+	const deadline = Date.now() + 2_000;
+	while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(predicate(), message);
+}
+
+function emitQuestion(owner: string, question: { questionId: string; question: string; options?: string[] }): void {
+	const options = launchedByOwner.get(owner);
+	assert.ok(options, `missing launch options for ${owner}`);
+	options.onStatus?.("waiting");
+	options.onQuestion?.(question);
+}
+
+function resolveNextSelect(value: string | undefined): void {
+	const resolve = selectResolvers.shift();
+	assert.ok(resolve, "no pending select dialog");
+	resolve(value);
+}
+
+function resolveNextInput(value: string | undefined): void {
+	const resolve = inputResolvers.shift();
+	assert.ok(resolve, "no pending input dialog");
+	resolve(value);
+}
 
 try {
 	subagentsExtension(fakePi as never);
 	assert.deepEqual([...registeredTools.keys()].sort(), ["subagent", "subagent_message", "subagents_list"]);
 	assert.match(registeredTools.get("subagent")?.description ?? "", /new parent turn.*End your turn instead of polling/);
 	assert.match(registeredTools.get("subagents_list")?.description ?? "", /when the user asks.*do not poll/);
+	assert.match(registeredTools.get("subagent_message")?.description ?? "", /Child questions are routed to the user automatically; answer a pending question only when the user tells you to/);
 	assert.deepEqual(registeredCommands.sort(), ["subagent-effort", "subagent-model"]);
 	await commandHandlers.get("subagent-effort")!("explorer inherit", context);
 	let settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
@@ -241,12 +309,102 @@ try {
 	const deliveredResult = deliveryFailureText.match(/\n  Result: ([\s\S]*?)(?=\n  Error:|\n  Recent output:|$)/)?.[1];
 	assert.ok(deliveredResult);
 	assert.ok(Buffer.byteLength(deliveredResult) <= 2_000);
+
+	const userMessageCountBeforeQuestions = sentMessages.length;
+	await registeredTools.get("subagent")!.execute("call-14", { task: "question task parent" }, new AbortController().signal, undefined, context);
+	const parentOwner = "subagent-6";
+	emitQuestion(parentOwner, { questionId: "parent-question", question: "Pick ipc-secret?", options: ["yes", "no"] });
+	await waitFor(() => selectCalls.length === 1, "first relayed select dialog");
+	assert.equal(selectCalls[0]!.title, "worker subagent-6 asks: Pick [REDACTED]?");
+	assert.deepEqual(selectCalls[0]!.options, ["yes", "no", "Other…"]);
+
+	const spawnNested = (launchHost as unknown as { options: { onSpawn?: (owner: string, payload: unknown) => Promise<unknown> } }).options.onSpawn;
+	assert.ok(spawnNested, "host did not expose nested spawn callback");
+	const ownersBeforeNested = new Set(launchedByOwner.keys());
+	let nestedSpawnError: unknown;
+	const nestedSpawnResult = spawnNested(parentOwner, { agent: "explorer", task: "question task nested" }).catch((error: unknown) => { nestedSpawnError = error; });
+	await waitFor(() => [...launchedByOwner.keys()].some((owner) => !ownersBeforeNested.has(owner)), "nested explorer launch");
+	const nestedOwner = [...launchedByOwner.keys()].find((owner) => !ownersBeforeNested.has(owner))!;
+	emitQuestion(nestedOwner, { questionId: "nested-question", question: "Which nested answer?", options: ["green", "blue"] });
+	assert.equal(selectCalls.length, 1, "second question opened before FIFO dialog finished");
+
+	resolveNextSelect("Other…");
+	await waitFor(() => inputCalls.length === 1, "Other answer input dialog");
+	resolveNextInput("typed ipc-secret");
+	await waitFor(() => answerCalls.length === 1 && selectCalls.length === 2, "first answer and queued nested dialog");
+	assert.deepEqual(answerCalls[0], { owner: parentOwner, questionId: "parent-question", answer: "typed ipc-secret" });
+	assert.equal(selectCalls[1]!.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Which nested answer?`);
+	assert.deepEqual(selectCalls[1]!.options, ["green", "blue", "Other…"]);
+	assert.equal(sentContextMessages[0]?.message.customType, "subagent-question");
+	assert.equal(sentContextMessages[0]?.message.display, true);
+	assert.ok((sentContextMessages[0]?.message.content ?? "").includes("worker subagent-6 asked: Pick [REDACTED]?\nUser answered: typed [REDACTED]"));
+	assert.doesNotMatch(sentContextMessages[0]?.message.content ?? "", /ipc-secret/);
+	assert.deepEqual(sentContextMessages[0]?.options, { deliverAs: "nextTurn" });
+	resolveNextSelect("blue");
+	await waitFor(() => answerCalls.length === 2, "nested dialog answer");
+	assert.equal(answerCalls[1]?.owner, nestedOwner);
+	assert.ok((sentContextMessages[1]?.message.content ?? "").includes(`explorer ${nestedOwner} (via worker ${parentOwner}) asked: Which nested answer?\nUser answered: blue`));
+	assert.equal(sentMessages.length, userMessageCountBeforeQuestions, "question relay must not send a user follow-up turn");
+
+	const duplicateDialogAnswer = await registeredTools.get("subagent_message")!.execute("call-15", { owner: parentOwner, questionId: "parent-question", message: "late answer" }, new AbortController().signal, undefined, context);
+	assert.match((duplicateDialogAnswer as { content: Array<{ text: string }> }).content[0]!.text, /already answered/);
+
+	await registeredTools.get("subagent")!.execute("call-16", { task: "question task tool answer" }, new AbortController().signal, undefined, context);
+	const toolAnswerOwner = "subagent-8";
+	emitQuestion(toolAnswerOwner, { questionId: "tool-question", question: "Answer from tool?", options: ["yes", "no"] });
+	await waitFor(() => selectCalls.length === 3, "third relayed select dialog");
+	const toolAnswerSignal = selectCalls[2]!.signal;
+	const toolAnswer = await registeredTools.get("subagent_message")!.execute("call-17", { owner: toolAnswerOwner, questionId: "tool-question", message: "answer via explicit tool" }, new AbortController().signal, undefined, context);
+	assert.match((toolAnswer as { content: Array<{ text: string }> }).content[0]!.text, /Answer delivered/);
+	assert.equal(toolAnswerSignal?.aborted, true, "subagent_message must dismiss active dialog");
+	const duplicateToolAnswer = await registeredTools.get("subagent_message")!.execute("call-18", { owner: toolAnswerOwner, questionId: "tool-question", message: "second answer" }, new AbortController().signal, undefined, context);
+	assert.match((duplicateToolAnswer as { content: Array<{ text: string }> }).content[0]!.text, /already answered/);
+
+	await registeredTools.get("subagent")!.execute("call-19", { task: "question task dismissed" }, new AbortController().signal, undefined, context);
+	const dismissedOwner = "subagent-9";
+	emitQuestion(dismissedOwner, { questionId: "dismissed-question", question: "Dismiss then answer" });
+	await waitFor(() => inputCalls.length === 2, "free-text question dialog");
+	resolveNextInput(undefined);
+	await waitFor(() => notifications.some((message) => message.includes("answer later with /agents")), "pending question notice after dismissal");
+	const dismissedList = await registeredTools.get("subagents_list")!.execute("call-20", {}, new AbortController().signal, undefined, context);
+	const dismissedAgents = (dismissedList as { details: { agents: Array<{ owner: string; status: string; question?: { questionId: string } }> } }).details.agents;
+	assert.equal(dismissedAgents.find((agent) => agent.owner === dismissedOwner)?.status, "waiting");
+	assert.equal(dismissedAgents.find((agent) => agent.owner === dismissedOwner)?.question?.questionId, "dismissed-question");
+	assert.ok((dismissedList as { content: Array<{ text: string }> }).content[0]!.text.includes("? question-pending=dismissed-question"));
+	const dismissedAnswer = await registeredTools.get("subagent_message")!.execute("call-21", { owner: dismissedOwner, questionId: "dismissed-question", message: "answer later" }, new AbortController().signal, undefined, context);
+	assert.match((dismissedAnswer as { content: Array<{ text: string }> }).content[0]!.text, /Answer delivered/);
+
+	context.hasUI = false;
+	await registeredTools.get("subagent")!.execute("call-22", { task: "question task no-ui" }, new AbortController().signal, undefined, context);
+	const noUiOwner = "subagent-10";
+	emitQuestion(noUiOwner, { questionId: "no-ui-question", question: "No UI available" });
+	assert.equal(selectCalls.length, 3);
+	assert.equal(inputCalls.length, 2);
+	assert.ok((notifications.at(-1) ?? "").includes("answer later with /agents"));
+	const noUiAnswer = await registeredTools.get("subagent_message")!.execute("call-23", { owner: noUiOwner, questionId: "no-ui-question", message: "answer without UI" }, new AbortController().signal, undefined, context);
+	assert.match((noUiAnswer as { content: Array<{ text: string }> }).content[0]!.text, /Answer delivered/);
+	assert.equal(sentMessages.length, userMessageCountBeforeQuestions, "question handling must not prompt parent model");
+	assert.equal(sentContextMessages.length, 5);
+	assert.ok(sentContextMessages.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "nextTurn" })));
+
+	context.hasUI = true;
+	const questionOwners = [parentOwner, nestedOwner, toolAnswerOwner, dismissedOwner, noUiOwner];
+	for (const owner of questionOwners) {
+		const resolve = pendingResults.get(owner);
+		pendingResults.delete(owner);
+		resolve?.({ owner, childSessionId: `child-${owner}`, text: `${owner} done` });
+	}
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(nestedSpawnError, undefined);
+	await nestedSpawnResult;
 	await handlers.get("session_shutdown")?.({}, context);
 	console.log("subagent tool surface tests passed");
 } finally {
 	SubagentLaunchHost.prototype.launch = originalLaunch;
 	SubagentLaunchHost.prototype.resume = originalResume;
 	SubagentLaunchHost.prototype.readTail = originalReadTail;
+	SubagentLaunchHost.prototype.answerQuestion = originalAnswerQuestion;
+	SubagentLaunchHost.prototype.redactText = originalRedactText;
 	SubagentLaunchHost.prototype.close = originalClose;
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
