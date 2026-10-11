@@ -609,21 +609,14 @@ export async function checkDocs(cwd: string, options: CheckDocsOptions = {}): Pr
 		// decisions dir doesn't exist yet
 	}
 
-	// Check if decisions index is stale
+	// Compare the generated index byte-for-byte so metadata drift is detected too.
 	let staleIndex = false;
 	const indexPath = join(decisionsDir, DECISIONS_INDEX);
 	try {
-		const indexContent = await readFile(indexPath, "utf-8");
-		// If there are ADR files but index doesn't reference them, it's stale
-		for (const adr of adrFiles) {
-			const adrName = adr.split("/").pop()?.match(/^ADR-\d{4,}/)?.[0] ?? "";
-			if (!indexContent.includes(adrName)) {
-				staleIndex = true;
-				break;
-			}
-		}
+		const [indexContent, generatedIndex] = await Promise.all([readFile(indexPath), generateDecisionIndex(cwd)]);
+		staleIndex = !indexContent.equals(Buffer.from(generatedIndex, "utf-8"));
 	} catch {
-		staleIndex = adrFiles.length > 0;
+		staleIndex = true;
 	}
 
 	let spokes = await checkSpokes(cwd);

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkDocs, generateSpokeBody, initDocs, mergeSpokeContent, writeSpokes } from "../filesystem.ts";
+import { checkDocs, generateSpokeBody, initDocs, mergeSpokeContent, updateDecisionIndex, writeSpokes } from "../filesystem.ts";
 
 const body = generateSpokeBody();
 
@@ -78,3 +78,19 @@ await rename(join(initRoot, "docs/engineering/invariants.md"), join(initRoot, "d
 const deadLinkCheck = await checkDocs(initRoot, { repairSpokes: true });
 assert.ok(deadLinkCheck.spokes.every((spoke) => spoke.deadLinks.includes("docs/engineering/invariants.md")), "check detects dead spoke doc link");
 assert.equal(deadLinkCheck.spokesRepaired.length, 0, "dead link alone is not repaired by rewriting spokes");
+
+const indexRoot = await mkdtemp(join(tmpdir(), "docs-index-freshness-"));
+try {
+	await initDocs(indexRoot);
+	const adrPath = join(indexRoot, "docs/engineering/decisions/ADR-1000-index-fixture.md");
+	const adr = "---\nid: ADR-1000\ntitle: Index fixture\nstatus: Active\ndate: 2026-10-11\nreadWhen: testing decision-index freshness\n---\n";
+	await writeFile(adrPath, adr, "utf8");
+	await updateDecisionIndex(indexRoot);
+	assert.equal((await checkDocs(indexRoot)).staleIndex, false, "generated index starts fresh");
+	await writeFile(adrPath, adr.replace("status: Active", "status: Deprecated"), "utf8");
+	assert.equal((await checkDocs(indexRoot)).staleIndex, true, "status drift makes decision index stale");
+	await updateDecisionIndex(indexRoot);
+	assert.equal((await checkDocs(indexRoot)).staleIndex, false, "regenerating index restores freshness");
+} finally {
+	await rm(indexRoot, { recursive: true, force: true });
+}
