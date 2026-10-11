@@ -457,26 +457,51 @@ try {
 		message: { customType: "subagent-steer", content: "User told subagent-3: hello [REDACTED]", display: true },
 		options: { deliverAs: "nextTurn" },
 	});
+	const deferredOverlayQuestionId = "overlay-question-pending";
+	const answerCountBeforeDeferredQuestion = answerCalls.length;
+	emitQuestion("subagent-3", { questionId: deferredOverlayQuestionId, question: "Answer me after closing?", options: ["yes", "no"] });
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "viewed child's new question stays in overlay");
+	assert.match(overlayComponent!.render?.(80)?.join("\n") ?? "", /Question: Answer me after closing\?/);
 	emitQuestion(nestedOwner, { questionId: "nested-overlay-question", question: "Other child asks?", options: ["green", "blue"] });
 	const otherQuestionNotice = `explorer ${nestedOwner} (via worker ${parentOwner}) has a question; press Esc to answer it.`;
 	const currentOverlayText = () => (overlayComponent?.render?.(80) ?? []).join(" ").replace(/\s+/g, " ");
 	await waitFor(() => currentOverlayText().includes(otherQuestionNotice), "notice for question belonging to another child");
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "question for another child must stay queued while /agents is open");
-	assert.equal(answerCalls.length, answerCountBeforeOverlayQuestions + 1, "Esc must not dismiss or answer the queued question");
-	overlayComponent!.handleInput?.("\u001b");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "questions must not open dialogs while /agents is open");
+	assert.equal(answerCalls.length, answerCountBeforeDeferredQuestion, "queued questions remain unanswered before Esc");
+	const closingOverlay = overlayComponent!;
+	closingOverlay.handleInput?.("\u001b");
 	await openAgentsOverlay;
-	await waitFor(() => selectCalls.length === selectCountBeforeOverlayQuestions + 1, "queued question dialog after last /agents overlay closes");
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "closing one overlay opens exactly one queued dialog");
+	await waitFor(() => selectCalls.length === selectCountBeforeOverlayQuestions + 1, "other-child question dialog after overlay closes");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "only other-child question opens after Esc");
 	assert.equal(selectCalls.at(-1)?.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Other child asks?`);
-	assert.equal(selectCalls.at(-1)?.signal?.aborted, false, "Esc in /agents must not cancel queued dialog");
+	assert.equal(selectCalls.at(-1)?.signal?.aborted, false, "Esc in /agents must not cancel the other child's queued dialog");
+	assert.ok(notifications.at(-1)?.includes("worker subagent-3: question remains pending; answer later with /agents."));
 	const pendingOverlayList = await registeredTools.get("subagents_list")!.execute("call-24", {}, new AbortController().signal, undefined, context);
 	const pendingOverlayAgents = (pendingOverlayList as { details: { agents: Array<{ owner: string; status: string; question?: { questionId: string } }> } }).details.agents;
-	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === nestedOwner)?.status, "waiting");
+	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === "subagent-3")?.status, "waiting");
+	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === "subagent-3")?.question?.questionId, deferredOverlayQuestionId);
 	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === nestedOwner)?.question?.questionId, "nested-overlay-question");
 	resolveNextSelect("green");
-	await waitFor(() => answerCalls.length === answerCountBeforeOverlayQuestions + 2, "answer queued dialog after overlay close");
+	await waitFor(() => answerCalls.length === answerCountBeforeDeferredQuestion + 1, "answer other-child dialog after overlay close");
 	assert.deepEqual(answerCalls.at(-1), { owner: nestedOwner, questionId: "nested-overlay-question", answer: "green" });
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "one queued question must produce one dialog");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "same-child question must not open a dialog after Esc");
+
+	const reopenAgentsOverlay = commandHandlers.get("agents")!("", context) as Promise<void>;
+	await waitFor(() => selectCalls.length === selectCountBeforeOverlayQuestions + 2, "agents picker for pending question");
+	const reopenPicker = selectCalls.at(-1)!;
+	const deferredChildOption = reopenPicker.options.find((option) => option.includes("subagent-3 — worker [waiting]"));
+	assert.ok(deferredChildOption, "pending child must remain selectable after Esc");
+	resolveNextSelect(deferredChildOption);
+	await waitFor(() => overlayComponent !== closingOverlay, "reopened overlay for dismissed question");
+	assert.match(overlayComponent!.render?.(80)?.join("\n") ?? "", /Question: Answer me after closing\?/);
+	for (const character of "answered later in /agents") overlayComponent!.handleInput?.(character);
+	overlayComponent!.handleInput?.("\r");
+	await waitFor(() => answerCalls.length === answerCountBeforeDeferredQuestion + 2, "answer dismissed question later through /agents");
+	assert.deepEqual(answerCalls.at(-1), { owner: "subagent-3", questionId: deferredOverlayQuestionId, answer: "answered later in /agents" });
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 2, "later overlay answer must not open a relay dialog");
+	overlayComponent!.handleInput?.("\u001b");
+	await reopenAgentsOverlay;
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 2);
 
 	const questionOwners = [parentOwner, nestedOwner, toolAnswerOwner, dismissedOwner, noUiOwner];
 	for (const owner of questionOwners) {

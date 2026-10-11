@@ -458,6 +458,16 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		catch { /* UI may be disposed during session replacement. */ }
 	};
 
+	const dismissQueuedQuestionForOverlay = (owner: string): void => {
+		const index = questionQueue.findIndex((relay) => relay.record.owner === owner && relay.state === "queued");
+		if (index < 0) return;
+		const [relay] = questionQueue.splice(index, 1);
+		if (!relay) return;
+		relay.state = "dismissed";
+		notifyQuestionPending(relay);
+		refreshAgentsOverlays();
+	};
+
 	const answerRelay = (relay: QuestionRelay, answer: string, answerHost: SubagentLaunchHost | undefined): boolean => {
 		if (relay.state === "answered" || relay.state === "closed" || !answerHost) return false;
 		const value = answer.trim();
@@ -862,6 +872,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				if (overlay) {
 					agentsOverlays.delete(overlay);
 					overlay.dispose();
+					dismissQueuedQuestionForOverlay(record.owner);
 				}
 				pumpQuestionQueue();
 			}

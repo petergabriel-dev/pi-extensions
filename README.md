@@ -71,7 +71,7 @@ The focused commands are useful while iterating; `npm test` runs the complete co
 
 Overrides are per role and stored in Pi settings. Explorer effort defaults to `low`; worker effort inherits the parent when unset. Explicit explorer `inherit` restores parent effort instead of the default.
 
-In a saved interactive TUI session, `/agents` lists child runs in tree order and opens a live view of recent redacted RPC items. Arrow keys or PageUp/PageDown scroll; Enter answers a pending child question or steers a running child; Esc closes. Finished children are read-only. Child questions are relayed to the user automatically, and dismissing a dialog leaves the question pending. `/agents` requires the interactive TUI.
+In a saved interactive TUI session, `/agents` lists child runs in tree order and opens a live view of recent redacted RPC items. Arrow keys or PageUp/PageDown scroll; Enter answers a pending child question or steers a running child; Esc closes. If viewed child asks while overlay is open, Esc returns to chat and leaves question pending for later answer through `/agents`; a queued question from another child may open its dialog after close. Finished children are read-only. Child questions are relayed to the user automatically, and dismissing a dialog leaves the question pending. `/agents` requires the interactive TUI.
 
 ## Contents
 
