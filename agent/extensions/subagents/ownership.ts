@@ -1,3 +1,8 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+export const MAX_OWNERSHIP_PATHS = 100;
+
 export interface OwnershipConflict {
 	owner: string;
 	requestedPath: string;
@@ -15,25 +20,53 @@ export function normalizeOwnership(paths: readonly string[] | undefined): string
 }
 
 export function ownershipOverlaps(left: string, right: string): boolean {
-	const a = left.replace(/\/{1,2}\*\*?$/, "").replace(/\/$/, "");
-	const b = right.replace(/\/{1,2}\*\*?$/, "").replace(/\/$/, "");
+	const normalize = (value: string): string => value.replaceAll("\\", "/").replace(/\/{1,2}\*\*?$/, "").replace(/\/+$/, "");
+	const a = normalize(left);
+	const b = normalize(right);
 	return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
-export class OwnershipLockManager {
-	private readonly locks = new Map<string, Set<string>>();
+interface OwnershipPath {
+	original: string;
+	canonical: string;
+}
 
-	acquire(owner: string, requestedPaths: readonly string[] | undefined): OwnershipAcquireResult {
+function canonicalOwnershipPath(value: string, cwd: string): string {
+	const relativePath = value.replace(/\/\*\*?$/, "");
+	const lexicalPath = path.resolve(cwd, relativePath);
+	let ancestor = lexicalPath;
+	const remainder: string[] = [];
+	while (true) {
+		try {
+			const realAncestor = fs.realpathSync.native(ancestor);
+			return path.resolve(realAncestor, ...remainder.reverse()).toLowerCase();
+		} catch {
+			const parent = path.dirname(ancestor);
+			if (parent === ancestor) return lexicalPath.toLowerCase();
+			remainder.push(path.basename(ancestor));
+			ancestor = parent;
+		}
+	}
+}
+
+export class OwnershipLockManager {
+	private readonly locks = new Map<string, OwnershipPath[]>();
+
+	acquire(owner: string, requestedPaths: readonly string[] | undefined, cwd: string): OwnershipAcquireResult {
+		if ((requestedPaths?.length ?? 0) > MAX_OWNERSHIP_PATHS) throw new Error(`Ownership paths exceed maximum of ${MAX_OWNERSHIP_PATHS}.`);
 		const paths = normalizeOwnership(requestedPaths);
-		for (const requestedPath of paths) {
+		const identities = paths.map((original) => ({ original, canonical: canonicalOwnershipPath(original, cwd) }));
+		for (const requested of identities) {
 			for (const [existingOwner, existingPaths] of this.locks) {
 				if (existingOwner === owner) continue;
-				for (const existingPath of existingPaths) {
-					if (ownershipOverlaps(requestedPath, existingPath)) return { ok: false, paths, conflict: { owner: existingOwner, requestedPath, existingPath } };
+				for (const existing of existingPaths) {
+					if (ownershipOverlaps(requested.canonical, existing.canonical)) {
+						return { ok: false, paths, conflict: { owner: existingOwner, requestedPath: requested.original, existingPath: existing.original } };
+					}
 				}
 			}
 		}
-		if (paths.length > 0) this.locks.set(owner, new Set(paths));
+		if (paths.length > 0) this.locks.set(owner, identities);
 		return { ok: true, paths };
 	}
 
@@ -46,6 +79,6 @@ export class OwnershipLockManager {
 	}
 
 	snapshot(): Record<string, string[]> {
-		return Object.fromEntries([...this.locks.entries()].map(([owner, paths]) => [owner, [...paths]]));
+		return Object.fromEntries([...this.locks.entries()].map(([owner, paths]) => [owner, paths.map(({ original }) => original)]));
 	}
 }

@@ -13,7 +13,7 @@ import {
 	type SubagentTransport,
 } from "./diagnostics.ts";
 import type { AgentRole, AgentConfig } from "./agents.ts";
-import { normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
+import { MAX_OWNERSHIP_PATHS, normalizeOwnership, OwnershipLockManager, type OwnershipAcquireResult } from "./ownership.ts";
 import { acquireSubagentSlot, type AcquiredSubagentSlot } from "./concurrency.ts";
 import { subagentToolsMutateRepository, validateSubagentDepth } from "./policy.ts";
 import { createSubagentWatchdog, type SubagentWatchdog, type SubagentWatchdogClock } from "./timeout.ts";
@@ -188,6 +188,7 @@ interface RunItemBuffer {
 interface RunState {
 	options: SubagentRuntimeOptions;
 	tools: string[];
+	cwd: string;
 	watchdog?: SubagentWatchdog;
 	childSessionId: string;
 	ipcToken: string;
@@ -472,7 +473,7 @@ export class SubagentLaunchHost {
 		if (options.parentSessionId !== this.options.parentSessionId) throw new Error("Subagent parent session does not match IPC host.");
 		if (!options.task.trim()) throw new Error("Subagent task is required.");
 		if (!Array.isArray(options.tools) || options.tools.length === 0 || options.tools.some((tool) => typeof tool !== "string" || !tool.trim())) throw new Error("Subagent tools must be a non-empty allowlist.");
-		if (options.fileOwnership !== undefined && (!Array.isArray(options.fileOwnership) || options.fileOwnership.some((item) => typeof item !== "string" || !item.trim()))) throw new Error("Subagent ownership paths must be non-empty strings.");
+		if (options.fileOwnership !== undefined && (!Array.isArray(options.fileOwnership) || options.fileOwnership.length > MAX_OWNERSHIP_PATHS || options.fileOwnership.some((item) => typeof item !== "string" || !item.trim()))) throw new Error(`Subagent ownership paths must be non-empty strings (maximum ${MAX_OWNERSHIP_PATHS}).`);
 		if (options.subagentAgents !== undefined && (!Array.isArray(options.subagentAgents) || options.subagentAgents.some((item) => typeof item !== "string" || !item.trim()))) throw new Error("Subagent child agent names must be non-empty strings.");
 		const depthError = validateSubagentDepth(options.depth ?? 0);
 		if (depthError) throw new Error(depthError);
@@ -533,9 +534,9 @@ export class SubagentLaunchHost {
 		return run ? redactSubagentText(text, run.ipcToken) : text;
 	}
 
-	acquireOwnership(owner: string, paths: readonly string[] | undefined): OwnershipAcquireResult {
+	acquireOwnership(owner: string, paths: readonly string[] | undefined, cwd: string): OwnershipAcquireResult {
 		validateIdentifier(owner, "owner");
-		return this.ownership.acquire(owner, paths);
+		return this.ownership.acquire(owner, paths, cwd);
 	}
 
 	releaseOwnership(owner: string): void {
@@ -596,7 +597,7 @@ export class SubagentLaunchHost {
 		await this.server.revokeRun(loadout.owner);
 		const args = buildSubagentCommandArgs(loadout);
 		if (subagentToolsMutateRepository(loadout.tools)) {
-			const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership);
+			const ownership = this.ownership.acquire(loadout.owner, loadout.fileOwnership, loadout.cwd);
 			if (!ownership.ok) throw new Error(`Subagent ownership overlaps ${ownership.conflict?.owner}: requested ${ownership.conflict?.requestedPath}, existing ${ownership.conflict?.existingPath}.`);
 		}
 		let slot: AcquiredSubagentSlot;
@@ -641,6 +642,7 @@ export class SubagentLaunchHost {
 		run = {
 			options: runtime,
 			tools: loadout.tools,
+			cwd: loadout.cwd,
 			childSessionId: loadout.childSessionId,
 			ipcToken,
 			loadoutPath,
@@ -1090,9 +1092,9 @@ export class SubagentLaunchHost {
 				return { accepted: true, released: true };
 			}
 			const requested = request.payload.paths as string[] | undefined;
-			if (requested !== undefined && (!Array.isArray(requested) || requested.some((item) => typeof item !== "string"))) throw new Error("Ownership paths are malformed.");
+			if (requested !== undefined && (!Array.isArray(requested) || requested.length > MAX_OWNERSHIP_PATHS || requested.some((item) => typeof item !== "string"))) throw new Error(`Ownership paths are malformed or exceed maximum of ${MAX_OWNERSHIP_PATHS}.`);
 			if (!subagentToolsMutateRepository(run.tools)) return { ok: true, paths: normalizeOwnership(requested) };
-			const acquired = this.acquireOwnership(request.owner, requested);
+			const acquired = this.acquireOwnership(request.owner, requested, run.cwd);
 			if (!acquired.ok) throw new Error(`Subagent ownership overlaps ${acquired.conflict?.owner}: requested ${acquired.conflict?.requestedPath}, existing ${acquired.conflict?.existingPath}.`);
 			return acquired;
 		}

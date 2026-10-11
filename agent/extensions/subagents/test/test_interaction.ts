@@ -80,7 +80,7 @@ try {
 		assert.equal(questionCalls[0]?.args.includes("--print"), false);
 		await waitFor(() => Boolean(question));
 		assert.deepEqual(question, { questionId: "question-ui-1", question: "Which answer?", options: ["yes", "no"] });
-		const ownershipConflict = questionHost.acquireOwnership("other-owner", ["src/file.ts"]);
+		const ownershipConflict = questionHost.acquireOwnership("other-owner", ["src/file.ts"], process.cwd());
 		assert.equal(ownershipConflict.ok, false);
 		assert.equal(ownershipConflict.conflict?.owner, "question-owner");
 		let questionSettled = false;
