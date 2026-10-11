@@ -25,6 +25,8 @@ const answerCalls: Array<{ owner: string; questionId: string; answer: string }> 
 const answeredQuestionKeys = new Set<string>();
 const launchedByOwner = new Map<string, SubagentLaunchOptions>();
 const pendingResults = new Map<string, (result: SubagentResult) => void>();
+const pendingFailures = new Map<string, (error: Error) => void>();
+const shutdownFailureOwners = new Set<string>();
 const selectCalls: Array<{ title: string; options: string[]; signal?: AbortSignal }> = [];
 const inputCalls: Array<{ title: string; placeholder?: string; signal?: AbortSignal }> = [];
 const selectResolvers: Array<(value: string | undefined) => void> = [];
@@ -153,12 +155,19 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 	launchHost = this;
 	launchedByOwner.set(options.owner, options);
 	const failing = options.task === "failure task";
-	const running = options.task.startsWith("tail task") || options.task.startsWith("question task");
+	const shutdownFailure = options.task === "shutdown failure task";
+	const running = options.task.startsWith("tail task") || options.task.startsWith("question task") || shutdownFailure;
 	const taskResultText = options.task === "delivery failure task" ? "x".repeat(3_000) : "surface result";
 	const result = failing
 		? Promise.reject(new SubagentFailureError(options.owner, { transport: "rpc", kind: "process", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
 		: running
-			? new Promise<SubagentResult>((resolve) => { pendingResults.set(options.owner, resolve); })
+			? new Promise<SubagentResult>((resolve, reject) => {
+				pendingResults.set(options.owner, resolve);
+				if (shutdownFailure) {
+					pendingFailures.set(options.owner, reject);
+					shutdownFailureOwners.add(options.owner);
+				}
+			})
 			: Promise.resolve({ owner: options.owner, childSessionId: "child-surface", text: taskResultText, sessionFile: "/tmp/sessions/child-surface.jsonl" });
 	if (!failing && !running) queueMicrotask(() => { void options.onResult?.(taskResultText); });
 	return {
@@ -210,7 +219,14 @@ SubagentLaunchHost.prototype.answerQuestion = function (owner: string, questionI
 SubagentLaunchHost.prototype.redactText = function (_owner: string, text: string): string {
 	return text.replaceAll("ipc-secret", "[REDACTED]");
 };
-SubagentLaunchHost.prototype.close = async function (): Promise<void> {};
+SubagentLaunchHost.prototype.close = async function (): Promise<void> {
+	for (const owner of shutdownFailureOwners) {
+		pendingFailures.get(owner)?.(new Error(`Subagent ${owner} host closed.`));
+		pendingFailures.delete(owner);
+		pendingResults.delete(owner);
+	}
+	shutdownFailureOwners.clear();
+};
 
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {
 	const deadline = Date.now() + 2_000;
@@ -512,7 +528,12 @@ try {
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(nestedSpawnError, undefined);
 	await nestedSpawnResult;
+	const messagesBeforeShutdown = sentMessages.length;
+	await registeredTools.get("subagent")!.execute("call-shutdown", { task: "shutdown failure task" }, new AbortController().signal, undefined, context);
+	assert.equal(launched?.task, "shutdown failure task");
 	await handlers.get("session_shutdown")?.({}, context);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(sentMessages.length, messagesBeforeShutdown, "host-close failure must not send a parent follow-up during shutdown");
 	console.log("subagent tool surface tests passed");
 } finally {
 	SubagentLaunchHost.prototype.launch = originalLaunch;

@@ -417,6 +417,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let host: SubagentLaunchHost | undefined;
 	let hostSessionId: string | undefined;
 	let activeContext: ExtensionContext | undefined;
+	let shuttingDown = false;
 	const records = new Map<string, SubagentRecord>();
 	const questionRelays = new Map<string, QuestionRelay>();
 	const questionQueue: QuestionRelay[] = [];
@@ -635,7 +636,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			}
 			record.progress?.setFailure(record.error);
 			record.progress?.finish("failed");
-			if (steerToParent) steerFailure(pi, record);
+			if (steerToParent && !shuttingDown) steerFailure(pi, record);
 		});
 	};
 
@@ -739,6 +740,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		shuttingDown = false;
 		cancelAgentsOverlays();
 		activeContext = ctx;
 		setSubagentProgressContext(ctx);
@@ -746,6 +748,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		shuttingDown = true;
 		cancelAgentsOverlays();
 		clearQuestionRelays();
 		activeContext = undefined;
