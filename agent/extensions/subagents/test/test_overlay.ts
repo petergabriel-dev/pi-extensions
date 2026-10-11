@@ -35,10 +35,12 @@ function makeHarness(current: SubagentOverlayRecord, initialItems: readonly Suba
 	const steers: string[] = [];
 	const notes: string[] = [];
 	let items = initialItems;
+	let questionNotice: string | undefined;
 	const tui = { terminal: { rows: 30, columns: 80 }, requestRender: () => { renderRequests += 1; } } as unknown as TUI;
 	const theme = { fg: (_color: string, text: string) => text } as unknown as Theme;
 	const source: SubagentOverlaySource = {
 		getRecord: () => current,
+		getQuestionNotice: () => questionNotice,
 		readItems: () => items,
 		subscribeItems: (listener) => {
 			itemListener = listener;
@@ -69,6 +71,10 @@ function makeHarness(current: SubagentOverlayRecord, initialItems: readonly Suba
 		updateItems(next: readonly SubagentItem[]) {
 			items = next;
 			itemListener?.(next);
+		},
+		setQuestionNotice(next: string | undefined) {
+			questionNotice = next;
+			component.refresh();
 		},
 	};
 }
@@ -101,11 +107,14 @@ const tree = orderSubagentTree([
 ]);
 assert.deepEqual(tree.map((child) => child.owner), ["root-a", "child-a", "root-b", "child-b"]);
 
-const pending = record({ status: "waiting", question: { questionId: "question-1", question: "Choose?" } });
+const pending = record({ status: "waiting", question: { questionId: "question-1", question: "Choose?", options: ["red", "blue"] } });
 const answerHarness = makeHarness(pending, [{ kind: "question", text: "Question includes ipc-secret" }]);
 const safeLines = answerHarness.component.render(80).join("\n");
 assert.match(safeLines, /\[REDACTED\]/);
 assert.doesNotMatch(safeLines, /ipc-secret/);
+assert.match(safeLines, /Question: Choose\?/);
+assert.match(safeLines, /Options: red \| blue/);
+assert.match(safeLines, /Esc closes \/agents only; question stays pending/);
 for (const character of "blue") answerHarness.component.handleInput(character);
 answerHarness.component.handleInput("\r");
 await flush();
@@ -117,6 +126,22 @@ assert.equal(answerHarness.unsubscribeCount, 1);
 assert.equal(answerHarness.doneCount, 1);
 answerHarness.component.handleInput("\u001b");
 assert.equal(answerHarness.unsubscribeCount, 1);
+
+const escapePending = record({ status: "waiting", question: { questionId: "question-esc", question: "Still pending?" } });
+const escapeHarness = makeHarness(escapePending);
+escapeHarness.component.handleInput("\u001b");
+assert.deepEqual(escapeHarness.answers, []);
+assert.equal(escapePending.question?.questionId, "question-esc", "Esc closes overlay without dismissing pending question");
+assert.equal(escapeHarness.doneCount, 1);
+assert.equal(escapeHarness.unsubscribeCount, 1);
+
+const externalQuestionHarness = makeHarness(record());
+externalQuestionHarness.setQuestionNotice("explorer subagent-2 (via worker subagent-1) has a question; press Esc to answer it.");
+const externalQuestionText = externalQuestionHarness.component.render(80).join(" ").replace(/\s+/g, " ");
+assert.ok(externalQuestionText.includes("explorer subagent-2 (via worker subagent-1) has a question; press Esc to answer it"));
+externalQuestionHarness.component.handleInput("\u001b");
+assert.deepEqual(externalQuestionHarness.answers, []);
+assert.equal(externalQuestionHarness.doneCount, 1);
 
 const steerHarness = makeHarness(record());
 for (const character of "check logs") steerHarness.component.handleInput(character);

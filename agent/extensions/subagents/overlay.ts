@@ -23,11 +23,12 @@ export interface SubagentOverlayRecord {
 	finishedAt?: number;
 	effort?: string;
 	sessionFile?: string;
-	question?: { questionId: string; question: string };
+	question?: { questionId: string; question: string; options?: string[] };
 }
 
 export interface SubagentOverlaySource {
 	getRecord(): SubagentOverlayRecord | undefined;
+	getQuestionNotice?(): string | undefined;
 	readItems(): readonly SubagentItem[];
 	subscribeItems(listener: (items: readonly SubagentItem[]) => void): () => void;
 	redactText(text: string): string;
@@ -141,12 +142,23 @@ export class SubagentOverlayComponent implements Component, Focusable {
 			`${record.owner} · ${record.agentName}${record.question ? " · ? question" : ""}`,
 			`Status: ${record.status} · Elapsed: ${elapsedLabel(record.startedAt, record.finishedAt)} · Effort: ${record.effort ?? "inherit"}`,
 			`Transcript: ${record.sessionFile ?? "not available"}`,
+			...(record.question ? [
+				`Question: ${record.question.question}`,
+				...(record.question.options?.length ? [`Options: ${record.question.options.join(" | ")}`] : []),
+			] : []),
 		].flatMap((line) => wrapTextWithAnsi(this.source.redactText(line), boundedWidth));
 		const body = this.getFormattedItems(boundedWidth).map((line) => this.source.redactText(line));
 		const editorLines = this.editor.render(boundedWidth).map((line) => this.source.redactText(line));
+		const questionNotice = this.source.getQuestionNotice?.();
+		const questionNoticeLines = questionNotice
+			? wrapTextWithAnsi(this.source.redactText(questionNotice), boundedWidth)
+			: [];
 		const footerLines = [
+			...questionNoticeLines,
 			...(this.notice ? [this.source.redactText(this.notice)] : []),
-			this.source.redactText("↑↓ / PgUp / PgDn scroll · Enter send or answer · Esc close"),
+			this.source.redactText(record.question
+				? "Enter answer · Esc closes /agents only; question stays pending"
+				: "↑↓ / PgUp / PgDn scroll · Enter send or answer · Esc close"),
 		];
 		const maxHeight = Math.max(8, Math.floor((this.tui.terminal.rows || 24) * 0.8));
 		this.bodyCapacity = Math.max(1, maxHeight - heading.length - editorLines.length - footerLines.length - 1);
@@ -189,6 +201,11 @@ export class SubagentOverlayComponent implements Component, Focusable {
 
 	invalidate(): void {
 		this.editor.invalidate();
+	}
+
+	refresh(): void {
+		this.invalidate();
+		this.requestThrottledRender();
 	}
 
 	dispose(): void {

@@ -154,7 +154,7 @@ The smoke resolves installed Pi through global npm metadata, binds its scripted 
 
 ### Interactive `/agents` and question-relay acceptance
 
-Use `./bin/pi-workspace` in a saved Build-mode TUI session, not `-p` and not after `/new`. Delegate a worker that starts an explorer which asks one question. Confirm a chain-labeled dialog appears, your answer reaches only the explorer, the parent receives one quiet `nextTurn` note, and the parent model does not call `subagent_message` to answer. While a child streams, open `/agents`, inspect recent/live items, steer the child, then Esc; confirm the steer arrives at its next tool boundary and the parent gets `User told <owner>: …`. Trigger one model-initiated `ask_user_question` while a child relay dialog is open; confirm dialogs do not overlap or break. Check for exactly one result delivery and no leftover child processes or runtime sockets.
+Use `./bin/pi-workspace` in a saved Build-mode TUI session, not `-p` and not after `/new`. Delegate a worker that starts an explorer which asks one question. Confirm a chain-labeled dialog appears, your answer reaches only the explorer, the parent receives one quiet `nextTurn` note, and the parent model does not call `subagent_message` to answer. While a child streams, open `/agents`, inspect recent/live items, steer the child, then Esc; confirm the steer arrives at its next tool boundary and the parent gets `User told <owner>: …`. R1 follow-up (out of scope here): a model-initiated `ask_user_question` opening over `/agents`; if reproduced, route dialog ownership through `pi.events` to one UI owner. Check for exactly one result delivery and no leftover child processes or runtime sockets.
 
 ## Standard verification gate
 

@@ -423,6 +423,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let activeQuestionRelay: QuestionRelay | undefined;
 	let lastListSignature: string | undefined;
 	const agentsOverlays = new Set<SubagentOverlayComponent>();
+	const refreshAgentsOverlays = (): void => {
+		for (const overlay of agentsOverlays) overlay.refresh();
+	};
 	const cancelAgentsOverlays = (): void => {
 		for (const overlay of agentsOverlays) overlay.cancel();
 		agentsOverlays.clear();
@@ -444,6 +447,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			activeQuestionRelay.record.question = undefined;
 			activeQuestionRelay.controller?.abort();
 		}
+		refreshAgentsOverlays();
 	};
 
 	const notifyQuestionPending = (relay: QuestionRelay): void => {
@@ -469,6 +473,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const queuedIndex = questionQueue.indexOf(relay);
 		if (queuedIndex >= 0) questionQueue.splice(queuedIndex, 1);
 		relay.controller?.abort();
+		refreshAgentsOverlays();
 		try {
 			pi.sendMessage(
 				{ customType: "subagent-question", content: `${label} asked: ${question}\nUser answered: ${safeAnswer}`, display: true },
@@ -523,7 +528,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	};
 
 	function pumpQuestionQueue(): void {
-		if (activeQuestionRelay) return;
+		if (activeQuestionRelay || agentsOverlays.size > 0) return;
 		while (questionQueue.length > 0) {
 			const relay = questionQueue.shift()!;
 			if (relay.state !== "queued") continue;
@@ -548,6 +553,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const relay: QuestionRelay = { key, record, question, label: questionChainLabel(record, records), state: "queued" };
 		questionRelays.set(key, relay);
 		questionQueue.push(relay);
+		refreshAgentsOverlays();
 		pumpQuestionQueue();
 	};
 
@@ -574,6 +580,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			if (status === "running") record.question = undefined;
 			record.progress?.setStatus(status);
 			record.progress?.setActivity(status === "waiting" ? "question pending" : "running");
+			refreshAgentsOverlays();
 		},
 		onSessionFile: (sessionFile: string) => {
 			record.sessionFile = sessionFile;
@@ -788,6 +795,13 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			};
 			const source: SubagentOverlaySource = {
 				getRecord: () => isCurrentSession() && records.get(record.owner) === record ? record : undefined,
+				getQuestionNotice: () => {
+					if (!isCurrentSession()) return undefined;
+					const pending = questionQueue.find((relay) => relay.record.owner !== record.owner && relay.state === "queued")?.record;
+					if (!pending) return undefined;
+					const notice = `${questionChainLabel(pending, records)} has a question; press Esc to answer it.`;
+					return host?.redactText(pending.owner, notice) ?? notice;
+				},
 				readItems: () => isCurrentSession() && records.get(record.owner) === record ? host?.readItems(record.owner) ?? [] : [],
 				subscribeItems: (listener: (items: readonly SubagentItem[]) => void) => {
 					const currentHost = host;
@@ -849,6 +863,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 					agentsOverlays.delete(overlay);
 					overlay.dispose();
 				}
+				pumpQuestionQueue();
 			}
 		},
 	});

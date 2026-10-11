@@ -435,6 +435,19 @@ try {
 	resolveNextSelect(selectedAgent);
 	await waitFor(() => overlayComponent !== undefined, "agents overlay");
 	assert.deepEqual(overlayOptions, { overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "80%", margin: 1 } });
+	const selectCountBeforeOverlayQuestions = selectCalls.length;
+	const answerCountBeforeOverlayQuestions = answerCalls.length;
+	emitQuestion("subagent-3", { questionId: "overlay-question", question: "Answer from overlay?", options: ["yes", "no"] });
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "question for viewed child must not open a competing dialog");
+	const viewedQuestion = overlayComponent!.render?.(80)?.join("\n") ?? "";
+	assert.match(viewedQuestion, /Question: Answer from overlay\?/);
+	assert.ok(viewedQuestion.includes("Options: yes | no"));
+	assert.match(viewedQuestion, /Enter answer.*Esc closes \/agents only/);
+	for (const character of "answer in overlay") overlayComponent!.handleInput?.(character);
+	overlayComponent!.handleInput?.("\r");
+	await waitFor(() => answerCalls.length === answerCountBeforeOverlayQuestions + 1, "answer to question shown in /agents");
+	assert.deepEqual(answerCalls.at(-1), { owner: "subagent-3", questionId: "overlay-question", answer: "answer in overlay" });
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions);
 	for (const character of "hello ipc-secret") overlayComponent!.handleInput?.(character);
 	assert.doesNotMatch(overlayComponent?.render?.(80)?.join("\n") ?? "", /ipc-secret/, "overlay input must redact the IPC token");
 	overlayComponent!.handleInput?.("\r");
@@ -444,8 +457,26 @@ try {
 		message: { customType: "subagent-steer", content: "User told subagent-3: hello [REDACTED]", display: true },
 		options: { deliverAs: "nextTurn" },
 	});
+	emitQuestion(nestedOwner, { questionId: "nested-overlay-question", question: "Other child asks?", options: ["green", "blue"] });
+	const otherQuestionNotice = `explorer ${nestedOwner} (via worker ${parentOwner}) has a question; press Esc to answer it.`;
+	const currentOverlayText = () => (overlayComponent?.render?.(80) ?? []).join(" ").replace(/\s+/g, " ");
+	await waitFor(() => currentOverlayText().includes(otherQuestionNotice), "notice for question belonging to another child");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "question for another child must stay queued while /agents is open");
+	assert.equal(answerCalls.length, answerCountBeforeOverlayQuestions + 1, "Esc must not dismiss or answer the queued question");
 	overlayComponent!.handleInput?.("\u001b");
 	await openAgentsOverlay;
+	await waitFor(() => selectCalls.length === selectCountBeforeOverlayQuestions + 1, "queued question dialog after last /agents overlay closes");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "closing one overlay opens exactly one queued dialog");
+	assert.equal(selectCalls.at(-1)?.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Other child asks?`);
+	assert.equal(selectCalls.at(-1)?.signal?.aborted, false, "Esc in /agents must not cancel queued dialog");
+	const pendingOverlayList = await registeredTools.get("subagents_list")!.execute("call-24", {}, new AbortController().signal, undefined, context);
+	const pendingOverlayAgents = (pendingOverlayList as { details: { agents: Array<{ owner: string; status: string; question?: { questionId: string } }> } }).details.agents;
+	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === nestedOwner)?.status, "waiting");
+	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === nestedOwner)?.question?.questionId, "nested-overlay-question");
+	resolveNextSelect("green");
+	await waitFor(() => answerCalls.length === answerCountBeforeOverlayQuestions + 2, "answer queued dialog after overlay close");
+	assert.deepEqual(answerCalls.at(-1), { owner: nestedOwner, questionId: "nested-overlay-question", answer: "green" });
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "one queued question must produce one dialog");
 
 	const questionOwners = [parentOwner, nestedOwner, toolAnswerOwner, dismissedOwner, noUiOwner];
 	for (const owner of questionOwners) {
