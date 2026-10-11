@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { discoverAgents, formatAgentList } from "../agents.ts";
+import { detectAgentShadows, discoverAgents, formatAgentList } from "../agents.ts";
 import { READ_ONLY_EXPLORER_TOOLS, validateExplorerTools } from "../index.ts";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agents-"));
@@ -14,11 +14,11 @@ assert.equal(READ_ONLY_EXPLORER_TOOLS.has("browser_kill"), false);
 assert.match(validateExplorerTools(["edit", "write", "bash"]) ?? "", /non-repository-read-only tool\(s\): edit, write, bash/);
 assert.match(validateExplorerTools(["browser_kill"]) ?? "", /browser_kill/);
 
-function writeAgent(dir: string, name: string, description = name, tools?: string, subagentAgents?: string): void {
+function writeAgent(dir: string, name: string, description = name, tools?: string, subagentAgents?: string, model?: string): void {
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(
 		path.join(dir, `${name}.md`),
-		`---\nname: ${name}\ndescription: ${description}${tools ? `\ntools: ${tools}` : ""}${subagentAgents ? `\nsubagent_agents: ${subagentAgents}` : ""}\n---\n\nPrompt for ${name}.\n`,
+		`---\nname: ${name}\ndescription: ${description}${tools ? `\ntools: ${tools}` : ""}${subagentAgents ? `\nsubagent_agents: ${subagentAgents}` : ""}${model ? `\nmodel: ${model}` : ""}\n---\n\nPrompt for ${name}.\n`,
 	);
 }
 
@@ -29,7 +29,7 @@ try {
 	const project = path.join(projectRoot, ".pi", "agents");
 	fs.mkdirSync(path.join(projectRoot, "nested", "cwd"), { recursive: true });
 	writeAgent(bundled, "explorer", "bundled explorer", "read,grep");
-	writeAgent(bundled, "worker", "bundled worker", undefined, "explorer, explorer");
+	writeAgent(bundled, "worker", "bundled worker", "read,grep", "explorer, explorer", "model/bundled");
 
 	const options = { bundledAgentsDir: bundled, userAgentsDir: user };
 	const clean = discoverAgents(tempRoot, "user", options);
@@ -45,27 +45,47 @@ try {
 
 	writeAgent(user, "user-only", "user definition");
 	writeAgent(user, "explorer", "user explorer");
+	writeAgent(user, "worker", "user worker", "read");
 	writeAgent(project, "project-only", "project definition");
-	writeAgent(project, "explorer", "project explorer");
+	writeAgent(project, "explorer", "project explorer", "read,grep");
+	fs.symlinkSync(path.join(bundled, "worker.md"), path.join(project, "worker.md"));
 
 	const nestedCwd = path.join(projectRoot, "nested", "cwd");
 	const userScoped = discoverAgents(nestedCwd, "user", options);
 	assert.equal(userScoped.agents.find((a) => a.name === "explorer")?.source, "user");
+	assert.equal(userScoped.agents.find((a) => a.name === "worker")?.source, "user");
 	assert.equal(userScoped.agents.some((a) => a.name === "project-only"), false);
+	const userWorkerShadow = userScoped.shadows.find((shadow) => shadow.name === "worker");
+	assert.deepEqual(userWorkerShadow?.missing, ["subagent_agents", "model"]);
+	assert.equal(userWorkerShadow?.source, "user");
+	assert.equal(userWorkerShadow?.filePath, path.join(user, "worker.md"));
+	assert.equal(userWorkerShadow?.bundledFilePath, path.join(bundled, "worker.md"));
+	assert.deepEqual(userScoped.shadows.find((shadow) => shadow.name === "explorer")?.missing, ["tools"]);
+	assert.equal(userScoped.shadows.some((shadow) => shadow.source === "project"), false);
+	assert.equal(userScoped.shadows.some((shadow) => shadow.name === "user-only"), false);
+	assert.deepEqual(detectAgentShadows(clean.agents, userScoped.agents), userScoped.shadows);
 
 	const projectScoped = discoverAgents(nestedCwd, "project", options);
 	assert.equal(projectScoped.agents.find((a) => a.name === "explorer")?.source, "project");
+	assert.equal(projectScoped.agents.find((a) => a.name === "worker")?.source, "project");
 	assert.equal(projectScoped.agents.some((a) => a.name === "user-only"), false);
+	const projectExplorerShadow = projectScoped.shadows.find((shadow) => shadow.name === "explorer");
+	assert.deepEqual(projectExplorerShadow?.missing, []);
+	assert.equal(projectExplorerShadow?.source, "project");
+	assert.equal(projectScoped.shadows.some((shadow) => shadow.name === "worker"), false, "symlink to bundled file is not a real override");
+	assert.equal(projectScoped.shadows.some((shadow) => shadow.source === "user"), false);
 
 	const both = discoverAgents(nestedCwd, "both", options);
 	assert.equal(both.agents.find((a) => a.name === "explorer")?.description, "project explorer");
 	assert.equal(both.agents.find((a) => a.name === "user-only")?.source, "user");
 	assert.equal(both.agents.find((a) => a.name === "project-only")?.source, "project");
+	assert.equal(both.shadows.some((shadow) => shadow.name === "user-only" || shadow.name === "project-only"), false);
 	assert.equal(both.projectAgentsDir, project);
 
 	// Invalid overrides do not displace a bundled default.
 	fs.writeFileSync(path.join(user, "worker.md"), "not frontmatter");
 	assert.equal(discoverAgents(tempRoot, "user", options).agents.find((a) => a.name === "worker")?.source, "bundled");
+	assert.equal(discoverAgents(tempRoot, "user", options).shadows.some((shadow) => shadow.name === "worker"), false);
 
 	// A valid but unsafe override is selected (the caller's validator rejects it).
 	writeAgent(user, "explorer", "unsafe explorer", "read,write");

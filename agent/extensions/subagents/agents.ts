@@ -19,8 +19,19 @@ export interface AgentConfig {
 	filePath: string;
 }
 
+export type AgentShadowField = "tools" | "subagent_agents" | "model";
+
+export interface AgentShadow {
+	name: string;
+	source: AgentSource;
+	filePath: string;
+	bundledFilePath: string;
+	missing: AgentShadowField[];
+}
+
 export interface AgentDiscoveryResult {
 	agents: AgentConfig[];
+	shadows: AgentShadow[];
 	userAgentsDir: string;
 	projectAgentsDir: string | null;
 	agentScope: AgentScope;
@@ -138,6 +149,27 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 	}
 }
 
+function isSameDefinitionFile(left: string, right: string): boolean {
+	try { return fs.realpathSync.native(left) === fs.realpathSync.native(right); }
+	catch { return false; }
+}
+
+export function detectAgentShadows(bundledAgents: readonly AgentConfig[], overrideAgents: readonly AgentConfig[]): AgentShadow[] {
+	const bundledByName = new Map(bundledAgents.map((agent) => [agent.name, agent]));
+	const shadows: AgentShadow[] = [];
+	for (const override of overrideAgents) {
+		if (override.source === "bundled") continue;
+		const bundled = bundledByName.get(override.name);
+		if (!bundled || isSameDefinitionFile(override.filePath, bundled.filePath)) continue;
+		const missing: AgentShadowField[] = [];
+		if (bundled.tools?.length && !override.tools?.length) missing.push("tools");
+		if (bundled.subagentAgents?.length && !override.subagentAgents?.length) missing.push("subagent_agents");
+		if (bundled.model && !override.model) missing.push("model");
+		shadows.push({ name: override.name, source: override.source, filePath: override.filePath, bundledFilePath: bundled.filePath, missing });
+	}
+	return shadows;
+}
+
 export function discoverAgents(
 	cwd: string,
 	agentScope: AgentScope = DEFAULT_AGENT_SCOPE,
@@ -149,6 +181,7 @@ export function discoverAgents(
 	const bundledAgents = loadAgentsFromDir(bundledAgentsDir, "bundled");
 	const userAgents = agentScope === "project" ? [] : loadAgentsFromDir(userAgentsDir, "user");
 	const projectAgents = agentScope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
+	const shadows = detectAgentShadows(bundledAgents, [...userAgents, ...projectAgents]);
 	const byName = new Map<string, AgentConfig>();
 
 	for (const agent of bundledAgents) byName.set(agent.name, agent);
@@ -161,6 +194,7 @@ export function discoverAgents(
 
 	return {
 		agents: Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name)),
+		shadows,
 		userAgentsDir,
 		projectAgentsDir,
 		agentScope,

@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
-import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type AgentScope } from "./agents.ts";
+import { discoverAgents, formatAgentList, type AgentConfig, type AgentRole, type AgentScope, type AgentShadow } from "./agents.ts";
 import { resolveEffort, type SubagentParentThinkingLevel } from "./effort.ts";
 import { normalizeOwnership } from "./ownership.ts";
 import {
@@ -418,6 +418,20 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let hostSessionId: string | undefined;
 	let activeContext: ExtensionContext | undefined;
 	let shuttingDown = false;
+	const warnedShadowFiles = new Set<string>();
+	const warnAgentShadows = (ctx: ExtensionContext, shadows: readonly AgentShadow[]): void => {
+		if (!ctx.hasUI || typeof ctx.ui.notify !== "function") return;
+		for (const shadow of shadows) {
+			if (warnedShadowFiles.has(shadow.filePath)) continue;
+			warnedShadowFiles.add(shadow.filePath);
+			const missing = shadow.missing.length > 0 ? `; missing: ${shadow.missing.join(", ")}` : "";
+			const fix = shadow.missing.length > 0
+				? `add missing keys from ${shadow.bundledFilePath}`
+				: "remove this file if override is unintended";
+			try { ctx.ui.notify(`Local agent ${shadow.filePath} overrides bundled ${shadow.name}${missing}. Fix: ${fix}.`, "warning"); }
+			catch { /* UI may be disposed during session replacement. */ }
+		}
+	};
 	const records = new Map<string, SubagentRecord>();
 	const questionRelays = new Map<string, QuestionRelay>();
 	const questionQueue: QuestionRelay[] = [];
@@ -673,6 +687,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const ctx = activeContext;
 		if (!ctx) throw new Error("Nested subagent context is unavailable.");
 		const discovery = discoverAgents(ctx.cwd, parent.agentScope);
+		warnAgentShadows(ctx, discovery.shadows);
 		const agent = discovery.agents.find((candidate) => candidate.name === agentName);
 		if (!agent) throw new Error(`Nested agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}`);
 		const configuredTools = agent.tools ?? [];
@@ -741,6 +756,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		shuttingDown = false;
+		warnedShadowFiles.clear();
 		cancelAgentsOverlays();
 		activeContext = ctx;
 		setSubagentProgressContext(ctx);
@@ -891,6 +907,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			const agentName = params.agent?.trim() || "worker";
 			const agentScope = (params.agentScope ?? DEFAULT_AGENT_SCOPE) as AgentScope;
 			const discovery = discoverAgents(ctx.cwd, agentScope);
+			warnAgentShadows(ctx, discovery.shadows);
 			const agent = discovery.agents.find((candidate) => candidate.name === agentName);
 			if (!agent) {
 				return { content: [{ type: "text", text: `Agent ${agentName} not found. Available: ${formatAgentList(discovery.agents)}` }], details: { ok: false, error: "Agent not found", discovery } };

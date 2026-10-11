@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +14,9 @@ import {
 
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const agentDir = mkdtempSync(join(tmpdir(), "subagent-tool-surface-"));
+const localWorkerPath = join(agentDir, "agents", "worker.md");
+mkdirSync(join(agentDir, "agents"), { recursive: true });
+writeFileSync(localWorkerPath, "---\nname: worker\ndescription: local worker override\ntools: read, bash, edit, write, grep, find, ls\nsubagent_agents: explorer\n---\n\nLocal worker prompt.\n");
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
@@ -36,6 +39,7 @@ let sendUserMessageFailure: Error | undefined;
 const registeredCommands: string[] = [];
 const commandHandlers = new Map<string, (args: string, ctx: unknown) => unknown>();
 const notifications: string[] = [];
+const workerShadowWarnings = (): string[] => notifications.filter((message) => message.includes(`Local agent ${localWorkerPath} overrides bundled worker`));
 const widgetRenders: unknown[] = [];
 let browserRequest: unknown;
 let overlayComponent: { handleInput?(data: string): void; render?(width: number): string[]; dispose?(): void } | undefined;
@@ -330,8 +334,12 @@ try {
 	assert.equal(sentMessages.length, 3);
 	assert.match(sentMessages[2]!.content, /sentinel failure/);
 	assert.match(sentMessages[2]!.content, /subagent-2\.log/);
+	assert.equal(workerShadowWarnings().length, 1);
+	assert.match(workerShadowWarnings()[0] ?? "", /missing: model/);
+	assert.match(workerShadowWarnings()[0] ?? "", /Fix: add missing keys from .*agent\/agents\/worker\.md/);
 
 	await registeredTools.get("subagent")!.execute("call-7", { task: "tail task one" }, new AbortController().signal, undefined, context);
+	assert.equal(workerShadowWarnings().length, 1, "same local override must warn only once per session across subagent calls");
 	await registeredTools.get("subagent")!.execute("call-8", { task: "tail task two" }, new AbortController().signal, undefined, context);
 	surfaceTailReads.length = 0;
 	await registeredTools.get("subagents_list")!.execute("call-9", {}, new AbortController().signal, undefined, context);
