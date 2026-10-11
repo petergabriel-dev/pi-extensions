@@ -7,7 +7,12 @@ import {
 	shouldDefer,
 	takePending,
 } from "./defer.js";
-import { askUserQuestionQueueDepth, cancelAskUserQuestionBatch, withAskUserQuestionQueue } from "./queue.js";
+import {
+	askUserQuestionQueueDepth,
+	cancelAskUserQuestionBatch,
+	type AskUserQuestionSource,
+	withAskUserQuestionQueue,
+} from "./queue.js";
 
 const MAX_OPTIONS = 50;
 const OptionSchema = Type.Object({
@@ -87,6 +92,25 @@ type AskAnswer = TextAnswer | OptionAnswer | OtherAnswer;
 type AskUserQuestionStatus = "answered" | "skipped" | "cancelled" | "unavailable";
 type AskUserQuestionMode = "text" | "single-select" | "multi-select";
 type ChoiceInteraction = { kind: "answered"; answers: AskAnswer[] } | { kind: "skipped" };
+type ChildQuestionStatus = "answered" | "dismissed" | "cancelled" | "unavailable";
+type ChildQuestionOutcome =
+	| { status: "answered"; answer: string }
+	| { status: Exclude<ChildQuestionStatus, "answered"> };
+interface ChildQuestionRequest {
+	requestId: string;
+	title: string;
+	options?: string[];
+}
+interface ParsedChildQuestionRequest {
+	requestId: string;
+	request?: ChildQuestionRequest;
+	reason?: string;
+}
+interface PendingChildQuestion {
+	controller: AbortController;
+	settled: boolean;
+	finish: (outcome: ChildQuestionOutcome) => void;
+}
 
 interface AskUserQuestionResultDetails {
 	status: AskUserQuestionStatus;
@@ -95,6 +119,10 @@ interface AskUserQuestionResultDetails {
 	mode: AskUserQuestionMode;
 	answers: AskAnswer[];
 	message?: string;
+}
+
+function cancelModelQuestionBatch(source: AskUserQuestionSource): void {
+	if (source === "model") cancelAskUserQuestionBatch(source);
 }
 
 function normalizeOptions(options: AskOptionInput[] | undefined): AskOption[] {
@@ -217,6 +245,7 @@ async function askText(
 	question: string,
 	context: string | undefined,
 	signal: AbortSignal | undefined,
+	source: AskUserQuestionSource,
 ): Promise<string | null> {
 	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const editor = new Editor(tui, createEditorTheme(theme));
@@ -234,7 +263,7 @@ async function askText(
 
 		editor.onSubmit = (value) => finish(value.trim());
 		onAbort = () => {
-			cancelAskUserQuestionBatch();
+			cancelModelQuestionBatch(source);
 			finish(null);
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -277,7 +306,7 @@ async function askText(
 			},
 			handleInput(data) {
 				if (matchesKey(data, Key.escape)) {
-					cancelAskUserQuestionBatch();
+					cancelModelQuestionBatch(source);
 					finish(null);
 					return;
 				}
@@ -297,11 +326,12 @@ async function askSingleChoice(
 	context: string | undefined,
 	options: AskOption[],
 	signal: AbortSignal | undefined,
+	source: AskUserQuestionSource,
 ): Promise<ChoiceInteraction | null> {
 	const allOptions: DisplayOption[] = [
 		...options.map((option, index) => ({ ...option, id: `option:${index}`, index: index + 1 })),
 		{ id: "other", label: getOtherLabel(options), value: "__other__", isOther: true },
-		{ id: "skip", label: "Skip this question", value: "__skip__", isSkip: true },
+		...(source === "model" ? [{ id: "skip", label: "Skip this question", value: "__skip__", isSkip: true }] : []),
 	];
 
 	return ctx.ui.custom<ChoiceInteraction | null>((tui, theme, _kb, done) => {
@@ -325,7 +355,7 @@ async function askSingleChoice(
 			if (trimmed) finish({ kind: "answered", answers: [{ type: "other", label: trimmed, value: trimmed }] });
 		};
 		onAbort = () => {
-			cancelAskUserQuestionBatch();
+			cancelModelQuestionBatch(source);
 			finish(null);
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -339,7 +369,7 @@ async function askSingleChoice(
 		function handleInput(data: string) {
 			if (editMode) {
 				if (matchesKey(data, Key.escape)) {
-					cancelAskUserQuestionBatch();
+					cancelModelQuestionBatch(source);
 					finish(null);
 					return;
 				}
@@ -375,7 +405,7 @@ async function askSingleChoice(
 				return;
 			}
 			if (matchesKey(data, Key.escape)) {
-				cancelAskUserQuestionBatch();
+				cancelModelQuestionBatch(source);
 				finish(null);
 			}
 		}
@@ -442,6 +472,7 @@ async function askMultiChoice(
 	context: string | undefined,
 	options: AskOption[],
 	signal: AbortSignal | undefined,
+	source: AskUserQuestionSource,
 ): Promise<ChoiceInteraction | null> {
 	const choiceItems: DisplayOption[] = options.map((option, index) => ({
 		...option,
@@ -480,7 +511,7 @@ async function askMultiChoice(
 			refresh();
 		};
 		onAbort = () => {
-			cancelAskUserQuestionBatch();
+			cancelModelQuestionBatch(source);
 			finish(null);
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -508,7 +539,7 @@ async function askMultiChoice(
 		function handleInput(data: string) {
 			if (editMode) {
 				if (matchesKey(data, Key.escape)) {
-					cancelAskUserQuestionBatch();
+					cancelModelQuestionBatch(source);
 					finish(null);
 					return;
 				}
@@ -562,7 +593,7 @@ async function askMultiChoice(
 			}
 
 			if (matchesKey(data, Key.escape)) {
-				cancelAskUserQuestionBatch();
+				cancelModelQuestionBatch(source);
 				finish(null);
 			}
 		}
@@ -644,6 +675,41 @@ async function askMultiChoice(
 }
 
 const CONTEXT_DEFER_ENTRY = "ask-user-question:context-defer";
+const CHILD_QUESTION_REQUEST_EVENT = "ask-user-question:request";
+const CHILD_QUESTION_ACK_EVENT = "ask-user-question:ack";
+const CHILD_QUESTION_RESULT_EVENT = "ask-user-question:result";
+const CHILD_QUESTION_CANCEL_EVENT = "ask-user-question:cancel";
+
+function parseChildQuestionRequest(value: unknown): ParsedChildQuestionRequest {
+	const record =
+		typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+	const rawRequestId = record?.requestId;
+	const requestId =
+		typeof rawRequestId === "string" && rawRequestId.length > 0 && rawRequestId.length <= 200 ? rawRequestId : "";
+	if (!requestId) return { requestId, reason: "requestId must be a non-empty string of at most 200 characters." };
+
+	const title = record?.title;
+	if (typeof title !== "string" || title.trim().length === 0 || title.length > 4_000) {
+		return { requestId, reason: "title must be a non-empty string of at most 4000 characters." };
+	}
+
+	const rawOptions = record?.options;
+	let options: string[] | undefined;
+	if (rawOptions !== undefined) {
+		if (!Array.isArray(rawOptions) || rawOptions.length > MAX_OPTIONS) {
+			return { requestId, reason: "options must contain at most 50 strings." };
+		}
+		options = [];
+		for (const option of rawOptions) {
+			if (typeof option !== "string" || option.trim().length === 0 || option.length > 500) {
+				return { requestId, reason: "each option must be a non-empty string of at most 500 characters." };
+			}
+			options.push(option.trim());
+		}
+	}
+
+	return { requestId, request: { requestId, title: title.trim(), options } };
+}
 
 function formatAnswersForResume(answers: AskAnswer[]): string {
 	return answers.map(formatAnswerForModel).join("\n");
@@ -652,6 +718,121 @@ function formatAnswersForResume(answers: AskAnswer[]): string {
 export default function askUserQuestion(pi: ExtensionAPI): void {
 	let deferredThisRun = false;
 	let deferAbortRequested = false;
+	let sessionContext: ExtensionContext | undefined;
+	const pendingChildQuestions = new Map<string, PendingChildQuestion>();
+
+	const finishChildQuestion = (
+		requestId: string,
+		pending: PendingChildQuestion,
+		outcome: ChildQuestionOutcome,
+	): void => {
+		if (pending.settled) return;
+		pending.settled = true;
+		pendingChildQuestions.delete(requestId);
+		pi.events.emit(CHILD_QUESTION_RESULT_EVENT, {
+			requestId,
+			status: outcome.status,
+			...(outcome.status === "answered" ? { answer: outcome.answer } : {}),
+		});
+	};
+	const cancelPendingChildQuestions = (): void => {
+		for (const [requestId, pending] of [...pendingChildQuestions]) {
+			pending.controller.abort();
+			finishChildQuestion(requestId, pending, { status: "cancelled" });
+		}
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		cancelPendingChildQuestions();
+		sessionContext = ctx;
+	});
+	pi.on("session_shutdown", () => {
+		sessionContext = undefined;
+		cancelPendingChildQuestions();
+	});
+
+	pi.events.on(CHILD_QUESTION_CANCEL_EVENT, (value: unknown) => {
+		let requestId: unknown;
+		try {
+			const record =
+				typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+			requestId = record?.requestId;
+		} catch {
+			return;
+		}
+		if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 200) return;
+		const pending = pendingChildQuestions.get(requestId);
+		if (!pending) return;
+		pending.controller.abort();
+		finishChildQuestion(requestId, pending, { status: "cancelled" });
+	});
+
+	pi.events.on(CHILD_QUESTION_REQUEST_EVENT, (value: unknown) => {
+		let parsed: ParsedChildQuestionRequest;
+		try {
+			parsed = parseChildQuestionRequest(value);
+		} catch {
+			parsed = { requestId: "", reason: "request payload is malformed." };
+		}
+		if (!parsed.request) {
+			pi.events.emit(CHILD_QUESTION_ACK_EVENT, { requestId: parsed.requestId, accepted: false, reason: parsed.reason });
+			return;
+		}
+
+		const { requestId, request } = parsed;
+		if (pendingChildQuestions.has(requestId)) {
+			pi.events.emit(CHILD_QUESTION_ACK_EVENT, { requestId, accepted: false, reason: "requestId is already pending." });
+			return;
+		}
+
+		const controller = new AbortController();
+		const pending: PendingChildQuestion = {
+			controller,
+			settled: false,
+			finish: (outcome) => finishChildQuestion(requestId, pending, outcome),
+		};
+		pendingChildQuestions.set(requestId, pending);
+		pi.events.emit(CHILD_QUESTION_ACK_EVENT, { requestId, accepted: true });
+
+		const ctx = sessionContext;
+		if (!ctx?.hasUI) {
+			pending.finish({ status: "unavailable" });
+			return;
+		}
+
+		void withAskUserQuestionQueue(
+			"child",
+			controller.signal,
+			async (): Promise<ChildQuestionOutcome> => {
+				try {
+					if (request.options && request.options.length > 0) {
+						const interaction = await askSingleChoice(
+							ctx,
+							request.title,
+							undefined,
+							request.options.map((label) => ({ label, value: label })),
+							controller.signal,
+							"child",
+						);
+						if (controller.signal.aborted) return { status: "cancelled" };
+						if (!interaction || interaction.kind !== "answered") return { status: "dismissed" };
+						const answer = interaction.answers[0]?.label;
+						return answer === undefined ? { status: "dismissed" } : { status: "answered", answer };
+					}
+
+					const answer = await askText(ctx, request.title, undefined, controller.signal, "child");
+					if (controller.signal.aborted) return { status: "cancelled" };
+					return answer === null ? { status: "dismissed" } : { status: "answered", answer };
+				} catch {
+					return controller.signal.aborted ? { status: "cancelled" } : { status: "unavailable" };
+				}
+			},
+			(): ChildQuestionOutcome => ({ status: "cancelled" }),
+		).then(
+			(outcome) => pending.finish(outcome),
+			() => pending.finish({ status: controller.signal.aborted ? "cancelled" : "unavailable" }),
+		);
+	});
 
 	pi.registerEntryRenderer(CONTEXT_DEFER_ENTRY, (_entry, _options, theme) => {
 		return new Text(theme.fg("dim", "Context threshold reached; resuming after compaction."), 0, 0);
@@ -704,18 +885,19 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 			if (!ctx.hasUI) return unavailableResult(question, mode, "ask_user_question requires interactive mode UI", context);
 
 			const result = await withAskUserQuestionQueue(
+				"model",
 				signal,
 				async () => {
 					if (mode === "text") {
-						const answer = await askText(ctx, question, context, signal);
+						const answer = await askText(ctx, question, context, signal, "model");
 						if (answer === null) return cancelledResult(question, mode, context);
 						return answeredResult(question, context, mode, [{ type: "text", label: answer, value: answer }]);
 					}
 
 					const interaction =
 						mode === "single-select"
-							? await askSingleChoice(ctx, question, context, options, signal)
-							: await askMultiChoice(ctx, question, context, options, signal);
+							? await askSingleChoice(ctx, question, context, options, signal, "model")
+							: await askMultiChoice(ctx, question, context, options, signal, "model");
 					if (!interaction || interaction.kind === "skipped") {
 						return interaction?.kind === "skipped" ? skippedResult(question, mode, context) : cancelledResult(question, mode, context);
 					}
