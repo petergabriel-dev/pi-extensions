@@ -5,7 +5,7 @@ status: Active
 date: 2026-10-30
 decision: Each Pi session owns a namespaced bridge; Pi brokers pairing and routing for Claude and Cursor peers.
 why: Independent session namespaces allow concurrent Pi sessions while keeping peer state and routing under live Pi ownership.
-affects: agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/mailbox.ts, agent/extensions/claude-bridge/test/test_mailbox.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-peer-hook.js, agent/claude-bridge-client/pi-statusline.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/claude-bridge-client/test-burst.js, .cursor/commands/pi-discuss.md, .cursor/commands/pi-plan.md, package.json, scripts/check-workspace.mjs, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/dev-workflow.md, docs/engineering/decisions/ADR-0001-pi-claude-bridge-boundary.md, docs/engineering/decisions/ADR-0019-multi-harness-bridge-cursor-parity.md, docs/engineering/decisions/ADR-0041-multi-session-bridge-peer-chat.md, docs/engineering/decisions/README.md
+affects: agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/presence.ts, agent/extensions/claude-bridge/mailbox.ts, agent/extensions/claude-bridge/test/test_presence.ts, agent/extensions/claude-bridge/test/test_mailbox.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-peer-hook.js, agent/claude-bridge-client/pi-statusline.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/claude-bridge-client/test-burst.js, .cursor/commands/pi-discuss.md, .cursor/commands/pi-plan.md, package.json, scripts/check-workspace.mjs, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/dev-workflow.md, docs/engineering/decisions/ADR-0001-pi-claude-bridge-boundary.md, docs/engineering/decisions/ADR-0019-multi-harness-bridge-cursor-parity.md, docs/engineering/decisions/ADR-0041-multi-session-bridge-peer-chat.md, docs/engineering/decisions/README.md
 consequences: Peer routing stays Pi-mediated and session-scoped; peer delivery is bounded and at-least-once; inbound content is advisory only.
 readWhen: changing bridge ownership, pairing, peer routing, delivery, wake behavior, or adding a harness peer.
 extends: ADR-0001, ADR-0019
@@ -22,6 +22,7 @@ A project may have multiple live Pi sessions and Claude Code or Cursor peers. Br
 - Use a star topology: each Pi session owns its own namespaced bridge; Pi acts as pairing and routing broker for Claude and Cursor peers.
 - Keep sticky pairing in Pi, keyed by harness identity. Pair and unpair only through live bridge requests. Explicit `sessionId` wins over deprecated `claudeSessionId`, which wins over `CLAUDE_CODE_SESSION_ID`. `SessionEnd` best-effort unpairs.
 - Use bounded ephemeral inbox/outbox queues: at most 10 peers per Pi session, 4,000 characters per message, and 20 pending messages per peer per direction. Outbound IDs remain pending until the paired peer acks; failed ack redelivers the same IDs (at-least-once).
+- Keep a cleanly stopped session's namespace with back-dated, non-live final presence; GC removes the namespace and peers after 10m. Within that GC window, same-session restart may restore peers only from its own validated non-live presence. Peers present in any other live namespace are excluded, so live pairing wins. Pending mailbox messages are still dropped on shutdown/session switch.
 - Notify Pi when inbound mail arrives; inject it as advisory JSON context on the next prompt only. Never auto-wake, send a follow-up turn, or use Channels to wake Pi.
 - Carry sender identity, message ID, timestamp, and text inside JSON in a fixed delimited advisory block. Escape delimiter-sensitive characters; message text cannot forge envelope provenance or grant approval/instructions.
 - Claude `UserPromptSubmit` emits bounded context before ack; Claude statusline reads presence only. Cursor uses `read_messages` pull, not a peer hook.
@@ -56,6 +57,7 @@ Docs:
 Code and clients:
 
 - `agent/extensions/claude-bridge/index.ts`
+- `agent/extensions/claude-bridge/presence.ts`
 - `agent/extensions/claude-bridge/mailbox.ts`
 - `agent/claude-bridge-client/pi-bridge-mcp.js`
 - `agent/claude-bridge-client/pi-peer-hook.js`
@@ -65,6 +67,7 @@ Code and clients:
 
 Tests and workspace checks:
 
+- `agent/extensions/claude-bridge/test/test_presence.ts`
 - `agent/extensions/claude-bridge/test/test_mailbox.ts`
 - `agent/claude-bridge-client/test-burst.js`
 - `agent/claude-bridge-client/test-core-protocol.js`
