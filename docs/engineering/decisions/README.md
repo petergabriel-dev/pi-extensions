@@ -41,3 +41,4 @@
 | ADR-0037 | Active | Design token adherence advisory on source writes | changing design-token parsing, source-write result handling, advisory scope or formatting, design-manifest permissions, or exact-match guidance |
 | ADR-0038 | Active | RPC-mode subagent transport | Changing RPC child launch, readiness, result/list delivery, live steering, child-question relay, `/agents` buffering/overlay, role effort defaults, stderr diagnostics, IPC token authentication, nested spawn/browser routing, event tails, lifecycle cleanup, or idle/max-total timeout behavior |
 | ADR-0039 | Active | Interactive subagent overlay and question relay | Changing child-question routing, owner-scoped item buffering, `/agents`, live steering, or parent `nextTurn` notes |
+| ADR-0040 | Active | Single question UI owner | Changing question UI ownership, child relay events, FIFO or source-scoped cancellation, RPC child dialogs, or the /agents gate |
