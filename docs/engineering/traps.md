@@ -77,7 +77,11 @@
 - **Bridge-down behavior is intentional.** Recall/capture/save must fail loud; no direct memory or plan-file fallback.
 - **Large bridge recalls exceed some harness result limits.** Inspect the saved response JSON with `jq`, selecting `.result.prompts` or `.result.memory`, instead of loading a full response into the chat/tool result.
 - **Live bridge tests must load current source.** Use `--no-extensions -e <repo-root>` (or explicit repository extension paths), not a stale installed package. Automated PTY runners must continuously drain Pi terminal output or the child can block and cause false request timeouts.
-- **Claude MCP config source matters.** `claude mcp add -s user` writes active user registration; editing an assumed sidecar config may not affect `claude mcp list`.
+- **Claude MCP registration source matters.** Installed MCP client copies can be stale; `claude mcp get/list` shows active CLI registration, and `claude mcp add -s user` updates it. Point registration at the repo client; do not edit an assumed sidecar config.
+- **Claude `/clear` can drift session identity.** Claude Code 2.1.296 print-mode `/clear` without session persistence changed session ID; this was not an interactive TUI test. Pass explicit `sessionId`: live client check confirmed it takes precedence over stale `CLAUDE_CODE_SESSION_ID`.
+- **Cursor peer delivery is pull-only.** Cursor identity was exercised through the live bridge client with `harness: "cursor"`, not an interactive Cursor model session. Retrieve/ack replies with `read_messages`; do not assume a prompt hook injects peer messages.
+- **Claude statusLine has one command slot.** Compose Pi indicator into that command; do not configure a competing statusline. `refreshInterval: 5` parsed and `claude doctor` passed, and script emitted `Pi ✉1`; interactive idle redraw timing/appearance was not verified.
+- **VS Code `additionalContext` peer-message delivery is unverified.** Do not treat it as proven hook/injection behavior.
 - **Claude Bash rewriting depends on PreToolUse `updatedInput`.** If host stops honoring rewritten input, deny Bash rather than fall back to unsandboxed regex approval.
 - **Sandbox bypass flags require explicit denial.** `dangerouslyDisableSandbox` must be rejected before wrapping.
 - **Cursor hook verdicts use `permission`, not `decision`.** Command hooks must return `permission` plus supported `user_message`/`agent_message` fields; a `decision` key silently fails to enforce the verdict.

@@ -286,27 +286,54 @@ Both commands should print nothing. Do not signal the current Pi, delete its bri
 
 ## Claude Code bridge workflow
 
-1. Launch workspace Pi in target project and confirm `Claude bridge: active`.
-2. Confirm status root is intended nearest `.pi` project.
-3. Register MCP client if user-level Claude config does not already contain it:
+1. Launch workspace Pi in the target project; confirm `Claude bridge: active` and intended nearest `.pi` root.
+2. Register the repo MCP client in Claude's active user registration. Inspect before changing it; remove stale registration before re-adding:
 
    ```bash
+   claude mcp get pi-claude-bridge
+   claude mcp list
+   claude mcp remove -s user pi-claude-bridge # only when replacing stale registration
    claude mcp add -s user pi-claude-bridge -- node "$PWD/agent/claude-bridge-client/pi-bridge-mcp.js"
+   claude mcp get pi-claude-bridge
    claude mcp list
    ```
 
-4. Configure Claude PreToolUse hook to invoke `node agent/claude-bridge-client/pi-readonly-hook.js` for project use.
-5. Use Claude `/discuss` or `/plan`; state-changing bridge tools require active Pi.
-6. Implement only in Pi Build mode.
+   Confirm active registration points to the repo client, not an installed copy. `claude mcp add -s user` updates active user registration; do not edit an assumed sidecar config.
 
-Acceptance:
+3. Merge hooks into existing Claude settings without replacing other settings or hooks. Append these command-hook entries to the existing `UserPromptSubmit` and `SessionEnd` arrays, preserving all existing entries/matchers; set the single `statusLine` command as shown. Replace `<repo-root>` with repo path in your settings:
 
-- `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan.
-- `capture_note` updates live Pi Notes UI through `discussion-notes` owner.
-- `validate_docs_tags` uses engineering-docs validator.
-- Confirmed `save_plan` appears in Pi `/plan view` with its session-scoped body path and seeded task count.
-- `read_plan_tasks` returns live task metadata/progress; `tick_plan_task` updates the same branch-backed tracker and replays idempotently.
-- Claude mutation tools deny. Bash is sandbox-wrapped on supported macOS; without sandbox it denies closed.
+   ```json
+   {
+     "hooks": {
+       "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"<repo-root>/agent/claude-bridge-client/pi-peer-hook.js\"" }] }],
+       "SessionEnd": [{ "hooks": [{ "type": "command", "command": "node \"<repo-root>/agent/claude-bridge-client/pi-peer-hook.js\"" }] }]
+     },
+     "statusLine": {
+       "type": "command",
+       "command": "node \"<repo-root>/agent/claude-bridge-client/pi-statusline.js\"",
+       "refreshInterval": 5
+     }
+   }
+   ```
+
+   Keep unrelated settings and hooks. Validate active settings JSON and run `claude doctor`.
+
+4. Use `/discuss` or `/plan`; state-changing bridge tools require active Pi. Implement only in Pi Build mode.
+
+### Claude bridge live acceptance
+
+Run against a disposable project with isolated Pi agent roots. Register the repo MCP client and hooks above, then verify:
+
+1. `claude mcp get pi-claude-bridge` and `claude mcp list` show the repo client connected; settings JSON parses, `claude doctor` passes.
+2. Two Pi RPC sessions in one project report active under separate namespaces; orderly shutdown removes both. Session IDs were captured separately.
+3. Through actual Claude CLI MCP calls, run `list_sessions`, `pair_session`, then `send_message`. Confirm message becomes pending and Pi receives it on its next prompt. Send Pi→Claude with `bridge_message`; statusline script outputs exact `Pi ✉1`; next actual Claude CLI prompt receives injected peer message; acknowledge it and confirm pending count clears. `SessionEnd` unpairs.
+4. Live bridge-client check with `harness: "cursor"` sends Cursor identity to a second Pi; Pi replies with `bridge_message`; `read_messages` retrieves and acknowledges reply. This exercises client protocol, not an interactive Cursor model session.
+5. Claude Code 2.1.296 print-mode `/clear` without session persistence changes session ID. This verifies CLI behavior, not interactive TUI behavior; explicit supplied `sessionId` takes precedence over stale `CLAUDE_CODE_SESSION_ID` in a separate live client check.
+6. Orderly Pi shutdown removes namespaces; cleanup passed. Shutdown emitted `claude-bridge dropped 1 pending peer message(s) on shutdown` for one pending message.
+
+The idle statusline script output and `refreshInterval: 5` settings were verified; interactive idle redraw timing/appearance was not separately verified.
+
+Existing bridge acceptance remains: `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan; `capture_note` updates live Pi Notes UI through `discussion-notes`; `validate_docs_tags` uses engineering-docs validator; `save_plan` appears in Pi `/plan view`; `read_plan_tasks` and `tick_plan_task` use the live branch-backed tracker; Claude mutation tools deny and Bash is sandbox-wrapped where supported, otherwise denied closed.
 
 ## Cursor bridge workflow
 
