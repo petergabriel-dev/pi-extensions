@@ -320,6 +320,26 @@ async function askText(
 	});
 }
 
+async function askChildQuestionOutsideTui(
+	ctx: ExtensionContext,
+	request: ChildQuestionRequest,
+	signal: AbortSignal,
+): Promise<ChildQuestionOutcome> {
+	const askTextInput = async (): Promise<ChildQuestionOutcome> => {
+		const answer = await ctx.ui.input(request.title, undefined, { signal });
+		if (signal.aborted) return { status: "cancelled" };
+		return answer === undefined ? { status: "dismissed" } : { status: "answered", answer: answer.trim() };
+	};
+
+	if (!request.options?.length) return askTextInput();
+	let otherLabel = "Other…";
+	while (request.options.includes(otherLabel)) otherLabel += " (custom)";
+	const selected = await ctx.ui.select(request.title, [...request.options, otherLabel], { signal });
+	if (signal.aborted) return { status: "cancelled" };
+	if (selected === undefined) return { status: "dismissed" };
+	return selected === otherLabel ? askTextInput() : { status: "answered", answer: selected };
+}
+
 async function askSingleChoice(
 	ctx: ExtensionContext,
 	question: string,
@@ -805,6 +825,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 			controller.signal,
 			async (): Promise<ChildQuestionOutcome> => {
 				try {
+					if (ctx.mode !== "tui") return await askChildQuestionOutsideTui(ctx, request, controller.signal);
 					if (request.options && request.options.length > 0) {
 						const interaction = await askSingleChoice(
 							ctx,

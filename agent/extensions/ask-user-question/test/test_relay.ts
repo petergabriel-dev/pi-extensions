@@ -13,16 +13,30 @@ interface UIInstance {
 	component: UIComponent;
 	resolve: (value: unknown) => void;
 }
+interface UISelectCall {
+	title: string;
+	options: string[];
+	signal?: AbortSignal;
+	resolve: (value: string | undefined) => void;
+}
+interface UIInputCall {
+	title: string;
+	placeholder?: string;
+	signal?: AbortSignal;
+	resolve: (value: string | undefined) => void;
+}
 
 async function flush(): Promise<void> {
 	await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-function createHarness(hasUI = true) {
+function createHarness(hasUI = true, mode: "tui" | "rpc" = "tui") {
 	const eventHandlers = new Map<string, Set<EventHandler>>();
 	const lifecycleHandlers = new Map<string, (event: unknown, ctx: unknown) => void>();
 	const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
 	const uiInstances: UIInstance[] = [];
+	const selectCalls: UISelectCall[] = [];
+	const inputCalls: UIInputCall[] = [];
 	const acknowledgements: Array<Record<string, unknown>> = [];
 	const results: Array<Record<string, unknown>> = [];
 	const events = {
@@ -58,11 +72,17 @@ function createHarness(hasUI = true) {
 				uiInstances.push({ component, resolve: (value) => resolve(value as T) });
 			});
 		},
+		select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined> {
+			return new Promise((resolve) => selectCalls.push({ title, options, signal: opts?.signal, resolve }));
+		},
+		input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined> {
+			return new Promise((resolve) => inputCalls.push({ title, placeholder, signal: opts?.signal, resolve }));
+		},
 	};
 	const ctx = {
 		hasUI,
 		ui,
-		mode: "tui",
+		mode,
 		getContextUsage: () => ({ tokens: 0, contextWindow: 100_000 }),
 		abort() {},
 	} as unknown as ExtensionContext;
@@ -72,7 +92,7 @@ function createHarness(hasUI = true) {
 	events.on(ACK, (value) => acknowledgements.push(value as Record<string, unknown>));
 	events.on(RESULT, (value) => results.push(value as Record<string, unknown>));
 
-	return { events, uiInstances, acknowledgements, results, tools, lifecycleHandlers, ctx };
+	return { events, uiInstances, selectCalls, inputCalls, acknowledgements, results, tools, lifecycleHandlers, ctx };
 }
 
 function last<T>(items: T[]): T {
@@ -193,6 +213,64 @@ async function main(): Promise<void> {
 		harness.events.emit(REQUEST, { requestId: "no-ui", title: "Child question" });
 		assert.deepEqual(harness.acknowledgements, [{ requestId: "no-ui", accepted: true }]);
 		assert.deepEqual(harness.results, [{ requestId: "no-ui", status: "unavailable" }]);
+		assert.equal(harness.uiInstances.length, 0);
+	}
+
+	{
+		const harness = createHarness(true, "rpc");
+		harness.events.emit(REQUEST, { requestId: "rpc-other", title: "Choose a color", options: ["Green", "Blue"] });
+		await flush();
+		assert.equal(harness.uiInstances.length, 0, "RPC child UI must not use ctx.ui.custom");
+		assert.equal(harness.selectCalls.length, 1);
+		assert.deepEqual(harness.selectCalls[0] && { title: harness.selectCalls[0].title, options: harness.selectCalls[0].options }, {
+			title: "Choose a color",
+			options: ["Green", "Blue", "Other…"],
+		});
+		assert.ok(harness.selectCalls[0]?.signal);
+		harness.selectCalls[0]!.resolve("Other…");
+		await flush();
+		assert.equal(harness.inputCalls.length, 1, "Other… must open built-in text input");
+		assert.equal(harness.inputCalls[0]?.title, "Choose a color");
+		assert.equal(harness.inputCalls[0]?.signal, harness.selectCalls[0]?.signal);
+
+		harness.events.emit(REQUEST, { requestId: "rpc-text", title: "Add detail" });
+		await flush();
+		assert.equal(harness.inputCalls.length, 1, "second RPC question stays queued while Other input is open");
+		harness.inputCalls[0]!.resolve("  custom answer  ");
+		await flush();
+		assert.equal(harness.inputCalls.length, 2);
+		assert.equal(harness.inputCalls[1]?.title, "Add detail");
+		harness.inputCalls[1]!.resolve(" free answer ");
+		await flush();
+		assert.deepEqual(harness.results, [
+			{ requestId: "rpc-other", status: "answered", answer: "custom answer" },
+			{ requestId: "rpc-text", status: "answered", answer: "free answer" },
+		]);
+		assert.equal(harness.uiInstances.length, 0);
+	}
+
+	{
+		const harness = createHarness(true, "rpc");
+		harness.events.emit(REQUEST, { requestId: "rpc-choice", title: "Pick one", options: ["Green", "Blue"] });
+		await flush();
+		harness.selectCalls[0]!.resolve("Blue");
+		await flush();
+		assert.deepEqual(harness.results, [{ requestId: "rpc-choice", status: "answered", answer: "Blue" }]);
+		assert.equal(harness.inputCalls.length, 0);
+		assert.equal(harness.uiInstances.length, 0);
+	}
+
+	{
+		const harness = createHarness(true, "rpc");
+		harness.events.emit(REQUEST, { requestId: "rpc-cancel", title: "Pick one", options: ["Green", "Blue"] });
+		await flush();
+		const signal = harness.selectCalls[0]?.signal;
+		assert.ok(signal);
+		harness.events.emit(CANCEL, { requestId: "rpc-cancel" });
+		assert.equal(signal.aborted, true, "cancel must abort built-in RPC dialog");
+		harness.selectCalls[0]!.resolve(undefined);
+		await flush();
+		assert.deepEqual(harness.results, [{ requestId: "rpc-cancel", status: "cancelled" }]);
 		assert.equal(harness.uiInstances.length, 0);
 	}
 
