@@ -38,10 +38,10 @@ async function waitFor(file, timeoutMs = TIMEOUT_MS) {
 	}
 	return false;
 }
-async function sendRequest(projectRoot, type, payload, id = crypto.randomUUID()) {
+async function sendRequest(projectRoot, type, payload, id = crypto.randomUUID(), peer) {
 	const p = paths(projectRoot);
 	const res = path.join(p.responses, `${id}.json`);
-	writeJson(path.join(p.requests, `${id}.json`), { id, type, payload, ts: Date.now() });
+	writeJson(path.join(p.requests, `${id}.json`), { id, type, payload, ts: Date.now(), ...(peer ? { peer } : {}) });
 	if (!(await waitFor(res))) throw new Error(`No response for ${type} within ${TIMEOUT_MS}ms`);
 	return { id, response: readJson(res), responsePath: res };
 }
@@ -140,6 +140,45 @@ test("capture accepts sessionId primary and lets it win over legacy alias", asyn
 	assert(first.response.ok, `sessionId capture failed: ${JSON.stringify(first.response)}`);
 	assert(first.response.result.sessionId === `session-${id}`, "sessionId did not win over claudeSessionId");
 	assert(first.response.result.claudeSessionId === `session-${id}`, "claudeSessionId alias did not mirror sessionId");
+});
+
+test("paired send_message queues inbound message for before_agent_start", async ({ projectRoot }) => {
+	const { p } = freshTarget(projectRoot);
+	const peer = { harness: "claude", id: `core-${crypto.randomUUID()}` };
+	const pair = await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), peer);
+	assert(pair.response.ok, `pair failed: ${JSON.stringify(pair.response)}`);
+	try {
+		const id = crypto.randomUUID();
+		const sent = await sendRequest(projectRoot, "send_message", { text: "Untrusted core-protocol advisory" }, id, peer);
+		assert(sent.response.ok, `send_message failed: ${JSON.stringify(sent.response)}`);
+		assert(sent.response.result.messageId === id, "inbound message id must preserve bridge request id");
+		const presence = readJson(p.presence);
+		const paired = presence.peers.find((candidate) => candidate.harness === peer.harness && candidate.id === peer.id);
+		assert(paired?.pendingCount === 0 && paired?.inboundPendingCount === 1, "directional pending counts not reflected in presence");
+	} finally {
+		await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), peer);
+	}
+});
+
+test("paired read_messages and ack_messages are non-destructive and UUID-idempotent", async ({ projectRoot }) => {
+	freshTarget(projectRoot);
+	const peer = { harness: "claude", id: `core-${crypto.randomUUID()}` };
+	const pair = await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), peer);
+	assert(pair.response.ok, `pair failed: ${JSON.stringify(pair.response)}`);
+	try {
+		const readId = crypto.randomUUID();
+		const firstRead = await sendRequest(projectRoot, "read_messages", {}, readId, peer);
+		assert(firstRead.response.ok && firstRead.response.result.messages.length === 0, "empty paired read failed");
+		const repeatedRead = await sendRequest(projectRoot, "read_messages", {}, readId, peer);
+		assert(JSON.stringify(repeatedRead.response) === JSON.stringify(firstRead.response), "read_messages request replay changed response");
+		const ackId = crypto.randomUUID();
+		const firstAck = await sendRequest(projectRoot, "ack_messages", { ids: [] }, ackId, peer);
+		assert(firstAck.response.ok && firstAck.response.result.acknowledged === 0, "empty ack failed");
+		const repeatedAck = await sendRequest(projectRoot, "ack_messages", { ids: ["different-id"] }, ackId, peer);
+		assert(JSON.stringify(repeatedAck.response) === JSON.stringify(firstAck.response), "ack_messages request replay changed response");
+	} finally {
+		await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), peer);
+	}
 });
 
 test("save_plan is visible through recall duplicate response stable", async ({ projectRoot }) => {

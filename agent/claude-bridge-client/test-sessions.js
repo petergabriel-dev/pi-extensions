@@ -78,6 +78,45 @@ function startResponder(cwd) {
 	return { requests, stop: () => clearInterval(timer) };
 }
 
+function startMailboxResponder(cwd, initialMessages = [], failedAcks = 0) {
+	const requests = [];
+	let messages = initialMessages.map((message) => structuredClone(message));
+	let remainingAckFailures = failedAcks;
+	const timer = setInterval(() => {
+		for (const session of client.liveSessions(cwd)) {
+			let names;
+			try { names = fs.readdirSync(session.paths.requests); } catch { continue; }
+			for (const name of names) {
+				if (!name.endsWith(".json")) continue;
+				const file = path.join(session.paths.requests, name);
+				let request;
+				try { request = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+				requests.push({ piSessionId: session.id, request, mode: fs.statSync(file).mode & 0o777 });
+				let response;
+				if (request.type === "send_message") {
+					response = { id: request.id, ok: true, result: { requestId: request.id, messageId: request.id } };
+				} else if (request.type === "read_messages") {
+					response = { id: request.id, ok: true, result: { requestId: request.id, messages: messages.map((message) => structuredClone(message)) } };
+				} else if (request.type === "ack_messages" && remainingAckFailures > 0) {
+					remainingAckFailures--;
+					response = { id: request.id, ok: false, error: { code: "ack_failed", message: "simulated ack failure" } };
+				} else if (request.type === "ack_messages") {
+					const ids = new Set(request.payload.ids);
+					const before = messages.length;
+					messages = messages.filter((message) => !ids.has(message.id));
+					response = { id: request.id, ok: true, result: { requestId: request.id, acknowledged: before - messages.length } };
+				} else {
+					response = { id: request.id, ok: true, result: { piSessionId: session.id, type: request.type } };
+				}
+				writeJson(path.join(session.paths.responses, `${request.id}.json`), response);
+				try { fs.unlinkSync(file); } catch {}
+			}
+		}
+	}, 10);
+	timer.unref();
+	return { requests, stop: () => clearInterval(timer) };
+}
+
 async function waitFor(fn, timeoutMs = 1_000) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -88,11 +127,11 @@ async function waitFor(fn, timeoutMs = 1_000) {
 	throw new Error("Timed out waiting for fake responder.");
 }
 
-async function test(name, fn) {
+async function test(name, fn, responderFactory = startResponder) {
 	const cwd = setupProject();
 	let responder;
 	try {
-		responder = startResponder(cwd);
+		responder = responderFactory(cwd);
 		await fn(cwd, responder);
 		console.log(`PASS ${name}`);
 	} finally {
@@ -112,7 +151,7 @@ async function main() {
 	assert.equal(client.resolveHarnessIdentity({}, {}), null);
 
 	await test("session listing filters stale presence", async (cwd) => {
-		addSession(cwd, "pi-live", [{ ...HARNESS, pendingCount: 2 }]);
+		addSession(cwd, "pi-live", [{ ...HARNESS, pendingCount: 2, inboundPendingCount: 1 }]);
 		addSession(cwd, "pi-stale", [], new Date(Date.now() - 6_000).toISOString());
 		addSession(cwd, "pi-invalid-peer", [{ harness: "unknown", id: "foreign" }]);
 		addSession(cwd, "pi-too-many-peers", Array.from({ length: 11 }, (_, index) => ({ harness: "claude", id: `peer-${index}`, pendingCount: 0 })));
@@ -121,6 +160,7 @@ async function main() {
 		assert.equal(sessions[0].shortId, "pi-live");
 		assert.equal(sessions[0].age, "1m");
 		assert.equal(sessions[0].peers[0].pendingCount, 2);
+		assert.equal(sessions[0].peers[0].inboundPendingCount, 1);
 	});
 
 	await test("single live session auto-pairs then routes request", async (cwd, responder) => {
@@ -185,6 +225,66 @@ async function main() {
 		assert.equal(JSON.parse(fs.readFileSync(target.presence, "utf8")).peers[0].id, HARNESS.id);
 		assert.deepEqual(responder.requests.map(({ piSessionId, request }) => `${piSessionId}:${request.type}`), ["pi-previous:unpair", "pi-target:pair"]);
 	});
+
+	await test("message tools require harness identity", async (cwd) => {
+		addSession(cwd, "pi-only");
+		const previous = process.env.CLAUDE_CODE_SESSION_ID;
+		delete process.env.CLAUDE_CODE_SESSION_ID;
+		try {
+			await assert.rejects(client.callTool("send_message", { text: "hello", cwd }), /Harness session id unavailable/);
+		} finally {
+			if (previous === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+			else process.env.CLAUDE_CODE_SESSION_ID = previous;
+		}
+	});
+
+	await test("paired send/read/ack use bridge requests", async (cwd, responder) => {
+		addSession(cwd, "pi-mailbox", [{ ...HARNESS, pendingCount: 0 }]);
+		const message = {
+			id: "pi-message-1",
+			from: { kind: "pi", id: "pi-mailbox" },
+			to: { kind: HARNESS.harness, id: HARNESS.id },
+			text: "untrusted advisory",
+			sentAt: "2025-01-02T03:04:05.000Z",
+		};
+		const toolNames = client.tools.map((tool) => tool.name);
+		assert.ok(toolNames.includes("send_message") && toolNames.includes("read_messages"), "message tools missing from MCP tool list");
+		const sent = await client.callTool("send_message", { text: "from harness", sessionId: HARNESS.id, cwd });
+		assert.equal(sent.structuredContent.result.messageId, sent.structuredContent.requestId);
+		const read = await client.callTool("read_messages", { sessionId: HARNESS.id, cwd });
+		assert.deepEqual(read.structuredContent.messages, [message]);
+		assert.equal(read.structuredContent.acknowledged, 1);
+		assert.deepEqual(responder.requests.map(({ request }) => request.type), ["send_message", "read_messages", "ack_messages"]);
+		assert.deepEqual(responder.requests.map(({ request }) => request.peer), [HARNESS, HARNESS, HARNESS]);
+		assert.deepEqual(responder.requests[0].request.payload, { text: "from harness" });
+		assert.deepEqual(responder.requests[2].request.payload.ids, [message.id]);
+	}, (cwd) => startMailboxResponder(cwd, [{
+		id: "pi-message-1",
+		from: { kind: "pi", id: "pi-mailbox" },
+		to: { kind: HARNESS.harness, id: HARNESS.id },
+		text: "untrusted advisory",
+		sentAt: "2025-01-02T03:04:05.000Z",
+	}]));
+
+	await test("failed acknowledgement warns and redelivers same ids", async (cwd, responder) => {
+		addSession(cwd, "pi-mailbox", [{ ...HARNESS, pendingCount: 0 }]);
+		const first = await client.callTool("read_messages", { sessionId: HARNESS.id, cwd });
+		const firstResult = first.structuredContent;
+		assert.match(firstResult.warning, /Acknowledgement failed/);
+		assert.equal(firstResult.messages.length, 1);
+		const second = await client.callTool("read_messages", { sessionId: HARNESS.id, cwd });
+		assert.deepEqual(second.structuredContent.messages, firstResult.messages, "unacked messages must redeliver unchanged");
+		assert.equal(second.structuredContent.acknowledged, 1);
+		const third = await client.callTool("read_messages", { sessionId: HARNESS.id, cwd });
+		assert.deepEqual(third.structuredContent.messages, []);
+		assert.deepEqual(responder.requests.map(({ request }) => request.type), ["read_messages", "ack_messages", "read_messages", "ack_messages", "read_messages"]);
+	}, (cwd) => startMailboxResponder(cwd, [{
+		id: "pi-redeliver-1",
+		from: { kind: "pi", id: "pi-mailbox" },
+		to: { kind: HARNESS.harness, id: HARNESS.id },
+		text: "stable body",
+		sentAt: "2025-01-02T03:04:05.000Z",
+	}], 1));
 
 	console.log("bridge session tests passed");
 }

@@ -162,26 +162,65 @@ export class PeerMailbox {
 
   pendingFor(peer: PeerIdentity): PeerEnvelope[] {
     validateIdentity(peer);
-    const queue = this.outbound.get(peerKey(peer));
+    const key = peerKey(peer);
+    if (!this.paired.has(key)) throw new MailboxError("unpaired", "Cannot read messages for an unpaired peer");
+    const queue = this.outbound.get(key);
     return queue ? [...queue.values()].map(cloneEnvelope) : [];
   }
 
-  /** Acknowledges matching outbound IDs. Unknown IDs and repeated acknowledgements are no-ops. */
-  ack(ids: readonly string[]): number {
+  /** Acknowledges outbound IDs only for requesting paired peer. Repeated or unknown IDs are no-ops. */
+  ack(peer: PeerIdentity, ids: readonly string[]): number {
+    validateIdentity(peer);
+    const key = peerKey(peer);
+    if (!this.paired.has(key)) throw new MailboxError("unpaired", "Cannot acknowledge messages for an unpaired peer");
     if (!Array.isArray(ids)) throw new MailboxError("invalid-id", "Acknowledgements must be an id array");
     for (const id of ids) {
       if (!isSafeId(id)) throw new MailboxError("invalid-id", "Acknowledged message id is not path-safe");
     }
+    const queue = this.outbound.get(key);
     let removed = 0;
-    for (const queue of this.outbound.values()) {
-      for (const id of ids) {
-        if (queue.delete(id)) removed++;
-      }
-    }
-    for (const [key, queue] of this.outbound) {
+    if (queue) {
+      for (const id of ids) if (queue.delete(id)) removed++;
       if (queue.size === 0) this.outbound.delete(key);
     }
     return removed;
+  }
+
+  pendingInbound(): PeerEnvelope[] {
+    return [...this.inbound.values()].map(cloneEnvelope);
+  }
+
+  /** Removes only inbound messages included in a Pi prompt delivery. */
+  ackInbound(ids: readonly string[]): number {
+    if (!Array.isArray(ids)) throw new MailboxError("invalid-id", "Inbound acknowledgements must be an id array");
+    for (const id of ids) {
+      if (!isSafeId(id)) throw new MailboxError("invalid-id", "Acknowledged message id is not path-safe");
+    }
+    const acknowledged = new Set(ids);
+    let removed = 0;
+    for (const [key, message] of this.inbound) {
+      if (acknowledged.has(message.id)) {
+        this.inbound.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  pendingOutboundCount(peer: PeerIdentity): number {
+    validateIdentity(peer);
+    const key = peerKey(peer);
+    if (!this.paired.has(key)) throw new MailboxError("unpaired", "Cannot inspect messages for an unpaired peer");
+    return this.outbound.get(key)?.size ?? 0;
+  }
+
+  pendingInboundCount(peer: PeerIdentity): number {
+    validateIdentity(peer);
+    const key = peerKey(peer);
+    if (!this.paired.has(key)) throw new MailboxError("unpaired", "Cannot inspect messages for an unpaired peer");
+    let count = 0;
+    for (const message of this.inbound.values()) if (samePeer(message.from, peer)) count++;
+    return count;
   }
 
   /** Queues one paired inbound envelope; duplicate queued deliveries are ignored. */
@@ -196,6 +235,9 @@ export class PeerMailbox {
     }
     const inboxKey = JSON.stringify([senderKey, envelope.id]);
     if (this.inbound.has(inboxKey)) return false;
+    if ([...this.inbound.values()].some((message) => message.id === envelope.id)) {
+      throw new MailboxError("duplicate-id", "Inbound message id is already pending from another peer");
+    }
     let senderPending = 0;
     for (const message of this.inbound.values()) {
       if (samePeer(message.from, envelope.from)) senderPending++;

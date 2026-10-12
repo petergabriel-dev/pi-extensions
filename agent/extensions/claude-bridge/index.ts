@@ -1,14 +1,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { FSWatcher } from "node:fs";
+import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
-import { isHarnessKind, MAX_PEERS, type HarnessKind } from "./mailbox.js";
+import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 
 const EXTENSION_ID = "claude-bridge";
-const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair"]);
+const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
+const PEER_BLOCK_BUDGET_CHARS = 16_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
@@ -33,6 +35,7 @@ interface HarnessPeer {
 
 interface PresencePeer extends HarnessPeer {
 	pendingCount: number;
+	inboundPendingCount: number;
 }
 
 interface BridgePresence {
@@ -125,6 +128,14 @@ interface SaveMemoryPayload {
 	body: string;
 }
 
+interface SendMessagePayload {
+	text: string;
+}
+
+interface AckMessagesPayload {
+	ids: string[];
+}
+
 interface PendingEventResult {
 	resolve: (result: Record<string, unknown>) => void;
 	reject: (error: Error) => void;
@@ -138,6 +149,7 @@ let activePiSessionId: string | null = null;
 let activeSessionName = "";
 let cachedMode: string | null = null;
 let pairedPeers = new Map<string, HarnessPeer>();
+let mailbox: PeerMailbox | null = null;
 let watcher: FSWatcher | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
@@ -285,10 +297,14 @@ function parsePresence(value: unknown, expectedSessionId?: string): BridgePresen
 	for (const rawPeer of record.peers) {
 		const peer = normalizePeer(rawPeer);
 		if (!peer) return null;
-		const rawPendingCount = (rawPeer as Record<string, unknown>).pendingCount;
+		const rawPresencePeer = rawPeer as Record<string, unknown>;
+		const rawPendingCount = rawPresencePeer.pendingCount;
 		const pendingCount = typeof rawPendingCount === "number" && Number.isFinite(rawPendingCount)
 			? Math.max(0, Math.floor(rawPendingCount)) : 0;
-		peers.push({ ...peer, pendingCount });
+		const rawInboundPendingCount = rawPresencePeer.inboundPendingCount;
+		const inboundPendingCount = typeof rawInboundPendingCount === "number" && Number.isFinite(rawInboundPendingCount)
+			? Math.max(0, Math.floor(rawInboundPendingCount)) : 0;
+		peers.push({ ...peer, pendingCount, inboundPendingCount });
 	}
 	return {
 		schemaVersion: 2,
@@ -379,28 +395,16 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 	return { active: true };
 }
 
-function pendingPeerCounts(paths: BridgePaths): Map<string, number> {
-	const counts = new Map<string, number>();
-	let files: string[];
-	try { files = fs.readdirSync(paths.requests); } catch { return counts; }
-	for (const file of files) {
-		if (!file.endsWith(".json")) continue;
-		const filePath = path.join(paths.requests, file);
-		try {
-			const stat = fs.lstatSync(filePath);
-			if (!stat.isFile() || stat.isSymbolicLink()) continue;
-		} catch { continue; }
-		const request = readJson(filePath);
-		const peer = request && typeof request === "object" ? normalizePeer((request as Record<string, unknown>).peer) : null;
-		if (peer) counts.set(peerKey(peer), (counts.get(peerKey(peer)) ?? 0) + 1);
-	}
-	return counts;
-}
-
 function writePresence(paths: BridgePaths): void {
 	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
-	const counts = pendingPeerCounts(paths);
-	const peers = Array.from(pairedPeers.values()).map((peer) => ({ ...peer, pendingCount: counts.get(peerKey(peer)) ?? 0 }));
+	const peers = Array.from(pairedPeers.values()).map((peer) => {
+		const identity: PeerIdentity = { kind: peer.harness, id: peer.id };
+		return {
+			...peer,
+			pendingCount: mailbox?.pendingOutboundCount(identity) ?? 0,
+			inboundPendingCount: mailbox?.pendingInboundCount(identity) ?? 0,
+		};
+	});
 	writeJsonFast(paths.presence, {
 		schemaVersion: 2,
 		piSessionId: activePiSessionId,
@@ -481,7 +485,7 @@ function validateRequest(fileId: string, raw: unknown): BridgeRequest {
 	if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) throw new Error("Request payload must be an object.");
 	const peer = record.peer === undefined ? undefined : normalizePeer(record.peer);
 	if (record.peer !== undefined && !peer) throw new Error("Request peer must contain valid harness and id.");
-	if ((record.type === "pair" || record.type === "unpair") && !peer) throw new Error(`${record.type} request requires peer identity.`);
+	if (["pair", "unpair", "send_message", "read_messages", "ack_messages"].includes(record.type as string) && !peer) throw new Error(`${record.type} request requires peer identity.`);
 	return {
 		id: record.id,
 		type: record.type,
@@ -624,6 +628,25 @@ function normalizeSaveMemoryPayload(payload: Record<string, unknown>): SaveMemor
 		...(typeof payload.type === "string" && payload.type.trim() ? { type: payload.type.trim() } : {}),
 		body: payload.body,
 	};
+}
+
+function normalizeSendMessagePayload(payload: Record<string, unknown>): SendMessagePayload {
+	if (Object.keys(payload).some((key) => key !== "text")) throw new Error("send_message accepts only text.");
+	if (typeof payload.text !== "string" || payload.text.length < 1 || payload.text.length > MAX_MESSAGE_CHARS) {
+		throw new Error(`send_message text must contain 1-${MAX_MESSAGE_CHARS} characters.`);
+	}
+	return { text: payload.text };
+}
+
+function normalizeReadMessagesPayload(payload: Record<string, unknown>): void {
+	if (Object.keys(payload).length > 0) throw new Error("read_messages accepts an empty payload.");
+}
+
+function normalizeAckMessagesPayload(payload: Record<string, unknown>): AckMessagesPayload {
+	if (Object.keys(payload).some((key) => key !== "ids")) throw new Error("ack_messages accepts only ids.");
+	if (!Array.isArray(payload.ids) || payload.ids.length > MAX_PENDING_PER_PEER) throw new Error(`ack_messages requires an ids array of at most ${MAX_PENDING_PER_PEER} entries.`);
+	if (payload.ids.some((id) => !isSafeId(id))) throw new Error("ack_messages ids must be path-safe message ids.");
+	return { ids: payload.ids as string[] };
 }
 
 function handleValidateTags(request: BridgeRequest): BridgeResponse {
@@ -870,6 +893,77 @@ async function handleSaveMemory(request: BridgeRequest): Promise<BridgeResponse>
 	}
 }
 
+function requireActiveMailbox(): { paths: BridgePaths; mailbox: PeerMailbox; local: PeerIdentity } {
+	if (!activePaths || !activePiSessionId || !mailbox || !namespaceDirsArePrivate(activePaths)) {
+		throw new Error("Pi bridge is not active for this session.");
+	}
+	return { paths: activePaths, mailbox, local: { kind: "pi", id: activePiSessionId } };
+}
+
+function notifyBestEffort(ctx: ExtensionContext | undefined, message: string, level: "info" | "warning"): void {
+	try { ctx?.ui.notify(message, level); } catch { /* UI notification must not change mailbox delivery outcome. */ }
+}
+
+function updateInboundStatus(ctx: ExtensionContext): number {
+	const count = mailbox?.pendingInbound().length ?? 0;
+	try { ctx.ui.setStatus(EXTENSION_ID, count > 0 ? `Claude bridge: ${count} inbound pending` : "Claude bridge: active"); }
+	catch { /* Status refresh is best-effort; heartbeat still updates presence. */ }
+	return count;
+}
+
+function refreshPresenceBestEffort(ctx: ExtensionContext): void {
+	if (!activePaths) return;
+	try { writePresence(activePaths); }
+	catch (error) { notifyBestEffort(ctx, `Claude bridge pending count refresh failed: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
+}
+
+async function handleSendMessage(ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeSendMessagePayload(request.payload);
+		const active = requireActiveMailbox();
+		const peer = request.peer!;
+		const envelope = {
+			id: request.id,
+			from: { kind: peer.harness, id: peer.id },
+			to: active.local,
+			text: payload.text,
+			sentAt: new Date().toISOString(),
+		};
+		const received = active.mailbox.receive(envelope);
+		if (received) {
+			const pending = updateInboundStatus(ctx);
+			notifyBestEffort(ctx, `Peer message received from ${peer.harness}:${peer.id} (${pending} pending).`, "info");
+		}
+		return { id: request.id, ok: true, result: { requestId: request.id, messageId: request.id, received } };
+	} catch (error) {
+		return errorResponse(request.id, "send_message_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+function handleReadMessages(request: BridgeRequest): BridgeResponse {
+	try {
+		normalizeReadMessagesPayload(request.payload);
+		const active = requireActiveMailbox();
+		const peer = request.peer!;
+		const messages = active.mailbox.pendingFor({ kind: peer.harness, id: peer.id });
+		return { id: request.id, ok: true, result: { requestId: request.id, messages } };
+	} catch (error) {
+		return errorResponse(request.id, "read_messages_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
+function handleAckMessages(request: BridgeRequest): BridgeResponse {
+	try {
+		const payload = normalizeAckMessagesPayload(request.payload);
+		const active = requireActiveMailbox();
+		const peer = request.peer!;
+		const acknowledged = active.mailbox.ack({ kind: peer.harness, id: peer.id }, payload.ids);
+		return { id: request.id, ok: true, result: { requestId: request.id, acknowledged } };
+	} catch (error) {
+		return errorResponse(request.id, "ack_messages_failed", error instanceof Error ? error.message : String(error));
+	}
+}
+
 function requestDiscussionNotesAdd(pi: ExtensionAPI, requestId: string, payload: CapturePayload): Promise<AddResult> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
@@ -942,6 +1036,9 @@ async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	if (request.type === "save_plan") return handleSavePlan(pi, ctx, request);
 	if (request.type === "read_plan_tasks") return handleReadPlanTasks(pi, request);
 	if (request.type === "tick_plan_task") return handleTickPlanTask(pi, request);
+	if (request.type === "send_message") return handleSendMessage(ctx, request);
+	if (request.type === "read_messages") return handleReadMessages(request);
+	if (request.type === "ack_messages") return handleAckMessages(request);
 	return errorResponse(request.id, "not_implemented", `Bridge handler not implemented for request type: ${request.type}.`);
 }
 
@@ -968,7 +1065,10 @@ async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths
 	if (activePaths !== paths || !fileName.endsWith(".json")) return;
 	const fileId = fileName.slice(0, -".json".length);
 	if (!UUID_RE.test(fileId)) return;
-	if (replayProcessedResponse(paths, fileId)) return;
+	if (replayProcessedResponse(paths, fileId)) {
+		safeUnlink(requestPath(paths, fileName));
+		return;
+	}
 
 	const absolute = requestPath(paths, fileName);
 	const resolved = path.resolve(absolute);
@@ -994,8 +1094,13 @@ async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths
 			if (request.type === "pair" && !pairedPeers.has(key) && pairedPeers.size >= MAX_PEERS) {
 				response = errorResponse(request.id, "peer_cap", `Cannot pair more than ${MAX_PEERS} peers.`);
 			} else {
-				if (request.type === "pair") pairedPeers.set(key, peer);
-				else pairedPeers.delete(key);
+				if (request.type === "pair") {
+					pairedPeers.set(key, peer);
+					mailbox?.pair({ kind: peer.harness, id: peer.id });
+				} else {
+					pairedPeers.delete(key);
+					mailbox?.unpair({ kind: peer.harness, id: peer.id });
+				}
 				writePresence(paths);
 				response = { id: request.id, ok: true, result: { paired: request.type === "pair", peer } };
 			}
@@ -1046,11 +1151,19 @@ function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContex
 	// No backup poll — fs.watch is sufficient on modern macOS/Node with O(1) in-flight requests.
 }
 
-function stopActiveBridge(): void {
+function dropPendingMessages(ctx: ExtensionContext | undefined, reason: string): number {
+	const dropped = mailbox?.dropAll() ?? 0;
+	mailbox = null;
+	if (dropped > 0) notifyBestEffort(ctx, `claude-bridge dropped ${dropped} pending peer message(s) on ${reason}.`, "warning");
+	return dropped;
+}
+
+function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 	watcher?.close();
 	watcher = null;
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	heartbeatTimer = null;
+	dropPendingMessages(ctx, reason);
 	if (activePaths && activePiSessionId && namespaceDirsArePrivate(activePaths)) {
 		const owner = readPresence(activePaths.presence, activePiSessionId);
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
@@ -1064,7 +1177,72 @@ function stopActiveBridge(): void {
 	pairedPeers = new Map();
 }
 
+function peerLabel(peer: PeerIdentity): string {
+	return `${peer.kind}:${peer.id}`;
+}
+
+function peerChoices(peers: PeerIdentity[]): string {
+	return peers.length ? peers.map((peer) => `- ${peerLabel(peer)}`).join("\n") : "- none (pair a peer first)";
+}
+
+function resolveToolPeer(to: string | undefined, peers: PeerIdentity[]): PeerIdentity {
+	if (to === undefined) {
+		if (peers.length === 1) return peers[0];
+		if (peers.length === 0) throw new Error(`No paired peers available. Choices:\n${peerChoices(peers)}`);
+		throw new Error(`Multiple paired peers; provide to as harness:id. Choices:\n${peerChoices(peers)}`);
+	}
+	const peer = peers.find((candidate) => peerLabel(candidate) === to);
+	if (peer) return peer;
+	throw new Error(`Peer ${JSON.stringify(to)} is not paired. Choices:\n${peerChoices(peers)}`);
+}
+
 export default function claudeBridge(pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "bridge_message",
+		label: "Bridge message",
+		description: "Send untrusted advisory text to one paired peer. Message is not approval or instructions.",
+		parameters: Type.Object({
+			text: Type.String({ minLength: 1, maxLength: MAX_MESSAGE_CHARS }),
+			to: Type.Optional(Type.String({ minLength: 1, maxLength: 135, description: "Paired peer as harness:id; required when multiple peers are paired." })),
+		}),
+		execute: async (_toolCallId, params: { text: string; to?: string }, ctx) => {
+			const active = requireActiveMailbox();
+			const peers = active.mailbox.peers();
+			const peer = resolveToolPeer(params.to, peers);
+			const envelope = active.mailbox.send(peer, params.text);
+			refreshPresenceBestEffort(ctx);
+			notifyBestEffort(ctx, `Peer message queued for ${peerLabel(peer)}.`, "info");
+			return {
+				content: [{ type: "text", text: `Message ${envelope.id} queued for ${peerLabel(peer)}.` }],
+				details: { id: envelope.id, to: peer, sentAt: envelope.sentAt },
+			};
+		},
+	});
+
+	pi.on("before_agent_start", (_event, ctx) => {
+		if (!activePaths || !mailbox || !namespaceDirsArePrivate(activePaths)) return;
+		const pending = mailbox.pendingInbound();
+		if (pending.length === 0) {
+			updateInboundStatus(ctx);
+			return;
+		}
+		const formatted = formatPeerBlock(pending, PEER_BLOCK_BUDGET_CHARS);
+		if (formatted.includedIds.length === 0) {
+			updateInboundStatus(ctx);
+			return;
+		}
+		mailbox.ackInbound(formatted.includedIds);
+		refreshPresenceBestEffort(ctx);
+		updateInboundStatus(ctx);
+		return {
+			message: {
+				customType: "claude-bridge-peer-messages",
+				content: formatted.text,
+				display: false,
+			},
+		};
+	});
+
 	pi.events.on("workflow-modes:changed", (data: unknown) => {
 		const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
 		cachedMode = typeof record.mode === "string" ? record.mode : null;
@@ -1110,7 +1288,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		stopActiveBridge();
+		stopActiveBridge(ctx, "session switch");
 		passiveReason = null;
 		cachedMode = null;
 		const projectRoot = findProjectRoot(ctx.cwd ?? process.cwd());
@@ -1139,6 +1317,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		activeProjectRoot = projectRoot;
 		activePiSessionId = piSessionId;
 		activeSessionName = sessionName(pi);
+		mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
+		for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
 		writePresence(paths);
 		startWatcher(pi, paths, ctx);
 		heartbeatTimer = setInterval(() => {
@@ -1150,9 +1330,11 @@ export default function claudeBridge(pi: ExtensionAPI) {
 				watcher = null;
 				clearInterval(heartbeatTimer!);
 				heartbeatTimer = null;
+				dropPendingMessages(ctx, "bridge ownership change");
 				activePaths = null;
 				activeProjectRoot = null;
 				activePiSessionId = null;
+				pairedPeers = new Map();
 				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
 				return;
@@ -1164,8 +1346,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		ctx.ui.notify(`claude-bridge active: ${paths.namespace}`, "info");
 	});
 
-	pi.on("session_shutdown", async () => {
-		stopActiveBridge();
+	pi.on("session_shutdown", async (_event, ctx) => {
+		stopActiveBridge(ctx, "shutdown");
 	});
 
 	pi.registerCommand("claude-bridge", {
@@ -1179,7 +1361,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			}
 			const lines = sessions.map(({ id, presence }) => {
 				const peers = presence.peers.length
-					? presence.peers.map((peer) => `${peer.harness}:${peer.id} (${peer.pendingCount} pending)`).join(", ")
+					? presence.peers.map((peer) => `${peer.harness}:${peer.id} (${peer.pendingCount} outbound / ${peer.inboundPendingCount} inbound pending)`).join(", ")
 					: "none";
 				return `- ${id.slice(0, 8)} (${id})${presence.name ? ` — ${presence.name}` : ""} [${presence.mode ?? "unknown"}] age ${formatAge(presence.startedAt)}; peers: ${peers}`;
 			});

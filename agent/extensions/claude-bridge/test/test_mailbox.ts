@@ -43,8 +43,8 @@ assert.deepEqual(mailbox.peers(), [claude]);
 const first = mailbox.send(claude, "hello");
 assert.equal(mailbox.pendingFor(claude)[0]?.id, first.id);
 assert.equal(mailbox.pendingFor(claude)[0]?.id, first.id); // same-id redelivery until ack
-assert.equal(mailbox.ack([first.id, first.id, "unknown-id"]), 1);
-assert.equal(mailbox.ack([first.id]), 0); // idempotent ack
+assert.equal(mailbox.ack(claude, [first.id, first.id, "unknown-id"]), 1);
+assert.equal(mailbox.ack(claude, [first.id]), 0); // idempotent ack
 assert.deepEqual(mailbox.pendingFor(claude), []);
 
 expectCode(() => mailbox.send(claude, ""), "message-size");
@@ -55,12 +55,23 @@ const capped = makeMailbox(local);
 capped.pair(claude);
 for (let index = 0; index < MAX_PENDING_PER_PEER; index++) capped.send(claude, `out-${index}`);
 expectCode(() => capped.send(claude, "overflow"), "pending-cap");
-assert.equal(capped.ack(capped.pendingFor(claude).map((message) => message.id)), MAX_PENDING_PER_PEER);
+assert.equal(capped.ack(claude, capped.pendingFor(claude).map((message) => message.id)), MAX_PENDING_PER_PEER);
 
 const overPaired = makeMailbox(local);
 for (let index = 0; index < 10; index++) overPaired.pair(identity("claude", `peer-${index}`));
 assert.equal(overPaired.peers().length, 10);
 expectCode(() => overPaired.pair(identity("cursor", "eleventh")), "peer-cap");
+
+const scopedAck = makeMailbox(local);
+const cursor = identity("cursor", "cursor-session");
+scopedAck.pair(claude);
+scopedAck.pair(cursor);
+const claudeMessage = scopedAck.send(claude, "claude message");
+const cursorMessage = scopedAck.send(cursor, "cursor message");
+assert.equal(scopedAck.ack(claude, [cursorMessage.id]), 0); // cannot ack another peer's message
+assert.deepEqual(scopedAck.pendingFor(cursor).map((message) => message.id), [cursorMessage.id]);
+assert.deepEqual(scopedAck.pendingFor(claude).map((message) => message.id), [claudeMessage.id]);
+expectCode(() => scopedAck.pendingFor(identity("claude", "unpaired")), "unpaired");
 
 const sender = makeMailbox(claude);
 sender.pair(local);
@@ -69,9 +80,30 @@ receiver.pair(claude);
 const inbound = sender.send(local, "from Claude");
 assert.equal(receiver.receive(inbound), true);
 assert.equal(receiver.receive(inbound), false); // duplicate delivery while queued is idempotent
-assert.equal(receiver.drainInbound().length, 1);
-assert.deepEqual(receiver.drainInbound(), []);
+assert.equal(receiver.pendingInbound()[0]?.id, inbound.id);
+assert.equal(receiver.pendingInboundCount(claude), 1);
+assert.equal(receiver.pendingOutboundCount(claude), 0);
+assert.equal(receiver.ackInbound([inbound.id]), 1);
+assert.deepEqual(receiver.pendingInbound(), []);
 expectCode(() => makeMailbox(local).receive(inbound), "unpaired");
+const drained = makeMailbox(local);
+drained.pair(claude);
+drained.receive(inbound);
+assert.deepEqual(drained.drainInbound(), [inbound]);
+assert.deepEqual(drained.pendingInbound(), []);
+
+const retained = makeMailbox(local);
+retained.pair(claude);
+const retainedOutbound = retained.send(claude, "outbound survives unpair");
+const retainedInbound: PeerEnvelope = { ...inbound, id: "retained-inbound" };
+assert.equal(retained.receive(retainedInbound), true);
+assert.equal(retained.unpair(claude), true);
+assert.deepEqual(retained.pendingInbound(), [retainedInbound]);
+expectCode(() => retained.pendingFor(claude), "unpaired");
+retained.pair(claude);
+assert.deepEqual(retained.pendingFor(claude).map((message) => message.id), [retainedOutbound.id]);
+assert.equal(retained.pendingInboundCount(claude), 1);
+assert.equal(retained.dropAll(), 2);
 
 const incomingCap = makeMailbox(local);
 incomingCap.pair(claude);
@@ -92,9 +124,18 @@ expectCode(() => incomingCap.receive({
   text: "inbound",
   sentAt: fixedTime().toISOString(),
 }), "pending-cap");
+incomingCap.pair(cursor);
+expectCode(() => incomingCap.receive({
+  id: "incoming-0",
+  from: cursor,
+  to: local,
+  text: "same pending id, different peer",
+  sentAt: fixedTime().toISOString(),
+}), "duplicate-id");
+assert.equal(incomingCap.pendingInboundCount(claude), MAX_PENDING_PER_PEER);
 assert.equal(incomingCap.dropAll(), MAX_PENDING_PER_PEER);
 assert.equal(incomingCap.dropAll(), 0);
-assert.equal(incomingCap.peers().length, 1); // dropping messages keeps pairings
+assert.equal(incomingCap.peers().length, 2); // dropping messages keeps pairings
 
 const budgetMessages: PeerEnvelope[] = ["one", "two"].map((id, index) => ({
   id,
