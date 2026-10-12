@@ -13,11 +13,22 @@ const POLL_MS = 50;
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, "utf8")); }
-function writeJson(p, v) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(v, null, 2)); }
+function writeJson(p, v) { fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 }); fs.writeFileSync(p, JSON.stringify(v, null, 2), { mode: 0o600 }); fs.chmodSync(p, 0o600); }
 function bridgeRoot(projectRoot) { return path.join(projectRoot, ".pi", "memory", "bridge"); }
-function paths(projectRoot) {
+function latestSessionId(projectRoot) {
+	const sessions = path.join(bridgeRoot(projectRoot), "sessions");
+	try {
+		return fs.readdirSync(sessions).filter((id) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))
+			.map((id) => ({ id, presence: readJson(path.join(sessions, id, "presence.json")) }))
+			.filter(({ presence }) => presence?.schemaVersion === 2 && Date.now() - Date.parse(presence.heartbeatAt) <= 5_000)
+			.sort((a, b) => Date.parse(b.presence.heartbeatAt) - Date.parse(a.presence.heartbeatAt))[0]?.id || null;
+	} catch { return null; }
+}
+function paths(projectRoot, piSessionId = latestSessionId(projectRoot)) {
 	const root = bridgeRoot(projectRoot);
-	return { root, requests: path.join(root, "requests"), responses: path.join(root, "responses"), processed: path.join(root, "processed"), policy: path.join(root, "policy.json"), session: path.join(root, "session.json") };
+	const sessions = path.join(root, "sessions");
+	const namespace = piSessionId ? path.join(sessions, piSessionId) : path.join(sessions, "missing-session");
+	return { root, sessions, namespace, requests: path.join(namespace, "requests"), responses: path.join(namespace, "responses"), processed: path.join(namespace, "processed"), presence: path.join(namespace, "presence.json") };
 }
 async function waitFor(file, timeoutMs = TIMEOUT_MS) {
 	const deadline = Date.now() + timeoutMs;
@@ -43,7 +54,7 @@ function runHook(input, cwd, env = {}) {
 function runMcp(messages, cwd) {
 	const mcp = path.resolve(__dirname, "pi-bridge-mcp.js");
 	const input = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
-	const out = cp.spawnSync("node", [mcp], { input, cwd, encoding: "utf8" });
+	const out = cp.spawnSync("node", [mcp], { input, cwd, encoding: "utf8", env: { ...process.env, CLAUDE_CODE_SESSION_ID: "core-protocol-mcp" } });
 	if (out.status !== 0) throw new Error(out.stderr || `mcp exit ${out.status}`);
 	return out.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
@@ -56,13 +67,11 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 function freshTarget(projectRoot) {
 	const p = paths(projectRoot);
-	assert(exists(p.session), `Missing bridge session: ${p.session}`);
-	assert(exists(p.policy), `Missing bridge policy: ${p.policy}`);
-	const session = readJson(p.session);
-	const lock = session.lock || session;
-	const heartbeat = Date.parse(lock.heartbeatAt || "");
-	assert(lock.status === "active" && Number.isFinite(heartbeat) && Date.now() - heartbeat <= 5_000, "Bridge session stale/not active");
-	return { p, session: lock };
+	assert(exists(p.presence), `Missing bridge presence: ${p.presence}`);
+	const session = readJson(p.presence);
+	const heartbeat = Date.parse(session.heartbeatAt || "");
+	assert(session.schemaVersion === 2 && session.piSessionId && Number.isFinite(heartbeat) && Date.now() - heartbeat <= 5_000, "Bridge session stale/not active");
+	return { p, session };
 }
 
 function makeTempPiProject() {
@@ -71,12 +80,11 @@ function makeTempPiProject() {
 	return root;
 }
 
-test("bridge active dirs, session, policy", async ({ projectRoot }) => {
+test("bridge active namespace dirs and v2 presence", async ({ projectRoot }) => {
 	const { p, session } = freshTarget(projectRoot);
 	for (const key of ["requests", "responses", "processed"]) assert(exists(p[key]), `Missing ${key}`);
-	const policy = readJson(p.policy);
-	assert(Array.isArray(policy.policy?.mutationTools), "policy missing mutationTools");
-	assert(session.bridgeSessionId, "session missing bridgeSessionId");
+	assert(session.piSessionId, "presence missing piSessionId");
+	assert(Array.isArray(session.peers), "presence missing peers");
 });
 
 test("malformed/invalid request returns error", async ({ projectRoot }) => {
@@ -262,7 +270,7 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 
 	// Expired policy must NOT block sandboxed Bash either.
 	const expired = makeTempPiProject();
-	const expiredPolicyPath = paths(expired).policy;
+	const expiredPolicyPath = path.join(bridgeRoot(expired), "policy.json");
 	writeJson(expiredPolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { mutationTools: [] } });
 	const expiredResult = runHook({ tool_name: "Bash", tool_input: { command: "echo stale" } }, expired);
 	if (isSandboxed) {
@@ -273,7 +281,7 @@ test("read-only hook allows non-Pi and enforces Pi policy", async ({ projectRoot
 
 	// Stale (old writtenAt) policy must NOT block sandboxed Bash.
 	const stalePolicy = makeTempPiProject();
-	const stalePolicyPath = paths(stalePolicy).policy;
+	const stalePolicyPath = path.join(bridgeRoot(stalePolicy), "policy.json");
 	writeJson(stalePolicyPath, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), policy: { mutationTools: [] } });
 	const stalePolicyResult = runHook({ tool_name: "Bash", tool_input: { command: "echo stale" } }, stalePolicy);
 	if (isSandboxed) {
@@ -317,7 +325,7 @@ test("read-only hook fail-closed path deterministically via env override", async
 	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "echo" } }, stale, env)), "stale-project Bash not denied");
 
 	const expired = makeTempPiProject();
-	writeJson(paths(expired).policy, { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { mutationTools: [] } });
+	writeJson(path.join(bridgeRoot(expired), "policy.json"), { writtenAt: new Date(Date.now() - 10_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString(), policy: { mutationTools: [] } });
 	assert(denied(runHook({ tool_name: "Bash", tool_input: { command: "echo" } }, expired, env)), "expired-policy Bash not denied");
 
 	// 6) Non-Pi directory: Bash allowed even with env override (no .pi ancestor).

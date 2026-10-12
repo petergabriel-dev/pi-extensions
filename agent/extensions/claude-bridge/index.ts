@@ -1,37 +1,49 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
 import type { FSWatcher } from "node:fs";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { composeWorkflowPrompt, getWorkflowPolicySnapshot, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
+import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
+import { isHarnessKind, MAX_PEERS, type HarnessKind } from "./mailbox.js";
 
 const EXTENSION_ID = "claude-bridge";
-const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task"]);
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const LOCK_TTL_MS = 5_000;
-const HEARTBEAT_MS = 2_000; // 2s; Pi lock TTL is 5s, so 2s gives 2.5x headroom.
-const POLICY_TTL_MS = 4_000;
+const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const HEARTBEAT_MS = 2_000;
+const LIVE_TTL_MS = 5_000;
+const NAMESPACE_GC_TTL_MS = 10 * 60_000;
 
 interface BridgePaths {
+	projectRoot: string;
 	root: string;
+	sessions: string;
+	namespace: string;
 	requests: string;
 	responses: string;
 	processed: string;
-	policy: string;
-	session: string;
+	presence: string;
 }
 
-interface BridgeSessionLock {
-	schemaVersion: 1;
-	status: "active";
-	bridgeSessionId: string;
-	piSessionId: string | null;
+interface HarnessPeer {
+	harness: HarnessKind;
+	id: string;
+}
+
+interface PresencePeer extends HarnessPeer {
+	pendingCount: number;
+}
+
+interface BridgePresence {
+	schemaVersion: 2;
+	piSessionId: string;
+	name: string;
+	mode: string | null;
 	pid: number;
-	projectRoot: string;
 	startedAt: string;
 	heartbeatAt: string;
+	peers: PresencePeer[];
 }
 
 interface BridgeRequest {
@@ -39,6 +51,7 @@ interface BridgeRequest {
 	type: string;
 	payload: Record<string, unknown>;
 	ts: number;
+	peer?: HarnessPeer;
 }
 
 interface BridgeResponse {
@@ -118,10 +131,13 @@ interface PendingEventResult {
 	timer: NodeJS.Timeout;
 }
 
-let bridgeSessionId = randomUUID();
 let startedAt = new Date().toISOString();
 let activePaths: BridgePaths | null = null;
 let activeProjectRoot: string | null = null;
+let activePiSessionId: string | null = null;
+let activeSessionName = "";
+let cachedMode: string | null = null;
+let pairedPeers = new Map<string, HarnessPeer>();
 let watcher: FSWatcher | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
@@ -134,54 +150,54 @@ const SCAN_COALESCE_MS = 50; // coalesce rapid watcher events into one scan per 
 let scanScheduled = false;
 let lastScanAt = 0;
 
-function ensureDir(dir: string): void {
-	fs.mkdirSync(dir, { recursive: true });
-}
-
-function writeFileAtomic(filePath: string, content: string): void {
-	const dir = path.dirname(filePath);
-	ensureDir(dir);
-	const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
-	let fd: number | undefined;
-	try {
-		fs.writeFileSync(tmp, content, "utf-8");
-		fd = fs.openSync(tmp, "r+");
-		fs.fsyncSync(fd);
-		fs.closeSync(fd);
-		fd = undefined;
-		fs.renameSync(tmp, filePath);
-	} catch (error) {
-		if (fd !== undefined) {
-			try { fs.closeSync(fd); } catch { /* ignore */ }
-		}
-		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
-		throw error;
+function ensureDirectory(dir: string, privateMode: boolean): void {
+	try { fs.mkdirSync(dir, { mode: privateMode ? 0o700 : 0o777 }); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 	}
+	const stat = fs.lstatSync(dir);
+	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Bridge path is not a real directory: ${dir}`);
+	if (privateMode) fs.chmodSync(dir, 0o700);
 }
 
-// Drop fsync for high-frequency writes — rename is sufficient safety.
+function ensurePrivateDir(dir: string): void {
+	ensureDirectory(dir, true);
+}
+
+function ensureBridgeParents(paths: BridgePaths): void {
+	ensureDirectory(path.join(paths.projectRoot, ".pi"), false);
+	ensureDirectory(path.join(paths.projectRoot, ".pi", "memory"), false);
+	ensurePrivateDir(paths.root);
+	ensurePrivateDir(paths.sessions);
+}
+
+function isRealDirectory(dir: string, mode?: number): boolean {
+	try {
+		const stat = fs.lstatSync(dir);
+		return stat.isDirectory() && !stat.isSymbolicLink() && (mode === undefined || (stat.mode & 0o777) === mode);
+	} catch { return false; }
+}
+
+function namespaceDirsArePrivate(paths: BridgePaths): boolean {
+	return isRealDirectory(path.join(paths.projectRoot, ".pi"))
+		&& isRealDirectory(path.join(paths.projectRoot, ".pi", "memory"))
+		&& [paths.root, paths.sessions, paths.namespace, paths.requests, paths.responses, paths.processed].every((dir) => isRealDirectory(dir, 0o700));
+}
+
+// Rename keeps presence and response files atomic; every bridge file stays private.
 function writeJsonFast(filePath: string, value: unknown): void {
 	const dir = path.dirname(filePath);
-	ensureDir(dir);
+	ensurePrivateDir(dir);
 	const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
-	let fd: number | undefined;
 	try {
-		fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
-		// No fsync — rename is atomic enough for idempotent cache files.
-		fs.closeSync(fs.openSync(tmp, "r+"));
-		fd = undefined;
+		fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+		fs.chmodSync(tmp, 0o600);
 		fs.renameSync(tmp, filePath);
+		fs.chmodSync(filePath, 0o600);
 	} catch (error) {
-		if (fd !== undefined) {
-			try { fs.closeSync(fd); } catch { /* ignore */ }
-		}
 		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
 		throw error;
 	}
-}
-
-function writeJsonAtomic(filePath: string, value: unknown): void {
-	writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function safeUnlink(filePath: string): void {
@@ -205,164 +221,234 @@ function readJson(filePath: string): unknown | null {
 	}
 }
 
-function toIso(ms: number): string {
-	return new Date(ms).toISOString();
-}
-
 function parseTime(value: unknown): number {
 	if (typeof value !== "string") return 0;
 	const parsed = Date.parse(value);
 	return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function isSafeId(value: unknown): value is string {
+	return typeof value === "string" && SAFE_ID_RE.test(value);
+}
+
+function isHarnessName(value: unknown): value is HarnessKind {
+	return isHarnessKind(value);
+}
+
+function peerKey(peer: HarnessPeer): string {
+	return `${peer.harness}\0${peer.id}`;
+}
+
+function normalizePeer(value: unknown): HarnessPeer | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	if (!isHarnessName(record.harness) || !isSafeId(record.id)) return null;
+	return { harness: record.harness, id: record.id };
+}
+
 function sessionIdFromContext(ctx: ExtensionContext): string | null {
 	try {
 		const sessionId = (ctx.sessionManager as { getSessionId?: () => string | null | undefined })?.getSessionId?.();
-		return sessionId ? String(sessionId) : null;
+		return isSafeId(sessionId) ? sessionId : null;
 	} catch {
 		return null;
 	}
 }
 
-function bridgePaths(projectRoot: string): BridgePaths {
-	const root = path.join(projectRoot, ".pi", "memory", "bridge");
+function bridgePaths(projectRoot: string, piSessionId: string): BridgePaths {
+	if (!isSafeId(piSessionId)) throw new Error("Invalid Pi session id for bridge namespace.");
+	const resolvedProjectRoot = fs.realpathSync(projectRoot);
+	const root = path.join(resolvedProjectRoot, ".pi", "memory", "bridge");
+	const sessions = path.join(root, "sessions");
+	const namespace = path.join(sessions, piSessionId);
 	return {
+		projectRoot: resolvedProjectRoot,
 		root,
-		requests: path.join(root, "requests"),
-		responses: path.join(root, "responses"),
-		processed: path.join(root, "processed"),
-		policy: path.join(root, "policy.json"),
-		session: path.join(root, "session.json"),
+		sessions,
+		namespace,
+		requests: path.join(namespace, "requests"),
+		responses: path.join(namespace, "responses"),
+		processed: path.join(namespace, "processed"),
+		presence: path.join(namespace, "presence.json"),
 	};
 }
 
-function ensureBridgeDirs(paths: BridgePaths): void {
-	ensureDir(paths.requests);
-	ensureDir(paths.responses);
-	ensureDir(paths.processed);
+function parsePresence(value: unknown, expectedSessionId?: string): BridgePresence | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	if (record.schemaVersion !== 2 || !isSafeId(record.piSessionId) || (expectedSessionId && record.piSessionId !== expectedSessionId)) return null;
+	if (typeof record.pid !== "number" || !Number.isInteger(record.pid) || typeof record.startedAt !== "string" || typeof record.heartbeatAt !== "string") return null;
+	if (typeof record.name !== "string" || !(typeof record.mode === "string" || record.mode === null)) return null;
+	if (!Number.isFinite(Date.parse(record.startedAt)) || !Number.isFinite(Date.parse(record.heartbeatAt))) return null;
+	if (!Array.isArray(record.peers) || record.peers.length > MAX_PEERS) return null;
+	const peers: PresencePeer[] = [];
+	for (const rawPeer of record.peers) {
+		const peer = normalizePeer(rawPeer);
+		if (!peer) return null;
+		const rawPendingCount = (rawPeer as Record<string, unknown>).pendingCount;
+		const pendingCount = typeof rawPendingCount === "number" && Number.isFinite(rawPendingCount)
+			? Math.max(0, Math.floor(rawPendingCount)) : 0;
+		peers.push({ ...peer, pendingCount });
+	}
+	return {
+		schemaVersion: 2,
+		piSessionId: record.piSessionId,
+		name: record.name,
+		mode: record.mode,
+		pid: record.pid,
+		startedAt: record.startedAt,
+		heartbeatAt: record.heartbeatAt,
+		peers,
+	};
 }
 
-function isStaleLock(lock: unknown, now = Date.now()): { stale: true; reason: string } | { stale: false } {
-	if (!lock || typeof lock !== "object") return { stale: false }; // no/unreadable lock file → free to claim
-	const record = lock as Partial<BridgeSessionLock>;
-	if (record.status !== "active" || typeof record.bridgeSessionId !== "string") {
-		return { stale: false }; // missing/unset is okay for us to claim
-	}
-	// Same bridge session: fine, we refresh it.
-	if (record.bridgeSessionId === bridgeSessionId) return { stale: false };
-	const heartbeat = parseTime(record.heartbeatAt);
-	// Stale if: heartbeat is older than our lock TTL (another session's heartbeat expired).
-	if (heartbeat > 0 && now - heartbeat <= LOCK_TTL_MS) {
-		return { stale: true, reason: `Another active Pi bridge owns this project (${record.bridgeSessionId}).` };
-	}
-	// Heartbeat expired: treat it as our session (it was ours before Pi restart).
-	return { stale: false };
-}
-
-function claimSessionLock(paths: BridgePaths, projectRoot: string, piSessionId: string | null): { active: true } | { active: false; reason: string } {
-	const existing = readJson(paths.session);
-	const stale = isStaleLock(existing);
-	if (stale.stale) {
-		return { active: false, reason: stale.reason };
-	}
-	const now = new Date().toISOString();
-	const policy = getWorkflowPolicySnapshot();
-	const batch = JSON.stringify({
-		lock: {
-			schemaVersion: 1,
-			status: "active",
-			bridgeSessionId,
-			piSessionId,
-			pid: process.pid,
-			projectRoot,
-			startedAt,
-			heartbeatAt: now,
-		},
-		policy,
-		writtenAt: now,
-	}, null, 2);
-	const tmp = path.join(paths.root, `policy.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
-	let fd: number | undefined;
+function readPresence(filePath: string, expectedSessionId?: string): BridgePresence | null {
 	try {
-		fs.writeFileSync(tmp, batch, "utf-8");
-		fs.closeSync(fs.openSync(tmp, "r+"));
-		fs.renameSync(tmp, paths.session);
-		writeJsonFast(paths.policy, { schemaVersion: 1, projectRoot, bridgeSessionId, pid: process.pid, writtenAt: now, expiresAt: new Date(Date.now() + POLICY_TTL_MS).toISOString(), policy });
-	} catch (error) {
-		if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
-		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
-		throw error;
+		const stat = fs.lstatSync(filePath);
+		if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) return null;
+	} catch { return null; }
+	return parsePresence(readJson(filePath), expectedSessionId);
+}
+
+function ensureBridgeDirs(paths: BridgePaths): void {
+	ensureBridgeParents(paths);
+	for (const dir of [paths.namespace, paths.requests, paths.responses, paths.processed]) ensurePrivateDir(dir);
+}
+
+function gcStaleNamespaces(sessionsDir: string, now = Date.now()): void {
+	let entries: string[];
+	try { entries = fs.readdirSync(sessionsDir); } catch { return; }
+	for (const id of entries) {
+		if (!isSafeId(id)) continue;
+		const namespace = path.join(sessionsDir, id);
+		try {
+			const stat = fs.lstatSync(namespace);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+		} catch { continue; }
+		const presence = readPresence(path.join(namespace, "presence.json"), id);
+		const heartbeat = parseTime(presence?.heartbeatAt);
+		if (heartbeat > 0 && now - heartbeat > NAMESPACE_GC_TTL_MS) {
+			try { fs.rmSync(namespace, { recursive: true, force: true }); } catch { /* best-effort stale namespace GC */ }
+		}
 	}
+}
+
+function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { active: true } | { active: false; reason: string } {
+	ensureBridgeParents(paths);
+	gcStaleNamespaces(paths.sessions);
+	let namespaceExists = false;
+	try {
+		const stat = fs.lstatSync(paths.namespace);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) return { active: false, reason: `Pi session ${piSessionId} namespace is not a real directory.` };
+		namespaceExists = true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { active: false, reason: `Pi session ${piSessionId} namespace cannot be inspected.` };
+	}
+	let existing = namespaceExists ? readPresence(paths.presence, piSessionId) : null;
+	const now = Date.now();
+	const heartbeat = parseTime(existing?.heartbeatAt);
+	const fresh = heartbeat > 0 && heartbeat <= now + LIVE_TTL_MS && now - heartbeat <= LIVE_TTL_MS;
+	if (existing && fresh && existing.pid !== process.pid) {
+		return { active: false, reason: `Pi session ${piSessionId} already has live bridge owner pid ${existing.pid}.` };
+	}
+	if (namespaceExists && !existing) {
+		return { active: false, reason: `Pi session ${piSessionId} bridge namespace is initializing or invalid; retry session start.` };
+	}
+	if (existing && Date.now() - parseTime(existing.heartbeatAt) > NAMESPACE_GC_TTL_MS) {
+		try { fs.rmSync(paths.namespace, { recursive: true, force: true }); } catch { /* retry claim will fail closed */ }
+		existing = null;
+	}
+	if (!fs.existsSync(paths.namespace)) {
+		try { fs.mkdirSync(paths.namespace, { mode: 0o700 }); }
+		catch {
+			const raced = readPresence(paths.presence, piSessionId);
+			return { active: false, reason: raced ? `Pi session ${piSessionId} already has bridge owner pid ${raced.pid}.` : `Pi session ${piSessionId} bridge namespace is initializing; retry session start.` };
+		}
+	}
+	if (existing) {
+		startedAt = existing.startedAt;
+		pairedPeers = new Map(existing.peers.map(({ harness, id }) => {
+			const peer = { harness, id };
+			return [peerKey(peer), peer] as const;
+		}));
+	} else {
+		startedAt = new Date().toISOString();
+		pairedPeers = new Map();
+	}
+	ensureBridgeDirs(paths);
 	return { active: true };
 }
 
-function refreshSessionLock(paths: BridgePaths, projectRoot: string, piSessionId: string | null): boolean {
-	const existing = readJson(paths.session);
-	const stale = isStaleLock(existing);
-	if (stale.stale) {
-		passiveReason = stale.reason;
-		return false;
-	}
-	const now = new Date().toISOString();
-	const policy = getWorkflowPolicySnapshot();
-	const batch = JSON.stringify({
-		lock: {
-			schemaVersion: 1,
-			status: "active",
-			bridgeSessionId,
-			piSessionId,
-			pid: process.pid,
-			projectRoot,
-			startedAt,
-			heartbeatAt: now,
-		},
-		policy,
-		writtenAt: now,
-	}, null, 2);
-	const tmp = path.join(paths.root, `policy.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
-	let fd: number | undefined;
-	try {
-		fs.writeFileSync(tmp, batch, "utf-8");
-		fs.closeSync(fs.openSync(tmp, "r+"));
-		fs.renameSync(tmp, paths.session);
-		writeJsonFast(paths.policy, { schemaVersion: 1, projectRoot, bridgeSessionId, pid: process.pid, writtenAt: now, expiresAt: new Date(Date.now() + POLICY_TTL_MS).toISOString(), policy });
-	} catch (error) {
-		if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
-		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
-		throw error;
-	}
-	return true;
-}
-
-function cleanupAllBridgeFiles(paths: BridgePaths): void {
-	const existing = readJson(paths.session);
-	if (existing && typeof existing === "object" && (existing as { bridgeSessionId?: unknown }).bridgeSessionId !== bridgeSessionId) {
-		return; // Not ours — leave it alone.
-	}
-	for (const dir of [paths.requests, paths.responses, paths.processed]) {
+function pendingPeerCounts(paths: BridgePaths): Map<string, number> {
+	const counts = new Map<string, number>();
+	let files: string[];
+	try { files = fs.readdirSync(paths.requests); } catch { return counts; }
+	for (const file of files) {
+		if (!file.endsWith(".json")) continue;
+		const filePath = path.join(paths.requests, file);
 		try {
-			for (const fileName of fs.readdirSync(dir)) {
-				if (fileName.endsWith(".json")) {
-					try { fs.unlinkSync(path.join(dir, fileName)); } catch { /* ignore */ }
-				}
-			}
-		} catch { /* dir missing or empty */ }
+			const stat = fs.lstatSync(filePath);
+			if (!stat.isFile() || stat.isSymbolicLink()) continue;
+		} catch { continue; }
+		const request = readJson(filePath);
+		const peer = request && typeof request === "object" ? normalizePeer((request as Record<string, unknown>).peer) : null;
+		if (peer) counts.set(peerKey(peer), (counts.get(peerKey(peer)) ?? 0) + 1);
 	}
-	try { fs.unlinkSync(paths.session); } catch { /* ignore */ }
-	try { fs.unlinkSync(paths.policy); } catch { /* ignore */ }
+	return counts;
 }
 
-function writePolicy(paths: BridgePaths, projectRoot: string): void {
-	const now = Date.now();
-	writeJsonAtomic(paths.policy, {
-		schemaVersion: 1,
-		projectRoot,
-		bridgeSessionId,
+function writePresence(paths: BridgePaths): void {
+	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
+	const counts = pendingPeerCounts(paths);
+	const peers = Array.from(pairedPeers.values()).map((peer) => ({ ...peer, pendingCount: counts.get(peerKey(peer)) ?? 0 }));
+	writeJsonFast(paths.presence, {
+		schemaVersion: 2,
+		piSessionId: activePiSessionId,
+		name: activeSessionName,
+		mode: cachedMode,
 		pid: process.pid,
-		writtenAt: toIso(now),
-		expiresAt: toIso(now + POLICY_TTL_MS),
-		policy: getWorkflowPolicySnapshot(),
-	});
+		startedAt,
+		heartbeatAt: new Date().toISOString(),
+		peers,
+	} satisfies BridgePresence);
+}
+
+function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: string; presence: BridgePresence }> {
+	let resolvedProjectRoot: string;
+	try { resolvedProjectRoot = fs.realpathSync(projectRoot); } catch { return []; }
+	const piDir = path.join(resolvedProjectRoot, ".pi");
+	const memoryDir = path.join(piDir, "memory");
+	const rootDir = path.join(memoryDir, "bridge");
+	const sessionsDir = path.join(rootDir, "sessions");
+	if (!isRealDirectory(piDir) || !isRealDirectory(memoryDir) || !isRealDirectory(rootDir, 0o700) || !isRealDirectory(sessionsDir, 0o700)) return [];
+	let ids: string[];
+	try { ids = fs.readdirSync(sessionsDir); } catch { return []; }
+	const live: Array<{ id: string; presence: BridgePresence }> = [];
+	for (const id of ids) {
+		if (!isSafeId(id)) continue;
+		const namespace = path.join(sessionsDir, id);
+		try {
+			const stat = fs.lstatSync(namespace);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+		} catch { continue; }
+		const presence = readPresence(path.join(namespace, "presence.json"), id);
+		const heartbeat = parseTime(presence?.heartbeatAt);
+		if (presence && heartbeat > 0 && now - heartbeat <= LIVE_TTL_MS && heartbeat <= now + LIVE_TTL_MS) live.push({ id, presence });
+	}
+	return live;
+}
+
+function sessionName(pi: ExtensionAPI): string {
+	try { return pi.getSessionName() ?? ""; }
+	catch { return ""; }
+}
+
+function formatAge(startedAt: string, now = Date.now()): string {
+	const seconds = Math.max(0, Math.floor((now - parseTime(startedAt)) / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	return `${Math.floor(minutes / 60)}h`;
 }
 
 function responsePath(paths: BridgePaths, id: string): string {
@@ -393,11 +479,15 @@ function validateRequest(fileId: string, raw: unknown): BridgeRequest {
 	}
 	if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) throw new Error("Request ts must be a finite number.");
 	if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) throw new Error("Request payload must be an object.");
+	const peer = record.peer === undefined ? undefined : normalizePeer(record.peer);
+	if (record.peer !== undefined && !peer) throw new Error("Request peer must contain valid harness and id.");
+	if ((record.type === "pair" || record.type === "unpair") && !peer) throw new Error(`${record.type} request requires peer identity.`);
 	return {
 		id: record.id,
 		type: record.type,
 		payload: record.payload as Record<string, unknown>,
 		ts: record.ts,
+		...(peer ? { peer } : {}),
 	};
 }
 
@@ -408,7 +498,9 @@ function existsSync(filePath: string): boolean {
 function findProjectRoot(cwd: string): string | null {
 	let dir = path.resolve(cwd);
 	while (true) {
-		if (existsSync(path.join(dir, ".pi"))) return dir;
+		if (existsSync(path.join(dir, ".pi"))) {
+			try { return fs.realpathSync(dir); } catch { return null; }
+		}
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;
 		dir = parent;
@@ -854,6 +946,7 @@ async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 }
 
 function writeResponse(paths: BridgePaths, response: BridgeResponse): void {
+	if (!namespaceDirsArePrivate(paths)) return;
 	// Write processed/ first (source of truth for idempotency), then responses/.
 	// Both use writeJsonFast — no fsync, rename-only. Safe since we unlink the
 	// request file immediately after, so no concurrent reader can see a
@@ -872,7 +965,7 @@ function replayProcessedResponse(paths: BridgePaths, id: string): boolean {
 }
 
 async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths, fileName: string): Promise<void> {
-	if (!fileName.endsWith(".json")) return;
+	if (activePaths !== paths || !fileName.endsWith(".json")) return;
 	const fileId = fileName.slice(0, -".json".length);
 	if (!UUID_RE.test(fileId)) return;
 	if (replayProcessedResponse(paths, fileId)) return;
@@ -880,8 +973,14 @@ async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths
 	const absolute = requestPath(paths, fileName);
 	const resolved = path.resolve(absolute);
 	const requestRoot = path.resolve(paths.requests) + path.sep;
+	let requestStat: fs.Stats | null = null;
+	try { requestStat = fs.lstatSync(resolved); } catch { return; }
 	if (!resolved.startsWith(requestRoot)) {
 		writeResponse(paths, errorResponse(fileId, "path_traversal", "Request path escaped bridge requests directory."));
+		return;
+	}
+	if (!requestStat.isFile() || requestStat.isSymbolicLink() || (requestStat.mode & 0o777) !== 0o600) {
+		safeUnlink(absolute);
 		return;
 	}
 
@@ -889,7 +988,20 @@ async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths
 	try {
 		const raw = JSON.parse(fs.readFileSync(resolved, "utf-8"));
 		const request = validateRequest(fileId, raw);
-		response = await handleRequest(pi, ctx, request);
+		if (request.type === "pair" || request.type === "unpair") {
+			const peer = request.peer!;
+			const key = peerKey(peer);
+			if (request.type === "pair" && !pairedPeers.has(key) && pairedPeers.size >= MAX_PEERS) {
+				response = errorResponse(request.id, "peer_cap", `Cannot pair more than ${MAX_PEERS} peers.`);
+			} else {
+				if (request.type === "pair") pairedPeers.set(key, peer);
+				else pairedPeers.delete(key);
+				writePresence(paths);
+				response = { id: request.id, ok: true, result: { paired: request.type === "pair", peer } };
+			}
+		} else {
+			response = await handleRequest(pi, ctx, request);
+		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		response = errorResponse(fileId, "invalid_request", message);
@@ -897,9 +1009,11 @@ async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths
 	writeResponse(paths, response);
 	// Unlink request file so subsequent scans are O(in-flight), not O(history).
 	safeUnlink(requestPath(paths, fileName));
+	writePresence(paths);
 }
 
 async function scanRequests(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): Promise<void> {
+	if (activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
 	let fileNames: string[] = [];
 	try {
 		fileNames = fs.readdirSync(paths.requests);
@@ -928,33 +1042,35 @@ function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContex
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.ui.notify(`claude-bridge watcher failed: ${message}`, "error");
 	});
+	void scanRequests(pi, ctx, paths);
 	// No backup poll — fs.watch is sufficient on modern macOS/Node with O(1) in-flight requests.
 }
 
-function stopActiveBridge(reason?: string): void {
+function stopActiveBridge(): void {
 	watcher?.close();
 	watcher = null;
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	heartbeatTimer = null;
-	if (activePaths) {
-		const paths = activePaths;
-		if (reason) {
-			// Graceful stop: write inactive marker so MCP clients can detect us stopping.
-			writeJsonFast(paths.session, {
-				schemaVersion: 1,
-				status: "inactive",
-				bridgeSessionId,
-				stoppedAt: new Date().toISOString(),
-				reason: reason ?? "shutdown",
-			});
+	if (activePaths && activePiSessionId && namespaceDirsArePrivate(activePaths)) {
+		const owner = readPresence(activePaths.presence, activePiSessionId);
+		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
+			try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ }
 		}
-		cleanupAllBridgeFiles(paths);
 	}
 	activePaths = null;
 	activeProjectRoot = null;
+	activePiSessionId = null;
+	activeSessionName = "";
+	pairedPeers = new Map();
 }
 
 export default function claudeBridge(pi: ExtensionAPI) {
+	pi.events.on("workflow-modes:changed", (data: unknown) => {
+		const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+		cachedMode = typeof record.mode === "string" ? record.mode : null;
+		if (activePaths) writePresence(activePaths);
+	});
+
 	pi.events.on("workflow-modes:save-plan-result", (data: unknown) => {
 		const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
 		const requestId = typeof result.requestId === "string" ? result.requestId : undefined;
@@ -996,17 +1112,23 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		stopActiveBridge();
 		passiveReason = null;
+		cachedMode = null;
 		const projectRoot = findProjectRoot(ctx.cwd ?? process.cwd());
 		if (!projectRoot) {
 			ctx.ui.setStatus(EXTENSION_ID, undefined);
 			return;
 		}
-
-		const paths = bridgePaths(projectRoot);
-		ensureBridgeDirs(paths);
 		const piSessionId = sessionIdFromContext(ctx);
-		const claim = claimSessionLock(paths, projectRoot, piSessionId);
-		if (claim.active === false) {
+		if (!piSessionId) {
+			passiveReason = "Pi session id is missing or invalid; bridge namespace cannot be created.";
+			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+			ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+			return;
+		}
+
+		const paths = bridgePaths(projectRoot, piSessionId);
+		const claim = claimSessionNamespace(paths, piSessionId);
+		if (!claim.active) {
 			passiveReason = claim.reason;
 			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 			ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
@@ -1015,35 +1137,53 @@ export default function claudeBridge(pi: ExtensionAPI) {
 
 		activePaths = paths;
 		activeProjectRoot = projectRoot;
-		writePolicy(paths, projectRoot);
+		activePiSessionId = piSessionId;
+		activeSessionName = sessionName(pi);
+		writePresence(paths);
 		startWatcher(pi, paths, ctx);
 		heartbeatTimer = setInterval(() => {
-			if (!activePaths || !activeProjectRoot) return;
-			if (!refreshSessionLock(activePaths, activeProjectRoot, piSessionId)) {
+			if (!activePaths || !activePiSessionId) return;
+			const current = readPresence(activePaths.presence, activePiSessionId);
+			if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
+				passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
 				watcher?.close();
 				watcher = null;
+				clearInterval(heartbeatTimer!);
+				heartbeatTimer = null;
+				activePaths = null;
+				activeProjectRoot = null;
+				activePiSessionId = null;
 				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
 				return;
 			}
+			writePresence(activePaths);
 		}, HEARTBEAT_MS);
 		heartbeatTimer.unref?.();
 		ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: active");
-		ctx.ui.notify(`claude-bridge active: ${paths.root}`, "info");
+		ctx.ui.notify(`claude-bridge active: ${paths.namespace}`, "info");
 	});
 
 	pi.on("session_shutdown", async () => {
-		stopActiveBridge("session_shutdown");
+		stopActiveBridge();
 	});
 
 	pi.registerCommand("claude-bridge", {
-		description: "Show Claude Code bridge status",
+		description: "List live Claude bridge sessions and paired peers",
 		handler: async (_args, ctx) => {
-			if (activePaths && activeProjectRoot) {
-				ctx.ui.notify(`Claude bridge active\nRoot: ${activePaths.root}\nSession: ${bridgeSessionId}`, "info");
+			const projectRoot = findProjectRoot(ctx.cwd ?? process.cwd());
+			const sessions = projectRoot ? listLiveNamespaces(projectRoot) : [];
+			if (sessions.length === 0) {
+				ctx.ui.notify(`No live Claude bridge sessions.${passiveReason ? `\n${passiveReason}` : ""}`, passiveReason ? "warning" : "info");
 				return;
 			}
-			ctx.ui.notify(`Claude bridge passive/off${passiveReason ? `\n${passiveReason}` : ""}`, passiveReason ? "warning" : "info");
+			const lines = sessions.map(({ id, presence }) => {
+				const peers = presence.peers.length
+					? presence.peers.map((peer) => `${peer.harness}:${peer.id} (${peer.pendingCount} pending)`).join(", ")
+					: "none";
+				return `- ${id.slice(0, 8)} (${id})${presence.name ? ` — ${presence.name}` : ""} [${presence.mode ?? "unknown"}] age ${formatAge(presence.startedAt)}; peers: ${peers}`;
+			});
+			ctx.ui.notify(`Claude bridge live sessions\n${lines.join("\n")}`, "info");
 		},
 	});
 }

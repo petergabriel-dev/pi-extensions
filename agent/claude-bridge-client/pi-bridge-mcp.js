@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * Claude Code MCP client for Pi bridge.
- * Zero Pi imports by design. Talks only to <project>/.pi/memory/bridge/*.json.
+ * Zero Pi imports by design. Talks only to per-session bridge namespaces.
  */
 
 const fs = require("node:fs");
@@ -11,10 +11,11 @@ const readline = require("node:readline");
 
 const BRIDGE_TIMEOUT_MS = 2_000;
 const POLL_MS = 100;
-const LOCK_TTL_MS = 5_000;
-// Cache session heartbeat for DEBOUNCE_CACHE_MS to avoid hammering session.json
-// on burst requests. Re-read on cache miss or when we expect a new heartbeat.
-const DEBOUNCE_CACHE_MS = 1_000;
+const LIVE_TTL_MS = 5_000;
+const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const HARNESS_KINDS = new Set(["claude", "cursor", "pi"]);
+const MAX_PEERS = 10;
+const BRIDGE_DOWN_MESSAGE = "Pi bridge not responding; start/focus Pi in this project.";
 const SERVER_NAME = "pi-claude-bridge";
 const SERVER_VERSION = "0.1.0";
 
@@ -22,118 +23,225 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function nowIso() {
-	return new Date().toISOString();
+function isDir(p) {
+	try {
+		const stat = fs.lstatSync(p);
+		return stat.isDirectory() && !stat.isSymbolicLink();
+	} catch { return false; }
 }
 
-function isDir(p) {
-	try { return fs.statSync(p).isDirectory(); } catch { return false; }
+function isPrivateDir(p) {
+	try {
+		const stat = fs.lstatSync(p);
+		return stat.isDirectory() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o700;
+	} catch { return false; }
+}
+
+function isPrivateFile(p) {
+	try {
+		const stat = fs.lstatSync(p);
+		return stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o600;
+	} catch { return false; }
 }
 
 function findPiProjectRoot(start = process.cwd()) {
 	let dir = path.resolve(start);
 	while (true) {
-		if (isDir(path.join(dir, ".pi"))) return dir;
+		const marker = path.join(dir, ".pi");
+		if (fs.existsSync(marker)) {
+			if (!isDir(marker)) return null;
+			try { return fs.realpathSync(dir); } catch { return null; }
+		}
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;
 		dir = parent;
 	}
 }
 
-function bridgePaths(projectRoot) {
-	const root = path.join(projectRoot, ".pi", "memory", "bridge");
+function bridgePaths(projectRoot, piSessionId) {
+	if (!isSafeId(piSessionId)) throw new Error("Invalid Pi session id.");
+	const root = path.join(fs.realpathSync(projectRoot), ".pi", "memory", "bridge");
+	const sessions = path.join(root, "sessions");
+	const namespace = path.join(sessions, piSessionId);
 	return {
 		root,
-		requests: path.join(root, "requests"),
-		responses: path.join(root, "responses"),
-		processed: path.join(root, "processed"),
-		policy: path.join(root, "policy.json"),
-		session: path.join(root, "session.json"),
+		sessions,
+		namespace,
+		requests: path.join(namespace, "requests"),
+		responses: path.join(namespace, "responses"),
+		processed: path.join(namespace, "processed"),
+		presence: path.join(namespace, "presence.json"),
 	};
+}
+
+function isSafeId(value) {
+	return typeof value === "string" && SAFE_ID_RE.test(value);
+}
+
+function isHarnessName(value) {
+	return typeof value === "string" && HARNESS_KINDS.has(value);
 }
 
 function readJson(file) {
 	try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
 
-function writeFileAtomic(file, text) {
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	const tmp = path.join(path.dirname(file), `${path.basename(file)}.tmp.${process.pid}.${Date.now()}.${crypto.randomUUID()}`);
-	let fd;
+function parsePresence(value, expectedId) {
+	if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== 2) return null;
+	if (!isSafeId(value.piSessionId) || (expectedId && value.piSessionId !== expectedId)) return null;
+	if (!Number.isInteger(value.pid) || typeof value.name !== "string" || !(typeof value.mode === "string" || value.mode === null)) return null;
+	if (typeof value.startedAt !== "string" || typeof value.heartbeatAt !== "string" || !Array.isArray(value.peers) || value.peers.length > MAX_PEERS) return null;
+	const heartbeat = Date.parse(value.heartbeatAt);
+	if (!Number.isFinite(heartbeat) || !Number.isFinite(Date.parse(value.startedAt))) return null;
+	if (value.peers.some((peer) => !peer || typeof peer !== "object" || !isHarnessName(peer.harness) || !isSafeId(peer.id))) return null;
+	const peers = value.peers.map((peer) => ({ harness: peer.harness, id: peer.id, pendingCount: Number.isFinite(peer.pendingCount) ? Math.max(0, Math.floor(peer.pendingCount)) : 0 }));
+	return { schemaVersion: 2, piSessionId: value.piSessionId, name: value.name, mode: value.mode, pid: value.pid, startedAt: value.startedAt, heartbeatAt: value.heartbeatAt, peers };
+}
+
+function resolveProjectRoot(cwd = process.cwd()) {
+	const projectRoot = findPiProjectRoot(cwd);
+	if (!projectRoot) throw new Error("Not a Pi project; no .pi directory found in cwd or ancestors.");
+	return projectRoot;
+}
+
+function liveSessions(projectRoot, now = Date.now()) {
+	const piDir = path.join(projectRoot, ".pi");
+	const memoryDir = path.join(piDir, "memory");
+	const paths = bridgePathsRoot(projectRoot);
+	if (!isDir(piDir) || !isDir(memoryDir) || !isPrivateDir(paths.root) || !isPrivateDir(paths.sessions)) return [];
+	let ids;
+	try { ids = fs.readdirSync(paths.sessions); } catch { return []; }
+	const result = [];
+	for (const id of ids) {
+		if (!isSafeId(id)) continue;
+		const namespace = bridgePaths(projectRoot, id);
+		if (![namespace.namespace, namespace.requests, namespace.responses, namespace.processed].every(isPrivateDir) || !isPrivateFile(namespace.presence)) continue;
+		const presence = parsePresence(readJson(namespace.presence), id);
+		if (!presence) continue;
+		const heartbeat = Date.parse(presence.heartbeatAt);
+		if (now - heartbeat <= LIVE_TTL_MS && heartbeat <= now + LIVE_TTL_MS) result.push({ id, presence, paths: namespace });
+	}
+	return result;
+}
+
+function bridgePathsRoot(projectRoot) {
+	const root = path.join(projectRoot, ".pi", "memory", "bridge");
+	return { root, sessions: path.join(root, "sessions") };
+}
+
+function formatAge(startedAt, now = Date.now()) {
+	const seconds = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	return `${Math.floor(minutes / 60)}h`;
+}
+
+function listSessions(cwd = process.cwd(), now = Date.now()) {
+	return liveSessions(resolveProjectRoot(cwd), now).map(({ id, presence }) => ({ id, shortId: id.slice(0, 8), ...presence, age: formatAge(presence.startedAt, now) }));
+}
+
+function resolveHarnessIdentity(input = {}, env = process.env) {
+	const record = input && typeof input === "object" ? input : {};
+	const explicit = record.sessionId !== undefined && record.sessionId !== null && record.sessionId !== ""
+		? record.sessionId
+		: record.claudeSessionId !== undefined && record.claudeSessionId !== null && record.claudeSessionId !== ""
+			? record.claudeSessionId
+			: undefined;
+	const id = explicit ?? (typeof env.CLAUDE_CODE_SESSION_ID === "string" && env.CLAUDE_CODE_SESSION_ID ? env.CLAUDE_CODE_SESSION_ID : undefined);
+	if (id === undefined) return null;
+	if (!isSafeId(id)) throw new Error("Harness session id is invalid.");
+	const harness = record.harness === undefined ? "claude" : record.harness;
+	if (!isHarnessName(harness)) throw new Error("Harness kind is invalid.");
+	return { harness, id };
+}
+
+function peerMatches(peer, identity) {
+	return peer.harness === identity.harness && peer.id === identity.id;
+}
+
+function formatChoices(sessions) {
+	return sessions.map(({ id, presence }) => `- ${id.slice(0, 8)} (${id})${presence.name ? ` — ${presence.name}` : ""} [${presence.mode ?? "unknown"}] age ${formatAge(presence.startedAt)}`).join("\n");
+}
+
+function ensureBridgeIsLive(session) {
+	if (!session || ![session.paths.root, session.paths.sessions, session.paths.namespace, session.paths.requests, session.paths.responses, session.paths.processed].every(isPrivateDir) || !isPrivateFile(session.paths.presence)) {
+		throw new Error(BRIDGE_DOWN_MESSAGE);
+	}
+}
+
+async function sendRequestToSession(projectRoot, session, type, payload, identity, options = {}) {
+	ensureBridgeIsLive(session);
+	const id = options.requestId || crypto.randomUUID();
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error("Bridge request id must be a UUID.");
+	const requestFile = path.join(session.paths.requests, `${id}.json`);
+	const responseFile = path.join(session.paths.responses, `${id}.json`);
+	const request = { id, type, payload: payload || {}, ts: Date.now(), ...(identity ? { peer: identity } : {}) };
+	const tmp = path.join(session.paths.requests, `${id}.tmp.${process.pid}.${crypto.randomUUID()}`);
 	try {
-		fs.writeFileSync(tmp, text, "utf8");
-		fd = fs.openSync(tmp, "r+");
-		fs.fsyncSync(fd);
-		fs.closeSync(fd);
-		fd = undefined;
-		fs.renameSync(tmp, file);
+		fs.writeFileSync(tmp, `${JSON.stringify(request, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+		fs.chmodSync(tmp, 0o600);
+		fs.renameSync(tmp, requestFile);
 	} catch (error) {
-		if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
 		try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
+		if (error && (error.code === "ENOENT" || error.code === "EACCES")) throw new Error(BRIDGE_DOWN_MESSAGE);
 		throw error;
 	}
-}
-
-function writeJsonAtomic(file, value) {
-	writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-// Module-level session cache: avoids re-reading session.json on burst requests.
-// Invalidate the cache when we detect a stale bridge (Pi restart mid-burst).
-let _cachedProjectRoot = null;
-let _cachedPaths = null;
-let _cachedSessionReadAt = 0; // ms epoch
-let _cachedHeartbeat = 0;     // ms epoch from session heartbeatAt
-
-function resolveBridge(cwd) {
-	const projectRoot = findPiProjectRoot(cwd || process.cwd());
-	if (!projectRoot) throw new Error("Not a Pi project; no .pi directory found in cwd or ancestors.");
-	const paths = bridgePaths(projectRoot);
-	if (!isDir(paths.root) || !isDir(paths.requests) || !isDir(paths.responses)) {
-		throw new Error("Pi bridge not responding; start/focus Pi in this project.");
-	}
-	// Debounce: reuse cached session read within DEBOUNCE_CACHE_MS window.
-	const now = Date.now();
-	if (projectRoot === _cachedProjectRoot && now - _cachedSessionReadAt < DEBOUNCE_CACHE_MS) {
-		// Still fresh enough.
-		if (now - _cachedHeartbeat <= LOCK_TTL_MS) return { projectRoot, paths };
-		// Cache was fresh but heartbeat may have expired — re-read to be sure.
-	}
-	const session = readJson(paths.session);
-	const lock = session && (session.lock || session);
-	const heartbeat = Date.parse(lock && lock.heartbeatAt || "");
-	_cachedProjectRoot = projectRoot;
-	_cachedPaths = paths;
-	_cachedSessionReadAt = now;
-	_cachedHeartbeat = Number.isFinite(heartbeat) ? heartbeat : 0;
-	if (!lock || lock.status !== "active" || !Number.isFinite(heartbeat) || now - heartbeat > LOCK_TTL_MS) {
-		throw new Error("Pi bridge not responding; start/focus Pi in this project.");
-	}
-	return { projectRoot, paths };
-}
-
-async function bridgeRequest(type, payload, options = {}) {
-	const { projectRoot, paths } = resolveBridge(options.cwd);
-	const id = options.requestId || crypto.randomUUID();
-	const request = { id, type, payload: payload || {}, ts: Date.now(), source: "claude-code" };
-	const responseFile = path.join(paths.responses, `${id}.json`);
-	const requestFile = path.join(paths.requests, `${id}.json`);
-	// Drop fsync on request write — we poll for response, rename is sufficient.
-	fs.mkdirSync(path.dirname(requestFile), { recursive: true });
-	const tmp = path.join(path.dirname(requestFile), `${path.basename(requestFile)}.tmp.${process.pid}.${Date.now()}.${crypto.randomUUID()}`);
-	fs.writeFileSync(tmp, `${JSON.stringify(request, null, 2)}\n`, "utf8");
-	fs.closeSync(fs.openSync(tmp, "r+"));
-	fs.renameSync(tmp, requestFile);
 	const deadline = Date.now() + BRIDGE_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		const response = readJson(responseFile);
-		if (response) {
-			if (response.ok) return { projectRoot, requestId: id, result: response.result };
+		if (response && response.id === id) {
+			if (response.ok) return { projectRoot, piSessionId: session.id, requestId: id, result: response.result };
 			throw new Error(response.error && response.error.message ? response.error.message : `Pi bridge ${type} failed.`);
 		}
 		await sleep(POLL_MS);
 	}
-	throw new Error("Pi bridge not responding; start/focus Pi in this project.");
+	throw new Error(BRIDGE_DOWN_MESSAGE);
+}
+
+function requireIdentity(identity) {
+	if (!identity) throw new Error("Harness session id unavailable; set CLAUDE_CODE_SESSION_ID or pass sessionId/claudeSessionId, then pair with pair_session.");
+}
+
+async function resolveTarget(projectRoot, identity) {
+	const sessions = liveSessions(projectRoot);
+	if (sessions.length === 0) throw new Error(BRIDGE_DOWN_MESSAGE);
+	if (!identity && sessions.length > 1) throw new Error(`Multiple live Pi sessions; choose one with pair_session. Choices:\n${formatChoices(sessions)}`);
+	requireIdentity(identity);
+	const paired = sessions.filter(({ presence }) => presence.peers.some((peer) => peerMatches(peer, identity)));
+	if (paired.length === 1) return paired[0];
+	if (paired.length > 1) throw new Error(`Harness is paired with multiple live Pi sessions; select one using pair_session. Choices:\n${formatChoices(paired)}`);
+	if (sessions.length === 1) {
+		await sendRequestToSession(projectRoot, sessions[0], "pair", {}, identity);
+		return sessions[0];
+	}
+	throw new Error(`Multiple live Pi sessions; choose one with pair_session. Choices:\n${formatChoices(sessions)}`);
+}
+
+async function bridgeRequest(type, payload, options = {}) {
+	const projectRoot = resolveProjectRoot(options.cwd || process.cwd());
+	const identity = Object.prototype.hasOwnProperty.call(options, "identity")
+		? options.identity
+		: resolveHarnessIdentity(payload, options.env || process.env);
+	const session = await resolveTarget(projectRoot, identity);
+	return sendRequestToSession(projectRoot, session, type, payload, identity, options);
+}
+
+async function pairSession(piSessionId, options = {}) {
+	if (!isSafeId(piSessionId)) throw new Error("pair_session requires a valid piSessionId.");
+	const projectRoot = resolveProjectRoot(options.cwd || process.cwd());
+	const identity = Object.prototype.hasOwnProperty.call(options, "identity") ? options.identity : resolveHarnessIdentity(options.identityInput || {}, options.env || process.env);
+	requireIdentity(identity);
+	const sessions = liveSessions(projectRoot);
+	const target = sessions.find(({ id }) => id === piSessionId);
+	if (!target) throw new Error(`Pi session ${piSessionId} is not live. Choices:\n${formatChoices(sessions) || "- none"}`);
+	for (const session of sessions) {
+		if (session.presence.peers.some((peer) => peerMatches(peer, identity))) {
+			await sendRequestToSession(projectRoot, session, "unpair", {}, identity);
+		}
+	}
+	await sendRequestToSession(projectRoot, target, "pair", {}, identity);
+	return { piSessionId, harness: identity.harness, harnessId: identity.id };
 }
 
 function content(text, details) {
@@ -255,19 +363,43 @@ const tools = [
 			},
 			oneOf: [{ required: ["taskId"] }, { required: ["title"] }]
 		}
+	},
+	{
+		name: "list_sessions",
+		description: "List live Pi bridge sessions and their paired harness peers.",
+		inputSchema: { type: "object", properties: { cwd: { type: "string" } } }
+	},
+	{
+		name: "pair_session",
+		description: "Move this harness pairing to one selected live Pi session.",
+		inputSchema: {
+			type: "object",
+			properties: { piSessionId: { type: "string" }, cwd: { type: "string" } },
+			required: ["piSessionId"]
+		}
 	}
 ];
 
+const identityProperties = {
+	sessionId: { type: "string", description: "Harness session id; takes precedence over claudeSessionId." },
+	claudeSessionId: { type: "string", description: "Deprecated alias for sessionId." },
+	harness: { type: "string", enum: [...HARNESS_KINDS], description: "Harness kind; defaults to claude." },
+};
+for (const tool of tools) Object.assign(tool.inputSchema.properties, identityProperties);
+
 async function callTool(name, args) {
 	const cwd = args && args.cwd;
-	if (name === "recall_memory") return toolResult(name, await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd }));
-	if (name === "recall_memory_entry") return toolResult(name, await bridgeRequest("recall_entry", { slug: args.slug }, { cwd }));
-	if (name === "save_memory") return toolResult(name, await bridgeRequest("save_memory", { name: args.name, description: args.description, type: args.type, body: args.body }, { cwd }));
-	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, sessionId: args.sessionId, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd }));
-	if (name === "validate_docs_tags") return toolResult(name, await bridgeRequest("validate_tags", { planText: args.planText }, { cwd }));
-	if (name === "save_plan") return toolResult(name, await bridgeRequest("save_plan", { planText: args.planText, planId: args.planId, confirmed: args.confirmed === true }, { cwd }));
-	if (name === "read_plan_tasks") return toolResult(name, await bridgeRequest("read_plan_tasks", { planId: args.planId }, { cwd }));
-	if (name === "tick_plan_task") return toolResult(name, await bridgeRequest("tick_plan_task", { taskId: args.taskId, title: args.title, planId: args.planId }, { cwd }));
+	if (name === "list_sessions") return toolResult(name, { sessions: listSessions(cwd) });
+	const identity = resolveHarnessIdentity(args);
+	if (name === "pair_session") return toolResult(name, await pairSession(args.piSessionId, { cwd, identity }));
+	if (name === "recall_memory") return toolResult(name, await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd, identity }));
+	if (name === "recall_memory_entry") return toolResult(name, await bridgeRequest("recall_entry", { slug: args.slug }, { cwd, identity }));
+	if (name === "save_memory") return toolResult(name, await bridgeRequest("save_memory", { name: args.name, description: args.description, type: args.type, body: args.body }, { cwd, identity }));
+	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, sessionId: args.sessionId, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd, identity }));
+	if (name === "validate_docs_tags") return toolResult(name, await bridgeRequest("validate_tags", { planText: args.planText }, { cwd, identity }));
+	if (name === "save_plan") return toolResult(name, await bridgeRequest("save_plan", { planText: args.planText, planId: args.planId, confirmed: args.confirmed === true }, { cwd, identity }));
+	if (name === "read_plan_tasks") return toolResult(name, await bridgeRequest("read_plan_tasks", { planId: args.planId }, { cwd, identity }));
+	if (name === "tick_plan_task") return toolResult(name, await bridgeRequest("tick_plan_task", { taskId: args.taskId, title: args.title, planId: args.planId }, { cwd, identity }));
 	throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -311,7 +443,28 @@ async function main() {
 	}
 }
 
-main().catch((error) => {
-	console.error(error instanceof Error ? error.message : String(error));
-	process.exit(1);
-});
+module.exports = {
+	BRIDGE_DOWN_MESSAGE,
+	bridgePaths,
+	bridgePathsRoot,
+	bridgeRequest,
+	callTool,
+	findPiProjectRoot,
+	isSafeId,
+	listSessions,
+	liveSessions,
+	pairSession,
+	parsePresence,
+	resolveHarnessIdentity,
+	resolveProjectRoot,
+	resolveTarget,
+	sendRequestToSession,
+	tools,
+};
+
+if (require.main === module) {
+	main().catch((error) => {
+		console.error(error instanceof Error ? error.message : String(error));
+		process.exit(1);
+	});
+}

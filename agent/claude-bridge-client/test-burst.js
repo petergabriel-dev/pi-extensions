@@ -18,9 +18,20 @@ function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, "utf8")); }
 function bridgeRoot(projectRoot) { return path.join(projectRoot, ".pi", "memory", "bridge"); }
-function paths(projectRoot) {
+function latestSessionId(projectRoot) {
+	const sessions = path.join(bridgeRoot(projectRoot), "sessions");
+	try {
+		return fs.readdirSync(sessions).filter((id) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))
+			.map((id) => ({ id, presence: readJson(path.join(sessions, id, "presence.json")) }))
+			.filter(({ presence }) => presence?.schemaVersion === 2 && Date.now() - Date.parse(presence.heartbeatAt) <= 5_000)
+			.sort((a, b) => Date.parse(b.presence.heartbeatAt) - Date.parse(a.presence.heartbeatAt))[0]?.id || null;
+	} catch { return null; }
+}
+function paths(projectRoot, piSessionId = latestSessionId(projectRoot)) {
 	const root = bridgeRoot(projectRoot);
-	return { root, requests: path.join(root, "requests"), responses: path.join(root, "responses"), processed: path.join(root, "processed"), policy: path.join(root, "policy.json"), session: path.join(root, "session.json") };
+	const sessions = path.join(root, "sessions");
+	const namespace = piSessionId ? path.join(sessions, piSessionId) : path.join(sessions, "missing-session");
+	return { root, sessions, namespace, requests: path.join(namespace, "requests"), responses: path.join(namespace, "responses"), processed: path.join(namespace, "processed"), presence: path.join(namespace, "presence.json") };
 }
 async function waitFor(file, timeoutMs = TIMEOUT_MS) {
 	const deadline = Date.now() + timeoutMs;
@@ -34,7 +45,8 @@ async function sendRequest(projectRoot, type, payload, id = crypto.randomUUID())
 	const p = paths(projectRoot);
 	const res = path.join(p.responses, `${id}.json`);
 	const req = path.join(p.requests, `${id}.json`);
-	fs.writeFileSync(req, JSON.stringify({ id, type, payload, ts: Date.now() }, null, 2));
+	fs.writeFileSync(req, JSON.stringify({ id, type, payload, ts: Date.now() }, null, 2), { mode: 0o600 });
+	fs.chmodSync(req, 0o600);
 	const start = Date.now();
 	if (!(await waitFor(res))) throw new Error(`No response for ${type} within ${TIMEOUT_MS}ms (${Date.now() - start}ms elapsed)`);
 	return { id, response: readJson(res), latencyMs: Date.now() - start };
@@ -46,12 +58,11 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 function freshTarget(projectRoot) {
 	const p = paths(projectRoot);
-	assert(exists(p.session), `Missing bridge session: ${p.session}`);
-	const session = readJson(p.session);
-	const lock = session.lock || session;
-	const heartbeat = Date.parse(lock.heartbeatAt || "");
-	assert(lock.status === "active" && Number.isFinite(heartbeat) && Date.now() - heartbeat <= 5_000, "Bridge session stale/not active");
-	return { p, session: lock };
+	assert(exists(p.presence), `Missing bridge presence: ${p.presence}`);
+	const session = readJson(p.presence);
+	const heartbeat = Date.parse(session.heartbeatAt || "");
+	assert(session.schemaVersion === 2 && session.piSessionId && Number.isFinite(heartbeat) && Date.now() - heartbeat <= 5_000, "Bridge session stale/not active");
+	return { p, session };
 }
 
 test("5 concurrent recall requests all complete", async ({ projectRoot }) => {
