@@ -49,7 +49,7 @@ const publishedFiles = [
   "agent/extensions/ask-user-question/*.ts",
   "agent/extensions/browser/index.ts",
   "agent/extensions/ccc-search/index.ts",
-  "agent/extensions/claude-bridge/index.ts",
+  "agent/extensions/claude-bridge/*.ts",
   "agent/extensions/discussion-notes.ts",
   "agent/extensions/engineering-docs/*.ts",
   "agent/extensions/engineering-docs/README.md",
