@@ -325,13 +325,23 @@ Both commands should print nothing. Do not signal the current Pi, delete its bri
 Run against a disposable project with isolated Pi agent roots. Register the repo MCP client and hooks above, then verify:
 
 1. `claude mcp get pi-claude-bridge` and `claude mcp list` show the repo client connected; settings JSON parses, `claude doctor` passes.
-2. Two Pi RPC sessions in one project report active under separate namespaces; orderly shutdown removes both. Session IDs were captured separately.
+2. Two Pi RPC sessions in one project report active under separate namespaces. Session IDs were captured separately.
 3. Through actual Claude CLI MCP calls, run `list_sessions`, `pair_session`, then `send_message`. Confirm message becomes pending and Pi receives it on its next prompt. Send Pi→Claude with `bridge_message`; statusline script outputs exact `Pi ✉1`; next actual Claude CLI prompt receives injected peer message; acknowledge it and confirm pending count clears. `SessionEnd` unpairs.
 4. Live bridge-client check with `harness: "cursor"` sends Cursor identity to a second Pi; Pi replies with `bridge_message`; `read_messages` retrieves and acknowledges reply. This exercises client protocol, not an interactive Cursor model session.
 5. Claude Code 2.1.296 print-mode `/clear` without session persistence changes session ID. This verifies CLI behavior, not interactive TUI behavior; explicit supplied `sessionId` takes precedence over stale `CLAUDE_CODE_SESSION_ID` in a separate live client check.
-6. Orderly Pi shutdown removes namespaces; cleanup passed. Shutdown emitted `claude-bridge dropped 1 pending peer message(s) on shutdown` for one pending message.
+6. Clean shutdown retains an owned namespace with non-live presence and peers; stale namespaces are collected after 10m. Pending mailbox messages are still dropped with a count warning.
 
 The idle statusline script output and `refreshInterval: 5` settings were verified; interactive idle redraw timing/appearance was not separately verified.
+
+#### Restart pairing acceptance (2026-10-12)
+
+Ran in a disposable project with isolated `PI_CODING_AGENT_DIR`, mode-0600 auth/config copies, and current repo extension source loaded in Pi RPC. Temp files and processes were removed after test. `pi --help` showed `--session <path|id>` and `--resume [session]`; `--resume <id>` opened an interactive picker in RPC, so same-ID resumes used `--session <id>` after initial `--session-id <id>`.
+
+- (a) Cleanly stopping Pi A kept `presence.json` and its peer, wrote a non-live heartbeat with both pending counts at zero, and made A disappear from `list_sessions`.
+- (b) Resuming A in 406ms restored its peer and showed `(restored 1 peer)`. Pi `bridge_message` then reached the `UserPromptSubmit` hook without an intervening harness request; hook output included the peer message and ack cleared `pendingCount`. Repeated after 5,684ms with same result. Hook was invoked directly with real `UserPromptSubmit` input; interactive Claude TUI rendering was not tested.
+- (c) With A down, the client's first live request auto-paired Claude to B. Restarting A dropped that peer; client resolved to B only.
+- (d) Backdating A's heartbeat by more than 10m and claiming another namespace triggered GC; A's old namespace disappeared, and same-ID resume restored no peers.
+- (e) Shutting down with one outbound message pending dropped it and emitted `claude-bridge dropped 1 pending peer message(s) on shutdown`.
 
 Existing bridge acceptance remains: `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan; `capture_note` updates live Pi Notes UI through `discussion-notes`; `validate_docs_tags` uses engineering-docs validator; `save_plan` appears in Pi `/plan view`; `read_plan_tasks` and `tick_plan_task` use the live branch-backed tracker; Claude mutation tools deny and Bash is sandbox-wrapped where supported, otherwise denied closed.
 

@@ -68,6 +68,10 @@
 ## Pi ↔ harness bridge
 
 - **Bridge ownership is per Pi session.** A second process reusing a Pi session ID becomes passive when that namespace has a fresh owner; distinct Pi session IDs can be active in one project. Stop the duplicate owner or start a fresh Pi session.
+- **Clean-stop presence must be back-dated.** `stopActiveBridge()` keeps the owned namespace but writes heartbeat `now - LIVE_TTL_MS - 1`; a fresh final heartbeat makes a same-ID restart passive (`agent/extensions/claude-bridge/index.ts`, `presence.ts`).
+- **Live pairing wins over restored pairing.** Within the 10m GC window, restart restores peers from its own validated presence but filters peers already present in another live namespace. Otherwise a Claude identity newly paired to Pi B could also reappear in Pi A (`presence.ts`, `index.ts`).
+- **A peer can return stale within the GC window.** If Claude ends while Pi is down, `SessionEnd` cannot unpair it; its persisted identity may restore for up to 10m. GC after that window removes the namespace and peer.
+- **RPC `--resume` is interactive.** In observed Pi CLI, `--resume <id>` opened a TUI picker in RPC mode; use `--session <id>` to resume a known session headlessly.
 - **Bridge root follows nearest marker, not client config path.** MCP `cwd`, Pi cwd, and intended project marker must agree.
 - **Bridge protocol tests mutate state.** Core tests save notes, plan, and personal memory. Run against disposable `PI_CODING_AGENT_DIR`, not normal user memory; workflow plans and personal-memory paths now use that injected root.
 - **Bridge uses `fs.watch` without polling fallback.** Missed request events become two-second client timeouts. Preserve watcher lifecycle/coalescing behavior and diagnose request files before changing protocol. Plan reads/ticks must remain live workflow-owner requests; never add a direct MCP plan-file fallback.
