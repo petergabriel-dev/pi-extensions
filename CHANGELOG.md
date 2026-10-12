@@ -11,11 +11,13 @@ All notable changes to this project are documented here.
 ### Added
 
 - Add `/agents` TUI overlay for recent/live child activity, pending-question answers, and steering running children.
+- Add a single-owner child-question relay through the shared `ask-user-question` FIFO, with source-scoped cancellation, redacted payloads, and RPC-safe `select`/`input` dialogs.
 
 ### Changed
 
-- Relay child questions directly to the user with nested-owner labels and exactly-once answers; queue a redacted main-agent `nextTurn` note without prompting the parent model.
-- Deliver subagent results once through automatic follow-up turns; list output omits delivered result bodies and discourages polling.
+- Keep subagent result/failure bodies pending until parent receipt; queue at most one displayed `nextTurn` fallback without auto-starting a turn, and suppress shutdown failure follow-ups.
+- Canonicalize writer ownership paths to case-folded real-path keys; warn once per session when local agent definitions shadow bundled keys.
+- Enforce read-only full-content decision-index, root-spoke, and ADR freshness in root `npm run check`.
 - Route live subagent messages through next-tool-boundary RPC steer; default explorer effort to `low` and prefix/filter bounded child diagnostics safely.
 
 ## [0.7.1] - 2026-09-18

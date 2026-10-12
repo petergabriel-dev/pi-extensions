@@ -150,11 +150,19 @@ Run the installed-Pi live smoke separately:
 npm run smoke:subagents
 ```
 
-The smoke resolves installed Pi through global npm metadata, binds its scripted endpoint and test page to loopback, filters inherited Pi/API-secret environment variables, uses a fresh `0700` `PI_CODING_AGENT_DIR` instead of normal `~/.pi` state, and deletes that directory afterward. It exercises parent-to-explorer launch, a child question answered through the parent's RPC extension UI request (the parent model must not call `subagent_message`), worker-to-nested-explorer spawn, and browser proxy navigation to a local page. It verifies no child processes remain; its main-response deadline is 120 seconds. This checkout's smoke passed on installed Pi 1.1.0; unit/type tests use vendored Pi 0.80.9. Browser reports explicit `PASS` or `SKIP` when Chromium is unavailable. The smoke is not part of `npm test`; `npm test` remains the full automated gate after `npm run bootstrap`.
+The smoke resolves installed Pi through global npm metadata, binds its scripted endpoint and test page to loopback, filters inherited Pi/API-secret environment variables, uses a fresh `0700` `PI_CODING_AGENT_DIR` instead of normal `~/.pi` state, and deletes that directory afterward. It exercises parent-to-explorer launch, a child question relayed through the question owner's built-in `ctx.ui.select`/`ctx.ui.input` path in RPC mode (the parent model must not call `subagent_message`), worker-to-nested-explorer spawn, and browser proxy navigation to a local page. It verifies no child processes remain; its main-response deadline is 120 seconds. This checkout's smoke passed on installed Pi 1.1.0; unit/type tests use vendored Pi 0.80.9. Browser reports explicit `PASS` or `SKIP` when Chromium is unavailable. The smoke is not part of `npm test`; `npm test` remains the full automated gate after `npm run bootstrap`.
 
 ### Interactive `/agents` and question-relay acceptance
 
-Use `./bin/pi-workspace` in a saved Build-mode TUI session, not `-p` and not after `/new`. Delegate a worker that starts an explorer which asks questions. Confirm a chain-labeled dialog appears, your answer reaches only the explorer, the parent receives one quiet `nextTurn` note, and the parent model does not call `subagent_message` to answer. While a child streams, open `/agents`, inspect recent/live items, and steer it; verify delivery at its next tool boundary and the `User told <owner>: …` note. If the viewed child asks while the overlay is open, Esc must return to chat without opening that child's dialog; verify warning and later answer through `/agents`. A different child's queued question should open its dialog after Esc. R1 follow-up (out of scope): model-initiated `ask_user_question` opening over `/agents`; if reproduced, route dialog ownership through `pi.events` to one UI owner. Check exactly one result delivery and no leftover child processes or runtime sockets.
+Use `./bin/pi-workspace` in a saved Build-mode TUI session, not `-p` and not after `/new`. Verify:
+
+1. Keep a model question open, trigger a child question, and confirm FIFO order, correct routing for both answers, and parent-turn completion.
+2. Dismiss a child dialog with Esc, then answer the still-pending question through `/agents`; confirm the answer reaches the child once.
+3. Esc with a queued result: submit restored editor text once, or verify one `nextTurn` fallback when the editor does not own it. `subagents_list` stays pending until matching `message_start`; no turn auto-starts.
+4. Quit with a live child; confirm no host-closed failure follow-up, socket removal, and no leftover RPC process.
+5. In a disposable Pi home, add a local `worker.md` shadow missing `subagent_agents`; verify one warning names the file and missing key, then remove the fixture.
+
+`npm run smoke:subagents` separately covers RPC child-question UI, nested spawn, and browser proxy. Model questions opening over `/agents` remain out of scope.
 
 ## Standard verification gate
 
@@ -168,7 +176,7 @@ GitHub Actions runs the same bootstrap and `npm test` gate for pull requests and
 
 This runs:
 
-1. Workspace inventory/integrity check.
+1. Workspace inventory/integrity, package artifact, and read-only engineering-doc checks (full-content decision index, root spokes, and ADR validity).
 2. Focused ask-user-question queue test, then CCC, engineering-docs, personal-memory, subagent RPC/timeout/lifecycle, and workflow-mode tests.
 3. Configured TypeScript checks.
 4. Cursor read-only hook and neutral Cursor-kit tests.
@@ -179,6 +187,7 @@ Useful focused commands:
 
 ```bash
 npm run check
+npm run check:docs
 npm run test:ask-user-question
 npm run test:extensions
 npm run typecheck
@@ -201,18 +210,18 @@ done
 
 | Component | Automated gate | Live/manual acceptance |
 |---|---|---|
-| Root package, eleven entrypoints, four skills, two agents | `npm run check` | Source header lists eleven extensions once; clean packed artifact loads and discovers bundled explorer/worker. |
+| Root package, eleven entrypoints, four skills, two agents | `npm run check` (includes read-only `check:docs`) | Source header lists eleven extensions once; clean packed artifact loads and discovers bundled explorer/worker; decision index, spokes, and ADRs are current. |
 | `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
 | `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |
 | `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |
-| `engineering-docs` | `npm --prefix agent/extensions/engineering-docs test` | `/docs check --check` reports managed docs, healthy spokes/ADRs/tags, current index. |
+| `engineering-docs` | `npm --prefix agent/extensions/engineering-docs test`; `npm run check:docs` | `/docs check --check` reports managed docs, healthy spokes/ADRs/tags, and full-content current index. |
 | `filechanges` | Package load/inventory; no dedicated unit suite | Make disposable `edit`/`write`, inspect cumulative diff, verify accept keeps and decline restores/deletes. |
 | `notify` | Package load/inventory; no dedicated unit suite | Finish one assistant turn and confirm terminal-native “Ready for input” notification. |
 | `personal-memory` | `npm --prefix agent/extensions/personal-memory test` and `npm --prefix agent/extensions/personal-memory run typecheck` | In isolated Pi home, save slug, inspect generated `MEMORY.md`, fetch one entry. |
 | `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | `npm run smoke:subagents` exercises installed-Pi RPC launch, question round-trip, nested spawn, and browser proxy; browser reports explicit PASS/SKIP. Smoke is separate from `npm test`. |
 | `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
-| `ask-user-question` | `npm run test:ask-user-question` | Queue test covers FIFO order, batch cancellation, abort re-check, drain reset, and per-question Skip progression. |
+| `ask-user-question` | `npm run test:ask-user-question` | Queue/relay tests cover model-child FIFO, source-scoped cancellation, RPC select/input, Other, free text, and unavailable/dismissed paths. |
 | Claude MCP client + read-only hook | Live core protocol test covers MCP dispatch, bridge-down failure, sandbox allow/deny | `claude mcp list`; real `/discuss` and `/plan` capture/save handoff plus `read_plan_tasks`/`tick_plan_task`. |
 | Cursor MCP/hooks/commands | `npm run test:cursor` and `npm run test:cursor-kit` | Real Cursor bridge commands, shell/MCP denial, `Write` pre-tool denial, neutral commands, and commit nudge. |
 | Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |

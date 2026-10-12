@@ -5,7 +5,7 @@ status: Active
 date: 2026-08-27
 decision: Adopt ask-user-question as the eleventh runtime extension with text, single-select, and multi-select modes; serialize model-initiated UI through a module-local FIFO queue with batch cancellation; reinforce question routing with one shared per-turn workflow prompt fragment.
 why: Pi can emit multiple tool calls in one batch while ctx.ui.custom supports one active UI call. A local queue prevents overlapping question UIs without leaking mutable state through globalThis; explicit Skip and Escape outcomes preserve per-question and batch semantics. The root cause of prose questions was that no workflow-mode prompt named the question tool while DISCUSS_PROMPT named four other tools. A shared fragment at composeWorkflowPrompt binds output shape across active modes without five prompt edits or an enforcement hook.
-affects: package.json, scripts/check-workspace.mjs, agent/extensions/ask-user-question/index.ts, agent/extensions/ask-user-question/queue.ts, agent/extensions/ask-user-question/test/test_queue.ts, agent/extensions/subagents/spawn.ts, agent/extensions/workflow-modes/caveman.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_caveman.ts, agent/extensions/claude-bridge/index.ts, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/conventions.md, docs/engineering/dev-workflow.md, docs/engineering/traps.md, README.md, docs/engineering/decisions/README.md
+affects: package.json, scripts/check-workspace.mjs, agent/extensions/ask-user-question/index.ts, agent/extensions/ask-user-question/queue.ts, agent/extensions/ask-user-question/test/test_queue.ts, agent/extensions/subagents/spawn.ts, agent/extensions/workflow-modes/caveman.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_caveman.ts, agent/extensions/claude-bridge/index.ts, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/conventions.md, docs/engineering/dev-workflow.md, docs/engineering/traps.md, README.md, docs/engineering/decisions/ADR-0040-single-question-ui-owner.md, docs/engineering/decisions/README.md
 consequences: Interactive sessions can answer bounded normalized questions by text or selection; queued calls resolve on answer, Skip, Escape cancellation, abort, or unavailable UI. The focused queue test runs from the root without nested tooling, while workers cannot ask because child loaders use noExtensions: true. Active workflow modes reinforce question-tool routing each turn; Off remains deliberately uncovered because it emits no workflow prompt.
 readWhen: changing ask_user_question modes, question UI ownership, queue or cancellation semantics, root test registration, worker extension loading, workflow-mode prompt composition, or question routing
 supersedes: None
@@ -16,8 +16,8 @@ supersedes: None
 ## Decision
 
 - Add `agent/extensions/ask-user-question/index.ts` as the eleventh package runtime entrypoint. The `ask_user_question` tool supports free-form text, single-select, and multi-select questions with bounded schemas, trimmed labels/details, filtered empty labels, and option values defaulted to labels.
-- Render selection controls with visible rows and hints only. Single-select order is options, Other, Skip this question; multi-select order is options, Other, Submit, Skip this question. Escape cancels the whole queued batch; Skip resolves only the current question and lets the next queued question render. Results include `answered`, `skipped`, `cancelled`, and `unavailable` statuses.
-- Keep UI serialization in `agent/extensions/ask-user-question/queue.ts` as module-local FIFO state. Recheck `batchCancelled` and `signal.aborted` after each waiter reaches the lock, drain queued waiters without invoking their render callback, and reset cancellation only after the chain reaches idle. Do not use `globalThis`.
+- Render selection controls with visible rows and hints only. Single-select order is options, Other, Skip this question; multi-select order is options, Other, Submit, Skip this question. Model Escape cancels queued model questions; Skip resolves only the current model question and lets the next queued question render. Child Escape dismisses only that child request; see ADR-0040 for source-scoped cancellation. Results include `answered`, `skipped`, `cancelled`, and `unavailable` statuses.
+- Keep UI serialization in `agent/extensions/ask-user-question/queue.ts` as module-local FIFO state. Recheck source cancellation and `signal.aborted` after each waiter reaches the lock, drain cancelled waiters without invoking their render callback, and reset cancellation only after the chain reaches idle. Do not use `globalThis`.
 - Keep worker sessions out of this UI path. `agent/extensions/subagents/spawn.ts` creates child sessions with `noExtensions: true`, so the parent must handle model-initiated questions.
 - Run queue coverage from the root `test:ask-user-question` script. Do not add a nested manifest, lockfile, TypeScript config, or bootstrap package for this focused test.
 - Reinforce question routing at `composeWorkflowPrompt` with one shared per-turn fragment. Bind output shape broadly: if a reply would end with a question or offer choices, call the question tool rather than limiting the rule to options-only prompts.
@@ -37,6 +37,7 @@ supersedes: None
 Docs:
 
 - [architecture.md](../architecture.md)
+- [ADR-0040-single-question-ui-owner.md](ADR-0040-single-question-ui-owner.md)
 - [invariants.md](../invariants.md)
 - [conventions.md](../conventions.md)
 - [dev-workflow.md](../dev-workflow.md)
@@ -61,7 +62,7 @@ Code:
 ## Consequences
 
 - Good: Interactive model questions have one visible UI at a time, deterministic FIFO order, explicit text/select modes, and usable headless `unavailable` results.
-- Good: Escape drains pending questions as cancelled, while Skip advances only the current question.
+- Good: model Escape drains queued model questions, child Escape dismisses only its request, and Skip advances only the current question (see ADR-0040 for child cancellation).
 - Good: Queue, schema, and package-boundary behavior have focused root-run coverage without nested tooling.
 - Bad/risk: Workers and other child sessions cannot call `ask_user_question`; the parent must ask or receive missing requirements before delegation.
 - Bad/risk: The module-local queue coordinates only this extension. A future model-initiated UI extension must either use its own owner or adopt an explicit shared owner contract.
