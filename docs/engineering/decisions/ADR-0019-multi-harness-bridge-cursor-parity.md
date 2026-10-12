@@ -79,3 +79,7 @@ Code/templates:
 ## Extends
 
 - ADR-0001
+
+## Extended by
+
+- ADR-0041

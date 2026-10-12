@@ -42,3 +42,4 @@
 | ADR-0038 | Active | RPC-mode subagent transport | Changing RPC child launch/readiness, result or failure receipt and nextTurn fallback, shutdown failure suppression, canonical ownership identity, live steering, child-question relay, `/agents` buffering/overlay, role effort defaults, stderr diagnostics, IPC token authentication, nested spawn/browser routing, event tails, lifecycle cleanup, or idle/max-total timeout behavior |
 | ADR-0039 | Active | Interactive subagent overlay and question relay | Changing child-question routing, owner-scoped item buffering, `/agents`, live steering, or parent `nextTurn` notes |
 | ADR-0040 | Active | Single question UI owner | Changing question UI ownership, child relay events, FIFO or source-scoped cancellation, RPC child dialogs, or the /agents gate |
+| ADR-0041 | Active | Multi-session bridge and peer chat | changing bridge ownership, pairing, peer routing, delivery, wake behavior, or adding a harness peer. |

@@ -3,7 +3,7 @@ id: ADR-0001
 title: Pi Claude Code bridge boundary
 status: Active
 date: 2026-05-26
-updated: 2026-07-17
+updated: 2026-10-30
 ---
 
 # ADR-0001: Pi Claude Code bridge boundary
@@ -90,6 +90,7 @@ Historical user-level Claude configuration paths (not packaged here):
 ## Extended by
 
 - ADR-0019
+- ADR-0041
 
 ## Supersedes
 
