@@ -31,6 +31,34 @@ function writeHookOutput(output, payload) {
 	});
 }
 
+function formatPeerEcho(messages, includedIds) {
+	const byId = new Map(messages.map((message) => [message.id, message]));
+	const selected = includedIds.map((id) => {
+		const message = byId.get(id);
+		if (!message || !client.isSafeId(message.from?.id) || typeof message.text !== "string") {
+			throw new Error("Invalid included peer message.");
+		}
+		return message;
+	});
+	const lines = selected.slice(0, 3).map((message) => {
+		let text = message.text
+			.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, " ")
+			.replace(/\s+/gu, " ")
+			.trim();
+		if (text.length > 200) {
+			let truncated = "";
+			for (const char of text) {
+				if (truncated.length + char.length > 199) break;
+				truncated += char;
+			}
+			text = `${truncated}…`;
+		}
+		return `Pi ${message.from.id.slice(0, 8)} (untrusted peer): ${text}`;
+	});
+	if (selected.length > 3) lines.push(`(+${selected.length - 3} more)`);
+	return lines.join("\n");
+}
+
 async function handleHookInput(input, output = process.stdout) {
 	const identity = hookIdentity(input);
 	if (!identity) return;
@@ -69,12 +97,15 @@ async function handleHookInput(input, output = process.stdout) {
 		if (!Array.isArray(messages) || messages.length === 0) return;
 		formatted = client.formatPeerBlock(messages, PEER_HOOK_BUDGET_CHARS);
 		if (!formatted.text || formatted.includedIds.length === 0) return;
-		await writeHookOutput(output, {
+		const payload = {
 			hookSpecificOutput: {
 				hookEventName: "UserPromptSubmit",
 				additionalContext: formatted.text,
 			},
-		});
+		};
+		try { payload.systemMessage = formatPeerEcho(messages, formatted.includedIds); }
+		catch { /* Echo is advisory; preserve JSON context and acknowledgement path. */ }
+		await writeHookOutput(output, payload);
 	} catch {
 		return;
 	}
@@ -93,6 +124,6 @@ async function main() {
 	catch { /* Hooks fail open without stderr or output. */ }
 }
 
-module.exports = { handleHookInput, hookIdentity };
+module.exports = { formatPeerEcho, handleHookInput, hookIdentity };
 
 if (require.main === module) void main();
