@@ -49,6 +49,7 @@ const selectCalls: Array<{ title: string; options: string[]; signal?: AbortSigna
 const selectResolvers: Array<(value: string | undefined) => void> = [];
 const registeredTools = new Map<string, { description?: string; execute: (...args: any[]) => Promise<unknown> }>();
 let sendUserMessageFailure: Error | undefined;
+let editorText = "";
 const registeredCommands: string[] = [];
 const commandHandlers = new Map<string, (args: string, ctx: unknown) => unknown>();
 const notifications: string[] = [];
@@ -131,6 +132,9 @@ const context = {
 				if (opts?.signal?.aborted) settle(undefined);
 			});
 		},
+		getEditorText() {
+			return editorText;
+		},
 		custom<T>(factory: (...args: any[]) => unknown, options: unknown): Promise<T> {
 			overlayOptions = options;
 			return new Promise<T>((resolve) => {
@@ -165,12 +169,12 @@ SubagentLaunchHost.prototype.launch = async function (options: SubagentLaunchOpt
 	launched = options;
 	launchHost = this;
 	launchedByOwner.set(options.owner, options);
-	const failing = options.task === "failure task";
+	const failing = options.task.startsWith("failure task");
 	const shutdownFailure = options.task === "shutdown failure task";
-	const running = options.task.startsWith("tail task") || options.task.startsWith("question task") || shutdownFailure;
+	const running = options.task.startsWith("tail task") || options.task.startsWith("question task") || options.task.startsWith("editor result") || options.task.startsWith("edited editor result") || options.task.startsWith("empty editor result") || shutdownFailure;
 	const taskResultText = options.task === "delivery failure task" ? "x".repeat(3_000) : "surface result";
 	const result = failing
-		? Promise.reject(new SubagentFailureError(options.owner, { transport: "rpc", kind: "process", logPath: "/tmp/subagents/surface-test-session/subagent-2.log", error: "sentinel failure", tail: "sentinel output" }))
+		? Promise.reject(new SubagentFailureError(options.owner, { transport: "rpc", kind: "process", logPath: `/tmp/subagents/surface-test-session/${options.owner}.log`, error: "sentinel failure", tail: "sentinel output" }))
 		: running
 			? new Promise<SubagentResult>((resolve, reject) => {
 				pendingResults.set(options.owner, resolve);
@@ -245,6 +249,21 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 	assert.ok(predicate(), message);
 }
 
+function emitMessageStart(message: unknown): void {
+	handlers.get("message_start")?.({ type: "message_start", message }, context);
+}
+
+function emitAgentSettled(): void {
+	handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+}
+
+function completePendingResult(owner: string, text: string): void {
+	const resolve = pendingResults.get(owner);
+	assert.ok(resolve, `missing pending result for ${owner}`);
+	pendingResults.delete(owner);
+	resolve({ owner, childSessionId: `child-${owner}`, text });
+}
+
 function emitQuestion(owner: string, question: { questionId: string; question: string; options?: string[] }): void {
 	const options = launchedByOwner.get(owner);
 	assert.ok(options, `missing launch options for ${owner}`);
@@ -298,6 +317,15 @@ try {
 	assert.deepEqual(launched?.tools, ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_question", "subagent", "browser_goto", "browser_eval", "browser_console", "browser_network", "browser_fill", "browser_click", "browser_screenshot", "browser_close"]);
 
 	await new Promise((resolve) => setImmediate(resolve));
+	const pendingDeliveryList = await registeredTools.get("subagents_list")!.execute("call-2-pending", {}, new AbortController().signal, undefined, context);
+	const pendingDeliveryText = (pendingDeliveryList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(pendingDeliveryText, /subagent-1 \[done\].*result pending delivery/);
+	assert.ok(pendingDeliveryText.includes("Result: Subagent subagent-1 finished.\n\nsurface result"));
+	assert.doesNotMatch(pendingDeliveryText, /result delivered/);
+	assert.equal(sentMessages.length, 1);
+	emitMessageStart({ role: "user", content: sentMessages[0]!.content });
+	emitAgentSettled();
+	assert.equal(sentContextMessages.filter(({ message }) => message.customType === "subagent-result").length, 0, "receipt prevents nextTurn redelivery");
 	const listResult = await registeredTools.get("subagents_list")!.execute("call-2", {}, new AbortController().signal, undefined, context);
 	const listDetails = (listResult as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string; sessionFile?: string }> } }).details;
 	assert.equal(listDetails.agents[0]?.status, "done");
@@ -306,13 +334,13 @@ try {
 	assert.equal(listDetails.agents[0]?.sessionFile, "/tmp/sessions/child-surface.jsonl");
 	const listText = (listResult as { content: Array<{ text: string }> }).content[0]!.text;
 	assert.match(listText, /transcript=\/tmp\/sessions\/child-surface\.jsonl/);
-	assert.match(listText, /subagent-1 \[done\].*result delivered as follow-up turn/);
-	assert.doesNotMatch(listText, /Result:/);
+	assert.match(listText, /subagent-1 \[done\].*result delivered/);
+	assert.doesNotMatch(listText, /result pending delivery|Result:/);
 	assert.equal(listDetails.agents[0]?.result, "surface result");
 	const unchangedList = await registeredTools.get("subagents_list")!.execute("call-2b", {}, new AbortController().signal, undefined, context);
 	const unchangedText = (unchangedList as { content: Array<{ text: string }> }).content[0]!.text;
 	assert.match(unchangedText, /No change since last check\. Results arrive automatically as a new turn; end your turn instead of polling\./);
-	assert.match(unchangedText, /subagent-1 \[done\].*result delivered as follow-up turn/);
+	assert.match(unchangedText, /subagent-1 \[done\].*result delivered/);
 	assert.doesNotMatch(unchangedText, /Result:/);
 	assert.equal(sentMessages.length, 1);
 	assert.match(sentMessages[0]!.content, /surface result/);
@@ -324,16 +352,26 @@ try {
 	assert.match((resumeResult as { content: Array<{ text: string }> }).content[0]!.text, /resumed asynchronously/);
 	assert.equal(resumedTask, "resume task");
 	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(sentMessages.length, 2);
+	assert.match(sentMessages[1]!.content, /resumed result/);
+	emitMessageStart({ role: "user", content: sentMessages[1]!.content });
+	emitAgentSettled();
 	const resumedList = await registeredTools.get("subagents_list")!.execute("call-4", {}, new AbortController().signal, undefined, context);
 	const resumedDetails = (resumedList as { details: { agents: Array<{ status: string; result?: string; transport?: string; logPath?: string }> } }).details;
 	assert.equal(resumedDetails.agents[0]?.status, "done");
 	assert.equal(resumedDetails.agents[0]?.result, "resumed result");
-	assert.equal(sentMessages.length, 2);
-	assert.match(sentMessages[1]!.content, /resumed result/);
+	assert.match((resumedList as { content: Array<{ text: string }> }).content[0]!.text, /result delivered/);
+	assert.doesNotMatch((resumedList as { content: Array<{ text: string }> }).content[0]!.text, /resumed result/);
 
 	const failureResult = await registeredTools.get("subagent")!.execute("call-5", { task: "failure task" }, new AbortController().signal, undefined, context);
 	assert.match((failureResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over rpc/);
 	await new Promise((resolve) => setImmediate(resolve));
+	const failurePendingList = await registeredTools.get("subagents_list")!.execute("call-6-pending", {}, new AbortController().signal, undefined, context);
+	const failurePendingText = (failurePendingList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(failurePendingText, /subagent-2 \[failed\].*result pending delivery/);
+	assert.ok(failurePendingText.includes("Subagent subagent-2 failed."));
+	emitMessageStart({ role: "user", content: sentMessages[2]!.content });
+	emitAgentSettled();
 	const failureList = await registeredTools.get("subagents_list")!.execute("call-6", {}, new AbortController().signal, undefined, context);
 	const failureAgents = (failureList as { details: { agents: Array<{ owner: string; status: string; transport?: string; logPath?: string; outputTail?: string }> } }).details.agents;
 	const failureAgent = failureAgents.find((agent) => agent.owner === "subagent-2");
@@ -374,14 +412,30 @@ try {
 	const deliveryFailureText = (deliveryFailureList as { content: Array<{ text: string }> }).content[0]!.text;
 	const deliveryFailureAgents = (deliveryFailureList as { details: { agents: Array<{ owner: string; status: string; result?: string; error?: string }> } }).details.agents;
 	const deliveryFailureAgent = deliveryFailureAgents.find((agent) => agent.owner === "subagent-5");
-	assert.equal(deliveryFailureAgent?.status, "failed");
+	assert.equal(deliveryFailureAgent?.status, "done");
 	assert.match(deliveryFailureAgent?.error ?? "", /^Result steering failed/);
 	assert.ok(Buffer.byteLength(deliveryFailureAgent?.result ?? "") <= 2_000);
-	assert.match(deliveryFailureText, /Result: x{50}/);
+	assert.match(deliveryFailureText, /result pending delivery/);
+	assert.match(deliveryFailureText, /Result: Subagent subagent-5 finished\.\n\nx{50}/);
 	assert.match(deliveryFailureText, /transcript=\/tmp\/sessions\/child-surface\.jsonl/);
-	const deliveredResult = deliveryFailureText.match(/\n  Result: ([\s\S]*?)(?=\n  Error:|\n  Recent output:|$)/)?.[1];
-	assert.ok(deliveredResult);
-	assert.ok(Buffer.byteLength(deliveredResult) <= 2_000);
+	const pendingDeliveryBody = deliveryFailureText.match(/\n  Result: ([\s\S]*?)(?=\n  Error:|\n  Recent output:|$)/)?.[1];
+	assert.ok(pendingDeliveryBody);
+	assert.ok(Buffer.byteLength(pendingDeliveryBody) <= 2_000);
+
+	const resultMessagesBeforeRedelivery = sentContextMessages.filter(({ message }) => message.customType === "subagent-result").length;
+	emitAgentSettled();
+	const redeliveryMessages = sentContextMessages.filter(({ message }) => message.customType === "subagent-result");
+	assert.equal(redeliveryMessages.length, resultMessagesBeforeRedelivery + 1);
+	assert.equal(redeliveryMessages.at(-1)?.message.display, true);
+	assert.deepEqual(redeliveryMessages.at(-1)?.options, { deliverAs: "nextTurn" });
+	emitAgentSettled();
+	assert.equal(sentContextMessages.filter(({ message }) => message.customType === "subagent-result").length, resultMessagesBeforeRedelivery + 1, "second settle must not duplicate nextTurn message");
+	assert.equal(sentMessages.length, 3, "nextTurn re-delivery must not start a parent turn");
+	emitMessageStart({ role: "custom", customType: "subagent-result", content: redeliveryMessages.at(-1)!.message.content });
+	const deliveredFallbackList = await registeredTools.get("subagents_list")!.execute("call-13-delivered", {}, new AbortController().signal, undefined, context);
+	const deliveredFallbackText = (deliveredFallbackList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(deliveredFallbackText, /subagent-5 \[done\].*result delivered/);
+	assert.doesNotMatch(deliveredFallbackText, /result pending delivery|Result:/);
 
 	const userMessageCountBeforeQuestions = sentMessages.length;
 	const contextMessageCountBeforeQuestions = sentContextMessages.length;
@@ -606,12 +660,105 @@ try {
 	}
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.ok(questionCancels.includes(settledChildRequest.requestId), "child settlement must cancel open owner request");
+	for (const message of sentMessages) emitMessageStart({ role: "user", content: message.content });
 	assert.equal(nestedSpawnError, undefined);
 	await nestedSpawnResult;
+
+	const failureFallbackMessageCount = sentMessages.length;
+	sendUserMessageFailure = new Error("injected failed-child delivery failure");
+	await registeredTools.get("subagent")!.execute("call-failure-fallback", { task: "failure task redelivery" }, new AbortController().signal, undefined, context);
+	const failureFallbackOwner = launched?.owner;
+	assert.ok(failureFallbackOwner);
+	await new Promise((resolve) => setImmediate(resolve));
+	sendUserMessageFailure = undefined;
+	const failureFallbackList = await registeredTools.get("subagents_list")!.execute("call-failure-pending", {}, new AbortController().signal, undefined, context);
+	const failureFallbackText = (failureFallbackList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(failureFallbackText, new RegExp(`${failureFallbackOwner} \\[failed\\].*result pending delivery`));
+	assert.match(failureFallbackText, /sentinel failure/);
+	const failureFallbackCustomCount = () => sentContextMessages.filter(({ message }) => message.customType === "subagent-result").length;
+	const failureFallbackCountBeforeSettle = failureFallbackCustomCount();
+	emitAgentSettled();
+	const failureFallbackMessage = sentContextMessages.filter(({ message }) => message.customType === "subagent-result").at(-1);
+	assert.ok(failureFallbackMessage);
+	assert.match(String(failureFallbackMessage.message.content), /sentinel failure/);
+	assert.deepEqual(failureFallbackMessage.options, { deliverAs: "nextTurn" });
+	emitAgentSettled();
+	assert.equal(failureFallbackCustomCount(), failureFallbackCountBeforeSettle + 1, "failed child gets one fallback delivery");
+	assert.equal(sentMessages.length, failureFallbackMessageCount, "failed-child nextTurn must not start parent turn");
+	emitMessageStart({ role: "custom", customType: "subagent-result", content: failureFallbackMessage.message.content });
+	const failureFallbackDelivered = await registeredTools.get("subagents_list")!.execute("call-failure-delivered", {}, new AbortController().signal, undefined, context);
+	const failureFallbackDeliveredText = (failureFallbackDelivered as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(failureFallbackDeliveredText, new RegExp(`${failureFallbackOwner} \\[failed\\].*result delivered`));
+	assert.ok(!failureFallbackDeliveredText.includes(`Result: Subagent ${failureFallbackOwner} failed.`));
+
+	const editorMessageCount = sentMessages.length;
+	await registeredTools.get("subagent")!.execute("call-editor-restore", { task: "editor result restored" }, new AbortController().signal, undefined, context);
+	const editorOwner = launched?.owner;
+	assert.ok(editorOwner);
+	completePendingResult(editorOwner, "editor restored output");
+	await waitFor(() => sentMessages.length === editorMessageCount + 1, "editor-owned follow-up queue");
+	const editorOwnedText = sentMessages.at(-1)!.content;
+	const customResultCount = () => sentContextMessages.filter(({ message }) => message.customType === "subagent-result").length;
+	const customCountBeforeEditorSettle = customResultCount();
+	editorText = editorOwnedText;
+	emitAgentSettled();
+	assert.equal(customResultCount(), customCountBeforeEditorSettle, "restored editor text must not get nextTurn duplicate");
+	const editorPendingList = await registeredTools.get("subagents_list")!.execute("call-editor-pending", {}, new AbortController().signal, undefined, context);
+	assert.match((editorPendingList as { content: Array<{ text: string }> }).content[0]!.text, /result pending delivery/);
+	editorText = "";
+	emitMessageStart({ role: "user", content: editorOwnedText });
+	emitAgentSettled();
+	assert.equal(customResultCount(), customCountBeforeEditorSettle);
+	const editorDeliveredList = await registeredTools.get("subagents_list")!.execute("call-editor-delivered", {}, new AbortController().signal, undefined, context);
+	const editorDeliveredText = (editorDeliveredList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(editorDeliveredText, new RegExp(`${editorOwner} \\[done\\].*result delivered`));
+	assert.doesNotMatch(editorDeliveredText, /editor restored output/);
+
+	const editedMessageCount = sentMessages.length;
+	await registeredTools.get("subagent")!.execute("call-editor-edited", { task: "edited editor result" }, new AbortController().signal, undefined, context);
+	const editedOwner = launched?.owner;
+	assert.ok(editedOwner);
+	completePendingResult(editedOwner, "edited editor original");
+	await waitFor(() => sentMessages.length === editedMessageCount + 1, "edited editor follow-up queue");
+	const editedDeliveryText = sentMessages.at(-1)!.content;
+	editorText = editedDeliveryText;
+	emitAgentSettled();
+	editorText = editedDeliveryText.replace("edited editor original", "user changed this result");
+	emitMessageStart({ role: "user", content: editorText });
+	editorText = "";
+	emitAgentSettled();
+	assert.equal(customResultCount(), customCountBeforeEditorSettle, "edited restored text stays pending without duplicate");
+	const editedPendingList = await registeredTools.get("subagents_list")!.execute("call-editor-edited-pending", {}, new AbortController().signal, undefined, context);
+	const editedPendingText = (editedPendingList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(editedPendingText, new RegExp(`${editedOwner} \\[done\\].*result pending delivery`));
+	assert.ok(editedPendingText.includes(`Result: Subagent ${editedOwner} finished.\n\nedited editor original`));
+
+	const emptyEditorMessageCount = sentMessages.length;
+	await registeredTools.get("subagent")!.execute("call-editor-empty", { task: "empty editor result" }, new AbortController().signal, undefined, context);
+	const emptyEditorOwner = launched?.owner;
+	assert.ok(emptyEditorOwner);
+	completePendingResult(emptyEditorOwner, "empty editor output");
+	await waitFor(() => sentMessages.length === emptyEditorMessageCount + 1, "empty-editor follow-up queue");
+	const resultMessageCountBeforeSettle = customResultCount();
+	emitAgentSettled();
+	const fallbackMessage = sentContextMessages.filter(({ message }) => message.customType === "subagent-result").at(-1);
+	assert.ok(fallbackMessage);
+	assert.equal(fallbackMessage.message.content, sentMessages.at(-1)!.content);
+	assert.deepEqual(fallbackMessage.options, { deliverAs: "nextTurn" });
+	emitAgentSettled();
+	assert.equal(customResultCount(), resultMessageCountBeforeSettle + 1, "only one nextTurn re-delivery per result");
+	assert.equal(sentMessages.length, emptyEditorMessageCount + 1, "nextTurn must not auto-start a parent turn");
+	emitMessageStart({ role: "custom", customType: "subagent-result", content: fallbackMessage.message.content });
+	const emptyEditorDeliveredList = await registeredTools.get("subagents_list")!.execute("call-editor-empty-delivered", {}, new AbortController().signal, undefined, context);
+	const emptyEditorDeliveredText = (emptyEditorDeliveredList as { content: Array<{ text: string }> }).content[0]!.text;
+	assert.match(emptyEditorDeliveredText, new RegExp(`${emptyEditorOwner} \\[done\\].*result delivered`));
+	assert.doesNotMatch(emptyEditorDeliveredText, /empty editor output/);
+
 	const messagesBeforeShutdown = sentMessages.length;
 	await registeredTools.get("subagent")!.execute("call-shutdown", { task: "shutdown failure task" }, new AbortController().signal, undefined, context);
 	assert.equal(launched?.task, "shutdown failure task");
-	const shutdownQuestionOwner = "subagent-13";
+	const shutdownQuestionOwner = launched?.owner;
+	assert.ok(shutdownQuestionOwner);
 	emitQuestion(shutdownQuestionOwner, { questionId: "shutdown-child-question", question: "Close on shutdown?" });
 	await waitFor(() => questionRequests.length === settledRelayCount + 2, "open request before session shutdown");
 	const shutdownQuestionRequest = questionRequests.at(-1)!;

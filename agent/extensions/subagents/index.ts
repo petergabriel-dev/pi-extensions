@@ -143,7 +143,10 @@ interface SubagentRecord {
 	result?: string;
 	error?: string;
 	browserReadOnly: boolean;
-	steered: boolean;
+	deliveryText?: string;
+	deliveryDelivered?: boolean;
+	deliveryRedelivered?: boolean;
+	deliveryEditorOwned?: boolean;
 	progress?: ProgressHandle;
 }
 
@@ -339,18 +342,14 @@ function resultMessage(record: SubagentRecord, text: string): string {
 }
 
 function steerResult(pi: ExtensionAPI, record: SubagentRecord, text: string): void {
-	if (record.steered) return;
-	let lastError: unknown;
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			pi.sendUserMessage(resultMessage(record, text), { deliverAs: "followUp" });
-			record.steered = true;
-			return;
-		} catch (error) {
-			lastError = error;
-		}
+	if (record.deliveryText) return;
+	const deliveryText = resultMessage(record, text);
+	record.deliveryText = deliveryText;
+	try {
+		pi.sendUserMessage(deliveryText, { deliverAs: "followUp" });
+	} catch (error) {
+		record.error = `Result steering failed: ${error instanceof Error ? error.message : String(error)}`;
 	}
-	record.error = `Result steering failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
 }
 
 function failureMessage(record: SubagentRecord): string {
@@ -365,19 +364,21 @@ function failureMessage(record: SubagentRecord): string {
 	return lines.join("\n");
 }
 
+function messageContentText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.map((part) => isRecord(part) && typeof part.text === "string" ? part.text : "").join("");
+}
+
 function steerFailure(pi: ExtensionAPI, record: SubagentRecord): void {
-	if (record.steered) return;
-	let lastError: unknown;
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			pi.sendUserMessage(failureMessage(record), { deliverAs: "followUp" });
-			record.steered = true;
-			return;
-		} catch (error) {
-			lastError = error;
-		}
+	if (record.deliveryText) return;
+	const deliveryText = failureMessage(record);
+	record.deliveryText = deliveryText;
+	try {
+		pi.sendUserMessage(deliveryText, { deliverAs: "followUp" });
+	} catch (error) {
+		record.error = `Failure steering failed: ${error instanceof Error ? error.message : String(error)}`;
 	}
-	record.error = `Failure steering failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
 }
 
 async function chooseSubagentModel(args: string, ctx: ExtensionContext): Promise<void> {
@@ -699,8 +700,8 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			record.sessionFile = result.sessionFile ?? record.sessionFile;
 			record.result = result.text;
 			record.finishedAt = Date.now();
-			if (steerToParent && !record.steered) steerResult(pi, record, result.text);
-			record.status = !steerToParent || record.steered ? "done" : "failed";
+			if (steerToParent && !record.deliveryText) steerResult(pi, record, result.text);
+			record.status = "done";
 			record.progress?.finish(record.status === "done" ? "done" : "failed");
 		}).catch((error: unknown) => {
 			clearQuestionRelays(record.owner);
@@ -785,7 +786,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			parentOwner,
 			startedAt: Date.now(),
 			answeredQuestionIds: new Set(),
-			steered: false,
 			progress: startSubagentProgress(inferRole(agent), { name: owner, parentId: parentOwner, depth }),
 		};
 		rememberRecord(record);
@@ -826,6 +826,44 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		activeContext = ctx;
 		setSubagentProgressContext(ctx);
 		ensureHost(ctx);
+	});
+
+	pi.on("message_start", (event) => {
+		const message = isRecord(event) && isRecord(event.message) ? event.message : undefined;
+		if (!message || (message.role !== "user" && !(message.role === "custom" && message.customType === "subagent-result"))) return;
+		const text = messageContentText(message.content);
+		if (!text) return;
+		for (const record of records.values()) {
+			if (record.deliveryText && text.includes(record.deliveryText)) record.deliveryDelivered = true;
+		}
+	});
+
+	pi.on("agent_settled", () => {
+		if (shuttingDown) return;
+		const ctx = activeContext;
+		for (const record of records.values()) {
+			if (!record.deliveryText || record.deliveryDelivered || record.deliveryRedelivered || record.deliveryEditorOwned) continue;
+			if (ctx?.hasUI) {
+				let editorText: string;
+				try { editorText = ctx.ui.getEditorText(); }
+				catch { continue; }
+				if (editorText.includes(record.deliveryText)) {
+					record.deliveryEditorOwned = true;
+					continue;
+				}
+			}
+			record.deliveryRedelivered = true;
+			try {
+				pi.sendMessage(
+					{ customType: "subagent-result", content: record.deliveryText, display: true },
+					{ deliverAs: "nextTurn" },
+				);
+			} catch (error) {
+				const kind = record.status === "failed" ? "Failure" : "Result";
+				const deliveryError = `${kind} re-delivery failed: ${error instanceof Error ? error.message : String(error)}`;
+				record.error = record.error ? `${record.error}\n${deliveryError}` : deliveryError;
+			}
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1019,7 +1057,6 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				browserReadOnly: workflow.mode !== "build",
 				startedAt: Date.now(),
 				answeredQuestionIds: new Set(),
-				steered: false,
 				progress,
 			};
 			rememberRecord(record);
@@ -1114,7 +1151,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			record.result = undefined;
 			record.error = undefined;
 			record.finishedAt = undefined;
-			record.steered = false;
+			record.deliveryText = undefined;
+			record.deliveryDelivered = false;
+			record.deliveryRedelivered = false;
+			record.deliveryEditorOwned = false;
 			record.question = undefined;
 			try {
 				const handle = await ensureHost(ctx).resume(record.loadoutPath, message, { signal, ...callbacksFor(record) });
@@ -1157,8 +1197,17 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				outputTail: record.outputTail,
 				question: record.question,
 			}));
+			const deliveryInfo = (owner: string) => {
+				const record = records.get(owner);
+				if (!record?.deliveryText) return { label: "", body: "" };
+				const delivered = record.deliveryDelivered === true;
+				return {
+					label: delivered ? " result delivered" : " result pending delivery",
+					body: delivered ? "" : `\n  Result: ${truncateUtf8(record.deliveryText, 2_000)}`,
+				};
+			};
 			const signature = agents
-				.map((agent) => `${agent.owner}:${agent.status}${agent.question ? `:${agent.question.questionId}` : ""}`)
+				.map((agent) => `${agent.owner}:${agent.status}${agent.question ? `:${agent.question.questionId}` : ""}${deliveryInfo(agent.owner).label}`)
 				.sort()
 				.join("\n");
 			const noChange = !params.tail && signature === lastListSignature;
@@ -1166,11 +1215,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			const text = noChange
 				? [
 					...(agents.length === 0 ? ["No subagents."] : agents.map((agent) => {
-						const resultDelivered = records.get(agent.owner)?.steered === true;
+						const delivery = deliveryInfo(agent.owner);
 						const question = agent.question ? ` ? question-pending=${agent.question.questionId}` : "";
-						const transcript = agent.error?.startsWith("Result steering failed") ? ` transcript=${agent.sessionFile ?? "unavailable"}` : "";
-						const result = agent.result && !resultDelivered ? `\n  Result: ${truncateUtf8(agent.result, 2_000)}` : "";
-						return `${agent.owner} [${agent.status}]${question}${resultDelivered ? " result delivered as follow-up turn" : ""}${transcript}${result}`;
+						const transcript = agent.error?.includes("steering failed") ? ` transcript=${agent.sessionFile ?? "unavailable"}` : "";
+						return `${agent.owner} [${agent.status}]${question}${delivery.label}${transcript}${delivery.body}`;
 					})),
 					"No change since last check. Results arrive automatically as a new turn; end your turn instead of polling.",
 				].join("\n")
@@ -1180,15 +1228,13 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 						const elapsed = Math.max(0, (Date.parse(agent.finishedAt ?? new Date().toISOString()) - Date.parse(agent.startedAt)) / 1000).toFixed(1);
 						const transport = agent.transport ? ` transport=${agent.transport}` : "";
 						const log = agent.logPath ? ` log=${agent.logPath}` : "";
-						const deliveryFailed = agent.error?.startsWith("Result steering failed") === true;
+						const deliveryFailed = agent.error?.includes("steering failed") === true;
 						const sessionFile = agent.sessionFile ? ` transcript=${agent.sessionFile}` : deliveryFailed ? " transcript=unavailable" : "";
-						const resultDelivered = records.get(agent.owner)?.steered === true;
-						const result = agent.result && !resultDelivered ? `\n  Result: ${truncateUtf8(agent.result, 2_000)}` : "";
-						const delivered = resultDelivered ? " result delivered as follow-up turn" : "";
+						const delivery = deliveryInfo(agent.owner);
 						const question = agent.question ? ` ? question-pending=${agent.question.questionId}` : "";
 						const error = agent.error ? `\n  Error: ${agent.error}` : "";
 						const tail = agent.outputTail ? `\n  Recent output: ${agent.outputTail}` : "";
-						return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${question}${delivered}${result}${error}${tail}`;
+						return `${agent.owner} [${agent.status}] agent=${agent.agent} role=${agent.role}${transport}${log}${sessionFile} elapsed=${elapsed}s${question}${delivery.label}${delivery.body}${error}${tail}`;
 					}).join("\n\n");
 			return { content: [{ type: "text", text: truncateUtf8(text) }], details: { agents } };
 		},
