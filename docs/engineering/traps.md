@@ -67,11 +67,10 @@
 
 ## Pi ↔ harness bridge
 
-- **One active owner per project.** Fresh heartbeat from older Pi makes newer bridge passive. Stop old process before testing changed protocol.
+- **Bridge ownership is per Pi session.** A second process reusing a Pi session ID becomes passive when that namespace has a fresh owner; distinct Pi session IDs can be active in one project. Stop the duplicate owner or start a fresh Pi session.
 - **Bridge root follows nearest marker, not client config path.** MCP `cwd`, Pi cwd, and intended project marker must agree.
 - **Bridge protocol tests mutate state.** Core tests save notes, plan, and personal memory. Run against disposable `PI_CODING_AGENT_DIR`, not normal user memory; workflow plans and personal-memory paths now use that injected root.
 - **Bridge uses `fs.watch` without polling fallback.** Missed request events become two-second client timeouts. Preserve watcher lifecycle/coalescing behavior and diagnose request files before changing protocol. Plan reads/ticks must remain live workflow-owner requests; never add a direct MCP plan-file fallback.
-- **Session lock may be enveloped.** Consumers should read `session.lock ?? session` for compatibility; assuming top-level heartbeat/status breaks against current bridge output.
 - **Do not import live owner state.** Earlier direct workflow/discussion module imports produced false plan success and clobbered Notes UI. Use event-bus request/result handoff.
 - **Idle widget redraw is load-bearing.** Capture success requires live owner update while Pi waits for input. Unit tests cannot replace real idle UI acceptance.
 - **Bridge-down behavior is intentional.** Recall/capture/save must fail loud; no direct memory or plan-file fallback.

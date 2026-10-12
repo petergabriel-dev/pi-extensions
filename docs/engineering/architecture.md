@@ -20,7 +20,7 @@ This repository publishes as `@lopezpetergabriel/pi-extensions@0.7.1`, one Pi pa
 |---|---|---|---|
 | 1 | `agent/extensions/browser/index.ts` | `/browser`; `browser_goto`, `browser_eval`, `browser_console`, `browser_network`, `browser_fill`, `browser_click`, `browser_screenshot`, `browser_close`/`browser_kill` | Owns gated persistent Chromium context, lazy owner-keyed pages, per-page bounded console/network buffers, browser:* request/result events, and browser-free unit-test helpers. |
 | 2 | `agent/extensions/ccc-search/index.ts` | `ccc_search` tool | Validates bounded semantic-search input and invokes fixed `ccc search` argv without a shell. |
-| 3 | `agent/extensions/claude-bridge/index.ts` | `/claude-bridge` command | Owns live project bridge watcher, lock, heartbeat, request processing, response cache, and event-bus adapters. |
+| 3 | `agent/extensions/claude-bridge/index.ts` | `/claude-bridge` command | Owns one private IPC namespace per validated Pi session, heartbeat/presence, request processing, idempotency cache, peer pairing/chat routing, and event-bus adapters. |
 | 4 | `agent/extensions/discussion-notes.ts` | `discussion_notes` tool, `/notes` command, Notes UI | Owns typed notes for selected Pi session branch and reconstructs them from branch entries. |
 | 5 | `agent/extensions/engineering-docs/index.ts` | `docs_validate_tags` tool, `/docs` command | Owns managed engineering-doc operations, tag validation, generated spokes/indexes, and branch-local reminder tracking. |
 | 6 | `agent/extensions/filechanges/index.ts` | `/filechanges`, `/filechanges-accept`, `/filechanges-decline` | Tracks successful Pi `edit`/`write` mutations against branch-local first-write baselines and can keep or revert them. |
@@ -50,9 +50,10 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 
 ### Harness clients and project integration
 
-- `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code and Cursor.
-- `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard.
-- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity, returns Cursor's `permission` contract, and denies `Write` in `preToolUse` before the tool runs.
+- `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code and Cursor; client code imports no Pi internals.
+- `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard. Claude’s `UserPromptSubmit` peer hook injects pending messages as advisory context, then acknowledges included IDs; `SessionEnd` best-effort unpairs.
+- Claude’s statusline composes the `Pi ✉N` indicator from bridge presence only; it does not issue requests, write state, or ack messages.
+- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity, returns Cursor's `permission` contract, and denies `Write` in `preToolUse` before the tool runs. Cursor peer chat uses MCP `read_messages` as its pull path; no Cursor peer-message hook is installed.
 - `.cursor/mcp.json` registers the shared bridge MCP client.
 - `.cursor/hooks.json` registers Cursor shell, MCP, pre-tool, and commit-nudge guards.
 - `.cursor/commands/pi-discuss.md` and `.cursor/commands/pi-plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints.
@@ -72,7 +73,8 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 | Browser gate, shared Chromium context, owner-keyed pages, per-page buffers | Selected session branch `browser:state` plus live Playwright state; profile defaults to `<agentDir>/extensions/browser/.profile` or `PI_BROWSER_PROFILE` | `browser` | Gate is branch-persisted; context, pages, and buffers are process runtime state; profile is user-global runtime state |
 | Auth, settings, model catalogs | Pi user-global agent directory | Pi host | Reused, never copied into Git |
 | Personal memory entries and generated index | `~/.pi/memory/*.md`, `~/.pi/memory/MEMORY.md` | `personal-memory/store.ts` | User-global, excluded |
-| Bridge requests, responses, processed cache, policy, heartbeat | `<project>/.pi/memory/bridge/` | `claude-bridge` | Ephemeral, ignored |
+| Bridge requests, responses, processed cache, and presence | `<project>/.pi/memory/bridge/sessions/<piSessionId>/{requests,responses,processed,presence.json}` | `claude-bridge` | One private `0700` namespace per validated Pi session; bridge files are `0600`; ephemeral and ignored |
+| Peer mailbox | In-process bridge memory | `claude-bridge` | Ephemeral, bounded, non-durable; pending messages can be dropped on session switch or shutdown |
 | Dependency trees and semantic index | package `node_modules/`, `.cocoindex_code/` | npm / CCC | Generated, ignored |
 
 Project truth belongs in `docs/engineering/` and ADRs. Discussion notes are session handoff state, not project truth or personal memory. Personal memory is cross-repository user state, not project documentation.
@@ -124,33 +126,31 @@ Root scripts install the five lockfile-backed packages, then run the focused ask
 
 ## Pi ↔ multi-harness bridge
 
-Claude Code and Cursor are read-only planning surfaces for existing Pi projects. Pi remains source of truth for engineering docs validation, discussion notes, personal memory, workflow prompts, saved-plan handoff, and build execution.
+Claude Code and Cursor use the bridge for planning workflows and peer chat. Pi remains source of truth for engineering docs validation, discussion notes, personal memory, workflow prompts, saved-plan handoff, and build execution.
 
-Flow:
+### Per-session namespace and request protocol
 
-1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active session.
-2. Bridge resolves project root from nearest `.pi/` marker.
-3. Bridge creates `<project>/.pi/memory/bridge/{requests,responses,processed}` plus `session.json` and `policy.json`.
-4. MCP client writes UUID request JSON and polls matching response for up to two seconds.
-5. Bridge handles `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, `save_plan`, `read_plan_tasks`, and `tick_plan_task` using Pi-side owners/helpers.
-6. Recall returns canonical engineering docs, compact personal-memory index, composed workflow prompts, plan template, and live saved-plan state; task reads/ticks use the live workflow owner rather than a bridge cache.
-7. Bridge shutdown removes its owned request/response/cache/lock/policy files; ignored directories may remain.
+1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active session and resolves project root from nearest `.pi/` marker.
+2. Each validated Pi session owns `<project>/.pi/memory/bridge/sessions/<piSessionId>/{requests,responses,processed,presence.json}`. Namespace directories are `0700`; bridge files are `0600`. There is no project-wide single-owner lock or legacy shared-root fallback.
+3. A fresh namespace already owned by another PID makes that Pi session's bridge passive; different Pi session IDs can be active concurrently. Presence schemaVersion 2 records Pi session ID/name, cached workflow mode, PID, start/heartbeat times, peers, outbound `pendingCount`, and inbound `inboundPendingCount`. Heartbeat interval is 2s; clients consider presence fresh for 5s; namespaces with heartbeat older than 10m are GC'd. `/claude-bridge` lists live namespaces.
+4. MCP clients write UUID request JSON and poll matching responses for up to two seconds. Requests are `{ id, type, payload, ts, peer? }`; responses are `{ id, ok, result | error }`; processed responses are replay cache. UUID replay is idempotent. If bridge is unavailable, clients return exact error `Pi bridge not responding; start/focus Pi in this project.`
+5. Bridge operations include `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, `save_plan`, `read_plan_tasks`, `tick_plan_task`, and peer pairing/message operations. Recall returns canonical engineering docs, compact personal-memory index, composed workflow prompts, plan template, and live saved-plan state; task reads/ticks use the live workflow owner rather than a bridge cache.
 
-Bridge request protocol:
+`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; explicit `sessionId` wins over the alias, which wins over `CLAUDE_CODE_SESSION_ID`. `harness` defaults to `claude` and accepts `claude`, `cursor`, or `pi`. Capture emits `discussion-notes:add`; `save_plan` emits `workflow-modes:save-plan`; both wait for the live owner response. Recall obtains saved plans only through `workflow-modes:get`; unavailable live state is an error.
 
-- `requests/<uuid>.json`: `{ id, type, payload, ts }`
-- `responses/<uuid>.json`: `{ id, ok, result | error }`
-- `processed/<uuid>.json`: idempotency cache
-- `policy.json`: short-lived policy snapshot for clients/compatibility
-- `session.json`: active bridge lock and heartbeat
+### Pairing and peer chat
 
-Only one fresh bridge session processes a project. Another watcher becomes passive. Processed responses make UUID replay idempotent.
+Session and peer identifiers are path-safe (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; UUIDv7 is allowed). If exactly one live Pi session exists, an unpaired harness identity auto-pairs to it. With multiple live Pi sessions, pairing is ambiguous and the bridge lists choices. `pair_session` selects one peer and unpairs a prior live pairing; pairing changes only through live Pi bridge requests. Each Pi session allows at most 10 peers, 4,000 characters per message, and 20 pending messages per peer per direction.
 
-`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; primary wins. Capture emits `discussion-notes:add`, then waits for owner response. `save_plan` emits `workflow-modes:save-plan`, then waits for live owner response. Recall obtains saved plans only through `workflow-modes:get`; unavailable live state is an error.
+The peer mailbox is in-process memory, not durable storage. Harness `send_message` is paired-only. Inbound messages drain only into one delimited JSON custom message at the next `before_agent_start`; there is no auto-wake or follow-up turn. Delivery includes a fixed advisory header; peer text is JSON data with delimiter-sensitive characters escaped, never provenance, approval, or instructions. Pi `bridge_message` routes to one paired peer; `to` is required when multiple peers are paired.
+
+Pi-to-peer messages remain pending until the paired peer acknowledges IDs. Reads are non-destructive; ack is idempotent and peer-scoped; failures redeliver the same IDs. MCP `read_messages` returns then acknowledges, with ack failure surfaced as a warning and possible same-ID redelivery. Claude peer hook flushes injected output before ack. Its `UserPromptSubmit` hook checks presence first, reads only when pending, formats at most 9,000 characters, adds `additionalContext`, then acks included IDs; remainder stays pending. Hook failure is fail-open because injection is not a guard. `SessionEnd` best-effort unpairs. Pi surfaces inbound status/toast and warns with the dropped mailbox count on session switch or shutdown.
+
+Claude statusline shows `Pi ✉N` from presence only: no requests, writes, or acknowledgments. Cursor's peer-message path is MCP `read_messages` pull; there is no Cursor peer hook. On shutdown or session switch, the bridge drops pending mailbox messages and removes its owned namespace when ownership checks pass; stale namespaces from failed exits are collected after 10m. Ignored parent directories may remain.
 
 ### Read-only harness enforcement
 
-- Claude hook applies to any cwd below a `.pi` marker. Mutation tools and `dangerouslyDisableSandbox` are denied.
+- The existing Claude PreToolUse read-only hook remains fail-closed and applies to any cwd below a `.pi` marker. Mutation tools and `dangerouslyDisableSandbox` are denied.
 - On macOS, Claude Bash is rewritten through `/usr/bin/sandbox-exec` with network and non-scratch writes denied. If unavailable, Bash denies closed.
 - Cursor shell commands are allow/deny/ask classified; mutating non-bridge MCP calls deny; unknown calls ask.
 - Cursor `Write` tool calls are denied by `preToolUse` before execution and return a visible `permission: "deny"`; no Cursor hook writes or reverts files.
