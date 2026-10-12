@@ -7,6 +7,7 @@ import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/ind
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
+import { LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -14,7 +15,6 @@ const PEER_BLOCK_BUDGET_CHARS = 16_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
-const LIVE_TTL_MS = 5_000;
 const NAMESPACE_GC_TTL_MS = 10 * 60_000;
 
 interface BridgePaths {
@@ -395,7 +395,7 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 	return { active: true };
 }
 
-function writePresence(paths: BridgePaths): void {
+function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString()): void {
 	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
 	const peers = Array.from(pairedPeers.values()).map((peer) => {
 		const identity: PeerIdentity = { kind: peer.harness, id: peer.id };
@@ -412,7 +412,7 @@ function writePresence(paths: BridgePaths): void {
 		mode: cachedMode,
 		pid: process.pid,
 		startedAt,
-		heartbeatAt: new Date().toISOString(),
+		heartbeatAt,
 		peers,
 	} satisfies BridgePresence);
 }
@@ -1167,7 +1167,8 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 	if (activePaths && activePiSessionId && namespaceDirsArePrivate(activePaths)) {
 		const owner = readPresence(activePaths.presence, activePiSessionId);
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
-			try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ }
+			try { writePresence(activePaths, stoppedHeartbeatAt(Date.now())); }
+			catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
 		}
 	}
 	activePaths = null;
@@ -1313,6 +1314,12 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			return;
 		}
 
+		const restored = restorablePeers(
+			Array.from(pairedPeers.values()),
+			listLiveNamespaces(projectRoot).filter(({ id }) => id !== piSessionId).map(({ presence }) => presence),
+		);
+		const restoredCount = restored.length;
+		pairedPeers = new Map(restored.map((peer) => [peerKey(peer), peer] as const));
 		activePaths = paths;
 		activeProjectRoot = projectRoot;
 		activePiSessionId = piSessionId;
@@ -1343,7 +1350,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		}, HEARTBEAT_MS);
 		heartbeatTimer.unref?.();
 		ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: active");
-		ctx.ui.notify(`claude-bridge active: ${paths.namespace}`, "info");
+		const restoredNotice = restoredCount > 0 ? ` (restored ${restoredCount} ${restoredCount === 1 ? "peer" : "peers"})` : "";
+		ctx.ui.notify(`claude-bridge active: ${paths.namespace}${restoredNotice}`, "info");
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

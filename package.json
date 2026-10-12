@@ -66,7 +66,7 @@
     "test": "npm run check && npm run test:ask-user-question && npm run test:claude-bridge && npm run test:bridge-client && npm run test:extensions && npm run typecheck && npm run test:cursor && npm run test:cursor-kit",
     "prepublishOnly": "npm test",
     "test:ask-user-question": "npx --yes tsx agent/extensions/ask-user-question/test/test_queue.ts && npx --yes tsx agent/extensions/ask-user-question/test/test_defer.ts && NODE_PATH=agent/extensions/subagents/node_modules npx --yes tsx agent/extensions/ask-user-question/test/test_relay.ts",
-    "test:claude-bridge": "npx --yes tsx agent/extensions/claude-bridge/test/test_mailbox.ts",
+    "test:claude-bridge": "npx --yes tsx agent/extensions/claude-bridge/test/test_mailbox.ts && npx --yes tsx agent/extensions/claude-bridge/test/test_presence.ts",
     "test:bridge-client": "node agent/claude-bridge-client/test-sessions.js",
     "test:extensions": "npm --prefix agent/extensions/browser test && npm --prefix agent/extensions/ccc-search test && npm --prefix agent/extensions/engineering-docs test && npm --prefix agent/extensions/personal-memory test && npm --prefix agent/extensions/subagents test && npm --prefix agent/extensions/workflow-modes test",
     "smoke:subagents": "node agent/extensions/subagents/test/smoke/run-smoke.mjs",
