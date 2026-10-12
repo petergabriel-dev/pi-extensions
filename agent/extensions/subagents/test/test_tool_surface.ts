@@ -30,10 +30,23 @@ const launchedByOwner = new Map<string, SubagentLaunchOptions>();
 const pendingResults = new Map<string, (result: SubagentResult) => void>();
 const pendingFailures = new Map<string, (error: Error) => void>();
 const shutdownFailureOwners = new Set<string>();
+const ASK_QUESTION_REQUEST_EVENT = "ask-user-question:request";
+const ASK_QUESTION_ACK_EVENT = "ask-user-question:ack";
+const ASK_QUESTION_RESULT_EVENT = "ask-user-question:result";
+const ASK_QUESTION_CANCEL_EVENT = "ask-user-question:cancel";
+interface QuestionUiRequest {
+	requestId: string;
+	title: string;
+	options?: string[];
+}
+const questionRequests: QuestionUiRequest[] = [];
+const visibleQuestionRequestIds: string[] = [];
+const modelQueuedQuestionRequestIds: string[] = [];
+const questionCancels: string[] = [];
+let questionUiOwnerAvailable = true;
+let modelQuestionOpen = false;
 const selectCalls: Array<{ title: string; options: string[]; signal?: AbortSignal }> = [];
-const inputCalls: Array<{ title: string; placeholder?: string; signal?: AbortSignal }> = [];
 const selectResolvers: Array<(value: string | undefined) => void> = [];
-const inputResolvers: Array<(value: string | undefined) => void> = [];
 const registeredTools = new Map<string, { description?: string; execute: (...args: any[]) => Promise<unknown> }>();
 let sendUserMessageFailure: Error | undefined;
 const registeredCommands: string[] = [];
@@ -61,6 +74,16 @@ const events = {
 		if (name === "workflow-modes:get") {
 			for (const listener of eventHandlers.get("workflow-modes:state") ?? []) listener({ mode: "build", cavemanEnabled: true });
 		}
+		if (name === ASK_QUESTION_REQUEST_EVENT) {
+			const request = data as QuestionUiRequest;
+			questionRequests.push({ ...request, options: request.options ? [...request.options] : undefined });
+			if (questionUiOwnerAvailable) {
+				for (const listener of eventHandlers.get(ASK_QUESTION_ACK_EVENT) ?? []) listener({ requestId: request.requestId, accepted: true });
+				if (modelQuestionOpen) modelQueuedQuestionRequestIds.push(request.requestId);
+				else visibleQuestionRequestIds.push(request.requestId);
+			}
+		}
+		if (name === ASK_QUESTION_CANCEL_EVENT) questionCancels.push((data as { requestId: string }).requestId);
 		for (const listener of eventHandlers.get(name) ?? []) listener(data);
 	},
 };
@@ -104,22 +127,6 @@ const context = {
 					resolve(value);
 				};
 				selectResolvers.push(settle);
-				opts?.signal?.addEventListener("abort", () => settle(undefined), { once: true });
-				if (opts?.signal?.aborted) settle(undefined);
-			});
-		},
-		input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }) {
-			inputCalls.push({ title, placeholder, signal: opts?.signal });
-			return new Promise<string | undefined>((resolve) => {
-				let settled = false;
-				const settle = (value: string | undefined) => {
-					if (settled) return;
-					settled = true;
-					const index = inputResolvers.indexOf(settle);
-					if (index >= 0) inputResolvers.splice(index, 1);
-					resolve(value);
-				};
-				inputResolvers.push(settle);
 				opts?.signal?.addEventListener("abort", () => settle(undefined), { once: true });
 				if (opts?.signal?.aborted) settle(undefined);
 			});
@@ -251,10 +258,13 @@ function resolveNextSelect(value: string | undefined): void {
 	resolve(value);
 }
 
-function resolveNextInput(value: string | undefined): void {
-	const resolve = inputResolvers.shift();
-	assert.ok(resolve, "no pending input dialog");
-	resolve(value);
+function resolveQuestionRequest(requestId: string, status: "answered" | "dismissed" | "cancelled" | "unavailable", answer?: string): void {
+	events.emit(ASK_QUESTION_RESULT_EVENT, { requestId, status, ...(answer === undefined ? {} : { answer }) });
+}
+
+function finishModelQuestion(): void {
+	modelQuestionOpen = false;
+	visibleQuestionRequestIds.push(...modelQueuedQuestionRequestIds.splice(0));
 }
 
 try {
@@ -374,12 +384,16 @@ try {
 	assert.ok(Buffer.byteLength(deliveredResult) <= 2_000);
 
 	const userMessageCountBeforeQuestions = sentMessages.length;
+	const contextMessageCountBeforeQuestions = sentContextMessages.length;
+	const selectCountBeforeQuestions = selectCalls.length;
 	await registeredTools.get("subagent")!.execute("call-14", { task: "question task parent" }, new AbortController().signal, undefined, context);
 	const parentOwner = "subagent-6";
-	emitQuestion(parentOwner, { questionId: "parent-question", question: "Pick ipc-secret?", options: ["yes", "no"] });
-	await waitFor(() => selectCalls.length === 1, "first relayed select dialog");
-	assert.equal(selectCalls[0]!.title, "worker subagent-6 asks: Pick [REDACTED]?");
-	assert.deepEqual(selectCalls[0]!.options, ["yes", "no", "Other…"]);
+	emitQuestion(parentOwner, { questionId: "parent-question", question: "Pick ipc-secret?", options: ["ipc-secret yes", "no"] });
+	await waitFor(() => questionRequests.length === 1, "parent question request to owner");
+	const parentRequest = questionRequests[0]!;
+	assert.equal(parentRequest.title, "worker subagent-6 asks: Pick [REDACTED]?");
+	assert.deepEqual(parentRequest.options, ["[REDACTED] yes", "no"]);
+	assert.ok(visibleQuestionRequestIds.includes(parentRequest.requestId));
 
 	const spawnNested = (launchHost as unknown as { options: { onSpawn?: (owner: string, payload: unknown) => Promise<unknown> } }).options.onSpawn;
 	assert.ok(spawnNested, "host did not expose nested spawn callback");
@@ -389,24 +403,24 @@ try {
 	await waitFor(() => [...launchedByOwner.keys()].some((owner) => !ownersBeforeNested.has(owner)), "nested explorer launch");
 	const nestedOwner = [...launchedByOwner.keys()].find((owner) => !ownersBeforeNested.has(owner))!;
 	emitQuestion(nestedOwner, { questionId: "nested-question", question: "Which nested answer?", options: ["green", "blue"] });
-	assert.equal(selectCalls.length, 1, "second question opened before FIFO dialog finished");
+	assert.equal(questionRequests.length, 1, "second question reached owner before FIFO dialog finished");
+	assert.equal(selectCalls.length, selectCountBeforeQuestions, "child relay must not open a competing ctx.ui dialog");
 
-	resolveNextSelect("Other…");
-	await waitFor(() => inputCalls.length === 1, "Other answer input dialog");
-	resolveNextInput("typed ipc-secret");
-	await waitFor(() => answerCalls.length === 1 && selectCalls.length === 2, "first answer and queued nested dialog");
+	resolveQuestionRequest(parentRequest.requestId, "answered", "typed ipc-secret");
+	await waitFor(() => answerCalls.length === 1 && questionRequests.length === 2, "parent answer and queued nested request");
+	const nestedRequest = questionRequests[1]!;
 	assert.deepEqual(answerCalls[0], { owner: parentOwner, questionId: "parent-question", answer: "typed ipc-secret" });
-	assert.equal(selectCalls[1]!.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Which nested answer?`);
-	assert.deepEqual(selectCalls[1]!.options, ["green", "blue", "Other…"]);
-	assert.equal(sentContextMessages[0]?.message.customType, "subagent-question");
-	assert.equal(sentContextMessages[0]?.message.display, true);
-	assert.ok((sentContextMessages[0]?.message.content ?? "").includes("worker subagent-6 asked: Pick [REDACTED]?\nUser answered: typed [REDACTED]"));
-	assert.doesNotMatch(sentContextMessages[0]?.message.content ?? "", /ipc-secret/);
-	assert.deepEqual(sentContextMessages[0]?.options, { deliverAs: "nextTurn" });
-	resolveNextSelect("blue");
-	await waitFor(() => answerCalls.length === 2, "nested dialog answer");
+	assert.equal(nestedRequest.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Which nested answer?`);
+	assert.deepEqual(nestedRequest.options, ["green", "blue"]);
+	assert.equal(sentContextMessages[contextMessageCountBeforeQuestions]?.message.customType, "subagent-question");
+	assert.equal(sentContextMessages[contextMessageCountBeforeQuestions]?.message.display, true);
+	assert.ok((sentContextMessages[contextMessageCountBeforeQuestions]?.message.content ?? "").includes("worker subagent-6 asked: Pick [REDACTED]?\nUser answered: typed [REDACTED]"));
+	assert.doesNotMatch(sentContextMessages[contextMessageCountBeforeQuestions]?.message.content ?? "", /ipc-secret/);
+	assert.deepEqual(sentContextMessages[contextMessageCountBeforeQuestions]?.options, { deliverAs: "nextTurn" });
+	resolveQuestionRequest(nestedRequest.requestId, "answered", "blue");
+	await waitFor(() => answerCalls.length === 2, "nested owner result answer");
 	assert.equal(answerCalls[1]?.owner, nestedOwner);
-	assert.ok((sentContextMessages[1]?.message.content ?? "").includes(`explorer ${nestedOwner} (via worker ${parentOwner}) asked: Which nested answer?\nUser answered: blue`));
+	assert.ok((sentContextMessages[contextMessageCountBeforeQuestions + 1]?.message.content ?? "").includes(`explorer ${nestedOwner} (via worker ${parentOwner}) asked: Which nested answer?\nUser answered: blue`));
 	assert.equal(sentMessages.length, userMessageCountBeforeQuestions, "question relay must not send a user follow-up turn");
 
 	const duplicateDialogAnswer = await registeredTools.get("subagent_message")!.execute("call-15", { owner: parentOwner, questionId: "parent-question", message: "late answer" }, new AbortController().signal, undefined, context);
@@ -415,19 +429,19 @@ try {
 	await registeredTools.get("subagent")!.execute("call-16", { task: "question task tool answer" }, new AbortController().signal, undefined, context);
 	const toolAnswerOwner = "subagent-8";
 	emitQuestion(toolAnswerOwner, { questionId: "tool-question", question: "Answer from tool?", options: ["yes", "no"] });
-	await waitFor(() => selectCalls.length === 3, "third relayed select dialog");
-	const toolAnswerSignal = selectCalls[2]!.signal;
+	await waitFor(() => questionRequests.length === 3, "tool-answer question request to owner");
+	const toolRequest = questionRequests[2]!;
 	const toolAnswer = await registeredTools.get("subagent_message")!.execute("call-17", { owner: toolAnswerOwner, questionId: "tool-question", message: "answer via explicit tool" }, new AbortController().signal, undefined, context);
 	assert.match((toolAnswer as { content: Array<{ text: string }> }).content[0]!.text, /Answer delivered/);
-	assert.equal(toolAnswerSignal?.aborted, true, "subagent_message must dismiss active dialog");
+	assert.ok(questionCancels.includes(toolRequest.requestId), "subagent_message answer must cancel open owner request");
 	const duplicateToolAnswer = await registeredTools.get("subagent_message")!.execute("call-18", { owner: toolAnswerOwner, questionId: "tool-question", message: "second answer" }, new AbortController().signal, undefined, context);
 	assert.match((duplicateToolAnswer as { content: Array<{ text: string }> }).content[0]!.text, /already answered/);
 
 	await registeredTools.get("subagent")!.execute("call-19", { task: "question task dismissed" }, new AbortController().signal, undefined, context);
 	const dismissedOwner = "subagent-9";
 	emitQuestion(dismissedOwner, { questionId: "dismissed-question", question: "Dismiss then answer" });
-	await waitFor(() => inputCalls.length === 2, "free-text question dialog");
-	resolveNextInput(undefined);
+	await waitFor(() => questionRequests.length === 4, "free-text question request to owner");
+	resolveQuestionRequest(questionRequests[3]!.requestId, "dismissed");
 	await waitFor(() => notifications.some((message) => message.includes("answer later with /agents")), "pending question notice after dismissal");
 	const dismissedList = await registeredTools.get("subagents_list")!.execute("call-20", {}, new AbortController().signal, undefined, context);
 	const dismissedAgents = (dismissedList as { details: { agents: Array<{ owner: string; status: string; question?: { questionId: string } }> } }).details.agents;
@@ -440,40 +454,70 @@ try {
 	context.hasUI = false;
 	await registeredTools.get("subagent")!.execute("call-22", { task: "question task no-ui" }, new AbortController().signal, undefined, context);
 	const noUiOwner = "subagent-10";
+	const requestsBeforeNoUi = questionRequests.length;
 	emitQuestion(noUiOwner, { questionId: "no-ui-question", question: "No UI available" });
-	assert.equal(selectCalls.length, 3);
-	assert.equal(inputCalls.length, 2);
+	assert.equal(questionRequests.length, requestsBeforeNoUi, "non-UI context must not request a dialog");
 	assert.ok((notifications.at(-1) ?? "").includes("answer later with /agents"));
 	const noUiAnswer = await registeredTools.get("subagent_message")!.execute("call-23", { owner: noUiOwner, questionId: "no-ui-question", message: "answer without UI" }, new AbortController().signal, undefined, context);
 	assert.match((noUiAnswer as { content: Array<{ text: string }> }).content[0]!.text, /Answer delivered/);
-	assert.equal(sentMessages.length, userMessageCountBeforeQuestions, "question handling must not prompt parent model");
-	assert.equal(sentContextMessages.length, 5);
-	assert.ok(sentContextMessages.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "nextTurn" })));
 
 	context.hasUI = true;
-	const openAgentsOverlay = commandHandlers.get("agents")!("", context) as Promise<void>;
-	await waitFor(() => selectCalls.length === 4, "agents child picker");
-	assert.ok(selectCalls[3]!.options.some((option) => option.startsWith(`  ${nestedOwner} — explorer [running]`)), "picker should indent nested children");
-	const selectedAgent = selectCalls[3]!.options.find((option) => option.includes("subagent-3 — worker [running]"));
-	assert.ok(selectedAgent, "picker should list running children");
-	resolveNextSelect(selectedAgent);
-	await waitFor(() => overlayComponent !== undefined, "agents overlay");
+	questionUiOwnerAvailable = false;
+	await registeredTools.get("subagent")!.execute("call-no-owner", { task: "question task missing owner" }, new AbortController().signal, undefined, context);
+	const noOwnerAckOwner = "subagent-11";
+	emitQuestion(noOwnerAckOwner, { questionId: "missing-owner-question", question: "Owner is not loaded" });
+	await waitFor(() => questionRequests.length === requestsBeforeNoUi + 1, "request with no loaded question owner");
+	const noOwnerRequest = questionRequests.at(-1)!;
+	assert.ok(notifications.some((message) => message.includes("question UI unavailable; answer with /agents")));
+	assert.equal(visibleQuestionRequestIds.includes(noOwnerRequest.requestId), false);
+	questionUiOwnerAvailable = true;
+	const noOwnerAnswer = await registeredTools.get("subagent_message")!.execute("call-answer-no-owner", { owner: noOwnerAckOwner, questionId: "missing-owner-question", message: "answer after missing owner" }, new AbortController().signal, undefined, context);
+	assert.match((noOwnerAnswer as { content: Array<{ text: string }> }).content[0]!.text, /Answer delivered/);
+
+	// ponytail: fake owner holds child request behind model UI; ask-user-question relay tests exercise real FIFO.
+	modelQuestionOpen = true;
+	await registeredTools.get("subagent")!.execute("call-overlap", { task: "question task overlap" }, new AbortController().signal, undefined, context);
+	const overlappingOwner = "subagent-12";
+	emitQuestion(overlappingOwner, { questionId: "overlap-question", question: "Queued behind model?" });
+	await waitFor(() => questionRequests.length === requestsBeforeNoUi + 2, "child request queued behind model question");
+	const overlappingRequest = questionRequests.at(-1)!;
+	assert.equal(visibleQuestionRequestIds.includes(overlappingRequest.requestId), false);
+	finishModelQuestion();
+	assert.ok(visibleQuestionRequestIds.includes(overlappingRequest.requestId));
+	resolveQuestionRequest(overlappingRequest.requestId, "answered", "after model UI");
+	await waitFor(() => answerCalls.length === 7, "child answer after model UI clears");
+
+	assert.equal(selectCalls.length, selectCountBeforeQuestions, "relay must never render child questions with ctx.ui.select/input");
+	assert.equal(sentMessages.length, userMessageCountBeforeQuestions, "question handling must not prompt parent model");
+	assert.equal(sentContextMessages.length, contextMessageCountBeforeQuestions + 7);
+	assert.ok(sentContextMessages.slice(contextMessageCountBeforeQuestions).every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "nextTurn" })));
+	emitQuestion("subagent-3", { questionId: "open-overlay-question", question: "Answer from open relay?", options: ["yes", "no"] });
+	await waitFor(() => questionRequests.length === requestsBeforeNoUi + 3, "open relay for /agents answer");
+	const openOverlayRequest = questionRequests.at(-1)!;
+	const answerOverlaySelectCount = selectCalls.length;
+	overlayComponent = undefined;
+	const answerAgentsOverlay = commandHandlers.get("agents")!("", context) as Promise<void>;
+	await waitFor(() => selectCalls.length === answerOverlaySelectCount + 1, "agents picker for open question");
+	const answerPicker = selectCalls.at(-1)!;
+	assert.ok(answerPicker.options.some((option) => option.startsWith(`  ${nestedOwner} — explorer [running]`)), "picker should indent nested children");
+	const answerAgent = answerPicker.options.find((option) => option.includes("subagent-3 — worker [waiting]"));
+	assert.ok(answerAgent, "picker should list child with pending question");
+	resolveNextSelect(answerAgent);
+	await waitFor(() => overlayComponent !== undefined, "agents overlay for open question");
 	assert.deepEqual(overlayOptions, { overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "80%", margin: 1 } });
-	const selectCountBeforeOverlayQuestions = selectCalls.length;
-	const answerCountBeforeOverlayQuestions = answerCalls.length;
-	emitQuestion("subagent-3", { questionId: "overlay-question", question: "Answer from overlay?", options: ["yes", "no"] });
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "question for viewed child must not open a competing dialog");
-	const viewedQuestion = overlayComponent!.render?.(80)?.join("\n") ?? "";
-	assert.match(viewedQuestion, /Question: Answer from overlay\?/);
-	assert.ok(viewedQuestion.includes("Options: yes | no"));
-	assert.match(viewedQuestion, /Enter answer.*Esc closes \/agents only/);
+	const answerCountBeforeOpenOverlay = answerCalls.length;
+	const openQuestionText = overlayComponent!.render?.(80)?.join("\n") ?? "";
+	assert.match(openQuestionText, /Question: Answer from open relay\?/);
+	assert.ok(openQuestionText.includes("Options: yes | no"));
+	assert.match(openQuestionText, /Enter answer.*Esc closes \/agents only/);
 	for (const character of "answer in overlay") overlayComponent!.handleInput?.(character);
 	overlayComponent!.handleInput?.("\r");
-	await waitFor(() => answerCalls.length === answerCountBeforeOverlayQuestions + 1, "answer to question shown in /agents");
-	assert.deepEqual(answerCalls.at(-1), { owner: "subagent-3", questionId: "overlay-question", answer: "answer in overlay" });
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions);
+	await waitFor(() => answerCalls.length === answerCountBeforeOpenOverlay + 1, "answer open owner request through /agents");
+	assert.deepEqual(answerCalls.at(-1), { owner: "subagent-3", questionId: "open-overlay-question", answer: "answer in overlay" });
+	assert.ok(questionCancels.includes(openOverlayRequest.requestId), "/agents answer must cancel open owner request");
+	assert.doesNotMatch(overlayComponent?.render?.(80)?.join("\n") ?? "", /ipc-secret/, "overlay input must redact IPC token");
 	for (const character of "hello ipc-secret") overlayComponent!.handleInput?.(character);
-	assert.doesNotMatch(overlayComponent?.render?.(80)?.join("\n") ?? "", /ipc-secret/, "overlay input must redact the IPC token");
+	assert.doesNotMatch(overlayComponent?.render?.(80)?.join("\n") ?? "", /ipc-secret/, "overlay input must keep IPC token redacted");
 	overlayComponent!.handleInput?.("\r");
 	await waitFor(() => sentContextMessages.some(({ message }) => message.customType === "subagent-steer"), "steer parent note");
 	assert.deepEqual(steeredMessages.at(-1), { owner: "subagent-3", text: "hello ipc-secret" });
@@ -481,65 +525,98 @@ try {
 		message: { customType: "subagent-steer", content: "User told subagent-3: hello [REDACTED]", display: true },
 		options: { deliverAs: "nextTurn" },
 	});
-	const deferredOverlayQuestionId = "overlay-question-pending";
+	const answeredOverlay = overlayComponent!;
+	answeredOverlay.handleInput?.("\u001b");
+	await answerAgentsOverlay;
+
+	overlayComponent = undefined;
+	const gatePickerCount = selectCalls.length;
+	const openAgentsOverlay = commandHandlers.get("agents")!("", context) as Promise<void>;
+	await waitFor(() => selectCalls.length === gatePickerCount + 1, "agents picker for overlay queue gate");
+	const gatePicker = selectCalls.at(-1)!;
+	assert.ok(gatePicker.options.some((option) => option.startsWith(`  ${nestedOwner} — explorer [running]`)), "picker should continue indenting nested children");
+	const selectedAgent = gatePicker.options.find((option) => option.includes("subagent-3 — worker [running]"));
+	assert.ok(selectedAgent, "picker should list running children");
+	resolveNextSelect(selectedAgent);
+	await waitFor(() => overlayComponent !== undefined, "agents overlay for queue gate");
+	const selectCountBeforeOverlayQuestions = selectCalls.length;
+	const questionCountBeforeOverlayQuestions = questionRequests.length;
 	const answerCountBeforeDeferredQuestion = answerCalls.length;
+	const deferredOverlayQuestionId = "overlay-question-pending";
 	emitQuestion("subagent-3", { questionId: deferredOverlayQuestionId, question: "Answer me after closing?", options: ["yes", "no"] });
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "viewed child's new question stays in overlay");
+	assert.equal(questionRequests.length, questionCountBeforeOverlayQuestions, "viewed child's question must stay behind /agents overlay");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "viewed child's question must not open a competing dialog");
 	assert.match(overlayComponent!.render?.(80)?.join("\n") ?? "", /Question: Answer me after closing\?/);
+	const answerCountBeforeOverlayQuestions = answerCalls.length;
 	emitQuestion(nestedOwner, { questionId: "nested-overlay-question", question: "Other child asks?", options: ["green", "blue"] });
 	const otherQuestionNotice = `explorer ${nestedOwner} (via worker ${parentOwner}) has a question; press Esc to answer it.`;
 	const currentOverlayText = () => (overlayComponent?.render?.(80) ?? []).join(" ").replace(/\s+/g, " ");
 	await waitFor(() => currentOverlayText().includes(otherQuestionNotice), "notice for question belonging to another child");
+	assert.equal(questionRequests.length, questionCountBeforeOverlayQuestions, "questions must not reach owner while /agents is open");
 	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "questions must not open dialogs while /agents is open");
-	assert.equal(answerCalls.length, answerCountBeforeDeferredQuestion, "queued questions remain unanswered before Esc");
+	assert.equal(answerCalls.length, answerCountBeforeOverlayQuestions, "queued questions remain unanswered before Esc");
 	const closingOverlay = overlayComponent!;
 	closingOverlay.handleInput?.("\u001b");
 	await openAgentsOverlay;
-	await waitFor(() => selectCalls.length === selectCountBeforeOverlayQuestions + 1, "other-child question dialog after overlay closes");
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "only other-child question opens after Esc");
-	assert.equal(selectCalls.at(-1)?.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Other child asks?`);
-	assert.equal(selectCalls.at(-1)?.signal?.aborted, false, "Esc in /agents must not cancel the other child's queued dialog");
+	await waitFor(() => questionRequests.length === questionCountBeforeOverlayQuestions + 1, "other-child request after overlay closes");
+	const otherQuestionRequest = questionRequests.at(-1)!;
+	assert.equal(otherQuestionRequest.title, `explorer ${nestedOwner} (via worker ${parentOwner}) asks: Other child asks?`);
+	assert.ok(visibleQuestionRequestIds.includes(otherQuestionRequest.requestId));
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "only question owner handles child dialog after Esc");
 	assert.ok(notifications.at(-1)?.includes("worker subagent-3: question remains pending; answer later with /agents."));
 	const pendingOverlayList = await registeredTools.get("subagents_list")!.execute("call-24", {}, new AbortController().signal, undefined, context);
 	const pendingOverlayAgents = (pendingOverlayList as { details: { agents: Array<{ owner: string; status: string; question?: { questionId: string } }> } }).details.agents;
 	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === "subagent-3")?.status, "waiting");
 	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === "subagent-3")?.question?.questionId, deferredOverlayQuestionId);
 	assert.equal(pendingOverlayAgents.find((agent) => agent.owner === nestedOwner)?.question?.questionId, "nested-overlay-question");
-	resolveNextSelect("green");
-	await waitFor(() => answerCalls.length === answerCountBeforeDeferredQuestion + 1, "answer other-child dialog after overlay close");
+	resolveQuestionRequest(otherQuestionRequest.requestId, "answered", "green");
+	await waitFor(() => answerCalls.length === answerCountBeforeDeferredQuestion + 1, "answer other-child question after overlay closes");
 	assert.deepEqual(answerCalls.at(-1), { owner: nestedOwner, questionId: "nested-overlay-question", answer: "green" });
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 1, "same-child question must not open a dialog after Esc");
+	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions, "same-child question must not open a relay dialog after Esc");
 
+	const reopenPickerCount = selectCalls.length;
+	overlayComponent = undefined;
 	const reopenAgentsOverlay = commandHandlers.get("agents")!("", context) as Promise<void>;
-	await waitFor(() => selectCalls.length === selectCountBeforeOverlayQuestions + 2, "agents picker for pending question");
+	await waitFor(() => selectCalls.length === reopenPickerCount + 1, "agents picker for pending question");
 	const reopenPicker = selectCalls.at(-1)!;
 	const deferredChildOption = reopenPicker.options.find((option) => option.includes("subagent-3 — worker [waiting]"));
 	assert.ok(deferredChildOption, "pending child must remain selectable after Esc");
 	resolveNextSelect(deferredChildOption);
-	await waitFor(() => overlayComponent !== closingOverlay, "reopened overlay for dismissed question");
+	await waitFor(() => overlayComponent !== undefined && overlayComponent !== closingOverlay, "reopened overlay for dismissed question");
 	assert.match(overlayComponent!.render?.(80)?.join("\n") ?? "", /Question: Answer me after closing\?/);
 	for (const character of "answered later in /agents") overlayComponent!.handleInput?.(character);
 	overlayComponent!.handleInput?.("\r");
 	await waitFor(() => answerCalls.length === answerCountBeforeDeferredQuestion + 2, "answer dismissed question later through /agents");
 	assert.deepEqual(answerCalls.at(-1), { owner: "subagent-3", questionId: deferredOverlayQuestionId, answer: "answered later in /agents" });
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 2, "later overlay answer must not open a relay dialog");
+	assert.equal(questionRequests.length, questionCountBeforeOverlayQuestions + 1, "later /agents answer must not create owner request");
+	assert.equal(selectCalls.length, reopenPickerCount + 1);
 	overlayComponent!.handleInput?.("\u001b");
 	await reopenAgentsOverlay;
-	assert.equal(selectCalls.length, selectCountBeforeOverlayQuestions + 2);
+	assert.equal(selectCalls.length, reopenPickerCount + 1);
 
-	const questionOwners = [parentOwner, nestedOwner, toolAnswerOwner, dismissedOwner, noUiOwner];
+	const settledRelayCount = questionRequests.length;
+	emitQuestion("subagent-4", { questionId: "settled-child-question", question: "Close when child settles?" });
+	await waitFor(() => questionRequests.length === settledRelayCount + 1, "open request for child settlement cancellation");
+	const settledChildRequest = questionRequests.at(-1)!;
+	const questionOwners = [parentOwner, nestedOwner, toolAnswerOwner, dismissedOwner, noUiOwner, noOwnerAckOwner, overlappingOwner, "subagent-3", "subagent-4"];
 	for (const owner of questionOwners) {
 		const resolve = pendingResults.get(owner);
 		pendingResults.delete(owner);
 		resolve?.({ owner, childSessionId: `child-${owner}`, text: `${owner} done` });
 	}
 	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(questionCancels.includes(settledChildRequest.requestId), "child settlement must cancel open owner request");
 	assert.equal(nestedSpawnError, undefined);
 	await nestedSpawnResult;
 	const messagesBeforeShutdown = sentMessages.length;
 	await registeredTools.get("subagent")!.execute("call-shutdown", { task: "shutdown failure task" }, new AbortController().signal, undefined, context);
 	assert.equal(launched?.task, "shutdown failure task");
+	const shutdownQuestionOwner = "subagent-13";
+	emitQuestion(shutdownQuestionOwner, { questionId: "shutdown-child-question", question: "Close on shutdown?" });
+	await waitFor(() => questionRequests.length === settledRelayCount + 2, "open request before session shutdown");
+	const shutdownQuestionRequest = questionRequests.at(-1)!;
 	await handlers.get("session_shutdown")?.({}, context);
+	assert.ok(questionCancels.includes(shutdownQuestionRequest.requestId), "session shutdown must cancel open owner request");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(sentMessages.length, messagesBeforeShutdown, "host-close failure must not send a parent follow-up during shutdown");
 	console.log("subagent tool surface tests passed");

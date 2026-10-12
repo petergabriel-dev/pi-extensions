@@ -55,6 +55,10 @@ const MAX_TRACKED_RUNS = 100;
 const MAX_BROWSER_PROXY_TIMEOUT_MS = 120_000;
 const BROWSER_REQUEST_EVENT = "browser:request";
 const BROWSER_RESULT_EVENT = "browser:result";
+const ASK_QUESTION_REQUEST_EVENT = "ask-user-question:request";
+const ASK_QUESTION_ACK_EVENT = "ask-user-question:ack";
+const ASK_QUESTION_RESULT_EVENT = "ask-user-question:result";
+const ASK_QUESTION_CANCEL_EVENT = "ask-user-question:cancel";
 const BROWSER_READ_ONLY_TOOLS = new Set(["browser_console", "browser_network"]);
 
 const SubagentParams = Type.Object({
@@ -149,7 +153,8 @@ interface QuestionRelay {
 	question: SubagentQuestion;
 	label: string;
 	state: "queued" | "open" | "dismissed" | "answered" | "closed";
-	controller?: AbortController;
+	requestId?: string;
+	requestAccepted?: boolean;
 }
 
 function isWorkflowMode(value: unknown): value is WorkflowMode {
@@ -434,8 +439,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	};
 	const records = new Map<string, SubagentRecord>();
 	const questionRelays = new Map<string, QuestionRelay>();
+	const questionRequests = new Map<string, QuestionRelay>();
 	const questionQueue: QuestionRelay[] = [];
 	let activeQuestionRelay: QuestionRelay | undefined;
+	let questionRequestCounter = 0;
+	let pumpingQuestionQueue = false;
 	let lastListSignature: string | undefined;
 	const agentsOverlays = new Set<SubagentOverlayComponent>();
 	const refreshAgentsOverlays = (): void => {
@@ -446,30 +454,42 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		agentsOverlays.clear();
 	};
 
+	const cancelQuestionRequest = (relay: QuestionRelay): void => {
+		const requestId = relay.requestId;
+		if (!requestId) return;
+		if (questionRequests.get(requestId) !== relay) {
+			relay.requestId = undefined;
+			relay.requestAccepted = undefined;
+			return;
+		}
+		questionRequests.delete(requestId);
+		relay.requestId = undefined;
+		relay.requestAccepted = undefined;
+		try { pi.events.emit(ASK_QUESTION_CANCEL_EVENT, { requestId }); }
+		catch { /* Owner may be shutting down; child settlement still proceeds. */ }
+	};
+
 	const clearQuestionRelays = (owner?: string): void => {
 		for (const [key, relay] of questionRelays) {
 			if (owner && relay.record.owner !== owner) continue;
 			questionRelays.delete(key);
+			cancelQuestionRequest(relay);
 			relay.state = "closed";
 			relay.record.question = undefined;
-			relay.controller?.abort();
 		}
 		for (let index = questionQueue.length - 1; index >= 0; index -= 1) {
 			if (!owner || questionQueue[index]?.record.owner === owner) questionQueue.splice(index, 1);
 		}
-		if (activeQuestionRelay && (!owner || activeQuestionRelay.record.owner === owner) && activeQuestionRelay.state !== "answered") {
-			activeQuestionRelay.state = "closed";
-			activeQuestionRelay.record.question = undefined;
-			activeQuestionRelay.controller?.abort();
-		}
+		if (activeQuestionRelay && (!owner || activeQuestionRelay.record.owner === owner)) activeQuestionRelay = undefined;
 		refreshAgentsOverlays();
+		pumpQuestionQueue();
 	};
 
-	const notifyQuestionPending = (relay: QuestionRelay): void => {
+	const notifyQuestionPending = (relay: QuestionRelay, notice = "question remains pending; answer later with /agents"): void => {
 		const ctx = activeContext;
 		if (!ctx) return;
 		const label = host?.redactText(relay.record.owner, relay.label) ?? relay.label;
-		try { ctx.ui.notify(`${label}: question remains pending; answer later with /agents.`, "warning"); }
+		try { ctx.ui.notify(`${label}: ${notice}.`, "warning"); }
 		catch { /* UI may be disposed during session replacement. */ }
 	};
 
@@ -497,8 +517,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		relay.record.question = undefined;
 		const queuedIndex = questionQueue.indexOf(relay);
 		if (queuedIndex >= 0) questionQueue.splice(queuedIndex, 1);
-		relay.controller?.abort();
+		cancelQuestionRequest(relay);
+		if (activeQuestionRelay === relay) activeQuestionRelay = undefined;
 		refreshAgentsOverlays();
+		pumpQuestionQueue();
 		try {
 			pi.sendMessage(
 				{ customType: "subagent-question", content: `${label} asked: ${question}\nUser answered: ${safeAnswer}`, display: true },
@@ -516,59 +538,102 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		return relay ? answerRelay(relay, answer, answerHost) : false;
 	};
 
-	const showQuestionDialog = async (relay: QuestionRelay, ctx: ExtensionContext, controller: AbortController): Promise<void> => {
-		try {
-			const activeHost = host;
-			const label = activeHost?.redactText(relay.record.owner, relay.label) ?? relay.label;
-			const question = activeHost?.redactText(relay.record.owner, relay.question.question) ?? relay.question.question;
-			const title = `${label} asks: ${question}`;
-			let answer: string | undefined;
-			if (relay.question.options?.length) {
-				const selected = await ctx.ui.select(title, [...relay.question.options, "Other…"], { signal: controller.signal });
-				answer = selected === "Other…"
-					? await ctx.ui.input(title, "Type another answer", { signal: controller.signal })
-					: selected;
-			} else {
-				answer = await ctx.ui.input(title, "Type an answer", { signal: controller.signal });
-			}
-			if (relay.state !== "open" || controller.signal.aborted) return;
-			if (!answer?.trim() || !answerPendingQuestion(relay.record.owner, relay.question.questionId, answer, host)) {
-				relay.state = "dismissed";
-				notifyQuestionPending(relay);
-			}
-		} catch {
-			if (relay.state === "open" && !controller.signal.aborted) {
-				relay.state = "dismissed";
-				notifyQuestionPending(relay);
-			}
-		} finally {
+	const closeQuestionRequest = (requestId: string, relay: QuestionRelay): void => {
+		if (questionRequests.get(requestId) === relay) questionRequests.delete(requestId);
+		if (relay.requestId === requestId) {
+			relay.requestId = undefined;
+			relay.requestAccepted = undefined;
+		}
+		if (activeQuestionRelay === relay) activeQuestionRelay = undefined;
+	};
+
+	const dismissQuestionRequest = (requestId: string, relay: QuestionRelay, notice?: string): void => {
+		closeQuestionRequest(requestId, relay);
+		if (relay.state === "open") {
+			relay.state = "dismissed";
+			notifyQuestionPending(relay, notice);
+		}
+		refreshAgentsOverlays();
+		pumpQuestionQueue();
+	};
+
+	pi.events?.on(ASK_QUESTION_ACK_EVENT, (value: unknown) => {
+		if (!isRecord(value) || typeof value.requestId !== "string" || value.requestId.length === 0 || value.requestId.length > 200 || typeof value.accepted !== "boolean") return;
+		const relay = questionRequests.get(value.requestId);
+		if (!relay || relay.requestAccepted !== undefined) return;
+		relay.requestAccepted = value.accepted;
+	});
+
+	pi.events?.on(ASK_QUESTION_RESULT_EVENT, (value: unknown) => {
+		if (!isRecord(value) || typeof value.requestId !== "string" || value.requestId.length === 0 || value.requestId.length > 200) return;
+		const relay = questionRequests.get(value.requestId);
+		if (!relay || relay.requestAccepted !== true) return;
+
+		let answered = false;
+		if (value.status === "answered" && typeof value.answer === "string" && Buffer.byteLength(value.answer, "utf8") <= MAX_FINAL_TEXT_BYTES) {
+			try { answered = answerPendingQuestion(relay.record.owner, relay.question.questionId, value.answer, host); }
+			catch { /* Keep the child question pending if answer handling fails. */ }
+		}
+		if (answered) return;
+
+		dismissQuestionRequest(value.requestId, relay);
+	});
+
+	const requestQuestionFromOwner = (relay: QuestionRelay): void => {
+		const activeHost = host;
+		if (!activeHost) {
+			relay.state = "dismissed";
 			if (activeQuestionRelay === relay) activeQuestionRelay = undefined;
-			relay.controller = undefined;
-			if (relay.state === "open") {
-				relay.state = "dismissed";
-				notifyQuestionPending(relay);
-			}
-			pumpQuestionQueue();
+			notifyQuestionPending(relay, "question UI unavailable; answer with /agents");
+			refreshAgentsOverlays();
+			return;
+		}
+		const requestId = `subagent-question-${++questionRequestCounter}`;
+		relay.requestId = requestId;
+		relay.requestAccepted = undefined;
+
+		let emitFailed = false;
+		try {
+			const label = activeHost.redactText(relay.record.owner, relay.label);
+			const question = activeHost.redactText(relay.record.owner, relay.question.question);
+			const title = `${label} asks: ${question}`.slice(0, 4_000);
+			const options = relay.question.options
+				?.map((option) => activeHost.redactText(relay.record.owner, option).trim().slice(0, 500))
+				.filter((option) => option.length > 0);
+			questionRequests.set(requestId, relay);
+			pi.events.emit(ASK_QUESTION_REQUEST_EVENT, {
+				requestId,
+				title,
+				...(options?.length ? { options } : {}),
+			});
+		} catch {
+			emitFailed = true;
+		}
+		if ((emitFailed || relay.requestAccepted !== true) && relay.state === "open") {
+			dismissQuestionRequest(requestId, relay, "question UI unavailable; answer with /agents");
 		}
 	};
 
 	function pumpQuestionQueue(): void {
-		if (activeQuestionRelay || agentsOverlays.size > 0) return;
-		while (questionQueue.length > 0) {
-			const relay = questionQueue.shift()!;
-			if (relay.state !== "queued") continue;
-			const ctx = activeContext;
-			if (!ctx?.hasUI) {
-				relay.state = "dismissed";
-				notifyQuestionPending(relay);
-				continue;
+		if (pumpingQuestionQueue || activeQuestionRelay || agentsOverlays.size > 0) return;
+		pumpingQuestionQueue = true;
+		try {
+			while (questionQueue.length > 0) {
+				const relay = questionQueue.shift()!;
+				if (relay.state !== "queued") continue;
+				const ctx = activeContext;
+				if (!ctx?.hasUI) {
+					relay.state = "dismissed";
+					notifyQuestionPending(relay);
+					continue;
+				}
+				relay.state = "open";
+				activeQuestionRelay = relay;
+				requestQuestionFromOwner(relay);
+				if (relay.state === "open") return;
 			}
-			const controller = new AbortController();
-			relay.controller = controller;
-			relay.state = "open";
-			activeQuestionRelay = relay;
-			void showQuestionDialog(relay, ctx, controller);
-			return;
+		} finally {
+			pumpingQuestionQueue = false;
 		}
 	}
 
