@@ -1,0 +1,70 @@
+declare module "node:buffer" {
+	export class Buffer {
+		static byteLength(value: string, encoding?: string): number;
+	}
+}
+
+declare module "node:fs" {
+	export function writeSync(fd: number, text: string): number;
+	export function existsSync(path: string): boolean;
+	export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+}
+
+declare module "node:fs/promises" {
+	export function readFile(path: string, encoding: string): Promise<string>;
+	export function appendFile(path: string, data: string, encoding: string): Promise<void>;
+	export function writeFile(path: string, data: string, encoding: string): Promise<void>;
+	export function mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+	export function stat(path: string): Promise<{ size: number }>;
+	export function mkdtemp(prefix: string): Promise<string>;
+	export function readdir(path: string): Promise<string[]>;
+	export function rename(oldPath: string, newPath: string): Promise<void>;
+	export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+}
+
+declare module "node:os" {
+	export function homedir(): string;
+	export function tmpdir(): string;
+}
+
+declare module "node:path" {
+	export function join(...parts: string[]): string;
+	export function dirname(path: string): string;
+	export function basename(path: string): string;
+}
+
+declare module "node:url" {
+	export function fileURLToPath(url: string | URL): string;
+}
+
+declare module "node:process" {
+	const process: { argv: string[]; env: Record<string, string | undefined>; once(event: string, listener: () => void): void };
+	export default process;
+}
+
+declare module "node:assert" {
+	const assert: any;
+	export default assert;
+}
+
+declare module "@earendil-works/pi-coding-agent" {
+	export interface ExtensionAPI {
+		on(event: string, callback: (...args: any[]) => any): void;
+		registerCommand(name: string, config: any): void;
+		registerTool?(config: any): void;
+		sendUserMessage(content: string, options?: { deliverAs: "followUp" }): void;
+	}
+
+	export interface ExtensionCommandContext {
+		cwd: string;
+		isIdle(): boolean;
+		ui: { notify(message: string, type: "info" | "warning" | "error" | "success"): void };
+		[key: string]: any;
+	}
+
+	export function getAgentDir(): string;
+}
+
+declare module "@mariozechner/pi-coding-agent" {
+	export function getAgentDir(): string;
+}

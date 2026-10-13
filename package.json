@@ -1,0 +1,95 @@
+{
+  "name": "@lopezpetergabriel/pi-extensions",
+  "version": "0.8.0",
+  "description": "Pi extensions, skills, and agents by lopezpetergabriel",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "author": "lopezpetergabriel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/petergabriel-dev/pi-extensions.git"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "agent/extensions/ask-user-question/*.ts",
+    "agent/extensions/browser/index.ts",
+    "agent/extensions/ccc-search/index.ts",
+    "agent/extensions/claude-bridge/*.ts",
+    "agent/extensions/discussion-notes.ts",
+    "agent/extensions/engineering-docs/*.ts",
+    "agent/extensions/engineering-docs/README.md",
+    "agent/extensions/filechanges/index.ts",
+    "agent/extensions/filechanges/README.md",
+    "agent/extensions/notify.ts",
+    "agent/extensions/personal-memory/*.ts",
+    "agent/extensions/subagents/*.ts",
+    "agent/extensions/workflow-modes/*.ts",
+    "agent/extensions/workflow-modes/plan-template.md",
+    "agent/extensions/workflow-modes/README.md",
+    "agent/claude-bridge-client/pi-bridge-mcp.js",
+    "agent/claude-bridge-client/pi-readonly-hook.js",
+    "agent/claude-bridge-client/pi-peer-hook.js",
+    "agent/claude-bridge-client/pi-statusline.js",
+    "agent/cursor-bridge-client/cursor-readonly-hook.js",
+    "agent/agents/*.md",
+    "agent/skills/**/*.md",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./agent/extensions/ask-user-question/index.ts",
+      "./agent/extensions/browser/index.ts",
+      "./agent/extensions/ccc-search/index.ts",
+      "./agent/extensions/claude-bridge/index.ts",
+      "./agent/extensions/discussion-notes.ts",
+      "./agent/extensions/engineering-docs/index.ts",
+      "./agent/extensions/filechanges/index.ts",
+      "./agent/extensions/notify.ts",
+      "./agent/extensions/personal-memory/index.ts",
+      "./agent/extensions/subagents/index.ts",
+      "./agent/extensions/workflow-modes/index.ts"
+    ],
+    "skills": [
+      "./agent/skills/grill",
+      "./agent/skills/grill-with-docs",
+      "./agent/skills/web-debug",
+      "./agent/skills/worker-orchestration"
+    ]
+  },
+  "scripts": {
+    "bootstrap": "npm --prefix agent/extensions/browser ci && npm --prefix agent/extensions/ccc-search ci && npm --prefix agent/extensions/filechanges ci && npm --prefix agent/extensions/subagents ci && npm --prefix agent/extensions/workflow-modes ci",
+    "check:workspace": "node scripts/check-workspace.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "check:docs": "npx --yes tsx scripts/check-docs.ts",
+    "check": "npm run check:workspace && npm run check:package && npm run check:docs",
+    "test": "npm run check && node scripts/test-release-branch.mjs && npm run test:ask-user-question && npm run test:claude-bridge && npm run test:bridge-client && npm run test:extensions && npm run typecheck && npm run test:cursor && npm run test:cursor-kit",
+    "prepublishOnly": "npm test",
+    "test:ask-user-question": "npx --yes tsx agent/extensions/ask-user-question/test/test_queue.ts && npx --yes tsx agent/extensions/ask-user-question/test/test_defer.ts && NODE_PATH=agent/extensions/subagents/node_modules npx --yes tsx agent/extensions/ask-user-question/test/test_relay.ts",
+    "test:claude-bridge": "npx --yes tsx agent/extensions/claude-bridge/test/test_mailbox.ts && npx --yes tsx agent/extensions/claude-bridge/test/test_presence.ts",
+    "test:bridge-client": "node agent/claude-bridge-client/test-sessions.js",
+    "test:extensions": "npm --prefix agent/extensions/browser test && npm --prefix agent/extensions/ccc-search test && npm --prefix agent/extensions/engineering-docs test && npm --prefix agent/extensions/personal-memory test && npm --prefix agent/extensions/subagents test && npm --prefix agent/extensions/workflow-modes test",
+    "smoke:subagents": "node agent/extensions/subagents/test/smoke/run-smoke.mjs",
+    "typecheck": "npm --prefix agent/extensions/browser run typecheck && npm --prefix agent/extensions/ccc-search run typecheck && npm --prefix agent/extensions/personal-memory run typecheck && npm --prefix agent/extensions/subagents run typecheck && npm --prefix agent/extensions/workflow-modes run typecheck",
+    "test:cursor": "node agent/cursor-bridge-client/test-cursor-readonly-hook.js",
+    "test:cursor-kit": "node .cursor/hooks/test-docs-nudge.js"
+  },
+  "dependencies": {
+    "diff": "^5.2.0",
+    "playwright-core": "^1.62.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
