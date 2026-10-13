@@ -335,10 +335,10 @@ The idle statusline script output and `refreshInterval: 5` settings were verifie
 
 #### Restart pairing acceptance (2026-10-12)
 
-Ran in a disposable project with isolated `PI_CODING_AGENT_DIR`, mode-0600 auth/config copies, and current repo extension source loaded in Pi RPC. Temp files and processes were removed after test. `pi --help` showed `--session <path|id>` and `--resume [session]`; `--resume <id>` opened an interactive picker in RPC, so same-ID resumes used `--session <id>` after initial `--session-id <id>`.
+Ran in a disposable project with isolated `PI_CODING_AGENT_DIR`, mode-0600 auth/config copies, and current repo extension source loaded in Pi RPC. Temporary project/auth copies and Pi processes were removed after test; global config/auth file hashes were unchanged. `pi --help` showed `--session <path|id>` and `--resume [session]`; `--resume <id>` opened an interactive picker in RPC, so same-ID resumes used `--session <id>` after initial `--session-id <id>`.
 
-- (a) Cleanly stopping Pi A kept `presence.json` and its peer, wrote a non-live heartbeat with both pending counts at zero, and made A disappear from `list_sessions`.
-- (b) Resuming A in 406ms restored its peer and showed `(restored 1 peer)`. Pi `bridge_message` then reached the `UserPromptSubmit` hook without an intervening harness request; hook output included the peer message and ack cleared `pendingCount`. Repeated after 5,684ms with same result. Hook was invoked directly with real `UserPromptSubmit` input; interactive Claude TUI rendering was not tested.
+- (a) Cleanly stopping Pi A left only `presence.json` in its owned 0700 namespace (file mode 0600), retaining its paired Claude peer with a back-dated/non-live heartbeat and both pending counts at zero; A disappeared from `list_sessions`.
+- (b) Resuming A with `--session <id>` restored its peer and recreated private `requests`, `responses`, and `processed` dirs. Pi `bridge_message` queued one synthetic message; direct Node invocation of `pi-peer-hook.js` with real `UserPromptSubmit` fields returned `hookSpecificOutput.additionalContext` containing it, with no `systemMessage`; ack changed `pendingCount` from 1 to 0. A second clean stop again left only `presence.json`. This invoked the hook directly, not Claude CLI; interactive Claude TUI behavior remains untested.
 - (c) With A down, the client's first live request auto-paired Claude to B. Restarting A dropped that peer; client resolved to B only.
 - (d) Backdating A's heartbeat by more than 10m and claiming another namespace triggered GC; A's old namespace disappeared, and same-ID resume restored no peers.
 - (e) Shutting down with one outbound message pending dropped it and emitted `claude-bridge dropped 1 pending peer message(s) on shutdown`.
