@@ -1,6 +1,6 @@
 # Pi Extensions
 
-`@lopezpetergabriel/pi-extensions@0.7.1` is a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+This workspace prepares `@lopezpetergabriel/pi-extensions@0.8.0`, a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -12,14 +12,16 @@
 
 ## Install and try the package
 
+Install globally, for one project, or temporarily:
+
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.7.1
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.7.1   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.7.1           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.8.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.8.0   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.8.0           # temporary try
 pi list
 ```
 
-These install commands pin `@0.7.1`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.8.0`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
@@ -27,13 +29,13 @@ pi update npm:@lopezpetergabriel/pi-extensions
 
 Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi update` updates Pi itself, not package extensions.
 
-### Install from Git after the 0.8.0 release
+### Install from Git
 
 ```bash
 pi install git:github.com/petergabriel-dev/pi-extensions@v0.8.0
 ```
 
-After that release, use the [installed-package consumer bridge setup](docs/engineering/dev-workflow.md#installed-package-consumer-bridge-setup) to register Claude Code and configure repo-local Cursor hooks. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope. The command above is future-facing; no 0.8.0 publish or install is claimed here.
+Use the [installed-package consumer bridge setup](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/dev-workflow.md#installed-package-consumer-bridge-setup) to register Claude Code and configure repo-local Cursor hooks. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope.
 
 Install `ccc` separately before using `ccc_search`; verify it with `ccc --version`. Raw or global copies of these extensions can load twice alongside the package. Use `pi list` and `pi config` to inspect registrations, then remove or disable duplicates.
 
@@ -123,13 +125,13 @@ Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpe
 
 ## Documentation
 
-Canonical project truth lives under [`docs/engineering/`](docs/engineering/). Start with:
+Canonical project truth lives under [`docs/engineering/`](https://github.com/petergabriel-dev/pi-extensions/tree/main/docs/engineering/). Start with:
 
-- [Engineering docs index](docs/engineering/README.md)
-- [Architecture and package boundary](docs/engineering/architecture.md)
-- [Development workflow and test matrix](docs/engineering/dev-workflow.md)
-- [Conventions](docs/engineering/conventions.md)
-- [Invariants](docs/engineering/invariants.md)
-- [Operational traps](docs/engineering/traps.md)
+- [Engineering docs index](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/README.md)
+- [Architecture and package boundary](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/architecture.md)
+- [Development workflow and test matrix](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/dev-workflow.md)
+- [Conventions](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/conventions.md)
+- [Invariants](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/invariants.md)
+- [Operational traps](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/traps.md)
 
 Edit canonical engineering docs rather than generated `AGENTS.md`, `CLAUDE.md`, or index content; regenerate generated outputs when required.

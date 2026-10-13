@@ -2,18 +2,18 @@
 
 ## Consumer install and release gates
 
-Install globally, for one project, or temporarily:
+For release version `0.8.0`, install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.7.1
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.7.1
-pi -e npm:@lopezpetergabriel/pi-extensions@0.7.1
+pi install npm:@lopezpetergabriel/pi-extensions@0.8.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.8.0
+pi -e npm:@lopezpetergabriel/pi-extensions@0.8.0
 pi list
 pi update npm:@lopezpetergabriel/pi-extensions
 pi remove npm:@lopezpetergabriel/pi-extensions
 ```
 
-Install commands pin the exact `@0.7.1` release. To upgrade an installed package to latest, run `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
+Install commands pin the exact `@0.8.0` version. Upgrade an installed package to latest with `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
 The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Subagent children launch through the parent Pi CLI in RPC mode; no separate terminal transport binary is required. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
@@ -97,7 +97,7 @@ git push <remote> release
 git push <remote> vX.Y.Z
 ```
 
-From `v0.8.0` onward, release tags point to release commits; earlier tags remain on main. No 0.8.0 publish or install is implied by these instructions.
+From `v0.8.0` onward, release tags point to release commits; earlier tags remain on main. Do not infer permission to publish or push from successful checks; wait for explicit approval at each outward-facing step.
 
 ## Bootstrap
 

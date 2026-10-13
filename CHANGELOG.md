@@ -4,10 +4,6 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-### Breaking
-
-- Removed `cmux`-based subagent launches in favor of Pi RPC; side-channel tokens are now per-run and owner-bound.
-
 ### Added
 
 - Add `/agents` TUI overlay for recent/live child activity, pending-question answers, and steering running children.
@@ -19,6 +15,27 @@ All notable changes to this project are documented here.
 - Canonicalize writer ownership paths to case-folded real-path keys; warn once per session when local agent definitions shadow bundled keys.
 - Enforce read-only full-content decision-index, root-spoke, and ADR freshness in root `npm run check`.
 - Route live subagent messages through next-tool-boundary RPC steer; default explorer effort to `low` and prefix/filter bounded child diagnostics safely.
+
+## [0.8.0] - 2026-10-13
+
+### Breaking
+
+- Bridge protocol v2 replaces the single lock with per-session namespaces; 0.7.x and 0.8.0 bridge clients do not interoperate. Re-register clients from the installed 0.8.0 package after upgrading.
+- The npm package and stripped `release` branch exclude `docs/engineering/**`.
+- Removed `cmux`-based subagent launches in favor of Pi RPC; side-channel tokens are now per-run and owner-bound.
+
+### Added
+
+- Add per-session namespaces plus `list_sessions` and `pair_session`.
+- Add peer chat with `send_message`/`read_messages` and Pi-side `bridge_message`.
+- Add the Claude peer hook and `Pi ✉N` statusline.
+- Include Claude and Cursor bridge clients in the npm package.
+- Add a stripped `release` branch for Git installs.
+
+### Changed
+
+- Pairing survives a clean restart of the same Pi session within 10 minutes; a live namespace wins.
+- A clean stop retains only `presence.json`.
 
 ## [0.7.1] - 2026-09-18
 
