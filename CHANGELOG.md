@@ -11,6 +11,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- Allow up to two within-task worker slices for substantial disjoint work; parent waits for all results and owns consolidation, verification, commit, and tick.
 - Keep subagent result/failure bodies pending until parent receipt; queue at most one displayed `nextTurn` fallback without auto-starting a turn, and suppress shutdown failure follow-ups.
 - Canonicalize writer ownership paths to case-folded real-path keys; warn once per session when local agent definitions shadow bundled keys.
 - Enforce read-only full-content decision-index, root-spoke, and ADR freshness in root `npm run check`.

@@ -6,7 +6,8 @@ Scope: behavioral acceptance for async delegation guidance and the out-of-proces
 
 - **Discuss quick lookup stays inline:** Focused single-file lookups do not use `subagent`.
 - **Plan fan-out delegates to explorer:** Multi-file discovery may use `subagent` with `agent: "explorer"`; parent synthesizes bounded findings.
-- **Build uses one worker for substantial work:** Use `subagent` with `agent: "worker"` and explicit `fileOwnership` for one saved-plan task at a time. Parent owns inspection, verification, commits, and confirmation gates.
+- **Build may slice one substantial confirmed task:** Use one worker by default. Fan out to at most two parallel workers only for at least two substantial disjoint slices and default/≥3 `concurrencyCap`, per the worker-orchestration skill. Parent waits for every result before consolidating, verifying, committing once, and ticking once; never fan out across saved-plan tasks.
+- **Slice failure scenario:** One slice fails while its sibling still runs. Parent does not abort the sibling or consolidate; waits for all results, then reports each slice's status, files touched, and open questions. Task stays blocked with no commit or tick.
 - **No over-delegation:** Do not delegate trivial lookups or one-line changes.
 
 ## Automated verification

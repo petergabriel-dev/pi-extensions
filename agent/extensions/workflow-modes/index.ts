@@ -632,9 +632,9 @@ Per-task execution:
 - Implement only what is needed for the current task.
 
 Worker delegation:
-- Use the worker-orchestration skill's A+B model for contract-first delegation. When \`subagent\` is available and the confirmed task is substantial (multi-file or multi-step changes), start exactly one worker per task inside the Section-4 loop with \`agent: "worker"\`. Pass task text as \`task\` and derive \`fileOwnership\` from task scope or target files. After \`subagent\`, end your turn; results arrive as a new turn. Use \`subagents_list\` only when the user asks for status or to find a transcript or log; use \`subagent_message\` for live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks. Parent retains task selection, Verification Gate, commit, and confirmation; worker handles isolated implementation.
+- Use the worker-orchestration skill's A+B model. For a confirmed substantial saved-plan task, use one worker or at most two parallel slice workers per its "Within-task slicing" section, only when at least two substantial disjoint slices exist and concurrencyCap is default or at least 3; otherwise use one worker or inline. Pass task text as task and derive fileOwnership from task scope or target files. After subagent, end your turn; results arrive as a new turn. Use subagents_list only when the user asks for status or to find a transcript or log; use subagent_message for live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks. Parent retains task selection, Verification Gate, commit, and confirmation.
 - Skip worker delegation for trivial one-line tasks — execute them directly in the parent.
-- Do not fan out multiple workers concurrently within the saved-plan loop. Parallel fan-out is reserved for ad-hoc multi-task requests that are not driven by a saved plan.
+- Wait for every slice result before consolidating; parent runs Verification Gate and owns one commit and one tick per task. Never fan out across saved-plan tasks. If slices fail or block, report each slice's status.
 - Carry the ponytail reflex into delegation: include the minimalism bar (prefer reuse, stdlib, and existing dependencies; minimum viable for the task) in the worker's task text so the worker does not over-build what it is handed.
 
 Verification:
