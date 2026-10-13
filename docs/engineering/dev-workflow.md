@@ -17,7 +17,7 @@ Install commands pin the exact `@0.7.1` release. To upgrade an installed package
 
 The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Subagent children launch through the parent Pi CLI in RPC mode; no separate terminal transport binary is required. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
-The package allowlist contains runtime TS/helpers, workflow template, agent/skill Markdown, engineering docs, README.md, LICENSE, CHANGELOG.md, and npm-mandatory nested READMEs. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
+Starting with release `0.8.0`, the npm tarball includes runtime TS/helpers, workflow template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly five bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Main retains engineering docs and development material; `.cursor/` commands/config are repository-only and never ship. The `release` branch mirrors the unpacked tarball file-for-file, with only an optional root `.npmrc` extra. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
 For a clean source/release setup, install the root published dependency/lock, then nested development packages. Pi-managed installs disable peer solving; Pi API imports remain `"*"` peers.
 
@@ -28,16 +28,14 @@ npm test
 npm pack --dry-run --json --ignore-scripts
 ```
 
-Before publication, smoke-test the exact packed artifact without copying normal auth/settings/memory:
+Smoke-test the exact tarball already built at `dist/<tgz>`; never call `npm pack` again. Set `TGZ` to the actual artifact path in the same shell session before running this block:
 
 ```bash
 umask 077
 PACKAGE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-package.XXXXXX")"
 trap 'rm -rf "$PACKAGE_TEST_DIR"' EXIT INT TERM
-npm pack --ignore-scripts --pack-destination "$PACKAGE_TEST_DIR"
 mkdir -p "$PACKAGE_TEST_DIR/package" "$PACKAGE_TEST_DIR/agent"
-tar -xzf "$PACKAGE_TEST_DIR/lopezpetergabriel-pi-extensions-0.7.1.tgz" \
-  -C "$PACKAGE_TEST_DIR/package" --strip-components=1
+tar -xzf "$TGZ" -C "$PACKAGE_TEST_DIR/package" --strip-components=1
 npm install --prefix "$PACKAGE_TEST_DIR/package" --omit=dev --omit=peer --ignore-scripts
 PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
   pi --no-extensions -e "$PACKAGE_TEST_DIR/package" --list-models
@@ -47,24 +45,59 @@ PI_CODING_AGENT_DIR="$PACKAGE_TEST_DIR/agent" \
 
 ## Release procedure
 
-Run release gates from repository root before publishing:
+Run release gates on main from the repository root:
 
 ```bash
 npm ci --ignore-scripts --legacy-peer-deps
 npm run bootstrap
+npm run check
 npm test
-npm pack --dry-run --json --ignore-scripts
 ```
 
-Run exact-artifact smoke test above with a disposable `PI_CODING_AGENT_DIR`. Add a `## [0.7.1]` CHANGELOG entry with an explicit `### Breaking` section before publishing. After all gates pass, use `Release v0.7.1` as the release commit message, publish with `npm publish --access public`, then create an annotated `v0.7.1` tag:
+After gates pass, build one artifact and smoke-test that same file. For version `X.Y.Z`, `npm pack` writes `dist/lopezpetergabriel-pi-extensions-X.Y.Z.tgz`:
 
 ```bash
-git commit -m "Release v0.7.1"
-npm publish --access public
-git tag -a v0.7.1 -m "Release v0.7.1"
+mkdir -p dist
+npm pack --pack-destination dist/
+TGZ="dist/lopezpetergabriel-pi-extensions-X.Y.Z.tgz"
 ```
 
-Replace `0.7.1` in commit and tag commands for later releases. Keep annotated tag names in `vX.Y.Z` form and release commit messages in `Release vX.Y.Z` form.
+Run the [exact-artifact smoke test](#consumer-install-and-release-gates) with `TGZ` set to that path. Pi's Git installer uses production dependency installation (`npm install --omit=dev`); check whether that adds Pi peers:
+
+```bash
+PEER_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pi-peer-check.XXXXXX")"
+trap 'rm -rf "$PEER_TEST_DIR"' EXIT INT TERM
+mkdir -p "$PEER_TEST_DIR/package"
+tar -xzf "$TGZ" -C "$PEER_TEST_DIR/package" --strip-components=1
+(cd "$PEER_TEST_DIR/package" && npm install --omit=dev)
+find "$PEER_TEST_DIR/package/node_modules" \
+  \( -path '*/@earendil-works' -o -name typebox \) -print
+```
+
+Record whether the command prints `@earendil-works` or `typebox`. If either appears, repeat from a fresh extraction with `.npmrc` containing only `legacy-peer-deps=true` plus a trailing newline; confirm neither appears, then pass `--npmrc` to the release script. Do not create the release tag until this peer check passes.
+
+After gates, smoke test, and peer check pass, create the preparation commit on main and build the stripped release commit/tag from the same artifact:
+
+```bash
+git commit -m "Prepare vX.Y.Z"
+node scripts/release-branch.mjs --tgz dist/<tgz> --version X.Y.Z [--npmrc]
+```
+
+The command is a template; pass the exact `dist/lopezpetergabriel-pi-extensions-X.Y.Z.tgz` produced above and add `--npmrc` only when needed. Script requires clean main, creates a `Release vX.Y.Z` commit on `release` and annotated local tag `vX.Y.Z`, and never pushes. Stop here and wait for explicit approval before publication:
+
+```bash
+npm publish dist/<tgz>
+```
+
+After publish succeeds, wait for separate explicit push approval before pushing main, release, and tag:
+
+```bash
+git push <remote> main
+git push <remote> release
+git push <remote> vX.Y.Z
+```
+
+From `v0.8.0` onward, release tags point to release commits; earlier tags remain on main. No 0.8.0 publish or install is implied by these instructions.
 
 ## Bootstrap
 
@@ -283,6 +316,34 @@ ps -ax -o pid=,command= | grep -F "/path/to/PI_PROJECT_DIR" | grep '[p]i ' || tr
 ```
 
 Both commands should print nothing. Do not signal the current Pi, delete its bridge state, or leave temporary Pi, tmux, or bridge processes running after tests.
+
+## Installed-package consumer bridge setup
+
+Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes npm/Git sources and personal versus project scope (`--local`/`-l`). The roots below are expected from Pi's package-manager layout and still need confirmation in disposable installs; these paths are not claimed as live-verified.
+
+| Install source/scope | Expected `<pkg>` root |
+|---|---|
+| User npm | `~/.pi/agent/npm/node_modules/@lopezpetergabriel/pi-extensions` |
+| Project npm | `.pi/npm/node_modules/@lopezpetergabriel/pi-extensions` |
+| User Git | `~/.pi/agent/git/github.com/petergabriel-dev/pi-extensions` |
+| Project Git | `.pi/git/github.com/petergabriel-dev/pi-extensions` |
+
+Register Claude Code's user-scope MCP client from installed package root:
+
+```bash
+claude mcp add -s user pi-claude-bridge -- node <pkg>/agent/claude-bridge-client/pi-bridge-mcp.js
+```
+
+Preserve existing settings, matchers, and hooks while configuring these commands with `<pkg>` paths:
+
+| Config/event | Command |
+|---|---|
+| Claude `PreToolUse` | `node <pkg>/agent/claude-bridge-client/pi-readonly-hook.js` |
+| Claude `UserPromptSubmit` and `SessionEnd` | `node <pkg>/agent/claude-bridge-client/pi-peer-hook.js` |
+| Claude `statusLine` | `node <pkg>/agent/claude-bridge-client/pi-statusline.js` |
+| Cursor repo-local `.cursor/hooks.json` `preToolUse` | `node <pkg>/agent/cursor-bridge-client/cursor-readonly-hook.js` |
+
+Keep Cursor `.cursor/` commands/config in the project; package contains only the hook runtime. After upgrading from `0.7.x`, rerun Claude MCP registration and hook/statusline configuration. Bridge protocols do not interoperate; do not mix old and new clients. Confirm expected filesystem roots in disposable installs before relying on them.
 
 ## Claude Code bridge workflow
 

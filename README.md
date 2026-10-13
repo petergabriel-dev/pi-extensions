@@ -27,6 +27,14 @@ pi update npm:@lopezpetergabriel/pi-extensions
 
 Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi update` updates Pi itself, not package extensions.
 
+### Install from Git after the 0.8.0 release
+
+```bash
+pi install git:github.com/petergabriel-dev/pi-extensions@v0.8.0
+```
+
+After that release, use the [installed-package consumer bridge setup](docs/engineering/dev-workflow.md#installed-package-consumer-bridge-setup) to register Claude Code and configure repo-local Cursor hooks. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope. The command above is future-facing; no 0.8.0 publish or install is claimed here.
+
 Install `ccc` separately before using `ccc_search`; verify it with `ccc --version`. Raw or global copies of these extensions can load twice alongside the package. Use `pi list` and `pi config` to inspect registrations, then remove or disable duplicates.
 
 ## Develop from source
@@ -111,7 +119,7 @@ The launcher reuses the current Pi user state; it does not create a separate Pi 
 
 Never add credentials, trust/settings/model files, sessions, plans, personal memory, caches, databases, logs, dependency trees, bridge IPC, CCC indexes, or external symlinks to the repository. The only tracked `.pi/` resource is the internal `.pi/agents` symlink.
 
-The public npm package allowlist contains runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `docs/engineering/**`, `README.md`, `LICENSE`, `CHANGELOG.md`, and required nested READMEs. It excludes tests, nested manifests/lockfiles/TypeScript configs, bridge clients, Cursor configuration, `.pi`, `node_modules`, and runtime/user state. Package checks enforce `<=512 KiB` packed and `<=1 MiB` unpacked limits.
+Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly five bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=1 MiB` unpacked limits.
 
 ## Documentation
 

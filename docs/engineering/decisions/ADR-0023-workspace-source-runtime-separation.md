@@ -2,11 +2,11 @@
 id: ADR-0023
 title: Workspace source and runtime separation
 status: Active
-date: 2026-07-17
-decision: Publish the allowlisted source/assets as public npm package @lopezpetergabriel/pi-extensions, including CHANGELOG.md; keep Pi-owned runtime state outside the repository and never package or copy it into active ~/.pi source. Use npm publish --access public, Release vX.Y.Z commit messages, and annotated vX.Y.Z tags for releases.
+date: 2026-10-13
+decision: Publish the allowlisted source/assets as public npm package @lopezpetergabriel/pi-extensions, including CHANGELOG.md; keep Pi-owned runtime state outside the repository and never package or copy it into active ~/.pi source. Starting with 0.8.0, ship exactly five bridge client runtime files, exclude docs/engineering/**, identify the source with package.json repository metadata, and mirror the tarball on release. Use Prepare vX.Y.Z commits on main; annotated vX.Y.Z tags from 0.8.0 onward point to release commits, while earlier tags stay on main.
 why: A relocatable package preserves source history and clean installation without risking credentials, sessions, personal memory, generated state, or active global Pi source/config.
-affects: package.json, package-lock.json, CHANGELOG.md, LICENSE, .gitignore, .pi/agents, bin/pi-workspace, scripts/check-workspace.mjs, scripts/check-package.mjs, agent/extensions/subagents/agents.ts, agent/agents, docs/engineering
-consequences: The package ships eleven extensions, four skills, two bundled agents, and the packaged changelog with root production dependencies and Pi peer dependencies; source-launcher behavior remains separate from npm installation, which does not copy into active ~/.pi source, while normal runs still share Pi-owned runtime state. Release gates run before npm publish, and release commits/tags use the documented versioned conventions.
+affects: package.json, package-lock.json, CHANGELOG.md, LICENSE, .gitignore, .pi/agents, bin/pi-workspace, scripts/check-workspace.mjs, scripts/check-package.mjs, scripts/release-branch.mjs, scripts/test-release-branch.mjs, agent/extensions/subagents/agents.ts, agent/agents, docs/engineering
+consequences: The package ships eleven extensions, four skills, two bundled agents, the packaged changelog, and exactly five bridge client runtime files from 0.8.0 onward; docs/engineering/** and .cursor/** are excluded. Root package.json declares repository metadata, production dependencies, and Pi peer dependencies. The release branch mirrors the unpacked tarball except optional root .npmrc; Prepare vX.Y.Z commits land on main, while tags from 0.8.0 onward point to release commits and earlier tags stay on main. The release script never pushes.
 readWhen: changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy
 ---
 
@@ -15,11 +15,11 @@ readWhen: changing package resources or allowlists, dependencies, launcher flags
 ## Decision
 
 - Keep this workspace as an independent Git repository preserving imported ancestry, with no remote that points back to the active global Pi source checkout.
-- Publish the allowlisted source/assets as public npm package `@lopezpetergabriel/pi-extensions`; include `CHANGELOG.md` with the package allowlist. The package is not a separate Pi home and never contains or copies Pi-owned runtime state.
-- Ship exactly eleven extension entrypoints, four authored skills, and two bundled agent definitions. Root `package.json` declares extension/skill resources and allowlists package-owned agent assets; root owns production dependencies while Pi packages remain peer dependencies.
+- Publish the allowlisted source/assets as npm package `@lopezpetergabriel/pi-extensions`; include `CHANGELOG.md` with the package allowlist. Root `package.json` `repository` metadata identifies the source repository. The package is not a separate Pi home and never contains or copies Pi-owned runtime state.
+- Ship exactly eleven extension entrypoints, four authored skills, and two bundled agent definitions. Starting with `0.8.0`, include exactly five bridge client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. Exclude `docs/engineering/**` and `.cursor/**`; engineering docs, development material, and Cursor commands/config remain on main and are not packaged. Root `package.json` declares extension/skill resources and allowlists package-owned agent assets; root owns production dependencies while Pi packages remain peer dependencies.
 - The source launcher `bin/pi-workspace` runs `pi --no-extensions -e <repository-root>` so global extension discovery is disabled and the workspace package loads once; npm installation loads the package without copying source into active `~/.pi`.
 - Reuse host Pi auth, settings, model catalogs, sessions, and indexed personal memory through normal Pi runtime ownership. Do not copy them into repository.
-- Version only allowlisted source/assets, authored config, and engineering docs. Exclude credentials, trust/settings/model snapshots, sessions, plans, memory, bridge IPC, caches, DBs, logs, dependency trees, CCC index data, and external symlinks; never treat Pi-owned runtime state as package content.
+- Version only allowlisted source/assets, authored config, and engineering docs on main. Exclude credentials, trust/settings/model snapshots, sessions, plans, memory, bridge IPC, caches, DBs, logs, dependency trees, CCC index data, and external symlinks; never treat Pi-owned runtime state as package content. From `0.8.0`, the npm tarball omits `docs/engineering/**`; `.cursor/**` remains repository-only.
 - Resolve package-owned assets relative to module/script location. No machine-specific absolute source path or dependency on active `~/.pi` source is allowed.
 - Keep clone/migration non-destructive: never move, delete, repoint, disable, or commit inside active global Pi source checkout.
 
@@ -64,6 +64,8 @@ Code/config:
 - Good: Workspace source can be edited, tested, documented, and committed without modifying active global Pi source.
 - Good: Package inventory and integrity checks make resource scope explicit.
 - Good: Public npm installation provides a managed lifecycle without copying source into active `~/.pi`.
+- From `0.8.0`, the release commit tree mirrors the unpacked npm tarball file-for-file; optional root `.npmrc` is the only permitted extra. `scripts/release-branch.mjs` builds this local branch and annotated tag from the already packed artifact and never pushes.
+- Prepare release source on main with `Prepare vX.Y.Z`, then create the release branch commit/tag. Tags from `v0.8.0` onward point to release commits; historical tags before `v0.8.0` remain on main.
 - Good: Bundled module-relative role definitions make clean installs self-contained while preserving scoped overrides.
 - Good: Global extension duplicates are prevented by launcher flag rather than manual global config changes.
 - Good: Credentials, personal memory, sessions, caches, and generated runtime data remain outside Git.

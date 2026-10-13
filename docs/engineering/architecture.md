@@ -2,9 +2,10 @@
 
 ## Workspace and package boundary
 
-This repository publishes as `@lopezpetergabriel/pi-extensions@0.7.1`, one Pi package containing eleven extensions, four skills, and two package-owned bundled agent definitions. It is source, not a separate Pi home.
+The last published package version documented here is `@lopezpetergabriel/pi-extensions@0.7.1`, one Pi package containing eleven extensions, four skills, and two package-owned bundled agent definitions. This repository is package source, not a separate Pi home.
 
-- The npm allowlist ships runtime TS/helpers, workflow plan template, agent/skill Markdown, `docs/engineering/**`, README.md, LICENSE, CHANGELOG.md, and npm-mandatory nested READMEs under engineering-docs/filechanges. It excludes tests, nested manifests/locks/tsconfigs, bridge clients, Cursor config, `.pi`, `node_modules`, and runtime/user state; package gates enforce <=512 KiB packed and <=1 MiB unpacked.
+- Starting with release `0.8.0`, the npm package ships runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly five bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=1 MiB unpacked.
+- From `0.8.0` onward, the `release` branch mirrors the unpacked tarball file-for-file; only an optional root `.npmrc` may be extra. Main retains engineering docs and development material, including `.cursor/` commands and config; those files are not packaged.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
 - Bundled agent definitions load relative to the package module. Scope overrides are: default user = bundled then user; project = bundled then nearest project; both = bundled then user then project. Later definitions override by name, but a selected valid unsafe explorer override is rejected by the caller’s read-only validator.
 - The package reuses host Pi auth, settings, model catalogs, personal memory, and session storage. Those remain outside this repository under Pi-owned user-global paths. Dependency installs, CCC indexes, bridge IPC, logs, DBs, credentials, sessions, plans, and personal memory are runtime/generated state and ignored.
@@ -49,6 +50,8 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 | `agent/skills/worker-orchestration` | Contract-first A+B orchestration with disjoint ownership, staged discovery (inventory → parent selection → bounded inspect), default budgets (inventory no reads/≤10 `grep`/`find`/`ls`; inspect ≤5 files/≤10 reads), sequential preference, and parent-owned integration. |
 
 ### Harness clients and project integration
+
+The `.cursor/` MCP config, hooks, and commands below are main-repository integrations only; `.cursor/**` is never included in the npm package or its tarball-mirroring `release` branch.
 
 - `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code and Cursor; client code imports no Pi internals.
 - `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard. Claude’s `UserPromptSubmit` peer hook injects pending messages as advisory context, then acknowledges included IDs; `SessionEnd` best-effort unpairs.
