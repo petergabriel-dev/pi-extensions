@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt, type PresencePeer } from "../presence.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt, type PresencePeer } from "../presence.js";
 
 const now = Date.parse("2025-01-02T03:04:05.000Z");
 const stoppedAt = Date.parse(stoppedHeartbeatAt(now));
@@ -27,5 +30,25 @@ assert.deepEqual(
 	restorablePeers([{ harness: "claude", id: "same-id" }], [{ peers: [{ harness: "cursor", id: "same-id" }] }]),
 	[{ harness: "claude", id: "same-id" }],
 );
+
+const namespace = fs.mkdtempSync(path.join(os.tmpdir(), "claude-bridge-presence-"));
+try {
+	const cacheDirs = ["requests", "responses", "processed"].map((dir) => path.join(namespace, dir));
+	for (const dir of cacheDirs) {
+		fs.mkdirSync(dir);
+		fs.writeFileSync(path.join(dir, "entry.json"), "cached");
+	}
+	const presencePath = path.join(namespace, "presence.json");
+	const presenceBytes = Buffer.from('{"schemaVersion":2}\n');
+	fs.writeFileSync(presencePath, presenceBytes);
+
+	clearRequestCache(cacheDirs);
+	assert.deepEqual(cacheDirs.map(fs.existsSync), [false, false, false]);
+	assert.equal(fs.existsSync(presencePath), true);
+	assert.deepEqual(fs.readFileSync(presencePath), presenceBytes);
+	assert.doesNotThrow(() => clearRequestCache([path.join(namespace, "missing")]));
+} finally {
+	fs.rmSync(namespace, { recursive: true, force: true });
+}
 
 console.log("claude bridge presence tests passed");

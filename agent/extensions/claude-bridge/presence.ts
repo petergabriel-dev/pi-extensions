@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+
 export const LIVE_TTL_MS = 5_000;
 
 export interface PresencePeer {
@@ -11,6 +13,12 @@ export interface LivePresence {
 
 export function stoppedHeartbeatAt(now: number): string {
 	return new Date(now - LIVE_TTL_MS - 1).toISOString();
+}
+
+export function clearRequestCache(dirs: readonly string[]): void {
+	for (const dir of dirs) {
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort cache cleanup */ }
+	}
 }
 
 export function restorablePeers<T extends PresencePeer>(previous: readonly T[], otherLive: readonly LivePresence[]): T[] {

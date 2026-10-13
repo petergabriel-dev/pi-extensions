@@ -7,7 +7,7 @@ import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/ind
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
-import { LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
+import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -1167,8 +1167,10 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 	if (activePaths && activePiSessionId && namespaceDirsArePrivate(activePaths)) {
 		const owner = readPresence(activePaths.presence, activePiSessionId);
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
-			try { writePresence(activePaths, stoppedHeartbeatAt(Date.now())); }
-			catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
+			try {
+				writePresence(activePaths, stoppedHeartbeatAt(Date.now()));
+				clearRequestCache([activePaths.requests, activePaths.responses, activePaths.processed]);
+			} catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
 		}
 	}
 	activePaths = null;
