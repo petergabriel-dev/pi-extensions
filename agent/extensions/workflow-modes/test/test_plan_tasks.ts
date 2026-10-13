@@ -19,12 +19,14 @@ const handEdited = `# Hand-edited plan
   - **Checkpoint:** commit task
 - [x] Already done
 - [ ] Second task without metadata
+- [ ] Task with files
+  - **Files:** a.ts, b.ts
 
 ## Section 5 — Definition of Done
 - [ ] Must not be parsed
 `;
 const parsed = parsePlanTasks(handEdited);
-assert.equal(parsed.length, 2);
+assert.equal(parsed.length, 3);
 assert.equal(parsed[0]?.title, "First task");
 assert.deepEqual(parsed[0]?.metadata, {
 	given: "input exists",
@@ -35,6 +37,8 @@ assert.deepEqual(parsed[0]?.metadata, {
 	checkpoint: "commit task",
 });
 assert.deepEqual(parsed[1]?.metadata, {});
+assert.deepEqual(parsed[2]?.metadata, { files: "a.ts, b.ts" }, "Files hint parses into metadata");
+assert.equal(parsed[0]?.id, "task-a3e4185a81812b83", "Files support must preserve existing task ids");
 assert.deepEqual(parsePlanTasks(handEdited), parsed, "ids must be deterministic");
 assert.notEqual(parsed[0]?.id, parsed[1]?.id);
 assert.deepEqual(parsePlanTasks(null as unknown as string), [], "malformed input must not throw");
