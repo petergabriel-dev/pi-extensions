@@ -47,7 +47,7 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 | `agent/skills/grill` | One-question-at-a-time plan interrogation with a recommended answer. |
 | `agent/skills/grill-with-docs` | Domain-aware interrogation that inspects code/docs, captures discussion notes, updates context docs, and offers ADRs only for durable trade-offs. |
 | `agent/skills/web-debug` | Evidence-first browser debugging for console, network, DOM, storage, session, and UI symptoms. |
-| `agent/skills/worker-orchestration` | Contract-first A+B orchestration with disjoint ownership, staged discovery (inventory → parent selection → bounded inspect), default budgets (inventory no reads/≤10 `grep`/`find`/`ls`; inspect ≤5 files/≤10 reads), sequential preference, and parent-owned integration. |
+| `agent/skills/worker-orchestration` | Contract-first A+B orchestration with disjoint ownership, staged discovery (inventory → parent selection → bounded inspect), default budgets (inventory no reads/≤10 `grep`/`find`/`ls`; inspect ≤5 files/≤10 reads), sequential preference, parent-owned integration, and at most two within-task slices at default/≥3 concurrencyCap to leave a nested-explorer slot. |
 
 ### Harness clients and project integration
 

@@ -429,7 +429,7 @@ npm run test:cursor-kit
 `.cursor/commands/discuss.md`, `.cursor/commands/plan.md`, and `.cursor/commands/build.md` form a standalone workflow for repositories without Pi or bridge configuration.
 
 - `/discuss` asks one focused question at a time, records the working handoff in conversation, and does not edit files.
-- `/plan` produces Evidence, Target files, and atomic Given/When/Then tasks with NFRs, verification gates, and commit boundaries. It creates no files during planning and creates only task-named docs during implementation.
+- `/plan` produces Evidence, Target files, and atomic Given/When/Then tasks with NFRs, verification gates, and commit boundaries; it may add optional task-level `Files` hints for Build slicing. Files hints are advisory, never ownership. Planning creates no files; implementation creates only task-named docs.
 - `/build` executes one task at a time, verifies before commit, stops on failure, and reports each checkpoint.
 - `npm run test:cursor-kit` covers the commit nudge hook. The nudge asks, never denies, when a commit stages non-doc changes without `docs/engineering/**`; docs-staged, empty, malformed, and Git-failure cases allow.
 
