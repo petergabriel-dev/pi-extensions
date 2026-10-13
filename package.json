@@ -7,6 +7,10 @@
   ],
   "license": "MIT",
   "author": "lopezpetergabriel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/petergabriel-dev/pi-extensions.git"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
@@ -29,9 +33,13 @@
     "agent/extensions/workflow-modes/*.ts",
     "agent/extensions/workflow-modes/plan-template.md",
     "agent/extensions/workflow-modes/README.md",
+    "agent/claude-bridge-client/pi-bridge-mcp.js",
+    "agent/claude-bridge-client/pi-readonly-hook.js",
+    "agent/claude-bridge-client/pi-peer-hook.js",
+    "agent/claude-bridge-client/pi-statusline.js",
+    "agent/cursor-bridge-client/cursor-readonly-hook.js",
     "agent/agents/*.md",
     "agent/skills/**/*.md",
-    "docs/engineering/**",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

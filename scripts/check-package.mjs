@@ -6,6 +6,13 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const bridgeClients = [
+  "agent/claude-bridge-client/pi-bridge-mcp.js",
+  "agent/claude-bridge-client/pi-readonly-hook.js",
+  "agent/claude-bridge-client/pi-peer-hook.js",
+  "agent/claude-bridge-client/pi-statusline.js",
+  "agent/cursor-bridge-client/cursor-readonly-hook.js",
+];
 const result = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
   cwd: root,
   encoding: "utf8",
@@ -30,14 +37,14 @@ const isAllowed = (file) =>
   file === "README.md" ||
   file === "LICENSE" ||
   file === "CHANGELOG.md" ||
+  bridgeClients.includes(file) ||
   /^agent\/extensions\/(?:[^/]+\/)?[^/]+\.ts$/.test(file) ||
   file === "agent/extensions/engineering-docs/README.md" ||
   file === "agent/extensions/filechanges/README.md" ||
   file === "agent/extensions/workflow-modes/plan-template.md" ||
   file === "agent/extensions/workflow-modes/README.md" ||
   /^agent\/agents\/[^/]+\.md$/.test(file) ||
-  /^agent\/skills\/.*\.md$/.test(file) ||
-  file.startsWith("docs/engineering/");
+  /^agent\/skills\/.*\.md$/.test(file);
 
 const forbiddenSegments = new Set([
   ".pi",
@@ -56,12 +63,18 @@ const forbiddenSegments = new Set([
 ]);
 const forbiddenFile = /^(?:auth|trust|settings|models-store)\.json$|^(?:memory|MEMORY)\.md(?:\.bak)?$|^(?:\.npmrc|npmrc|package-lock\.json|npm-shrinkwrap\.json)$|^tsconfig(?:\.[^/]+)?\.json$|\.(?:db|sqlite|sqlite3|log|tmp|lock)$/i;
 for (const file of files) {
+  assert.ok(!file.startsWith("docs/engineering/"), `engineering docs must not be packaged: ${file}`);
+  assert.ok(!/^test-.*\.js$/.test(path.posix.basename(file)), `test file must not be packaged: ${file}`);
   const segments = file.split("/");
   assert.ok(!segments.some((segment) => forbiddenSegments.has(segment)), `forbidden package path: ${file}`);
   assert.ok(file === "package.json" || path.posix.basename(file) !== "package.json", `nested package manifest: ${file}`);
   assert.ok(!forbiddenFile.test(path.posix.basename(file)), `forbidden package file: ${file}`);
   assert.ok(isAllowed(file), `file outside package allowlist: ${file}`);
 }
+assert.deepEqual(
+  [...files].filter((file) => file.startsWith("agent/claude-bridge-client/") || file.startsWith("agent/cursor-bridge-client/")).sort(),
+  bridgeClients.slice().sort(),
+);
 
 const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 for (const entry of manifest.pi.extensions) {
@@ -84,7 +97,7 @@ for (const file of [
   "agent/skills/worker-orchestration/SKILL.md",
   ...expectedAgents,
   "agent/extensions/workflow-modes/plan-template.md",
-  "docs/engineering/manifest.json",
+  ...bridgeClients,
   "README.md",
   "LICENSE",
   "CHANGELOG.md",

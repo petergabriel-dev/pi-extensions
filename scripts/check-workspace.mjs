@@ -61,9 +61,13 @@ const publishedFiles = [
   "agent/extensions/workflow-modes/*.ts",
   "agent/extensions/workflow-modes/plan-template.md",
   "agent/extensions/workflow-modes/README.md",
+  "agent/claude-bridge-client/pi-bridge-mcp.js",
+  "agent/claude-bridge-client/pi-readonly-hook.js",
+  "agent/claude-bridge-client/pi-peer-hook.js",
+  "agent/claude-bridge-client/pi-statusline.js",
+  "agent/cursor-bridge-client/cursor-readonly-hook.js",
   "agent/agents/*.md",
   "agent/skills/**/*.md",
-  "docs/engineering/**",
   "README.md",
   "LICENSE",
   "CHANGELOG.md",
@@ -75,6 +79,10 @@ assert.equal(manifest.version, "0.7.1");
 assert.equal(manifest.private, undefined);
 assert.equal(manifest.license, "MIT");
 assert.equal(manifest.author, "lopezpetergabriel");
+assert.deepEqual(manifest.repository, {
+  type: "git",
+  url: "git+https://github.com/petergabriel-dev/pi-extensions.git",
+});
 assert.equal(manifest.engines?.node, ">=22.19.0");
 assert.deepEqual(manifest.publishConfig, { access: "public" });
 assert.deepEqual(manifest.files, publishedFiles);
