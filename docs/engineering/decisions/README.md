@@ -8,7 +8,7 @@
 | ADR-0004 | Superseded | Pi Subagents | changing subagent sessions, role definitions, agent-definition discovery or precedence, nested spawning, concurrency, workflow gating, browser proxies, or parent/child isolation |
 | ADR-0005 | Superseded | Pinned Default Persistent-Memory Model Resolution |  |
 | ADR-0006 | Superseded | Chunked Persistent-Memory Reconciliation |  |
-| ADR-0007 | Active | Workflow modes direct subagent delegation by prompt |  |
+| ADR-0007 | Active | Workflow modes direct subagent delegation by prompt | Changing workflow-mode saved-plan Build delegation, worker slicing, nested-worker lane policy, or task verification and commit flow. |
 | ADR-0008 | Superseded | Persistent-memory reconcile connection ownership and observability |  |
 | ADR-0009 | Superseded | Bridge staging validity and malformed quarantine |  |
 | ADR-0010 | Active | Global subagent idle timeout with max-total backstop | Changing subagent RPC event activity, tool-open idle handling, parked-child policy, timeout settings, or timeout debugging |
