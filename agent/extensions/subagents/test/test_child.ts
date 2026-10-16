@@ -17,8 +17,14 @@ const previous = {
 	child: process.env.PI_SUBAGENT_CHILD_SESSION_ID,
 	loadout: process.env.PI_SUBAGENT_LOADOUT,
 };
+interface RegisteredTool {
+	description: string;
+	parameters: unknown;
+	execute: (...args: any[]) => Promise<unknown>;
+}
+
 const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-const tools = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>();
+const tools = new Map<string, RegisteredTool>();
 const requestTypes: string[] = [];
 const nestedRequests: unknown[] = [];
 const browserCalls: Array<{ tool: string; params: Record<string, unknown> }> = [];
@@ -37,14 +43,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function makePi(
-	toolMap = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>(),
+	toolMap = new Map<string, RegisteredTool>(),
 	handlerMap = new Map<string, (event: unknown, ctx: unknown) => unknown>(),
 ) {
 	return {
 		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
 			handlerMap.set(name, handler);
 		},
-		registerTool(tool: { name: string; parameters: unknown; execute: (...args: any[]) => Promise<unknown> }) {
+		registerTool(tool: { name: string; description: string; parameters: unknown; execute: (...args: any[]) => Promise<unknown> }) {
 			toolMap.set(tool.name, tool);
 		},
 	};
@@ -107,7 +113,7 @@ process.env.PI_SUBAGENT_LOADOUT = loadoutPath;
 
 try {
 	const noEnvHandlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-	const noEnvTools = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>();
+	const noEnvTools = new Map<string, RegisteredTool>();
 	const noEnvPi = makePi(noEnvTools, noEnvHandlers);
 	delete process.env.PI_SUBAGENT_TOKEN;
 	subagentChildExtension(noEnvPi as never);
@@ -118,6 +124,9 @@ try {
 	await server.listen();
 	subagentChildExtension(makePi(tools, handlers) as never);
 	assert.deepEqual([...tools.keys()].sort(), ["ask_question", "browser_close", "browser_console", "browser_eval", "subagent"]);
+	for (const [name, tool] of tools) {
+		if (name.startsWith("browser_")) assert.ok(tool.description.includes("/browser on"), `${name} description must name /browser on`);
+	}
 	assert.equal(handlers.size, 0);
 	assert.equal(server.getConnection("child-owner"), undefined);
 
@@ -186,7 +195,7 @@ try {
 	process.env.PI_SUBAGENT_TOKEN = maxDepthToken;
 	process.env.PI_SUBAGENT_OWNER = maxDepthOwner;
 	process.env.PI_SUBAGENT_CHILD_SESSION_ID = "max-depth-child";
-	const maxDepthTools = new Map<string, { parameters: unknown; execute: (...args: any[]) => Promise<unknown> }>();
+	const maxDepthTools = new Map<string, RegisteredTool>();
 	subagentChildExtension(makePi(maxDepthTools) as never);
 	assert.deepEqual([...maxDepthTools.keys()].sort(), ["ask_question", "browser_console"]);
 	assert.equal(server.getConnection(maxDepthOwner), undefined);

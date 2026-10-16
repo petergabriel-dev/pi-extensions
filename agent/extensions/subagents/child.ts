@@ -159,7 +159,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 		pi.registerTool<TSchema, unknown>({
 			name: toolName,
 			label: toolName.replaceAll("_", " "),
-			description: `Run ${toolName} through parent browser session.`,
+			description: `Run ${toolName} through parent browser session; requires /browser on in parent. If gate is off, stop and report blocked: run /browser on.`,
 			parameters,
 			async execute(_toolCallId, params: unknown, signal) {
 				try {
