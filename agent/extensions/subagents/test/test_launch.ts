@@ -50,6 +50,7 @@ const loadout: SubagentLoadout = {
 	cwd: process.cwd(),
 	extensionPath: resolveSubagentExtensionPath(),
 	tools: ["read", "grep"],
+	projectTrusted: false,
 	model: "openai/test-model",
 	thinkingLevel: "high",
 	appendSystemPrompt: buildSubagentSystemPrompt("Agent rules", true),
@@ -101,11 +102,31 @@ try {
 	assert.ok(loadout.appendSystemPrompt.includes(CAVEMAN_PROMPT.trim()));
 	assert.equal(buildSubagentSystemPrompt("Agent rules", false), "Agent rules");
 	assert.ok(Buffer.byteLength(truncateSubagentResult("x".repeat(MAX_SUBAGENT_RESULT_BYTES + 100)), "utf8") <= MAX_SUBAGENT_RESULT_BYTES);
-	assert.deepEqual(buildSubagentCommandArgs(loadout), [
+	const untrustedArgs = buildSubagentCommandArgs(loadout);
+	assert.deepEqual(untrustedArgs, [
 		"--no-extensions", "-e", loadout.extensionPath, "--tools", "read,grep",
 		"--append-system-prompt", loadout.appendSystemPrompt, "--session-id", "child-session",
 		"--no-approve", "--model", "openai/test-model", "--thinking", "high",
 	]);
+	const trustedArgs = buildSubagentCommandArgs({ ...loadout, projectTrusted: true });
+	assert.equal(trustedArgs.includes("--approve"), true);
+	assert.equal(trustedArgs.includes("--no-approve"), false);
+	for (const args of [untrustedArgs, trustedArgs]) {
+		assert.equal(args.includes("--no-extensions"), true);
+		assert.equal(args.filter((argument) => argument === "-e").length, 1);
+		assert.equal(args[args.indexOf("-e") + 1], loadout.extensionPath);
+		assert.equal(args.some((argument) => argument.startsWith("builtin:")), false);
+		assert.equal(args.some((argument) => argument.includes("claude-bridge") || argument.includes("discussion-notes")), false);
+	}
+
+	const legacyLoadoutPath = path.join(tempDir, "legacy-loadout.json");
+	const legacyLoadout = { ...loadout } as Partial<SubagentLoadout>;
+	delete legacyLoadout.projectTrusted;
+	fs.writeFileSync(legacyLoadoutPath, JSON.stringify(legacyLoadout));
+	assert.equal(readSubagentLoadout(legacyLoadoutPath).projectTrusted, false);
+	const invalidLoadoutPath = path.join(tempDir, "invalid-loadout.json");
+	fs.writeFileSync(invalidLoadoutPath, JSON.stringify({ ...loadout, projectTrusted: "true" }));
+	assert.throws(() => readSubagentLoadout(invalidLoadoutPath), /Invalid subagent loadout\./);
 
 	const calls: SpawnCall[] = [];
 	const steered: string[] = [];
@@ -117,6 +138,7 @@ try {
 	try {
 		const handle = await host.launch({
 			...launchOptions("parent-session", "worker-one"),
+			projectTrusted: true,
 			subagentAgents: ["explorer"],
 			fileOwnership: ["src/**"],
 			onResult: (text) => { steered.push(text); throw new Error("steering callback failed"); },
@@ -134,6 +156,9 @@ try {
 		const saved = readSubagentLoadout(handle.loadoutPath);
 		assert.deepEqual(saved.tools, ["read", "grep"]);
 		assert.equal(saved.cavemanEnabled, true);
+		assert.equal(saved.projectTrusted, true);
+		assert.equal(calls[0]?.args.includes("--approve"), true);
+		assert.equal(calls[0]?.args.includes("--no-approve"), false);
 		assert.equal(saved.depth, 0);
 		assert.deepEqual(saved.subagentAgents, ["explorer"]);
 		assert.deepEqual(saved.fileOwnership, ["src/**"]);

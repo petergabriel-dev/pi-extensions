@@ -61,6 +61,7 @@ const loadout: SubagentLoadout = {
 	cwd: process.cwd(),
 	extensionPath: "child.ts",
 	tools: ["read", "ask_question", "subagent", "browser_console", "browser_close", "browser_eval"],
+	projectTrusted: false,
 	appendSystemPrompt: "Agent rules",
 	cavemanEnabled: true,
 	depth: 0,
