@@ -154,7 +154,7 @@ Use `--no-session` for a disposable parent session:
 
 ## RPC subagent workflow
 
-`subagent` starts a child Pi process and returns immediately. The parent launches it with `process.execPath` and the parent CLI script resolved from `process.argv[1]`, using `--mode rpc`; it does not resolve `pi` from `PATH`. The child receives `--no-extensions`, the module-relative child extension, the exact `--tools` allowlist, `--append-system-prompt`, `--session-id`, `--no-approve`, and optional model/thinking settings. The parent sends the task through RPC `prompt`, not as a positional CLI argument.
+`subagent` starts a child Pi process and returns immediately. The parent launches it with `process.execPath` and the parent CLI script resolved from `process.argv[1]`, using `--mode rpc`; it does not resolve `pi` from `PATH`. The child receives `--no-extensions`, the module-relative child extension, the exact `--tools` allowlist, `--append-system-prompt`, `--session-id`, and either `--approve` when the parent trusts the project or `--no-approve` otherwise, plus optional model/thinking settings. The parent sends the task through RPC `prompt`, not as a positional CLI argument.
 
 Set per-role defaults with `/subagent-model <explorer|worker> <provider/model|inherit>` and `/subagent-effort <explorer|worker> <off|minimal|low|medium|high|xhigh|inherit>`. These commands write Pi settings; no spawn parameter exposes effort. Explorer effort defaults to `low`, worker effort inherits the parent when unset, and explicit explorer `inherit` is persisted to restore parent effort.
 

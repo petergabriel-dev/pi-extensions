@@ -17,6 +17,10 @@ All notable changes to this project are documented here.
 - Enforce read-only full-content decision-index, root-spoke, and ADR freshness in root `npm run check`.
 - Route live subagent messages through next-tool-boundary RPC steer; default explorer effort to `low` and prefix/filter bounded child diagnostics safely.
 
+### Fixed
+
+- Restore trusted-project skills for child agents and clarify browser proxy gate usage.
+
 ## [0.8.0] - 2026-10-13
 
 ### Breaking
