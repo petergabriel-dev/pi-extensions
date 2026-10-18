@@ -136,7 +136,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 			async execute(_toolCallId, params: NestedSubagentParams) {
 				const agentName = params.agent?.trim() || allowedAgents[0]!;
 				const allowlistError = validateSubagentAgentAllowlist(allowedAgents, agentName);
-				if (allowlistError) return { content: [{ type: "text", text: allowlistError }], details: { ok: false, error: allowlistError } };
+				if (allowlistError) throw new Error(allowlistError);
 				try {
 					const response = await getClient().request<{ text?: unknown }>("spawn", {
 						agent: agentName,
@@ -147,7 +147,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 					return { content: [{ type: "text", text: response.text }], details: { ok: true, agent: agentName } };
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					return { content: [{ type: "text", text: `Nested subagent failed: ${message}` }], details: { ok: false, error: message, agent: agentName } };
+					throw new Error(`Nested subagent failed: ${message}`);
 				}
 			},
 		});
@@ -168,7 +168,7 @@ export default function subagentChildExtension(pi: ExtensionAPI): void {
 					return { content: [{ type: "text", text: JSON.stringify(result) }], details: { ok: true, tool: toolName, result } };
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					return { content: [{ type: "text", text: `${toolName} failed: ${message}` }], details: { ok: false, tool: toolName, error: message } };
+					throw new Error(`${toolName} failed: ${message}`);
 				}
 			},
 		});

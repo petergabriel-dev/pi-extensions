@@ -82,12 +82,14 @@ const server = new SubagentIpcServer({
 		requestTypes.push(request.type);
 		if (request.type === "spawn") {
 			nestedRequests.push(request.payload);
+			if (isRecord(request.payload) && request.payload.task === "fail") throw new Error("Nested spawn failed.");
 			return { owner: "nested-owner", childSessionId: "nested-child", text: "nested result" };
 		}
 		if (request.type === "browser" && isRecord(request.payload) && typeof request.payload.tool === "string") {
 			const tool = request.payload.tool;
 			const params = isRecord(request.payload.params) ? request.payload.params : {};
 			browserCalls.push({ tool, params });
+			if (tool === "browser_eval" && params.expression === "gate-off") throw new Error("Browser gate is off. Run /browser on first.");
 			if (tool === "browser_eval") {
 				if (params.expression === "pre-aborted") resolvePreAbortedBrowserStart();
 				else resolveSlowBrowserStart();
@@ -161,25 +163,34 @@ try {
 	assert.deepEqual(nestedRequests, [{ agent: "explorer", task: "inspect" }]);
 	assert.ok(server.getConnection("child-owner"));
 
-	const refusedResult = await tools.get("subagent")!.execute("nested-refused", { agent: "worker", task: "inspect" }, undefined, undefined, {});
-	assert.match((refusedResult as { content: Array<{ text: string }> }).content[0]!.text, /allowed child agents/);
+	await assert.rejects(
+		tools.get("subagent")!.execute("nested-refused", { agent: "worker", task: "inspect" }, undefined, undefined, {}),
+		/allowed child agents/,
+	);
+	await assert.rejects(
+		tools.get("subagent")!.execute("nested-failed", { agent: "explorer", task: "fail" }, undefined, undefined, {}),
+		/Nested subagent failed: Nested spawn failed\./,
+	);
 	const browserResult = await tools.get("browser_console")!.execute("browser-call", { clear: false }, undefined, undefined, {});
 	assert.deepEqual((browserResult as { content: Array<{ text: string }> }).content[0], { type: "text", text: "browser result" });
+	await assert.rejects(
+		tools.get("browser_eval")!.execute("browser-gate-off", { expression: "gate-off" }, undefined, undefined, {}),
+		/browser_eval failed: Browser gate is off/,
+	);
 
 	const browserAbort = new AbortController();
 	const abortedBrowserCall = tools.get("browser_eval")!.execute("browser-abort", { expression: "1 + 1" }, browserAbort.signal, undefined, {});
+	const abortedBrowserRejected = assert.rejects(abortedBrowserCall, /aborted/);
 	await slowBrowserStarted;
 	browserAbort.abort();
-	const abortedBrowserResult = await abortedBrowserCall as { content: Array<{ text: string }> };
-	assert.match(abortedBrowserResult.content[0]!.text, /aborted/);
+	await abortedBrowserRejected;
 	await browserCloseRequested;
 	assert.ok(browserCalls.some((call) => call.tool === "browser_close"));
 	const preAbortedBrowser = new AbortController();
 	preAbortedBrowser.abort();
 	const preAbortedBrowserCall = tools.get("browser_eval")!.execute("browser-pre-aborted", { expression: "pre-aborted" }, preAbortedBrowser.signal, undefined, {});
-	await Promise.all([preAbortedBrowserStarted, preAbortedBrowserCloseRequested]);
-	const preAbortedResult = await preAbortedBrowserCall as { content: Array<{ text: string }> };
-	assert.match(preAbortedResult.content[0]!.text, /aborted/);
+	const preAbortedBrowserRejected = assert.rejects(preAbortedBrowserCall, /aborted/);
+	await Promise.all([preAbortedBrowserStarted, preAbortedBrowserCloseRequested, preAbortedBrowserRejected]);
 	assert.deepEqual(requestTypes.filter((type) => type === "question" || type === "activity" || type === "result" || type === "message"), []);
 
 	const maxDepthOwner = "max-depth-owner";

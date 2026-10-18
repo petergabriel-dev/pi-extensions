@@ -20,6 +20,7 @@ All notable changes to this project are documented here.
 ### Fixed
 
 - Restore trusted-project skills for child agents and clarify browser proxy gate usage.
+- Flag failed child browser-proxy and nested-subagent calls as tool errors so parent progress shows `error`, not `ok`.
 
 ## [0.8.0] - 2026-10-13
 
