@@ -93,6 +93,16 @@ function handle(input) {
 	const projectRoot = findPiProjectRoot(hookCwd(input));
 	if (!projectRoot) return allow();
 	const event = eventName(input);
+	if (event === "beforeShellExecution" || (event === "preToolUse" && toolType(input).toLowerCase() === "write")) {
+		try {
+			const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
+			const conversationId = input.conversation_id;
+			if (bridgeClient.isSafeId(conversationId)
+				&& bridgeClient.holdsBuildLease(projectRoot, { harness: "cursor", id: conversationId })) return allow();
+		} catch {
+			// Lease lookup errors retain today's read-only classifier.
+		}
+	}
 	if (event === "beforeShellExecution") {
 		const classified = classifyShell(commandFromInput(input));
 		if (classified.permission === "allow") return allow();

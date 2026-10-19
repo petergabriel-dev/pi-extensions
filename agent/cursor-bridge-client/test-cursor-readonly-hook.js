@@ -7,11 +7,35 @@ const path = require("node:path");
 
 const hook = path.resolve(__dirname, "cursor-readonly-hook.js");
 const { classifyShell, classifyMcp, classifyTool } = require(hook);
+const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
+const CURSOR = { harness: "cursor", id: "cursor-conversation-1" };
 
 function tempPiProject() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-hook-"));
 	fs.mkdirSync(path.join(root, ".pi"), { recursive: true });
 	return root;
+}
+
+function addLeasePresence(root, { paired = true, heartbeatAt = new Date().toISOString(), buildLease = { ...CURSOR, planId: "plan-1", grantedAt: Date.now() } } = {}) {
+	const paths = bridgeClient.bridgePaths(root, "pi-cursor-session");
+	for (const dir of [paths.root, paths.sessions, paths.namespace, paths.requests, paths.responses, paths.processed]) {
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		fs.chmodSync(dir, 0o700);
+	}
+	const startedAt = new Date().toISOString();
+	fs.writeFileSync(paths.presence, JSON.stringify({
+		schemaVersion: 2,
+		piSessionId: "pi-cursor-session",
+		name: "cursor test",
+		mode: "plan",
+		pid: process.pid,
+		startedAt,
+		heartbeatAt,
+		peers: paired ? [{ ...CURSOR, pendingCount: 0, inboundPendingCount: 0 }] : [],
+		buildLease,
+	}), { mode: 0o600 });
+	fs.chmodSync(paths.presence, 0o600);
+	return paths;
 }
 
 function run(input, raw) {
@@ -77,6 +101,43 @@ test("preToolUse denies Write before bytes reach disk", () => {
 	assertPermission(result, "deny");
 	assert.match(result.user_message, /Write tool/);
 	assert.equal(fs.readFileSync(file, "utf8"), "original\n");
+});
+
+test("live lease allows Cursor shell and Write while leaving MCP policy unchanged", () => {
+	const root = tempPiProject();
+	const paths = addLeasePresence(root);
+	const file = path.join(root, "note.txt");
+	fs.writeFileSync(file, "original\n", "utf8");
+	assertPermission(run({ event: "beforeShellExecution", cwd: root, conversation_id: CURSOR.id, command: "echo changed > note.txt" }), "allow");
+	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: file, content: "changed\n" } }), "allow");
+	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "filesystem", mcp_tool_name: "write_file" }), "deny");
+	assert.equal(fs.readFileSync(file, "utf8"), "original\n");
+	assert.deepEqual(fs.readdirSync(paths.requests), []);
+});
+
+test("non-holder lease does not bypass Cursor shell or Write denial", () => {
+	const root = tempPiProject();
+	addLeasePresence(root, { buildLease: { ...CURSOR, id: "another-conversation", planId: "plan-1", grantedAt: Date.now() } });
+	assertPermission(run({ event: "beforeShellExecution", cwd: root, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
+	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Write" }), "deny");
+});
+
+test("missing or invalid conversation_id keeps Cursor deny behavior", () => {
+	const root = tempPiProject();
+	addLeasePresence(root);
+	for (const conversation_id of [undefined, "../bad"]) {
+		assertPermission(run({ event: "beforeShellExecution", cwd: root, conversation_id, command: "echo x > file.txt" }), "deny");
+		assertPermission(run({ event: "preToolUse", cwd: root, conversation_id, tool_name: "Write" }), "deny");
+	}
+});
+
+test("unpaired or stale Cursor lease does not bypass denial", () => {
+	const unpairedRoot = tempPiProject();
+	addLeasePresence(unpairedRoot, { paired: false });
+	assertPermission(run({ event: "preToolUse", cwd: unpairedRoot, conversation_id: CURSOR.id, tool_name: "Write" }), "deny");
+	const staleRoot = tempPiProject();
+	addLeasePresence(staleRoot, { heartbeatAt: new Date(Date.now() - 6_000).toISOString() });
+	assertPermission(run({ event: "beforeShellExecution", cwd: staleRoot, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
 });
 
 test("preToolUse allows non-Write tools", () => {
