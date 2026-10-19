@@ -43,3 +43,4 @@
 | ADR-0039 | Active | Interactive subagent overlay and question relay | Changing child-question routing, owner-scoped item buffering, `/agents`, live steering, or parent `nextTurn` notes |
 | ADR-0040 | Active | Single question UI owner | Changing question UI ownership, child relay events, FIFO or source-scoped cancellation, RPC child dialogs, or the /agents gate |
 | ADR-0041 | Active | Multi-session bridge and peer chat | changing bridge ownership, pairing, peer routing, delivery, wake behavior, or adding a harness peer. |
+| ADR-0042 | Active | Design reference directory convention | changing design reference discovery, ingestion, prompt trust boundaries, manifest gates, or scaffold behavior |
