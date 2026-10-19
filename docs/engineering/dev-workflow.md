@@ -451,6 +451,8 @@ Inside workspace Pi:
 
 Use `/mode design` for design-system docs. `/docs init --design` creates missing `docs/design/` files without overwriting curated content. List each token CSS file in `docs/design/manifest.json`, use `/* @primitive */` and `/* @semantic */` sections with `:root` and optional `[data-theme="dark"]`, then run `/docs update-tokens`. `/docs check` reports invalid manifests, stale `tokens.md`, unmarked properties, and preview style literals. Use `/mode build` for component source.
 
+For optional reference context, manually copy external exports—Open Design packages/folders or ZIP exports, prototypes, and files from other tools—into `docs/design/reference/`. Commit the snapshot to keep it available; delete the directory to disable reference prompts. Check each package's license before committing.
+
 ## CCC indexing
 
 Search tool never initializes project. In Build mode, from repository root:

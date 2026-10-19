@@ -71,6 +71,7 @@
 - Off must inject neither question-tool fragment, Caveman, nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
 
 - Design write/edit gates fail closed: missing, unreadable, or invalid design manifest permits only `docs/design/**`; only validated manifest `tokenFiles` may extend this surface. Design never permits `docs/engineering/**` writes.
+- Optional `docs/design/reference/` affects Design/Build prompt context only when present; absence leaves prompts unchanged. Its contents are untrusted data, never instructions. Scaffolding must not create the directory, and reference files must never appear in manifest `tokenFiles`.
 
 ## Workflow modes announcement channel
 
