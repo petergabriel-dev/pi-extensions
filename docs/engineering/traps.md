@@ -165,6 +165,12 @@
 - **`--no-approve` silently drops project resources.** It skips trust-gated project skills, packages, and `.pi/mcp.json`; it does not preserve project resources while only suppressing a prompt. Mirror parent trust (`agent/extensions/subagents/index.ts`, `agent/extensions/subagents/launch.ts`; Pi 1.2.0 `docs/security.md`, `docs/packages.md`, `docs/mcp.md`).
 - **Child browser proxies use the parent's gate.** The browser gate defaults off; proxy calls fail until the parent runs `/browser on` (`agent/extensions/browser/index.ts`, `agent/extensions/subagents/child.ts`).
 
+## OpenCode plugin and MCP probe
+
+- OpenCode `v2.0.32` loads global plugins from `~/.config/opencode/plugins/`; a scratch plugin using `export default { id, setup }` loaded under Bun, and `createRequire()` loaded `pi-bridge-mcp.js`. Its tool hook rewrote the built-in `shell` command before execution. Installed runtime expects this default-export shape; docs examples showed a different named-export shape.
+- Local MCP config uses `mcp[name]` with `type: "local"`, `command: [...]`, and optional `enabled: true`. A scratch server received `initialize` and `tools/list`, but its tool was absent from the model's tool list; end-to-end MCP invocation and bridge identity injection remain unverified.
+- Scratch probe also observed direct `edit`, `write`, and `shell` tool hooks; throwing blocked `edit`/`write`, and changing `shell` input changed the executed command. `execute` hook fired, but its indirect write behavior was not established.
+
 ## Personal memory and discussion notes
 
 - **Current personal memory is indexed directory, not flat append file.** `~/.pi/memory.md` is legacy migration input only; active entries live under `~/.pi/memory/` with generated `MEMORY.md`.
