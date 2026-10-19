@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +78,8 @@ assert.deepEqual(firstScaffold.created, [
 	"docs/design/preview/example.html",
 ]);
 const scaffoldReadme = await readFile(join(scaffoldRoot, "docs/design/README.md"), "utf8");
+assert.match(scaffoldReadme, /reference\//);
+assert.equal(existsSync(join(scaffoldRoot, "docs/design/reference")), false, "scaffold does not create external reference dir");
 assert.match(scaffoldReadme, /\.dark/);
 for (const file of ["index.html", "example.html"]) {
 	const preview = await readFile(join(scaffoldRoot, "docs/design/preview", file), "utf8");
