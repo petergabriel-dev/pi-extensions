@@ -6,6 +6,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const bridgeClient = require("./pi-bridge-mcp.js");
 
 const MUTATION_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 function isDir(p) {
@@ -124,6 +125,13 @@ function main() {
 		return;
 	}
 
+	try {
+		if (bridgeClient.holdsBuildLease(projectRoot, { harness: "claude", id: input.session_id })) {
+			console.log(JSON.stringify(allow()));
+			return;
+		}
+	} catch {}
+
 	const toolName = String(input.tool_name || input.toolName || "");
 	if (MUTATION_TOOLS.has(toolName)) {
 		console.log(JSON.stringify(deny(`${toolName} is blocked in Pi project ${projectRoot}. Switch to Pi /mode build for mutations.`)));
@@ -151,4 +159,6 @@ function main() {
 	console.log(JSON.stringify(allow()));
 }
 
-main();
+module.exports = { wrapBashForSandbox };
+
+if (require.main === module) main();

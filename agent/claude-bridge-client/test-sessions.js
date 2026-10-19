@@ -7,6 +7,7 @@ const path = require("node:path");
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const client = require("./pi-bridge-mcp.js");
+const readonlyHook = require("./pi-readonly-hook.js");
 
 const HARNESS = { harness: "claude", id: "claude-session-1" };
 const OPENCODE = { harness: "opencode", id: "opencode-session-1" };
@@ -45,6 +46,22 @@ function addSession(cwd, id, peers = [], heartbeatAt) {
 	}
 	writeJson(paths.presence, presence(id, peers, heartbeatAt || new Date().toISOString()));
 	return paths;
+}
+
+function setBuildLease(paths, buildLease) {
+	const current = JSON.parse(fs.readFileSync(paths.presence, "utf8"));
+	current.buildLease = buildLease;
+	writeJson(paths.presence, current);
+}
+
+function parseReadonlyHook(result) {
+	assert.equal(result.code, 0, `hook exit code: ${result.signal || result.code}`);
+	assert.equal(result.stderr, "", "hook errors must stay silent");
+	return JSON.parse(result.stdout);
+}
+
+function noResponder() {
+	return { requests: [], stop() {} };
 }
 
 function startResponder(cwd) {
@@ -163,6 +180,29 @@ function parsePeerBlock(text) {
 	return JSON.parse(text.slice(start + open.length, end));
 }
 
+function assertBashUsesExistingPolicy(output) {
+	const available = process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC !== "1"
+		&& process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec");
+	if (available) {
+		assert.equal(output.hookSpecificOutput?.permissionDecision, "allow");
+		assert.match(output.hookSpecificOutput.updatedInput.command, /^\/usr\/bin\/sandbox-exec /);
+	} else {
+		assert.equal(output.hookSpecificOutput?.permissionDecision, "deny");
+		assert.match(output.systemMessage, /sandbox-exec is unavailable/);
+	}
+}
+
+async function assertReadOnlyFallback(cwd) {
+	const edit = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+		cwd, session_id: HARNESS.id, tool_name: "Edit", tool_input: {},
+	}));
+	assert.equal(edit.hookSpecificOutput.permissionDecision, "deny");
+	const bash = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+		cwd, session_id: HARNESS.id, tool_name: "Bash", tool_input: { command: "echo read-only" },
+	}));
+	assertBashUsesExistingPolicy(bash);
+}
+
 async function waitFor(fn, timeoutMs = 1_000) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -197,6 +237,7 @@ async function main() {
 	assert.deepEqual(client.resolveHarnessIdentity({ claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" }), { harness: "claude", id: "legacy-id" });
 	assert.deepEqual(client.resolveHarnessIdentity({}, { CLAUDE_CODE_SESSION_ID: "env-id" }), { harness: "claude", id: "env-id" });
 	assert.equal(client.resolveHarnessIdentity({}, {}), null);
+	assert.equal(typeof readonlyHook.wrapBashForSandbox, "function");
 
 	await test("session listing filters stale presence", async (cwd) => {
 		addSession(cwd, "pi-live", [{ ...HARNESS, pendingCount: 2, inboundPendingCount: 1 }]);
@@ -215,6 +256,77 @@ async function main() {
 		assert.equal(liveSession.peers[0].pendingCount, 2);
 		assert.equal(liveSession.peers[0].inboundPendingCount, 1);
 	});
+
+	await test("build lease allows holder tools without Bash wrapping or bridge writes", async (cwd) => {
+		const paths = addSession(cwd, "pi-lease-holder", [HARNESS]);
+		setBuildLease(paths, { harness: HARNESS.harness, id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() });
+		const before = fs.readFileSync(paths.presence, "utf8");
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true);
+		const edit = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+			cwd, session_id: HARNESS.id, tool_name: "Edit", tool_input: {},
+		}));
+		assert.deepEqual(edit, {});
+		const bash = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+			cwd, session_id: HARNESS.id, tool_name: "Bash", tool_input: { command: "echo unsandboxed" },
+		}));
+		assert.deepEqual(bash, {});
+		const envOnly = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+			cwd, tool_name: "Edit", tool_input: {},
+		}));
+		assert.equal(envOnly.hookSpecificOutput.permissionDecision, "deny", "lease identity must come from hook session_id only");
+		assert.equal(fs.readFileSync(paths.presence, "utf8"), before);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("non-holder lease does not bypass read-only", async (cwd) => {
+		const paths = addSession(cwd, "pi-lease-nonholder", [HARNESS]);
+		setBuildLease(paths, { harness: "claude", id: "other-session", planId: "plan-1", grantedAt: Date.now() });
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		await assertReadOnlyFallback(cwd);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("stale paired heartbeat does not bypass read-only", async (cwd) => {
+		const paths = addSession(cwd, "pi-lease-stale", [HARNESS], new Date(Date.now() - 6_000).toISOString());
+		setBuildLease(paths, { harness: "claude", id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() });
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		await assertReadOnlyFallback(cwd);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("malformed lease does not reject presence or bypass read-only", async (cwd) => {
+		const paths = addSession(cwd, "pi-lease-malformed", [HARNESS]);
+		setBuildLease(paths, { harness: "claude", id: HARNESS.id, planId: "", grantedAt: "now" });
+		assert.equal(client.listSessions(cwd).length, 1);
+		assert.equal(client.listSessions(cwd)[0].buildLease, null);
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		await assertReadOnlyFallback(cwd);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("multiple live paired sessions do not bypass read-only", async (cwd) => {
+		const lease = { harness: "claude", id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() };
+		const first = addSession(cwd, "pi-lease-one", [HARNESS]);
+		const second = addSession(cwd, "pi-lease-two", [HARNESS]);
+		setBuildLease(first, lease);
+		setBuildLease(second, lease);
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		await assertReadOnlyFallback(cwd);
+		assert.deepEqual(fs.readdirSync(first.requests), []);
+		assert.deepEqual(fs.readdirSync(second.requests), []);
+	}, noResponder);
+
+	await test("build lease lookup across ten live sessions stays under 50ms", async (cwd) => {
+		const lease = { harness: "claude", id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() };
+		for (let index = 0; index < 10; index++) {
+			const paths = addSession(cwd, `pi-timing-${index}`, index === 0 ? [HARNESS] : []);
+			if (index === 0) setBuildLease(paths, lease);
+		}
+		const start = process.hrtime.bigint();
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true);
+		const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+		assert.ok(elapsedMs < 50, `lease lookup took ${elapsedMs.toFixed(2)}ms`);
+	}, noResponder);
 
 	await test("single live session auto-pairs then routes request", async (cwd, responder) => {
 		const paths = addSession(cwd, "pi-only");

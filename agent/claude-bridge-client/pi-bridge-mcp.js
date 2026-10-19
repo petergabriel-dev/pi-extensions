@@ -14,6 +14,7 @@ const POLL_MS = 100;
 const LIVE_TTL_MS = 5_000;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HARNESS_KINDS = new Set(["claude", "cursor", "pi", "opencode"]);
+const BUILD_LEASE_HARNESSES = new Set(["claude", "cursor", "opencode"]);
 const MAX_PEERS = 10;
 const BRIDGE_DOWN_MESSAGE = "Pi bridge not responding; start/focus Pi in this project.";
 const SERVER_NAME = "pi-claude-bridge";
@@ -85,6 +86,13 @@ function isHarnessName(value) {
 	return typeof value === "string" && HARNESS_KINDS.has(value);
 }
 
+function parseBuildLease(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	if (!BUILD_LEASE_HARNESSES.has(value.harness) || !isSafeId(value.id)) return null;
+	if (typeof value.planId !== "string" || value.planId.trim().length === 0 || !Number.isFinite(value.grantedAt)) return null;
+	return { harness: value.harness, id: value.id, planId: value.planId, grantedAt: value.grantedAt };
+}
+
 function readJson(file) {
 	try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
@@ -103,7 +111,7 @@ function parsePresence(value, expectedId) {
 		pendingCount: Number.isFinite(peer.pendingCount) ? Math.max(0, Math.floor(peer.pendingCount)) : 0,
 		inboundPendingCount: Number.isFinite(peer.inboundPendingCount) ? Math.max(0, Math.floor(peer.inboundPendingCount)) : 0,
 	}));
-	return { schemaVersion: 2, piSessionId: value.piSessionId, name: value.name, mode: value.mode, pid: value.pid, startedAt: value.startedAt, heartbeatAt: value.heartbeatAt, peers };
+	return { schemaVersion: 2, piSessionId: value.piSessionId, name: value.name, mode: value.mode, pid: value.pid, startedAt: value.startedAt, heartbeatAt: value.heartbeatAt, peers, buildLease: parseBuildLease(value.buildLease) };
 }
 
 function resolveProjectRoot(cwd = process.cwd()) {
@@ -170,6 +178,19 @@ function peerMatches(peer, identity) {
 
 function findPairedLiveSessions(projectRoot, identity, now = Date.now()) {
 	return liveSessions(projectRoot, now).filter(({ presence }) => presence.peers.some((peer) => peerMatches(peer, identity)));
+}
+
+function holdsBuildLease(projectRoot, identity, now = Date.now()) {
+	try {
+		if (!identity || typeof identity !== "object" || Array.isArray(identity)
+			|| !BUILD_LEASE_HARNESSES.has(identity.harness) || !isSafeId(identity.id)) return false;
+		const paired = findPairedLiveSessions(projectRoot, identity, now);
+		if (paired.length !== 1) return false;
+		const lease = paired[0].presence.buildLease;
+		return Boolean(lease && lease.harness === identity.harness && lease.id === identity.id);
+	} catch {
+		return false;
+	}
 }
 
 function formatPeerBlock(messages, budgetChars) {
@@ -529,6 +550,7 @@ module.exports = {
 	findPairedLiveSessions,
 	findPiProjectRoot,
 	formatPeerBlock,
+	holdsBuildLease,
 	isSafeId,
 	listSessions,
 	liveSessions,
