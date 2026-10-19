@@ -540,7 +540,7 @@ export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled
 		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
 		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
 		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled, undefined, cwd),
-		designPrompt: composeWorkflowPrompt("design", cavemanEnabled),
+		designPrompt: composeWorkflowPrompt("design", cavemanEnabled, undefined, cwd),
 		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
 		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),

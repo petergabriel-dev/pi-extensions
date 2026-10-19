@@ -18,16 +18,36 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
+import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, BUILD_REFERENCE_PROMPT, DESIGN_REFERENCE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
-const absent = composeWorkflowPrompt("build", true, undefined, cwd);
-if (absent?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("missing manifest injected design block");
+const absentBuild = composeWorkflowPrompt("build", true, undefined, cwd);
+const absentDesign = composeWorkflowPrompt("design", true, undefined, cwd);
+for (const prompt of [absentBuild, absentDesign]) {
+	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
+}
+if (absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("missing manifest injected design block");
+mkdirSync(join(cwd, "docs/design/reference"), { recursive: true });
+const referenceBuild = composeWorkflowPrompt("build", true, undefined, cwd);
+if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("reference failed to inject Build prompt independently of manifest");
+if (!composeWorkflowPrompt("design", true, undefined, cwd)?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference failed to inject Design prompt");
+for (const mode of ["discuss", "plan", "review"] as const) {
+	const prompt = composeWorkflowPrompt(mode, true, undefined, cwd);
+	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error(mode + " mode injected a reference prompt");
+}
+const noCwdBuild = composeWorkflowPrompt("build", true);
+const noCwdDesign = composeWorkflowPrompt("design", true);
+for (const prompt of [noCwdBuild, noCwdDesign]) {
+	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference prompt injected without cwd");
+}
 mkdirSync(join(cwd, "docs/design"), { recursive: true });
 writeFileSync(join(cwd, "docs/design/manifest.json"), "{}");
 if (!composeWorkflowPrompt("build", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("manifest failed to inject design block");
 const buildPrompt = composeWorkflowPrompt("build", true, undefined, cwd);
+const designAwareIndex = buildPrompt?.indexOf(BUILD_DESIGN_AWARE_PROMPT) ?? -1;
+const referenceIndex = buildPrompt?.indexOf(BUILD_REFERENCE_PROMPT) ?? -1;
+if (designAwareIndex < 0 || referenceIndex <= designAwareIndex) throw new Error("Build reference prompt order was not design-aware then reference");
 if (!buildPrompt?.includes("workflow_plan_tick") || !buildPrompt.includes("authoritative queue") || !buildPrompt.includes("immutable seed text")) throw new Error("Build prompt omitted tracker queue rules");
 if (!buildPrompt.includes("at most two parallel slice workers") || !buildPrompt.includes("concurrencyCap is default or at least 3") || !buildPrompt.includes("Wait for every slice result before consolidating") || !buildPrompt.includes("Never fan out across saved-plan tasks") || buildPrompt.includes("exactly one worker per task")) throw new Error("Build prompt omitted within-task slicing rules or retained the single-worker rule");
 if (!buildPrompt?.includes("end your turn; results arrive as a new turn") || !buildPrompt.includes("only when the user asks for status or to find a transcript or log") || !buildPrompt.includes("live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks")) throw new Error("Build prompt omitted automatic delegation delivery guidance");
