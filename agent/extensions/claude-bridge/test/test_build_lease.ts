@@ -6,12 +6,12 @@ import {
 	releaseBuildLeaseOnRecall,
 	releaseBuildLeaseOnWorkflowChange,
 	type BuildLease,
+	type BuildLeasePeer,
 } from "../build-lease.js";
-import type { PeerIdentity } from "../mailbox.js";
 
-const claude: PeerIdentity = { harness: "claude", id: "claude-session" };
-const cursor: PeerIdentity = { harness: "cursor", id: "cursor-session" };
-const opencode: PeerIdentity = { harness: "opencode", id: "opencode-session" };
+const claude: BuildLeasePeer = { harness: "claude", id: "claude-session" };
+const cursor: BuildLeasePeer = { harness: "cursor", id: "cursor-session" };
+const opencode: BuildLeasePeer = { harness: "opencode", id: "opencode-session" };
 const workflow = { mode: "plan", planId: "plan-1", progress: { done: 0, total: 2 } };
 const grantedAt = 1234;
 

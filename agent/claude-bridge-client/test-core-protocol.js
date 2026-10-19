@@ -102,10 +102,22 @@ test("recall returns memory/prompts shape", async ({ projectRoot }) => {
 	const { response } = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
 	assert(response.ok === true, `recall failed: ${JSON.stringify(response)}`);
 	assert(response.result?.memory, "recall missing memory");
+	assert(response.result?.buildLease === null, "recall without lease must return buildLease:null");
 	assert(response.result?.prompts?.cavemanEnabled === true, "recall must default Caveman ON");
 	for (const field of ["discussPrompt", "planPrompt", "buildPrompt"]) {
 		assert(response.result?.prompts?.[field]?.includes("CAVEMAN MODE ACTIVE."), `${field} missing Caveman prompt`);
 	}
+});
+
+test("build recall requires a paired peer and active plan", async ({ projectRoot }) => {
+	const peer = { harness: "claude", id: `build-lease-${crypto.randomUUID()}` };
+	const unpaired = await sendRequest(projectRoot, "recall", { mode: "build" }, crypto.randomUUID(), peer);
+	assert(unpaired.response.error?.code === "build_lease_peer_kind", `Unpaired peer unexpectedly passed lease check: ${JSON.stringify(unpaired.response)}`);
+	await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), peer);
+	const attempt = await sendRequest(projectRoot, "recall", { mode: "build" }, crypto.randomUUID(), peer);
+	assert(attempt.response.ok === false, "build recall without active plan unexpectedly succeeded");
+	assert(attempt.response.error?.code === "build_lease_no_plan", `Unexpected build lease error: ${JSON.stringify(attempt.response.error)}`);
+	await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), peer);
 });
 
 test("validate_tags valid and invalid", async ({ projectRoot }) => {
@@ -189,6 +201,18 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	assert(first.response.result.planId === `core-${id}`, "planId mismatch");
 	assert(typeof first.response.result.path === "string" && first.response.result.path.endsWith(`${first.response.result.planId}.md`), "save_plan missing plan path");
 	assert(first.response.result.taskCount === 2, "save_plan missing task count");
+
+	const leasePeer = { harness: "claude", id: `build-lease-${id}` };
+	await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), leasePeer);
+	const buildRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "build" }, crypto.randomUUID(), leasePeer);
+	assert(buildRecall.response.ok === true, `build recall with saved plan failed: ${JSON.stringify(buildRecall.response)}`);
+	assert(buildRecall.response.result.buildLease?.harness === leasePeer.harness && buildRecall.response.result.buildLease?.id === leasePeer.id, "build recall did not return granted lease");
+	const presenceWithLease = readJson(paths(projectRoot).presence);
+	assert(presenceWithLease.buildLease?.harness === leasePeer.harness && presenceWithLease.buildLease?.id === leasePeer.id, "presence did not include build lease");
+	const discussRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "discuss" }, crypto.randomUUID(), leasePeer);
+	assert(discussRecall.response.ok === true && discussRecall.response.result.buildLease === null, "holder discuss recall did not release lease");
+	assert(readJson(paths(projectRoot).presence).buildLease == null, "presence retained lease after holder discuss recall");
+	await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), leasePeer);
 
 	// Recall must see the saved plan after a successful save.
 	const recall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });

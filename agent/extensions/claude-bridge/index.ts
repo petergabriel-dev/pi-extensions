@@ -8,6 +8,7 @@ import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
+import { acquireBuildLease, buildLeaseHolderLabel, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, type BuildLease, type BuildLeaseWorkflowState } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -47,6 +48,7 @@ interface BridgePresence {
 	startedAt: string;
 	heartbeatAt: string;
 	peers: PresencePeer[];
+	buildLease?: BuildLease | null;
 }
 
 interface BridgeRequest {
@@ -153,6 +155,9 @@ let mailbox: PeerMailbox | null = null;
 let watcher: FSWatcher | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
+let buildLease: BuildLease | null = null;
+let presenceInitialized = false;
+let activeContext: ExtensionContext | null = null;
 const pendingSavePlans = new Map<string, PendingEventResult>();
 const pendingPlanTaskReads = new Map<string, PendingEventResult>();
 const pendingPlanTaskTicks = new Map<string, PendingEventResult>();
@@ -397,6 +402,10 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 
 function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString()): void {
 	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
+	if (presenceInitialized) {
+		const owner = readPresence(paths.presence, activePiSessionId);
+		if (!owner || owner.pid !== process.pid || owner.startedAt !== startedAt) return;
+	}
 	const peers = Array.from(pairedPeers.values()).map((peer) => {
 		const identity: PeerIdentity = { kind: peer.harness, id: peer.id };
 		return {
@@ -414,7 +423,9 @@ function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString(
 		startedAt,
 		heartbeatAt,
 		peers,
+		...(buildLease ? { buildLease: { ...buildLease } } : {}),
 	} satisfies BridgePresence);
+	presenceInitialized = true;
 }
 
 function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: string; presence: BridgePresence }> {
@@ -809,6 +820,15 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 	if (!workflowState) {
 		return errorResponse(request.id, "workflow_state_unavailable", "Pi bridge recall requires live workflow-modes state.");
 	}
+	if (payload.mode === "build") {
+		const leasePeer = request.peer && pairedPeers.has(peerKey(request.peer)) ? request.peer : undefined;
+		const acquired = acquireBuildLease(buildLease, leasePeer, workflowState as BuildLeaseWorkflowState, Date.now());
+		if (!acquired.ok) return errorResponse(request.id, acquired.code, acquired.message);
+		if (acquired.granted) setBuildLease(acquired.lease, activeContext ?? undefined, "granted");
+	} else if (payload.mode === "discuss" || payload.mode === "plan") {
+		const nextLease = releaseBuildLeaseOnRecall(buildLease, request.peer, payload.mode);
+		if (nextLease !== buildLease) setBuildLease(nextLease, activeContext ?? undefined, "released");
+	}
 	const cavemanEnabled = workflowState.cavemanEnabled !== false;
 	const workflowPlan = typeof workflowState.plan === "string" ? workflowState.plan : undefined;
 	const workflowPlanId = typeof workflowState.planId === "string" ? workflowState.planId : undefined;
@@ -846,6 +866,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 			docs: readEngineeringDocs(projectRoot),
 			prompts: promptContextForMode(payload.mode, cavemanEnabled, projectRoot),
 			savedPlan,
+			buildLease: buildLease ? { ...buildLease } : null,
 		},
 	};
 }
@@ -911,10 +932,23 @@ function updateInboundStatus(ctx: ExtensionContext): number {
 	return count;
 }
 
-function refreshPresenceBestEffort(ctx: ExtensionContext): void {
+function refreshPresenceBestEffort(ctx: ExtensionContext | undefined): void {
 	if (!activePaths) return;
 	try { writePresence(activePaths); }
-	catch (error) { notifyBestEffort(ctx, `Claude bridge pending count refresh failed: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
+	catch (error) { notifyBestEffort(ctx, `Claude bridge presence refresh failed: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
+}
+
+function setBuildLease(next: BuildLease | null, ctx: ExtensionContext | undefined, action: "granted" | "released" | "revoked"): boolean {
+	const previous = buildLease;
+	if (previous === next) return false;
+	buildLease = next;
+	refreshPresenceBestEffort(ctx);
+	const holder = buildLeaseHolderLabel(next ?? previous);
+	const message = next
+		? `Build lease granted to ${holder} for plan ${next.planId}.`
+		: `Build lease ${action} for ${holder}.`;
+	notifyBestEffort(ctx, message, action === "revoked" ? "warning" : "info");
+	return true;
 }
 
 async function handleSendMessage(ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
@@ -1159,11 +1193,14 @@ function dropPendingMessages(ctx: ExtensionContext | undefined, reason: string):
 }
 
 function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
+	const noticeContext = ctx ?? activeContext ?? undefined;
+	const previousLease = buildLease;
+	buildLease = null;
 	watcher?.close();
 	watcher = null;
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	heartbeatTimer = null;
-	dropPendingMessages(ctx, reason);
+	dropPendingMessages(noticeContext, reason);
 	if (activePaths && activePiSessionId && namespaceDirsArePrivate(activePaths)) {
 		const owner = readPresence(activePaths.presence, activePiSessionId);
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
@@ -1173,10 +1210,13 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 			} catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
 		}
 	}
+	if (previousLease) notifyBestEffort(noticeContext, `Build lease revoked on ${reason} for ${buildLeaseHolderLabel(previousLease)}.`, "info");
 	activePaths = null;
 	activeProjectRoot = null;
 	activePiSessionId = null;
 	activeSessionName = "";
+	presenceInitialized = false;
+	activeContext = null;
 	pairedPeers = new Map();
 }
 
@@ -1250,6 +1290,24 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
 		cachedMode = typeof record.mode === "string" ? record.mode : null;
 		if (activePaths) writePresence(activePaths);
+		void (async () => {
+			try {
+				const workflowState = await requestWorkflowState(pi);
+				if (!workflowState) {
+					console.warn("claude-bridge could not read workflow state after mode change; retaining build lease.");
+					return;
+				}
+				const nextLease = releaseBuildLeaseOnWorkflowChange(buildLease, workflowState as BuildLeaseWorkflowState);
+				if (nextLease !== buildLease) setBuildLease(nextLease, activeContext ?? undefined, "revoked");
+			} catch (error) {
+				console.warn(`claude-bridge workflow state lookup failed; retaining build lease: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		})();
+	});
+
+	pi.events.on("workflow-modes:build-guard", (data: unknown) => {
+		if (!buildLease || !data || typeof data !== "object") return;
+		(data as Record<string, unknown>).blockedBy = buildLeaseHolderLabel(buildLease) ?? undefined;
 	});
 
 	pi.events.on("workflow-modes:save-plan-result", (data: unknown) => {
@@ -1292,6 +1350,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		stopActiveBridge(ctx, "session switch");
+		activeContext = ctx;
+		buildLease = null;
 		passiveReason = null;
 		cachedMode = null;
 		const projectRoot = findProjectRoot(ctx.cwd ?? process.cwd());
@@ -1323,6 +1383,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		const restoredCount = restored.length;
 		pairedPeers = new Map(restored.map((peer) => [peerKey(peer), peer] as const));
 		activePaths = paths;
+		presenceInitialized = false;
 		activeProjectRoot = projectRoot;
 		activePiSessionId = piSessionId;
 		activeSessionName = sessionName(pi);
@@ -1340,9 +1401,11 @@ export default function claudeBridge(pi: ExtensionAPI) {
 				clearInterval(heartbeatTimer!);
 				heartbeatTimer = null;
 				dropPendingMessages(ctx, "bridge ownership change");
+				setBuildLease(null, ctx, "revoked");
 				activePaths = null;
 				activeProjectRoot = null;
 				activePiSessionId = null;
+				presenceInitialized = false;
 				pairedPeers = new Map();
 				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
@@ -1358,6 +1421,22 @@ export default function claudeBridge(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		stopActiveBridge(ctx, "shutdown");
+	});
+
+	pi.registerCommand("build-lease", {
+		description: "Show or release current harness Build lease",
+		handler: async (args, ctx) => {
+			if (args.trim() === "release") {
+				if (!buildLease) {
+					notifyBestEffort(ctx, "No active Build lease.", "info");
+					return;
+				}
+				setBuildLease(null, ctx, "released");
+				return;
+			}
+			const holder = buildLeaseHolderLabel(buildLease);
+			notifyBestEffort(ctx, holder ? `Build lease held by ${holder} for plan ${buildLease!.planId}.` : "No active Build lease.", "info");
+		},
 	});
 
 	pi.registerCommand("claude-bridge", {

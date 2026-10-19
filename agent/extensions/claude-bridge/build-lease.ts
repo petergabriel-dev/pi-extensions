@@ -1,6 +1,11 @@
-import { isSafeId, type HarnessKind, type PeerIdentity } from "./mailbox.js";
+import { isSafeId, type HarnessKind } from "./mailbox.js";
 
 export type BuildLeaseHarness = Exclude<HarnessKind, "pi">;
+
+export interface BuildLeasePeer {
+	harness: HarnessKind;
+	id: string;
+}
 
 export interface BuildLease {
 	harness: BuildLeaseHarness;
@@ -27,7 +32,7 @@ export type AcquireBuildLeaseResult =
 
 const LEASE_HARNESSES = new Set<BuildLeaseHarness>(["claude", "cursor", "opencode"]);
 
-function isLeasePeer(peer: PeerIdentity | null | undefined): peer is PeerIdentity & { harness: BuildLeaseHarness } {
+function isLeasePeer(peer: BuildLeasePeer | null | undefined): peer is BuildLeasePeer & { harness: BuildLeaseHarness } {
 	return !!peer && LEASE_HARNESSES.has(peer.harness as BuildLeaseHarness) && isSafeId(peer.id);
 }
 
@@ -37,7 +42,7 @@ export function buildLeaseHolderLabel(lease: BuildLease | null | undefined): str
 
 export function acquireBuildLease(
 	current: BuildLease | null,
-	peer: PeerIdentity | null | undefined,
+	peer: BuildLeasePeer | null | undefined,
 	workflow: BuildLeaseWorkflowState,
 	now: number,
 ): AcquireBuildLeaseResult {
@@ -76,7 +81,7 @@ export function acquireBuildLease(
 
 export function releaseBuildLeaseOnRecall(
 	lease: BuildLease | null,
-	peer: PeerIdentity | null | undefined,
+	peer: BuildLeasePeer | null | undefined,
 	mode: string,
 ): BuildLease | null {
 	if (!lease || !peer || (mode !== "discuss" && mode !== "plan")) return lease;
