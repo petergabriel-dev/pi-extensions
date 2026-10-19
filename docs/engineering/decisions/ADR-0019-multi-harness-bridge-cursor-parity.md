@@ -83,3 +83,4 @@ Code/templates:
 ## Extended by
 
 - ADR-0041
+- ADR-0043

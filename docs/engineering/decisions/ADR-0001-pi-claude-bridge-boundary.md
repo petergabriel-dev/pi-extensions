@@ -91,6 +91,7 @@ Historical user-level Claude configuration paths (not packaged here):
 
 - ADR-0019
 - ADR-0041
+- ADR-0043
 
 ## Supersedes
 
