@@ -2,9 +2,16 @@ import assert from "node:assert";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isBashAllowedInMode, isDesignWriteAllowed } from "../policy.js";
+import { getBuildGuardBlocker, isBashAllowedInMode, isDesignWriteAllowed } from "../policy.js";
 
 console.log("Running test_policy...");
+
+assert.strictEqual(getBuildGuardBlocker((payload) => { payload.blockedBy = "cursor:holder"; }), "cursor:holder");
+assert.strictEqual(getBuildGuardBlocker(() => {}), undefined);
+assert.strictEqual(getBuildGuardBlocker((payload) => {
+	payload.blockedBy = "cursor:holder";
+	throw new Error("listener failed");
+}), undefined);
 
 assert.strictEqual(isBashAllowedInMode("rg write", "discuss"), true);
 assert.strictEqual(isBashAllowedInMode("grep -R 'format' docs", "discuss"), true);

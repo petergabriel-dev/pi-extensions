@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, getBuildGuardBlocker, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
@@ -200,6 +200,13 @@ function updateStatus(ctx: ExtensionContext): void {
 }
 
 async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Promise<void> {
+	if (mode === "build") {
+		const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
+		if (blockedBy) {
+			ctx.ui.notify(`Build mode blocked by ${blockedBy}; ask holder to run /build-lease release.`, "warning");
+			return;
+		}
+	}
 	const previousMode = currentMode;
 	await Promise.resolve(pi.appendEntry(MODE_ENTRY, { mode, at: Date.now() }));
 	if (mode === "off") {

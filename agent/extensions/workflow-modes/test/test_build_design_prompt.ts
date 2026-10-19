@@ -66,11 +66,23 @@ const commands = new Map<string, { handler: Function }>();
 const tools = new Map<string, any>();
 const operations: Array<{ action: string; type?: string; data?: unknown; message?: unknown }> = [];
 const notifications: string[] = [];
+const warnings: string[] = [];
 const statuses: string[] = [];
+const eventListeners = new Map<string, Function[]>();
+const events = {
+	on(name: string, handler: Function) {
+		const listeners = eventListeners.get(name) ?? [];
+		listeners.push(handler);
+		eventListeners.set(name, listeners);
+	},
+	emit(name: string, payload?: unknown) {
+		for (const listener of eventListeners.get(name) ?? []) listener(payload);
+	},
+};
 let branchEntries: any[] = [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }];
 let failSend = false;
 workflowModesExtension({
-	events: { on() {}, emit() {} },
+	events,
 	on(name: string, handler: Function) { handlers.set(name, handler); },
 	registerCommand(name: string, command: { handler: Function }) { commands.set(name, command); },
 	registerTool(tool: any) { tools.set(tool.name, tool); },
@@ -86,7 +98,7 @@ workflowModesExtension({
 } as never);
 const context = {
 	sessionManager: { getBranch: () => branchEntries, getSessionId: () => "session-test" },
-	ui: { setStatus(key: string, message: string) { statuses.push(key + ":" + message); }, notify(message: string) { notifications.push(message); } },
+	ui: { setStatus(key: string, message: string) { statuses.push(key + ":" + message); }, notify(message: string, level?: string) { notifications.push(message); if (level === "warning") warnings.push(message); } },
 };
 handlers.get("session_start")?.({}, context);
 handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (result: unknown) => {
@@ -216,6 +228,48 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	operations.length = 0;
 	await commands.get("plan")?.handler("save --last", context);
 	if (operations.some((operation) => operation.action === "user") || !operations.some((operation) => operation.action === "append")) throw new Error("/plan save --last did not use deterministic fallback");
+	operations.length = 0;
+	await commands.get("mode")?.handler("build", context);
+	if (operations[0]?.action !== "append") throw new Error("Build without guard listeners did not proceed");
+	let guardMode = "blocked";
+	let guardCalls = 0;
+	const changedEvents: unknown[] = [];
+	events.on("workflow-modes:build-guard", (payload: { blockedBy?: string }) => {
+		guardCalls++;
+		if (guardMode === "blocked") payload.blockedBy = "cursor:holder";
+		if (guardMode === "throwing") {
+			payload.blockedBy = "cursor:holder";
+			throw new Error("listener failed");
+		}
+	});
+	events.on("workflow-modes:changed", (payload: unknown) => changedEvents.push(payload));
+	operations.length = 0;
+	notifications.length = 0;
+	changedEvents.length = 0;
+	guardCalls = 0;
+	await commands.get("mode")?.handler("discuss", context);
+	if (guardCalls !== 0 || operations.length !== 1 || changedEvents.length !== 1) throw new Error("Build guard affected non-Build mode");
+	operations.length = 0;
+	notifications.length = 0;
+	warnings.length = 0;
+	changedEvents.length = 0;
+	guardCalls = 0;
+	await commands.get("mode")?.handler("build", context);
+	if (guardCalls !== 1 || operations.length !== 0 || changedEvents.length !== 0) throw new Error("blocked Build mode changed durable or live mode");
+	if (!warnings.some((message) => message.includes("cursor:holder") && message.includes("/build-lease release"))) throw new Error("blocked Build warning omitted warning level, holder, or release command");
+	guardMode = "unblocked";
+	operations.length = 0;
+	notifications.length = 0;
+	changedEvents.length = 0;
+	await commands.get("mode")?.handler("build", context);
+	if (operations[0]?.action !== "append" || changedEvents.length !== 1) throw new Error("unblocked Build mode did not proceed");
+	guardMode = "throwing";
+	operations.length = 0;
+	notifications.length = 0;
+	changedEvents.length = 0;
+	await commands.get("mode")?.handler("build", context);
+	if (operations[0]?.action !== "append" || changedEvents.length !== 1 || notifications.some((message) => message.includes("cursor:holder"))) throw new Error("throwing guard listener did not fail open");
+	guardMode = "unblocked";
 	operations.length = 0;
 	await commands.get("mode")?.handler("off", context);
 	if (operations[0]?.action !== "append" || operations[0]?.type !== MODE_ENTRY || (operations[0]?.data as { mode?: string })?.mode !== "off") throw new Error("Off mode was not persisted first");
