@@ -4,7 +4,7 @@
 
 This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.8.0`, one Pi package containing eleven extensions, four skills, and two package-owned bundled agent definitions. This repository is package source, not a separate Pi home.
 
-- The prepared `0.8.0` release tarball is configured to ship runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly five bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=1 MiB unpacked.
+- The prepared `0.8.0` release tarball is configured to ship runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships the six Claude/OpenCode command templates under `agent/harness-commands/`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=1 MiB unpacked.
 - From `0.8.0` onward, the `release` branch mirrors the unpacked tarball file-for-file; only an optional root `.npmrc` may be extra. Main retains engineering docs and development material, including `.cursor/` commands and config; those files are not packaged.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
 - Bundled agent definitions load relative to the package module. Scope overrides are: default user = bundled then user; project = bundled then nearest project; both = bundled then user then project. Later definitions override by name, but a selected valid unsafe explorer override is rejected by the caller’s read-only validator.
@@ -51,15 +51,17 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 
 ### Harness clients and project integration
 
-The `.cursor/` MCP config, hooks, and commands below are main-repository integrations only; `.cursor/**` is never included in the npm package or its tarball-mirroring `release` branch.
+The `.cursor/` MCP config, hooks, and commands below are main-repository integrations only; `.cursor/**` is never included in the npm package or its tarball-mirroring `release` branch. Claude and OpenCode command templates under `agent/harness-commands/` are shipped.
 
-- `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code and Cursor; client code imports no Pi internals.
-- `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard. Claude’s `UserPromptSubmit` peer hook injects pending messages as advisory context, then acknowledges included IDs; `SessionEnd` best-effort unpairs.
+- `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code, Cursor, and OpenCode; client code imports no Pi internals.
+- `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard outside a matching Pi Build lease. Claude’s `UserPromptSubmit` peer hook injects pending messages as advisory context, then acknowledges included IDs; `SessionEnd` best-effort unpairs.
 - Claude’s statusline composes the `Pi ✉N` indicator from bridge presence only; it does not issue requests, write state, or ack messages.
-- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity, returns Cursor's `permission` contract, and denies `Write` in `preToolUse` before the tool runs. Cursor peer chat uses MCP `read_messages` as its pull path; no Cursor peer-message hook is installed.
+- `agent/cursor-bridge-client/cursor-readonly-hook.js` classifies Cursor shell/MCP activity and returns Cursor's `permission` contract. Without a matching lease it denies `Write` in `preToolUse`; a matching `conversation_id` lease permits shell and `Write`. Cursor peer chat uses MCP `read_messages` as its pull path; no Cursor peer-message hook is installed.
+- `agent/opencode-bridge-client/pi-opencode-plugin.js` uses OpenCode's `tool.execute.before`, injects host `sessionID` into bridge MCP calls, and enforces lease-scoped edits plus sandboxed shell without Pi imports.
 - `.cursor/mcp.json` registers the shared bridge MCP client.
 - `.cursor/hooks.json` registers Cursor shell, MCP, pre-tool, and commit-nudge guards.
-- `.cursor/commands/pi-discuss.md` and `.cursor/commands/pi-plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints.
+- `.cursor/commands/pi-discuss.md` and `.cursor/commands/pi-plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints; `.cursor/commands/pi-build.md` requests lease-scoped Build.
+- `agent/harness-commands/{claude,opencode}/{discuss,plan,build}.md` provide shipped Claude/OpenCode workflows, including Build handoff and live tracker mapping.
 - `.cursor/commands/{discuss,plan,build}.md` provide a neutral workflow that needs no bridge or Pi session; `.cursor/skills/write-adr/SKILL.md` documents project ADR authoring.
 - `.cursor/hooks/docs-nudge.js` asks for an engineering-doc update on code commits that stage no `docs/engineering/**` path, without blocking the commit.
 
@@ -129,17 +131,17 @@ Root scripts install the five lockfile-backed packages, then run the focused ask
 
 ## Pi ↔ multi-harness bridge
 
-Claude Code and Cursor use the bridge for planning workflows and peer chat. Pi remains source of truth for engineering docs validation, discussion notes, personal memory, workflow prompts, saved-plan handoff, and build execution.
+Claude Code, Cursor, and OpenCode use the bridge for planning and peer chat. Pi remains source of truth for engineering docs validation, discussion notes, personal memory, workflow prompts, saved-plan handoff, lease lifecycle, and task progress; an external harness executes Build only under a Pi-granted lease.
 
 ### Per-session namespace and request protocol
 
 1. Pi loads `agent/extensions/claude-bridge/index.ts` in an active session and resolves project root from nearest `.pi/` marker.
 2. Each validated Pi session owns `<project>/.pi/memory/bridge/sessions/<piSessionId>/{requests,responses,processed,presence.json}`. Namespace directories are `0700`; bridge files are `0600`. There is no project-wide single-owner lock or legacy shared-root fallback.
-3. A fresh namespace already owned by another PID makes that Pi session's bridge passive; different Pi session IDs can be active concurrently. Presence schemaVersion 2 records Pi session ID/name, cached workflow mode, PID, start/heartbeat times, peers, outbound `pendingCount`, and inbound `inboundPendingCount`. Heartbeat interval is 2s; clients consider presence fresh for 5s; namespaces with heartbeat older than 10m are GC'd with their peers. `/claude-bridge` lists live namespaces.
+3. A fresh namespace already owned by another PID makes that Pi session's bridge passive; different Pi session IDs can be active concurrently. Presence schemaVersion 2 records Pi session ID/name, cached workflow mode, PID, start/heartbeat times, peers, outbound `pendingCount`, and inbound `inboundPendingCount`; optional `buildLease` carries the single active harness identity and plan ID. Heartbeat interval is 2s; clients consider presence fresh for 5s; namespaces with heartbeat older than 10m are GC'd with their peers. `/claude-bridge` lists live namespaces.
 4. MCP clients write UUID request JSON and poll matching responses for up to two seconds. Requests are `{ id, type, payload, ts, peer? }`; responses are `{ id, ok, result | error }`; processed responses are replay cache. UUID replay is idempotent. If bridge is unavailable, clients return exact error `Pi bridge not responding; start/focus Pi in this project.`
 5. Bridge operations include `recall`, `recall_entry`, `save_memory`, `capture`, `validate_tags`, `save_plan`, `read_plan_tasks`, `tick_plan_task`, and peer pairing/message operations. Recall returns canonical engineering docs, compact personal-memory index, composed workflow prompts, plan template, and live saved-plan state; task reads/ticks use the live workflow owner rather than a bridge cache.
 
-`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; explicit `sessionId` wins over the alias, which wins over `CLAUDE_CODE_SESSION_ID`. `harness` defaults to `claude` and accepts `claude`, `cursor`, or `pi`. Capture emits `discussion-notes:add`; `save_plan` emits `workflow-modes:save-plan`; both wait for the live owner response. Recall obtains saved plans only through `workflow-modes:get`; unavailable live state is an error.
+`capture` accepts primary `sessionId` plus deprecated `claudeSessionId`; explicit `sessionId` wins over the alias, which wins over `CLAUDE_CODE_SESSION_ID`. `harness` defaults to `claude` and accepts `claude`, `cursor`, `opencode`, or `pi`. Capture emits `discussion-notes:add`; `save_plan` emits `workflow-modes:save-plan`; both wait for the live owner response. Recall obtains saved plans only through `workflow-modes:get`; unavailable live state is an error.
 
 ### Pairing and peer chat
 
@@ -151,13 +153,14 @@ Pi-to-peer messages remain pending until the paired peer acknowledges IDs. Reads
 
 Claude statusline shows `Pi ✉N` from presence only: no requests, writes, or acknowledgments. Cursor's peer-message path is MCP `read_messages` pull; there is no Cursor peer hook. A clean stop removes the owned namespace's `requests`, `responses`, and `processed` directories, leaving only `presence.json` (0600 in the 0700 namespace) with back-dated, non-live presence. Clean shutdown or session switch drops pending mailbox messages. A restart of the same Pi session within 10m restores peers only from that namespace's own validated non-live presence, excluding peers present in any other live namespace; live pairing wins. GC removes the namespace and peers after 10m. Ignored parent directories may remain.
 
-### Read-only harness enforcement
+### Lease-scoped harness Build and read-only enforcement
 
-- The existing Claude PreToolUse read-only hook remains fail-closed and applies to any cwd below a `.pi` marker. Mutation tools and `dangerouslyDisableSandbox` are denied.
-- On macOS, Claude Bash is rewritten through `/usr/bin/sandbox-exec` with network and non-scratch writes denied. If unavailable, Bash denies closed.
-- Cursor shell commands are allow/deny/ask classified; mutating non-bridge MCP calls deny; unknown calls ask.
-- Cursor `Write` tool calls are denied by `preToolUse` before execution and return a visible `permission: "deny"`; no Cursor hook writes or reverts files.
-- Client code has zero Pi internal imports. All Pi-state writes travel through live bridge requests.
+- The bridge grants one in-memory Build lease per Pi session to a paired `claude`, `cursor`, or `opencode` identity only when a saved plan is active and Pi is not in Build mode. Presence schemaVersion 2 carries optional `buildLease`; old clients ignore it.
+- Hooks read local presence only and allow mutation only when exactly one fresh paired namespace contains a valid lease matching host identity (`session_id`, `conversation_id`, or OpenCode `sessionID`). Missing, malformed, stale, ambiguous, mismatched, or unreadable state keeps existing read-only behavior; there are no bridge round-trips or client-side Pi-state writes.
+- Claude denies mutation tools without a lease and sandbox-wraps Bash through `/usr/bin/sandbox-exec` where available; otherwise Bash denies closed. A matching lease allows its holder's tools and unsandboxed Bash.
+- Cursor keeps its shell/MCP classifier and `Write` denial without a matching lease; its `permission: "deny"` contract remains unchanged. A matching lease allows shell and `Write`; no hook writes or reverts files.
+- OpenCode's global plugin replaces model MCP identity with host `sessionID`, blocks direct edit/write/worktree mutations without a matching lease, and wraps `shell` or throws if the sandbox is unavailable. The outer Code Mode `execute` dispatcher remains available; nested mutations are independently guarded.
+- `/build-lease` reports or releases the holder. Pi's synchronous Build guard blocks `/mode build` while leased; plan changes/completion and holder Discuss/Plan recall release the lease. Pi Off remains intentionally unguarded.
 
 ## Workflow modes
 

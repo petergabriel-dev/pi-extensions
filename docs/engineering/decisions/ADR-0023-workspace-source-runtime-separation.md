@@ -3,10 +3,10 @@ id: ADR-0023
 title: Workspace source and runtime separation
 status: Active
 date: 2026-10-13
-decision: Publish the allowlisted source/assets as public npm package @lopezpetergabriel/pi-extensions, including CHANGELOG.md; keep Pi-owned runtime state outside the repository and never package or copy it into active ~/.pi source. Starting with 0.8.0, ship exactly five bridge client runtime files, exclude docs/engineering/**, identify the source with package.json repository metadata, and mirror the tarball on release. Use Prepare vX.Y.Z commits on main; annotated vX.Y.Z tags from 0.8.0 onward point to release commits, while earlier tags stay on main.
+decision: Publish the allowlisted source/assets as public npm package @lopezpetergabriel/pi-extensions, including CHANGELOG.md; keep Pi-owned runtime state outside the repository and never package or copy it into active ~/.pi source. Starting with 0.8.0, ship six bridge client runtime files and six Claude/OpenCode command templates, exclude docs/engineering/**, identify the source with package.json repository metadata, and mirror the tarball on release. Use Prepare vX.Y.Z commits on main; annotated vX.Y.Z tags from 0.8.0 onward point to release commits, while earlier tags stay on main.
 why: A relocatable package preserves source history and clean installation without risking credentials, sessions, personal memory, generated state, or active global Pi source/config.
-affects: package.json, package-lock.json, CHANGELOG.md, LICENSE, .gitignore, .pi/agents, bin/pi-workspace, scripts/check-workspace.mjs, scripts/check-package.mjs, scripts/release-branch.mjs, scripts/test-release-branch.mjs, agent/extensions/subagents/agents.ts, agent/agents, docs/engineering
-consequences: The package ships eleven extensions, four skills, two bundled agents, the packaged changelog, and exactly five bridge client runtime files from 0.8.0 onward; docs/engineering/** and .cursor/** are excluded. Root package.json declares repository metadata, production dependencies, and Pi peer dependencies. The release branch mirrors the unpacked tarball except optional root .npmrc; Prepare vX.Y.Z commits land on main, while tags from 0.8.0 onward point to release commits and earlier tags stay on main. The release script never pushes.
+affects: package.json, package-lock.json, CHANGELOG.md, LICENSE, .gitignore, .pi/agents, bin/pi-workspace, scripts/check-workspace.mjs, scripts/check-package.mjs, scripts/release-branch.mjs, scripts/test-release-branch.mjs, agent/extensions/subagents/agents.ts, agent/agents, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/harness-commands/claude/discuss.md, agent/harness-commands/claude/plan.md, agent/harness-commands/claude/build.md, agent/harness-commands/opencode/discuss.md, agent/harness-commands/opencode/plan.md, agent/harness-commands/opencode/build.md, .cursor/commands/pi-build.md, docs/engineering
+consequences: The package ships eleven extensions, four skills, two bundled agents, the packaged changelog, six bridge client runtime files, and six Claude/OpenCode command templates from 0.8.0 onward; docs/engineering/** and .cursor/** are excluded. Root package.json declares repository metadata, production dependencies, and Pi peer dependencies. The release branch mirrors the unpacked tarball except optional root .npmrc; Prepare vX.Y.Z commits land on main, while tags from 0.8.0 onward point to release commits and earlier tags stay on main. The release script never pushes.
 readWhen: changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy
 ---
 
@@ -16,7 +16,7 @@ readWhen: changing package resources or allowlists, dependencies, launcher flags
 
 - Keep this workspace as an independent Git repository preserving imported ancestry, with no remote that points back to the active global Pi source checkout.
 - Publish the allowlisted source/assets as npm package `@lopezpetergabriel/pi-extensions`; include `CHANGELOG.md` with the package allowlist. Root `package.json` `repository` metadata identifies the source repository. The package is not a separate Pi home and never contains or copies Pi-owned runtime state.
-- Ship exactly eleven extension entrypoints, four authored skills, and two bundled agent definitions. Starting with `0.8.0`, include exactly five bridge client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. Exclude `docs/engineering/**` and `.cursor/**`; engineering docs, development material, and Cursor commands/config remain on main and are not packaged. Root `package.json` declares extension/skill resources and allowlists package-owned agent assets; root owns production dependencies while Pi packages remain peer dependencies.
+- Ship exactly eleven extension entrypoints, four authored skills, and two bundled agent definitions. Starting with `0.8.0`, include exactly six bridge client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. Also ship six Claude/OpenCode command templates from `agent/harness-commands/claude/` and `agent/harness-commands/opencode/`. Exclude `docs/engineering/**` and `.cursor/**`; engineering docs, development material, and Cursor commands/config remain on main and are not packaged. Root `package.json` declares extension/skill resources and allowlists package-owned agent assets; root owns production dependencies while Pi packages remain peer dependencies.
 - The source launcher `bin/pi-workspace` runs `pi --no-extensions -e <repository-root>` so global extension discovery is disabled and the workspace package loads once; npm installation loads the package without copying source into active `~/.pi`.
 - Reuse host Pi auth, settings, model catalogs, sessions, and indexed personal memory through normal Pi runtime ownership. Do not copy them into repository.
 - Version only allowlisted source/assets, authored config, and engineering docs on main. Exclude credentials, trust/settings/model snapshots, sessions, plans, memory, bridge IPC, caches, DBs, logs, dependency trees, CCC index data, and external symlinks; never treat Pi-owned runtime state as package content. From `0.8.0`, the npm tarball omits `docs/engineering/**`; `.cursor/**` remains repository-only.
@@ -58,6 +58,14 @@ Code/config:
 - `agent/extensions/subagents/agents.ts`
 - `agent/agents/explorer.md`
 - `agent/agents/worker.md`
+- `agent/opencode-bridge-client/pi-opencode-plugin.js`
+- `agent/harness-commands/claude/discuss.md`
+- `agent/harness-commands/claude/plan.md`
+- `agent/harness-commands/claude/build.md`
+- `agent/harness-commands/opencode/discuss.md`
+- `agent/harness-commands/opencode/plan.md`
+- `agent/harness-commands/opencode/build.md`
+- `.cursor/commands/pi-build.md`
 
 ## Consequences
 

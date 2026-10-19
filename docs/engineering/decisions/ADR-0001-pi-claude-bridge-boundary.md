@@ -12,20 +12,20 @@ updated: 2026-10-30
 
 - Pi remains source of truth for engineering docs validation, discussion notes, personal memory recall, and build handoff.
 - Project memory is engineering docs; personal cross-repo memory is indexed `~/.pi/memory/` per ADR-0016 and ADR-0017.
-- Claude Code is a thin read-only planning client for existing Pi projects in v1.
+- Claude Code is a read-only planning client for existing Pi projects unless its hook-supplied session identity holds a fresh Pi Build lease per ADR-0043.
 - Claude Code side talks to Pi through a small file protocol under `<project>/.pi/memory/bridge/` and imports no Pi internals.
 - The Pi bridge extension is the only Pi-coupled layer and reuses real sibling extension functions.
 - `capture_note` updates live discussion notes through the event bus and never writes retired memory queues.
 - `recall_memory` returns engineering docs, compact `~/.pi/memory/MEMORY.md` index, workflow prompts, and saved-plan context; it does not read retired private memory indexes.
 - A live active Pi session is required for bridge use; bridge tools fail loudly when Pi is not running or bridge heartbeat is stale.
-- Claude Code mutation tools are denied in `.pi` projects; Bash is structurally sandboxed or denied closed.
+- Without a matching lease, Claude Code mutation tools are denied in `.pi` projects and Bash is structurally sandboxed or denied closed; ADR-0043 defines the lease-scoped exception.
 
 ## Why
 
 - Live Notes visibility is core user value: notes captured from Claude Code must appear in the active Pi session.
 - Project memory belongs in engineering docs so humans and non-Pi tools can read it.
 - Personal memory is host-loaded from an indexed markdown store, not extracted by model behavior.
-- Build should stay in Pi so plan-mode/read-only boundaries remain clear.
+- Pi owns Build authorization, saved plans, and task progress; external harness mutation is allowed only under the lease in ADR-0043.
 - Fail-loud behavior prevents users from believing memory/notes/plans were captured when Pi was not active.
 - One active bridge session per project avoids duplicate file watchers processing the same request stream.
 
@@ -60,7 +60,7 @@ Code:
 - `agent/extensions/discussion-notes.ts`
 - `agent/extensions/engineering-docs/filesystem.ts`
 
-Historical user-level Claude configuration paths (not packaged here):
+User-level Claude paths (command templates ship under `agent/harness-commands/claude/`; symlink setup is in `dev-workflow.md`):
 
 - `~/.claude/commands/discuss.md`
 - `~/.claude/commands/plan.md`
@@ -68,7 +68,7 @@ Historical user-level Claude configuration paths (not packaged here):
 
 ## Consequences
 
-- Good: Claude Code can discuss/plan with Pi docs, Notes, personal memory, and workflow prompts while Pi remains build system.
+- Good: Claude Code can discuss/plan and perform lease-scoped Build using Pi docs, Notes, personal memory, and workflow prompts while Pi retains plan and task-progress ownership.
 - Good: `capture_note` remains live and visible without coupling to retired memory queues.
 - Good: `recall_memory` survives deletion of the retired memory subsystem.
 - Good: read-only enforcement is structural, not prompt-based.
