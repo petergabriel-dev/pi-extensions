@@ -66,6 +66,8 @@ const publishedFiles = [
   "agent/claude-bridge-client/pi-peer-hook.js",
   "agent/claude-bridge-client/pi-statusline.js",
   "agent/cursor-bridge-client/cursor-readonly-hook.js",
+  "agent/opencode-bridge-client/pi-opencode-plugin.js",
+  "agent/harness-commands/**/*.md",
   "agent/agents/*.md",
   "agent/skills/**/*.md",
   "README.md",

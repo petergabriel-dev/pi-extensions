@@ -12,6 +12,15 @@ const bridgeClients = [
   "agent/claude-bridge-client/pi-peer-hook.js",
   "agent/claude-bridge-client/pi-statusline.js",
   "agent/cursor-bridge-client/cursor-readonly-hook.js",
+  "agent/opencode-bridge-client/pi-opencode-plugin.js",
+];
+const harnessTemplates = [
+  "agent/harness-commands/claude/discuss.md",
+  "agent/harness-commands/claude/plan.md",
+  "agent/harness-commands/claude/build.md",
+  "agent/harness-commands/opencode/discuss.md",
+  "agent/harness-commands/opencode/plan.md",
+  "agent/harness-commands/opencode/build.md",
 ];
 const result = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
   cwd: root,
@@ -38,6 +47,7 @@ const isAllowed = (file) =>
   file === "LICENSE" ||
   file === "CHANGELOG.md" ||
   bridgeClients.includes(file) ||
+  harnessTemplates.includes(file) ||
   /^agent\/extensions\/(?:[^/]+\/)?[^/]+\.ts$/.test(file) ||
   file === "agent/extensions/engineering-docs/README.md" ||
   file === "agent/extensions/filechanges/README.md" ||
@@ -72,8 +82,19 @@ for (const file of files) {
   assert.ok(isAllowed(file), `file outside package allowlist: ${file}`);
 }
 assert.deepEqual(
-  [...files].filter((file) => file.startsWith("agent/claude-bridge-client/") || file.startsWith("agent/cursor-bridge-client/")).sort(),
+  [...files]
+    .filter(
+      (file) =>
+        file.startsWith("agent/claude-bridge-client/") ||
+        file.startsWith("agent/cursor-bridge-client/") ||
+        file.startsWith("agent/opencode-bridge-client/"),
+    )
+    .sort(),
   bridgeClients.slice().sort(),
+);
+assert.deepEqual(
+  [...files].filter((file) => file.startsWith("agent/harness-commands/")).sort(),
+  harnessTemplates.slice().sort(),
 );
 
 const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
@@ -98,6 +119,7 @@ for (const file of [
   ...expectedAgents,
   "agent/extensions/workflow-modes/plan-template.md",
   ...bridgeClients,
+  ...harnessTemplates,
   "README.md",
   "LICENSE",
   "CHANGELOG.md",
