@@ -9,6 +9,7 @@ const { spawn } = require("node:child_process");
 const client = require("./pi-bridge-mcp.js");
 
 const HARNESS = { harness: "claude", id: "claude-session-1" };
+const OPENCODE = { harness: "opencode", id: "opencode-session-1" };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function writeJson(file, value) {
@@ -188,8 +189,10 @@ async function test(name, fn, responderFactory = startResponder) {
 async function main() {
 	const toolNames = client.tools.map((tool) => tool.name);
 	assert.ok(toolNames.includes("list_sessions") && toolNames.includes("pair_session"), "session tools missing from MCP tool list");
+	assert.deepEqual(client.tools[0].inputSchema.properties.harness.enum, ["claude", "cursor", "pi", "opencode"]);
 	const resolved = client.resolveHarnessIdentity({ sessionId: "primary-id", claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" });
 	assert.deepEqual(resolved, { harness: "claude", id: "primary-id" });
+	assert.deepEqual(client.resolveHarnessIdentity({ sessionId: OPENCODE.id, harness: OPENCODE.harness }, {}), OPENCODE);
 	assert.throws(() => client.resolveHarnessIdentity({ sessionId: "valid-id", harness: "unknown" }, {}), /Harness kind is invalid/);
 	assert.deepEqual(client.resolveHarnessIdentity({ claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" }), { harness: "claude", id: "legacy-id" });
 	assert.deepEqual(client.resolveHarnessIdentity({}, { CLAUDE_CODE_SESSION_ID: "env-id" }), { harness: "claude", id: "env-id" });
@@ -198,14 +201,19 @@ async function main() {
 	await test("session listing filters stale presence", async (cwd) => {
 		addSession(cwd, "pi-live", [{ ...HARNESS, pendingCount: 2, inboundPendingCount: 1 }]);
 		addSession(cwd, "pi-stale", [], new Date(Date.now() - 6_000).toISOString());
+		addSession(cwd, "pi-opencode", [{ ...OPENCODE, pendingCount: 1, inboundPendingCount: 2 }]);
 		addSession(cwd, "pi-invalid-peer", [{ harness: "unknown", id: "foreign" }]);
 		addSession(cwd, "pi-too-many-peers", Array.from({ length: 11 }, (_, index) => ({ harness: "claude", id: `peer-${index}`, pendingCount: 0 })));
 		const sessions = client.listSessions(cwd);
-		assert.deepEqual(sessions.map((session) => session.id), ["pi-live"]);
-		assert.equal(sessions[0].shortId, "pi-live");
-		assert.equal(sessions[0].age, "1m");
-		assert.equal(sessions[0].peers[0].pendingCount, 2);
-		assert.equal(sessions[0].peers[0].inboundPendingCount, 1);
+		assert.deepEqual(sessions.map((session) => session.id).sort(), ["pi-live", "pi-opencode"]);
+		const opencodeSession = sessions.find((session) => session.id === "pi-opencode");
+		assert.deepEqual(opencodeSession?.peers[0], { ...OPENCODE, pendingCount: 1, inboundPendingCount: 2 });
+		const liveSession = sessions.find((session) => session.id === "pi-live");
+		assert.ok(liveSession);
+		assert.equal(liveSession.shortId, "pi-live");
+		assert.equal(liveSession.age, "1m");
+		assert.equal(liveSession.peers[0].pendingCount, 2);
+		assert.equal(liveSession.peers[0].inboundPendingCount, 1);
 	});
 
 	await test("single live session auto-pairs then routes request", async (cwd, responder) => {

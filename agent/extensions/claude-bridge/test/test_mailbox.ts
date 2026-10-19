@@ -21,6 +21,7 @@ function expectCode(fn: () => unknown, code: MailboxError["code"]): void {
 const fixedTime = () => new Date("2025-01-02T03:04:05.000Z");
 const local = identity("pi", "pi-session");
 const claude = identity("claude", "claude-session");
+const opencode = identity("opencode", "opencode-session");
 let sequence = 0;
 const makeMailbox = (owner: PeerIdentity) => new PeerMailbox(owner, {
   createId: () => `message-${++sequence}`,
@@ -31,6 +32,11 @@ assert.equal(isSafeId("018f47a1-7b3c-7def-8abc-123456789abc"), true); // UUIDv7
 for (const invalid of ["", "../escape", "/absolute", "has space", "trailing-newline\n", "x".repeat(129)]) {
   assert.equal(isSafeId(invalid), false, invalid);
 }
+
+const opencodeMailbox = makeMailbox(local);
+opencodeMailbox.pair(opencode);
+assert.deepEqual(opencodeMailbox.peers(), [opencode]);
+assert.deepEqual(opencodeMailbox.send(opencode, "hello from OpenCode").to, opencode);
 
 const mailbox = makeMailbox(local);
 expectCode(() => mailbox.send(claude, "hello"), "unpaired");
