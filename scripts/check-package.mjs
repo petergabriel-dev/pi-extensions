@@ -15,12 +15,15 @@ const bridgeClients = [
   "agent/opencode-bridge-client/pi-opencode-plugin.js",
 ];
 const harnessTemplates = [
-  "agent/harness-commands/claude/discuss.md",
-  "agent/harness-commands/claude/plan.md",
-  "agent/harness-commands/claude/build.md",
-  "agent/harness-commands/opencode/discuss.md",
-  "agent/harness-commands/opencode/plan.md",
-  "agent/harness-commands/opencode/build.md",
+  "agent/harness-commands/claude/pi-discuss.md",
+  "agent/harness-commands/claude/pi-plan.md",
+  "agent/harness-commands/claude/pi-build.md",
+  "agent/harness-commands/cursor/pi-discuss.md",
+  "agent/harness-commands/cursor/pi-plan.md",
+  "agent/harness-commands/cursor/pi-build.md",
+  "agent/harness-commands/opencode/pi-discuss.md",
+  "agent/harness-commands/opencode/pi-plan.md",
+  "agent/harness-commands/opencode/pi-build.md",
 ];
 const result = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
   cwd: root,

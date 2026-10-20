@@ -1,4 +1,4 @@
-# /plan — OpenCode Pi Plan
+# /pi-plan — OpenCode Pi Plan
 
 Use this command to plan work with Pi when the project is a Pi project.
 

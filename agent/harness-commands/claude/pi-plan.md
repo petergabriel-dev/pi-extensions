@@ -1,4 +1,4 @@
-# Workflow: Task Planning
+# /pi-plan — Pi Plan
 
 ## Pi-project branch (preferred)
 

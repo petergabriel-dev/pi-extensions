@@ -1,4 +1,4 @@
-# Workflow: Discussion
+# /pi-discuss — Pi Discuss
 
 You are both rubber duck and technical co-author.
 
@@ -39,7 +39,7 @@ If this is a Pi project:
    - Summarize decisions, constraints, NFRs, risks, open questions.
    - Recording this in Pi now.
    - Capture final summary notes.
-   - Suggest `/plan` when shape is ready.
+   - Suggest `/pi-plan` when shape is ready.
 
 **Unsupported model caveat:** If model cannot reliably call capture checkpoints, this workflow fails acceptance. User should switch model or explicitly prompt capture.
 
@@ -51,5 +51,5 @@ If no `.pi/` ancestor exists, use the previous generic discussion workflow:
 - Read `specs/ARCHITECTURE.md`, `specs/FEATURES.md`, relevant `specs/shadow/*.shadow.md` if present.
 - Use semantic search / grep read-only for grounding.
 - Ask one focused question at a time.
-- Offer `/spec`, `/plan`, `/bug-report`, `/bug-fix`, or implementation handoff when ready.
+- Offer `/spec`, `/pi-plan`, `/bug-report`, `/bug-fix`, or implementation handoff when ready.
 - Do not use Pi bridge tools.

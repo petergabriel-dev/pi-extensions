@@ -1,4 +1,4 @@
-# /build — Pi Build
+# /pi-build — Pi Build
 
 Use this command to run an approved Pi saved plan through Claude Code's Pi build lease.
 

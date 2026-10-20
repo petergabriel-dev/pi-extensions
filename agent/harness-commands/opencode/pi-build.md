@@ -1,4 +1,4 @@
-# /build — OpenCode Pi Build
+# /pi-build — OpenCode Pi Build
 
 Use this command to run an approved Pi saved plan through OpenCode's Pi build lease.
 
