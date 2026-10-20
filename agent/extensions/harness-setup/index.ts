@@ -110,7 +110,7 @@ function execDescription(result: Awaited<ReturnType<typeof execFixed>>, subject:
 }
 
 async function checkClaudeMcp(): Promise<string> {
-	const result = await execFixed("claude", ["mcp", "get", "-s", "user", "pi-claude-bridge"]);
+	const result = await execFixed("claude", ["mcp", "get", "pi-claude-bridge"]);
 	if (result.kind === "ok") return "Claude MCP registration: registered.";
 	if (result.kind === "missing") return "Claude MCP registration: unknown; Claude CLI not found (ENOENT).";
 	return `Claude MCP registration: query failed (${result.reason}); state unknown.`;

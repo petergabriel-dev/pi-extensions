@@ -157,7 +157,7 @@ try {
 	const rootsFromEnv = resolveHarnessRoots({ CLAUDE_CONFIG_DIR: "/custom/claude", XDG_CONFIG_HOME: "/custom/xdg" }, "/users/tester");
 	assert.deepEqual(rootsFromEnv, {
 		claude: "/custom/claude",
-		claudeMcp: "/users/tester/.claude.json",
+		claudeMcp: "/custom/claude/.claude.json",
 		cursor: "/users/tester/.cursor",
 		opencode: "/custom/xdg/opencode",
 	});
@@ -368,6 +368,30 @@ try {
 		assert.deepEqual(second.cliSteps, [], `${harness} CLI plan is idempotent after registration`);
 	}
 	record("install apply idempotence and Claude MCP CLI-only planning");
+
+	const customClaudeBase = path.join(temp, "planner-claude-config-dir");
+	const customClaudePkg = await createPackage(customClaudeBase);
+	const customClaudeRoots = resolveHarnessRoots(
+		{ CLAUDE_CONFIG_DIR: path.join(customClaudeBase, "config", "claude") },
+		path.join(customClaudeBase, "home"),
+	);
+	const customClaudeOptions = {
+		pkgRoot: customClaudePkg,
+		roots: customClaudeRoots,
+		agentDir: path.join(customClaudeBase, "agent-dir"),
+		platform: "darwin" as const,
+	};
+	assert.equal(customClaudeRoots.claudeMcp, path.join(customClaudeRoots.claude, ".claude.json"));
+	const customClaudeFirst = await planInstall("claude", customClaudeOptions);
+	assert.deepEqual(customClaudeFirst.cliSteps.map(({ args }) => args.slice(0, 5)), [["mcp", "add", "-s", "user", PI_BRIDGE_MCP_KEY]]);
+	assert.ok((await applyPlan(customClaudeFirst)).every(({ applied: ok }) => ok));
+	await writeJson(customClaudeRoots.claudeMcp, {
+		mcpServers: { [PI_BRIDGE_MCP_KEY]: { command: "node", args: [path.join(customClaudePkg, "agent/claude-bridge-client/pi-bridge-mcp.js")] } },
+	});
+	const customClaudeSecond = await planInstall("claude", customClaudeOptions);
+	assert.deepEqual(customClaudeSecond.changes, []);
+	assert.deepEqual(customClaudeSecond.cliSteps, []);
+	record("CLAUDE_CONFIG_DIR MCP path and idempotence");
 
 	const repairBase = path.join(temp, "planner-mixed-root");
 	const repairPkg = await createPackage(repairBase);

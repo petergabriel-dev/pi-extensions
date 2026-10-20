@@ -128,9 +128,10 @@ export async function classifyPackageRoot(pkgRoot: string, agentDir: string): Pr
 
 export function resolveHarnessRoots(env: NodeJS.ProcessEnv | Record<string, string | undefined>, homedir: string): HarnessRoots {
 	const home = path.resolve(homedir);
+	const claude = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"));
 	return {
-		claude: path.resolve(env.CLAUDE_CONFIG_DIR || path.join(home, ".claude")),
-		claudeMcp: path.join(home, ".claude.json"),
+		claude,
+		claudeMcp: path.join(env.CLAUDE_CONFIG_DIR ? claude : home, ".claude.json"),
 		cursor: path.join(home, ".cursor"),
 		opencode: path.join(path.resolve(env.XDG_CONFIG_HOME || path.join(home, ".config")), "opencode"),
 	};
