@@ -12,6 +12,7 @@ const extensions = [
   "agent/extensions/claude-bridge/index.ts",
   "agent/extensions/discussion-notes.ts",
   "agent/extensions/engineering-docs/index.ts",
+  "agent/extensions/harness-setup/index.ts",
   "agent/extensions/filechanges/index.ts",
   "agent/extensions/notify.ts",
   "agent/extensions/personal-memory/index.ts",
