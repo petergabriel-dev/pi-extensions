@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "../manifest.ts";
-import { classifyPackageRoot, inspectHarness, resolveHarnessRoots } from "../setup.ts";
+import { applyPlan, classifyPackageRoot, inspectHarness, planInstall, planUninstall, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
 import type { Harness, ProblemKind, SetupProblem } from "../setup.ts";
 
 async function main(): Promise<void> {
@@ -19,6 +19,7 @@ const writeJson = async (file: string, value: unknown): Promise<void> => {
 	await mkdir(path.dirname(file), { recursive: true });
 	await writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
 };
+const backupTimestamp = (iso: string): string => process.platform === "win32" ? iso.replaceAll(":", "-") : iso;
 const setupRoot = async (root: string, harness: Harness, pkgRoot: string): Promise<void> => {
 	const entries = HARNESS_MANIFEST[harness];
 	for (const entry of entries) {
@@ -38,11 +39,9 @@ const createPackage = async (root: string): Promise<string> => {
 	await writeJson(path.join(pkgRoot, "package.json"), { name: "fixture", version: "1.2.3" });
 	for (const harness of ["claude", "cursor", "opencode"] as const) {
 		for (const entry of HARNESS_MANIFEST[harness]) {
-			if (entry.kind !== "command" && entry.kind !== "plugin") {
-				const asset = path.join(pkgRoot, entry.script);
-				await mkdir(path.dirname(asset), { recursive: true });
-				await writeFile(asset, "fixture asset\n");
-			}
+			const asset = path.join(pkgRoot, entry.script);
+			await mkdir(path.dirname(asset), { recursive: true });
+			await writeFile(asset, "fixture asset\n");
 		}
 	}
 	return pkgRoot;
@@ -346,6 +345,269 @@ try {
 	const relative = await inspectHarness("claude", { pkgRoot: relativePkg, roots: relativeRoots });
 	noted(relative.problems, "wrong-root");
 	record("relative package root refusal");
+
+	const installBase = path.join(temp, "planner-idempotence");
+	const installPkg = await createPackage(installBase);
+	for (const harness of ["claude", "cursor", "opencode"] as const) {
+		const rootsForHarness = makeRoots(path.join(installBase, harness));
+		const agent = path.join(installBase, harness, "agent-dir");
+		const options = { pkgRoot: installPkg, roots: rootsForHarness, agentDir: agent, platform: "darwin" };
+		const plan = await planInstall(harness, options);
+		assert.ok(plan.changes.length > 0, `${harness} fresh install plan has work`);
+		assert.ok(!plan.changes.some(({ path: file }) => file === rootsForHarness.claudeMcp), "Claude MCP config is never planned as a direct write");
+		if (harness === "claude") {
+			assert.deepEqual(plan.cliSteps, [{ executable: "claude", args: ["mcp", "add", "-s", "user", PI_BRIDGE_MCP_KEY, "--", "node", path.join(installPkg, "agent/claude-bridge-client/pi-bridge-mcp.js")] }]);
+		} else assert.deepEqual(plan.cliSteps, []);
+		const applied = await applyPlan(plan, { now: new Date("2024-01-02T03:04:05.000Z") });
+		assert.ok(applied.every(({ applied: ok }) => ok), `${harness} apply: ${JSON.stringify(applied)}`);
+		if (harness === "claude") {
+			await writeJson(rootsForHarness.claudeMcp, { mcpServers: { [PI_BRIDGE_MCP_KEY]: { command: "node", args: [path.join(installPkg, "agent/claude-bridge-client/pi-bridge-mcp.js")] } } });
+		}
+		const second = await planInstall(harness, options);
+		assert.deepEqual(second.changes, [], `${harness} plan is idempotent after apply`);
+		assert.deepEqual(second.cliSteps, [], `${harness} CLI plan is idempotent after registration`);
+	}
+	record("install apply idempotence and Claude MCP CLI-only planning");
+
+	const repairBase = path.join(temp, "planner-mixed-root");
+	const repairPkg = await createPackage(repairBase);
+	const stalePkg = await createPackage(path.join(temp, "planner-stale-package"));
+	const repairRoots = await installFixture(path.join(repairBase, "fixture"), repairPkg);
+	const repairMcpFile = path.join(repairRoots.cursor, "mcp.json");
+	const repairMcp = JSON.parse(await readFile(repairMcpFile, "utf8"));
+	repairMcp.mcpServers[PI_BRIDGE_MCP_KEY].args[0] = path.join(stalePkg, "agent/claude-bridge-client/pi-bridge-mcp.js");
+	await writeJson(repairMcpFile, repairMcp);
+	const repairPlan = await planInstall("cursor", { pkgRoot: repairPkg, roots: repairRoots, agentDir: path.join(repairBase, "agent-dir") });
+	assert.ok(repairPlan.changes.some(({ path: file }) => file === repairMcpFile));
+	assert.ok((await applyPlan(repairPlan)).every(({ applied: ok }) => ok));
+	const repairedMcp = JSON.parse(await readFile(repairMcpFile, "utf8"));
+	assert.equal(repairedMcp.mcpServers[PI_BRIDGE_MCP_KEY].args[0], path.join(repairPkg, "agent/claude-bridge-client/pi-bridge-mcp.js"));
+	assert.equal((await inspectHarness("cursor", { pkgRoot: repairPkg, roots: repairRoots })).state, "ok");
+	record("mixed-root config repaired to selected package root");
+
+	const mixedAgent = path.join(temp, "mixed-agent-dir");
+	for (const harness of ["claude", "cursor", "opencode"] as const) {
+		const fullRepair = await planInstall(harness, { pkgRoot, roots: mixedRoots, agentDir: mixedAgent, platform: "darwin" });
+		assert.ok(fullRepair.changes.length > 0, `${harness} mixed-root plan contains repair`);
+		assert.ok((await applyPlan(fullRepair)).every(({ applied: ok }) => ok), `${harness} mixed-root apply`);
+		assert.equal((await inspectHarness(harness, { pkgRoot, roots: mixedRoots, stamp: await readStamp(mixedAgent), platform: "darwin" })).state, "ok", `${harness} repaired mixed-root fixture`);
+	}
+	await assert.rejects(lstat(path.join(mixedRoots.claude, "commands/discuss.md")));
+	record("full live mixed-root fixture repairs across harnesses");
+
+	const mcpKeyBase = path.join(temp, "planner-mcp-key-ownership");
+	const mcpKeyPkg = await createPackage(mcpKeyBase);
+	const mcpKeyRoots = await installFixture(path.join(mcpKeyBase, "fixture"), mcpKeyPkg);
+	const mcpKeyFile = path.join(mcpKeyRoots.cursor, "mcp.json");
+	const mcpKeyConfig = JSON.parse(await readFile(mcpKeyFile, "utf8"));
+	mcpKeyConfig.mcpServers[PI_BRIDGE_MCP_KEY] = null;
+	await writeJson(mcpKeyFile, mcpKeyConfig);
+	const mcpKeyPlan = await planInstall("cursor", { pkgRoot: mcpKeyPkg, roots: mcpKeyRoots, agentDir: path.join(mcpKeyBase, "agent-dir") });
+	assert.ok(mcpKeyPlan.changes.some(({ path: file }) => file === mcpKeyFile));
+	assert.ok((await applyPlan(mcpKeyPlan)).every(({ applied: ok }) => ok));
+	assert.equal(JSON.parse(await readFile(mcpKeyFile, "utf8")).mcpServers[PI_BRIDGE_MCP_KEY].args[0], path.join(mcpKeyPkg, "agent/claude-bridge-client/pi-bridge-mcp.js"));
+	record("MCP ownership by key repairs malformed owned entry");
+
+	const preserveBase = path.join(temp, "planner-preserve-foreign");
+	const preservePkg = await createPackage(preserveBase);
+	const preserveRoots = await installFixture(path.join(preserveBase, "fixture"), preservePkg);
+	const preserveSettingsFile = path.join(preserveRoots.claude, "settings.json");
+	const preserveSettings = JSON.parse(await readFile(preserveSettingsFile, "utf8"));
+	const foreignHookGroup = { matcher: "Bash", hooks: [{ type: "command", command: "node /opt/foreign/hook.js", timeout: 10 }] };
+	preserveSettings.hooks.PreToolUse.push(foreignHookGroup);
+	await writeJson(preserveSettingsFile, preserveSettings);
+	const preservePlan = await planInstall("claude", { pkgRoot: preservePkg, roots: preserveRoots, agentDir: path.join(preserveBase, "agent-dir") });
+	assert.ok((await applyPlan(preservePlan)).every(({ applied: ok }) => ok));
+	const preserved = JSON.parse(await readFile(preserveSettingsFile, "utf8"));
+	assert.deepEqual(preserved.hooks.PreToolUse[1], foreignHookGroup);
+	record("foreign hook deep-equal preservation");
+
+	const skipBase = path.join(temp, "planner-skip-user");
+	const skipPkg = await createPackage(skipBase);
+	const skipRoots = await installFixture(path.join(skipBase, "fixture"), skipPkg);
+	const skipSettingsFile = path.join(skipRoots.claude, "settings.json");
+	const skipSettings = JSON.parse(await readFile(skipSettingsFile, "utf8"));
+	skipSettings.statusLine = { type: "command", command: "node /opt/user/status.js", refreshInterval: 1 };
+	await writeJson(skipSettingsFile, skipSettings);
+	const plainCommandPath = path.join(skipRoots.claude, "commands/pi-build.md");
+	await rm(plainCommandPath);
+	await writeFile(plainCommandPath, "user-authored command\n");
+	const skipPlan = await planInstall("claude", { pkgRoot: skipPkg, roots: skipRoots, agentDir: path.join(skipBase, "agent-dir") });
+	assert.ok(skipPlan.skipped.some(({ path: file, reason }) => file === skipSettingsFile && /statusLine/.test(reason)));
+	assert.ok(skipPlan.skipped.some(({ path: file }) => file === plainCommandPath));
+	assert.ok((await applyPlan(skipPlan)).every(({ applied: ok }) => ok));
+	assert.match(await readFile(plainCommandPath, "utf8"), /user-authored/);
+	assert.equal(JSON.parse(await readFile(skipSettingsFile, "utf8")).statusLine.command, "node /opt/user/status.js");
+	record("foreign statusLine and plain user command skipped");
+
+	const legacyPlanBase = path.join(temp, "planner-legacy-link");
+	const legacyPlanPkg = await createPackage(legacyPlanBase);
+	const legacyPlanRoots = await installFixture(path.join(legacyPlanBase, "fixture"), legacyPlanPkg);
+	const legacyOwnedPath = path.join(legacyPlanRoots.claude, "commands/discuss.md");
+	await symlink(path.join(legacyPlanPkg, "agent/harness-commands/claude/pi-discuss.md"), legacyOwnedPath);
+	const legacyPlan = await planInstall("claude", { pkgRoot: legacyPlanPkg, roots: legacyPlanRoots, agentDir: path.join(legacyPlanBase, "agent-dir") });
+	assert.ok(legacyPlan.changes.some(({ path: file, kind }) => file === legacyOwnedPath && kind === "delete"));
+	assert.ok((await applyPlan(legacyPlan)).every(({ applied: ok }) => ok));
+	await assert.rejects(lstat(legacyOwnedPath));
+	assert.ok((await lstat(path.join(legacyPlanRoots.claude, "commands/pi-discuss.md"))).isSymbolicLink());
+	record("owned legacy symlink removal during install");
+
+	const foreignLinkBase = path.join(temp, "planner-foreign-symlink");
+	const foreignLinkPkg = await createPackage(foreignLinkBase);
+	const foreignLinkRoots = makeRoots(path.join(foreignLinkBase, "fixture"));
+	const foreignLinkPath = path.join(foreignLinkRoots.cursor, "commands/pi-plan.md");
+	const foreignLinkTarget = path.join(stalePkg, "agent/harness-commands/cursor/pi-plan.md");
+	await mkdir(path.dirname(foreignLinkPath), { recursive: true });
+	await symlink(foreignLinkTarget, foreignLinkPath);
+	const foreignLinkPlan = await planInstall("cursor", { pkgRoot: foreignLinkPkg, roots: foreignLinkRoots, agentDir: path.join(foreignLinkBase, "agent-dir") });
+	assert.ok(foreignLinkPlan.skipped.some(({ path: file }) => file === foreignLinkPath));
+	assert.ok(!foreignLinkPlan.changes.some(({ path: file }) => file === foreignLinkPath));
+	assert.ok((await applyPlan(foreignLinkPlan)).every(({ applied: ok }) => ok));
+	assert.equal(await readlink(foreignLinkPath), foreignLinkTarget);
+	const foreignUninstallPlan = await planUninstall("cursor", { pkgRoot: foreignLinkPkg, roots: foreignLinkRoots, agentDir: path.join(foreignLinkBase, "agent-dir") });
+	assert.ok(foreignUninstallPlan.skipped.some(({ path: file }) => file === foreignLinkPath));
+	assert.ok(!foreignUninstallPlan.changes.some(({ path: file }) => file === foreignLinkPath));
+	record("foreign package symlink preserved on install and uninstall");
+
+	const invalidPlanBase = path.join(temp, "planner-unparseable");
+	const invalidPlanPkg = await createPackage(invalidPlanBase);
+	const invalidPlanRoots = await installFixture(path.join(invalidPlanBase, "fixture"), invalidPlanPkg);
+	const invalidFile = path.join(invalidPlanRoots.claude, "settings.json");
+	const invalidBytes = "{ broken config\n";
+	await writeFile(invalidFile, invalidBytes);
+	const invalidPlan = await planInstall("claude", { pkgRoot: invalidPlanPkg, roots: invalidPlanRoots, agentDir: path.join(invalidPlanBase, "agent-dir") });
+	assert.deepEqual(invalidPlan.changes.filter(({ path: file }) => file === invalidFile), []);
+	assert.ok(invalidPlan.skipped.some(({ path: file }) => file === invalidFile));
+	assert.ok((await applyPlan(invalidPlan)).every(({ applied: ok }) => ok));
+	assert.equal(await readFile(invalidFile, "utf8"), invalidBytes);
+	await assert.rejects(lstat(`${invalidFile}.harness-bak-2024-01-02T03:04:05.000Z`));
+	record("unparseable config plans zero writes for that file");
+
+	const raceBase = path.join(temp, "planner-toctou");
+	const racePkg = await createPackage(raceBase);
+	const raceRoots = await installFixture(path.join(raceBase, "fixture"), racePkg);
+	const raceHooksFile = path.join(raceRoots.cursor, "hooks.json");
+	const raceMcpFile = path.join(raceRoots.cursor, "mcp.json");
+	const raceHooks = JSON.parse(await readFile(raceHooksFile, "utf8"));
+	raceHooks.hooks.beforeShellExecution[0].failClosed = false;
+	await writeJson(raceHooksFile, raceHooks);
+	const raceMcp = JSON.parse(await readFile(raceMcpFile, "utf8"));
+	raceMcp.mcpServers[PI_BRIDGE_MCP_KEY].args[0] = path.join(stalePkg, "agent/claude-bridge-client/pi-bridge-mcp.js");
+	await writeJson(raceMcpFile, raceMcp);
+	const racePlan = await planInstall("cursor", { pkgRoot: racePkg, roots: raceRoots, agentDir: path.join(raceBase, "agent-dir") });
+	const hooksChange = racePlan.changes.find(({ path: file }) => file === raceHooksFile)!;
+	await writeJson(raceHooksFile, { userEdit: true });
+	const raceResults = await applyPlan(racePlan);
+	assert.equal(raceResults.find(({ path: file }) => file === raceHooksFile)?.applied, false);
+	assert.equal(raceResults.find(({ path: file }) => file === raceMcpFile)?.applied, true);
+	assert.equal(JSON.parse(await readFile(raceHooksFile, "utf8")).userEdit, true);
+	assert.notEqual(hooksChange.before, await readFile(raceHooksFile, "utf8"));
+	record("TOCTOU mismatch aborts only changed file");
+
+	const cappedApplyBase = path.join(temp, "planner-capped-apply");
+	const cappedApplyPkg = await createPackage(cappedApplyBase);
+	const cappedApplyRoots = await installFixture(path.join(cappedApplyBase, "fixture"), cappedApplyPkg);
+	const cappedApplyMcp = path.join(cappedApplyRoots.cursor, "mcp.json");
+	const cappedApplyConfig = JSON.parse(await readFile(cappedApplyMcp, "utf8"));
+	cappedApplyConfig.mcpServers[PI_BRIDGE_MCP_KEY].args[0] = path.join(cappedApplyBase, "stale-mcp.js");
+	await writeJson(cappedApplyMcp, cappedApplyConfig);
+	const cappedApplyPlan = await planInstall("cursor", { pkgRoot: cappedApplyPkg, roots: cappedApplyRoots, agentDir: path.join(cappedApplyBase, "agent-dir") });
+	const oversizedEdit = "x".repeat(MAX_CONFIG_BYTES + 1);
+	await writeFile(cappedApplyMcp, oversizedEdit);
+	const cappedApplyResults = await applyPlan(cappedApplyPlan);
+	assert.equal(cappedApplyResults.find(({ path: file }) => file === cappedApplyMcp)?.applied, false);
+	assert.equal((await readFile(cappedApplyMcp, "utf8")).length, oversizedEdit.length);
+	record("apply re-read respects 1 MiB config cap");
+
+	const backupBase = path.join(temp, "planner-backups");
+	const backupPkg = await createPackage(backupBase);
+	const backupRoots = await installFixture(path.join(backupBase, "fixture"), backupPkg);
+	const backupSettingsFile = path.join(backupRoots.claude, "settings.json");
+	const backupSettings = JSON.parse(await readFile(backupSettingsFile, "utf8"));
+	backupSettings.hooks.PreToolUse[0].hooks[0].command = command(stalePkg, "agent/claude-bridge-client/pi-readonly-hook.js");
+	await writeJson(backupSettingsFile, backupSettings);
+	await chmod(backupSettingsFile, 0o640);
+	const replacedLink = path.join(backupRoots.claude, "commands/pi-plan.md");
+	await rm(replacedLink);
+	await symlink(path.join(backupPkg, "agent/harness-commands/cursor/pi-plan.md"), replacedLink);
+	const backupLegacy = path.join(backupRoots.claude, "commands/build.md");
+	await symlink(path.join(backupPkg, "agent/harness-commands/claude/pi-build.md"), backupLegacy);
+	const backupPlan = await planInstall("claude", { pkgRoot: backupPkg, roots: backupRoots, agentDir: path.join(backupBase, "agent-dir") });
+	const priorExistingChanges = backupPlan.changes.filter(({ before }) => before !== null);
+	assert.ok(priorExistingChanges.length >= 3);
+	const backupIso = "2024-02-03T04:05:06.000Z";
+	const backupStamp = backupTimestamp(backupIso);
+	const backupResults = await applyPlan(backupPlan, { now: new Date(backupIso) });
+	assert.ok(backupResults.every(({ applied: ok }) => ok), JSON.stringify(backupResults));
+	assert.equal((await lstat(backupSettingsFile)).mode & 0o777, 0o640, "atomic replacement preserves original mode");
+	for (const change of priorExistingChanges) {
+		const backup = `${change.path}.harness-bak-${backupStamp}`;
+		const info = await lstat(backup);
+		if (change.kind === "json") {
+			assert.ok(info.isFile());
+			assert.equal(await readFile(backup, "utf8"), change.before);
+		} else {
+			assert.ok(info.isSymbolicLink());
+			assert.equal(await readlink(backup), change.before);
+		}
+	}
+	record("backup before every changed existing file or symlink");
+
+	const uninstallBase = path.join(temp, "planner-uninstall");
+	const uninstallPkg = await createPackage(uninstallBase);
+	const uninstallRoots = await installFixture(path.join(uninstallBase, "fixture"), uninstallPkg);
+	const uninstallAgent = path.join(uninstallBase, "agent-dir");
+	const uninstallSettingsFile = path.join(uninstallRoots.claude, "settings.json");
+	const uninstallSettings = JSON.parse(await readFile(uninstallSettingsFile, "utf8"));
+	const uninstallForeignHook = { hooks: [{ type: "command", command: "node /opt/foreign/preserve.js" }] };
+	uninstallSettings.hooks.PreToolUse.push(uninstallForeignHook);
+	await writeJson(uninstallSettingsFile, uninstallSettings);
+	const foreignUninstallCommand = path.join(uninstallRoots.claude, "commands/pi-build.md");
+	await rm(foreignUninstallCommand);
+	await writeFile(foreignUninstallCommand, "preserve this file\n");
+	await writeStamp(uninstallAgent, {
+		version: "1.2.3",
+		harnesses: {
+			claude: { pkgRoot: uninstallPkg, installedAt: "2024-01-01T00:00:00.000Z" },
+			cursor: { pkgRoot: uninstallPkg, installedAt: "2024-01-01T00:00:00.000Z" },
+		},
+	});
+	const uninstallPlan = await planUninstall("claude", { pkgRoot: uninstallPkg, roots: uninstallRoots, agentDir: uninstallAgent });
+	assert.deepEqual(uninstallPlan.cliSteps, [{ executable: "claude", args: ["mcp", "remove", "-s", "user", PI_BRIDGE_MCP_KEY] }]);
+	const uninstallBackupIso = "2024-04-05T06:07:08.000Z";
+	assert.ok((await applyPlan(uninstallPlan, { now: new Date(uninstallBackupIso) })).every(({ applied: ok }) => ok));
+	const uninstalledSettings = JSON.parse(await readFile(uninstallSettingsFile, "utf8"));
+	assert.deepEqual(uninstalledSettings.hooks.PreToolUse[0].hooks, []);
+	assert.deepEqual(uninstalledSettings.hooks.PreToolUse[1], uninstallForeignHook);
+	assert.equal(Object.hasOwn(uninstalledSettings, "statusLine"), false);
+	assert.match(await readFile(foreignUninstallCommand, "utf8"), /preserve this file/);
+	await assert.rejects(lstat(path.join(uninstallRoots.claude, "commands/pi-discuss.md")));
+	await assert.rejects(lstat(path.join(uninstallRoots.claude, "commands/pi-plan.md")));
+	assert.deepEqual(Object.keys((await readStamp(uninstallAgent))!.harnesses), ["cursor"]);
+	assert.ok((await lstat(path.join(uninstallAgent, `harness-setup.json.harness-bak-${backupTimestamp(uninstallBackupIso)}`))).isFile());
+	record("uninstall removes only owned entries and stamp harness");
+
+	const stampApiDir = path.join(temp, "stamp-api");
+	const stampValue = { version: "9.8.7", harnesses: { opencode: { pkgRoot: "/pkg", installedAt: "2024-01-01T00:00:00.000Z" } } };
+	await writeStamp(stampApiDir, stampValue);
+	assert.deepEqual(await readStamp(stampApiDir), stampValue);
+	const stampBackupIso = "2024-03-04T05:06:07.000Z";
+	await removeStampHarness(stampApiDir, "opencode", { now: new Date(stampBackupIso) });
+	assert.deepEqual(await readStamp(stampApiDir), { version: "9.8.7", harnesses: {} });
+	assert.ok((await lstat(path.join(stampApiDir, `harness-setup.json.harness-bak-${backupTimestamp(stampBackupIso)}`))).isFile());
+	record("stamp shape, write, read, and harness removal");
+
+	const boundaryBase = path.join(temp, "planner-boundary");
+	const boundaryPkg = await createPackage(boundaryBase);
+	const boundaryRoots = await installFixture(path.join(boundaryBase, "fixture"), boundaryPkg);
+	const boundaryAgent = path.join(boundaryBase, "agent-dir");
+	const boundaryPlan = await planInstall("cursor", { pkgRoot: boundaryPkg, roots: boundaryRoots, agentDir: boundaryAgent });
+	const outsideFile = path.join(temp, "outside-write-probe.json");
+	boundaryPlan.changes.push({ path: outsideFile, kind: "json", before: null, after: "{}\n" });
+	const boundaryResults = await applyPlan(boundaryPlan);
+	assert.equal(boundaryResults.find(({ path: file }) => file === outsideFile)?.applied, false);
+	await assert.rejects(lstat(outsideFile));
+	record("apply write confinement to harness roots and stamp");
 
 	console.log(`assertion coverage: ${[...covered].sort().join(", ")}`);
 	console.log(`problem-kind coverage: ${[...seenProblems].sort().join(", ")}`);

@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readlink, realpath } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, open, readlink, realpath, rename, symlink, unlink } from "node:fs/promises";
 import path from "node:path";
 import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "./manifest.ts";
 import type { Harness, HarnessEntry } from "./manifest.ts";
@@ -638,4 +639,782 @@ async function inspectCommandEntries(
 			await inspectSymlink(harness, root, entry, pkgRoot, satisfied, problems, signal);
 		}
 	}
+}
+
+export interface PlannedChange {
+	path: string;
+	kind: "json" | "symlink" | "delete";
+	before: string | null;
+	after: string | null;
+}
+
+export interface PlannedSkip {
+	path: string;
+	reason: string;
+}
+
+export interface CliStep {
+	executable: "claude";
+	args: string[];
+}
+
+export interface SetupPlan {
+	changes: PlannedChange[];
+	skipped: PlannedSkip[];
+	cliSteps: CliStep[];
+}
+
+export interface PlanOptions extends InspectOptions {
+	agentDir: string;
+}
+
+export interface HarnessStampEntry {
+	pkgRoot: string;
+	installedAt: string;
+}
+
+export interface HarnessSetupStamp {
+	version: string;
+	harnesses: Partial<Record<Harness, HarnessStampEntry>> & Record<string, unknown>;
+}
+
+export interface ApplyOptions {
+	now?: Date | (() => Date);
+}
+
+export interface ApplyResult {
+	path: string;
+	applied: boolean;
+	reason?: string;
+}
+
+interface PlanScope {
+	roots: string[];
+	stampPath: string;
+}
+
+const PLAN_SCOPE = Symbol("harness setup plan scope");
+type ScopedPlan = SetupPlan & { [PLAN_SCOPE]?: PlanScope };
+
+interface JsonDraft {
+	path: string;
+	before: string | null;
+	value: Record<string, unknown>;
+}
+
+function addSkip(skipped: PlannedSkip[], file: string, reason: string): void {
+	if (!skipped.some((item) => item.path === file && item.reason === reason)) skipped.push({ path: file, reason });
+}
+
+async function readJsonDraft(file: string, skipped: PlannedSkip[]): Promise<JsonDraft | undefined> {
+	let info;
+	try {
+		info = await lstat(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			addSkip(skipped, file, "Cannot inspect config file.");
+			return undefined;
+		}
+		return { path: file, before: null, value: {} };
+	}
+	if (info.isSymbolicLink() || !info.isFile()) {
+		addSkip(skipped, file, "Config path is not a regular file; preserve it.");
+		return undefined;
+	}
+	const read = await readCapped(file);
+	if (read.state === "oversized") {
+		addSkip(skipped, file, `Config exceeds ${MAX_CONFIG_BYTES} bytes.`);
+		return undefined;
+	}
+	if (read.state !== "ok") {
+		addSkip(skipped, file, "Config is unreadable; preserve it.");
+		return undefined;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(read.text ?? "");
+	} catch {
+		const jsonc = isJsonc(read.text ?? "");
+		addSkip(skipped, file, jsonc ? "JSONC is unsupported; preserve config." : "Config is unparseable; preserve it.");
+		return undefined;
+	}
+	if (!isRecord(parsed)) {
+		addSkip(skipped, file, "Config root is not a JSON object; preserve it.");
+		return undefined;
+	}
+	return { path: file, before: read.text ?? "", value: parsed };
+}
+
+function finishJsonDraft(draft: JsonDraft, dirty: boolean, changes: PlannedChange[]): void {
+	if (!dirty) return;
+	const after = `${JSON.stringify(draft.value, null, 2)}\n`;
+	if (after !== draft.before) changes.push({ path: draft.path, kind: "json", before: draft.before, after });
+}
+
+function ownedCommand(command: string | undefined, script: string): boolean {
+	return looksLikeOwnedTarget(commandTarget(command ?? ""), script);
+}
+
+function expectedHook(harness: Harness, entry: HarnessEntry, pkgRoot: string): Record<string, unknown> {
+	const command = `node ${JSON.stringify(packageAsset(pkgRoot, entry.script))}`;
+	return harness === "cursor"
+		? { command, failClosed: CURSOR_HOOK_FAIL_CLOSED }
+		: { type: "command", command };
+}
+
+function updateHook(
+	harness: Harness,
+	entry: HarnessEntry,
+	config: Record<string, unknown>,
+	pkgRoot: string,
+	install: boolean,
+	skipped: PlannedSkip[],
+	file: string,
+): boolean {
+	const event = entry.event!;
+	let hooks = config.hooks;
+	if (hooks === undefined && install) {
+		hooks = {};
+		config.hooks = hooks;
+	}
+	if (hooks === undefined) return false;
+	if (!isRecord(hooks)) {
+		addSkip(skipped, file, `hooks is not an object; preserve ${event}.`);
+		return false;
+	}
+	let groups = hooks[event];
+	if (groups === undefined && install) {
+		groups = [];
+		hooks[event] = groups;
+	}
+	if (groups === undefined) return false;
+	if (!Array.isArray(groups)) {
+		addSkip(skipped, file, `Hook event ${event} is not an array; preserve it.`);
+		return false;
+	}
+	const owned: Array<{ group: Record<string, unknown>; index: number }> = [];
+	let foreignPresent = false;
+	for (const group of groups) {
+		if (!isRecord(group)) continue;
+		if (harness === "claude") {
+			if (!Array.isArray(group.hooks)) continue;
+			for (let index = 0; index < group.hooks.length; index++) {
+				const hook = group.hooks[index];
+				if (isRecord(hook) && hook.type === "command" && typeof hook.command === "string" && ownedCommand(hook.command, entry.script)) owned.push({ group, index });
+				else foreignPresent = true;
+			}
+		} else if (typeof group.command === "string" && ownedCommand(group.command, entry.script)) {
+			owned.push({ group, index: -1 });
+		} else foreignPresent = true;
+	}
+	if (foreignPresent) addSkip(skipped, file, `Foreign hooks in ${event} are preserved.`);
+	let dirty = false;
+	if (!install) {
+		for (const candidate of owned.reverse()) {
+			if (harness === "claude") {
+				(candidate.group.hooks as unknown[]).splice(candidate.index, 1);
+			} else {
+				groups.splice(groups.indexOf(candidate.group), 1);
+			}
+			dirty = true;
+		}
+		return dirty;
+	}
+	const desired = expectedHook(harness, entry, pkgRoot);
+	if (owned.length) {
+		const first = owned[0]!;
+		if (harness === "claude") {
+			const array = first.group.hooks as unknown[];
+			if (JSON.stringify(array[first.index]) !== JSON.stringify(desired)) {
+				array[first.index] = desired;
+				dirty = true;
+			}
+			for (const duplicate of owned.slice(1).reverse()) {
+				(duplicate.group.hooks as unknown[]).splice(duplicate.index, 1);
+				dirty = true;
+			}
+		} else {
+			if (JSON.stringify(first.group) !== JSON.stringify(desired)) {
+				const index = groups.indexOf(first.group);
+				groups[index] = desired;
+				dirty = true;
+			}
+			for (const duplicate of owned.slice(1).reverse()) {
+				groups.splice(groups.indexOf(duplicate.group), 1);
+				dirty = true;
+			}
+		}
+		return dirty;
+	}
+	if (harness === "claude") {
+		const group = groups.find((item): item is Record<string, unknown> => isRecord(item) && Array.isArray(item.hooks));
+		if (group) (group.hooks as unknown[]).push(desired);
+		else groups.push({ hooks: [desired] });
+	} else groups.push(desired);
+	return true;
+}
+
+function expectedMcp(harness: Harness, pkgRoot: string): Record<string, unknown> {
+	const target = packageAsset(pkgRoot, HARNESS_MANIFEST[harness].find(({ kind }) => kind === "mcp")!.script);
+	return harness === "opencode"
+		? { type: "local", command: ["node", target], enabled: true }
+		: { command: "node", args: [target] };
+}
+
+async function updateMcp(
+	harness: Harness,
+	config: Record<string, unknown>,
+	pkgRoot: string,
+	install: boolean,
+	skipped: PlannedSkip[],
+	file: string,
+): Promise<boolean> {
+	const script = HARNESS_MANIFEST[harness].find(({ kind }) => kind === "mcp")!.script;
+	if (install && !(await packageAssetExists(pkgRoot, script))) {
+		addSkip(skipped, file, "Expected MCP package asset is missing or outside package root.");
+		return false;
+	}
+	const containerName = harness === "opencode" ? "mcp" : "mcpServers";
+	let container = config[containerName];
+	if (container === undefined && install) {
+		container = {};
+		config[containerName] = container;
+	}
+	if (container === undefined) return false;
+	if (!isRecord(container)) {
+		addSkip(skipped, file, `${containerName} is not an object; preserve it.`);
+		return false;
+	}
+	const current = container[PI_BRIDGE_MCP_KEY];
+	if (current === undefined) {
+		if (!install) return false;
+		container[PI_BRIDGE_MCP_KEY] = expectedMcp(harness, pkgRoot);
+		return true;
+	}
+	if (!install) {
+		delete container[PI_BRIDGE_MCP_KEY];
+		return true;
+	}
+	if (!isRecord(current)) {
+		container[PI_BRIDGE_MCP_KEY] = expectedMcp(harness, pkgRoot);
+		return true;
+	}
+	const expected = { ...current, ...expectedMcp(harness, pkgRoot) };
+	if (JSON.stringify(current) === JSON.stringify(expected)) return false;
+	container[PI_BRIDGE_MCP_KEY] = expected;
+	return true;
+}
+
+async function packageAssetExists(pkgRoot: string, script: string): Promise<boolean> {
+	try {
+		const [root, target] = await Promise.all([realpath(pkgRoot), realpath(packageAsset(pkgRoot, script))]);
+		return inside(root, target);
+	} catch {
+		return false;
+	}
+}
+
+async function planSymlink(
+	root: string,
+	entry: HarnessEntry,
+	pkgRoot: string,
+	install: boolean,
+	changes: PlannedChange[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	const file = path.resolve(root, ...entry.dest.split("/"));
+	const expected = packageAsset(pkgRoot, entry.script);
+	if (install && !(await packageAssetExists(pkgRoot, entry.script))) {
+		addSkip(skipped, file, "Expected package asset is missing or outside package root.");
+		return;
+	}
+	let info;
+	try {
+		info = await lstat(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			addSkip(skipped, file, "Cannot inspect symlink destination.");
+			return;
+		}
+		if (install) changes.push({ path: file, kind: "symlink", before: null, after: expected });
+		return;
+	}
+	if (!info.isSymbolicLink()) {
+		addSkip(skipped, file, "Destination is not a symlink; preserve it.");
+		return;
+	}
+	let raw: string;
+	let target: string;
+	let packagePath: string;
+	try {
+		[raw, target, packagePath] = await Promise.all([readlink(file), realpath(file), realpath(pkgRoot)]);
+	} catch {
+		addSkip(skipped, file, "Symlink target cannot be verified; preserve it.");
+		return;
+	}
+	if (!inside(packagePath, target)) {
+		addSkip(skipped, file, "Symlink target is outside selected package; preserve it.");
+		return;
+	}
+	if (!install) {
+		changes.push({ path: file, kind: "delete", before: raw, after: null });
+	} else {
+		let expectedTarget: string;
+		try {
+			expectedTarget = await realpath(expected);
+		} catch {
+			addSkip(skipped, file, "Expected package asset cannot be verified.");
+			return;
+		}
+		if (target !== expectedTarget) changes.push({ path: file, kind: "symlink", before: raw, after: expected });
+	}
+}
+
+async function planLegacyLinks(
+	root: string,
+	pkgRoot: string,
+	changes: PlannedChange[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	let packagePath: string;
+	try {
+		packagePath = await realpath(pkgRoot);
+	} catch {
+		return;
+	}
+	for (const name of ["discuss", "plan", "build"]) {
+		const file = path.join(root, "commands", `${name}.md`);
+		let info;
+		try {
+			info = await lstat(file);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") addSkip(skipped, file, "Cannot inspect legacy command path.");
+			continue;
+		}
+		if (!info.isSymbolicLink()) {
+			addSkip(skipped, file, "Plain legacy command is not owned; preserve it.");
+			continue;
+		}
+		let target: string;
+		try {
+			target = await realpath(file);
+		} catch {
+			addSkip(skipped, file, "Unverifiable legacy symlink is not owned; preserve it.");
+			continue;
+		}
+		if (!inside(packagePath, target)) {
+			addSkip(skipped, file, "Legacy symlink points outside selected package; preserve it.");
+			continue;
+		}
+		changes.push({ path: file, kind: "delete", before: await readlink(file), after: null });
+	}
+}
+
+async function readPackageVersion(pkgRoot: string): Promise<string | undefined> {
+	const read = await readCapped(path.join(pkgRoot, "package.json"));
+	if (read.state !== "ok") return undefined;
+	try {
+		const parsed: unknown = JSON.parse(read.text ?? "");
+		return isRecord(parsed) && typeof parsed.version === "string" ? parsed.version : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function validStamp(value: unknown): value is HarnessSetupStamp {
+	if (!isRecord(value) || typeof value.version !== "string" || !value.version || Buffer.byteLength(value.version) > 128 || !isRecord(value.harnesses)) return false;
+	try {
+		for (const [harness, item] of Object.entries(value.harnesses)) {
+			if (!Object.hasOwn(HARNESS_MANIFEST, harness) || !isRecord(item)) return false;
+			if (typeof item.pkgRoot !== "string" || !item.pkgRoot || Buffer.byteLength(item.pkgRoot) > 32_768) return false;
+			if (typeof item.installedAt !== "string" || new Date(item.installedAt).toISOString() !== item.installedAt) return false;
+		}
+		return Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`) <= MAX_CONFIG_BYTES;
+	} catch {
+		return false;
+	}
+}
+
+interface StampDraft {
+	state: "missing" | "ok" | "invalid";
+	before: string | null;
+	value?: HarnessSetupStamp;
+}
+
+async function readStampDraft(agentDir: string): Promise<StampDraft> {
+	const file = path.join(path.resolve(agentDir), "harness-setup.json");
+	let info;
+	try {
+		info = await lstat(file);
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT"
+			? { state: "missing", before: null }
+			: { state: "invalid", before: null };
+	}
+	if (info.isSymbolicLink() || !info.isFile()) return { state: "invalid", before: null };
+	const read = await readCapped(file);
+	if (read.state !== "ok") return { state: "invalid", before: null };
+	try {
+		const parsed: unknown = JSON.parse(read.text ?? "");
+		return validStamp(parsed) ? { state: "ok", before: read.text ?? "", value: parsed } : { state: "invalid", before: read.text ?? "" };
+	} catch {
+		return { state: "invalid", before: read.text ?? "" };
+	}
+}
+
+function attachScope(plan: SetupPlan, roots: string[], agentDir: string): SetupPlan {
+	Object.defineProperty(plan, PLAN_SCOPE, {
+		value: { roots: roots.map((root) => path.resolve(root)), stampPath: path.join(path.resolve(agentDir), "harness-setup.json") } satisfies PlanScope,
+		enumerable: false,
+	});
+	return plan;
+}
+
+function draftFromChange(draft: JsonDraft, dirty: boolean, changes: PlannedChange[]): void {
+	finishJsonDraft(draft, dirty, changes);
+}
+
+async function planClaudeMcp(
+	options: PlanOptions,
+	install: boolean,
+	cliSteps: CliStep[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	const file = path.resolve(options.roots.claudeMcp);
+	const draft = await readJsonDraft(file, skipped);
+	if (!draft) return;
+	const container = draft.value.mcpServers;
+	if (container !== undefined && !isRecord(container)) {
+		addSkip(skipped, file, "mcpServers is not an object; preserve it.");
+		return;
+	}
+	const current = isRecord(container) ? container[PI_BRIDGE_MCP_KEY] : undefined;
+	const script = HARNESS_MANIFEST.claude.find(({ kind }) => kind === "mcp")!.script;
+	if (install && !(await packageAssetExists(options.pkgRoot, script))) {
+		addSkip(skipped, file, "Expected MCP package asset is missing or outside package root.");
+		return;
+	}
+	if (current === undefined) {
+		if (install) {
+			cliSteps.push({ executable: "claude", args: ["mcp", "add", "-s", "user", PI_BRIDGE_MCP_KEY, "--", "node", packageAsset(options.pkgRoot, script)] });
+		}
+		return;
+	}
+	if (!install) {
+		cliSteps.push({ executable: "claude", args: ["mcp", "remove", "-s", "user", PI_BRIDGE_MCP_KEY] });
+		return;
+	}
+	const target = isRecord(current) ? mcpTarget(current, "claude") : undefined;
+	if (target && path.isAbsolute(target) && path.resolve(target) === packageAsset(options.pkgRoot, script)) return;
+	cliSteps.push({ executable: "claude", args: ["mcp", "remove", "-s", "user", PI_BRIDGE_MCP_KEY] });
+	cliSteps.push({ executable: "claude", args: ["mcp", "add", "-s", "user", PI_BRIDGE_MCP_KEY, "--", "node", packageAsset(options.pkgRoot, script)] });
+}
+
+async function updateStampPlan(
+	harness: Harness,
+	options: PlanOptions,
+	install: boolean,
+	changes: PlannedChange[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	const file = path.join(path.resolve(options.agentDir), "harness-setup.json");
+	const stamp = await readStampDraft(options.agentDir);
+	if (stamp.state === "invalid") {
+		addSkip(skipped, file, "Setup stamp is invalid or unreadable; preserve it.");
+		return;
+	}
+	if (!install) {
+		if (!stamp.value || !Object.hasOwn(stamp.value.harnesses, harness)) return;
+		const next = { ...stamp.value, harnesses: { ...stamp.value.harnesses } };
+		delete next.harnesses[harness];
+		changes.push({ path: file, kind: "json", before: stamp.before, after: `${JSON.stringify(next, null, 2)}\n` });
+		return;
+	}
+	const version = await readPackageVersion(options.pkgRoot);
+	if (!version) {
+		addSkip(skipped, file, "Package version is unavailable; cannot update setup stamp.");
+		return;
+	}
+	const next: HarnessSetupStamp = stamp.value
+		? { ...stamp.value, version, harnesses: { ...stamp.value.harnesses } }
+		: { version, harnesses: {} };
+	const previous = next.harnesses[harness] as HarnessStampEntry | undefined;
+	const installedAt = previous?.pkgRoot === path.resolve(options.pkgRoot) && stamp.value?.version === version
+		? previous.installedAt
+		: new Date().toISOString();
+	next.harnesses[harness] = { pkgRoot: path.resolve(options.pkgRoot), installedAt };
+	if (!validStamp(next)) {
+		addSkip(skipped, file, "Updated setup stamp exceeds limits or has invalid shape; preserve it.");
+		return;
+	}
+	const after = `${JSON.stringify(next, null, 2)}\n`;
+	if (after !== stamp.before) changes.push({ path: file, kind: "json", before: stamp.before, after });
+}
+
+async function buildPlan(harness: Harness, options: PlanOptions, install: boolean): Promise<SetupPlan> {
+	const changes: PlannedChange[] = [];
+	const skipped: PlannedSkip[] = [];
+	const cliSteps: CliStep[] = [];
+	if (!Object.hasOwn(HARNESS_MANIFEST, harness)) {
+		return attachScope({ changes, skipped: [{ path: options.agentDir, reason: "Unknown harness name." }], cliSteps }, [], options.agentDir);
+	}
+	const root = harness === "claude" ? options.roots.claude : harness === "cursor" ? options.roots.cursor : options.roots.opencode;
+	const entries = HARNESS_MANIFEST[harness];
+	const jsonFiles: string[] = harness === "claude"
+		? [path.join(root, "settings.json")]
+		: harness === "cursor"
+			? [path.join(root, "hooks.json"), path.join(root, "mcp.json")]
+			: [path.join(root, "opencode.json")];
+	for (const file of jsonFiles) {
+		const draft = await readJsonDraft(file, skipped);
+		if (!draft) continue;
+		let dirty = false;
+		if (harness === "claude" && file.endsWith(`${path.sep}settings.json`)) {
+			for (const entry of entries) {
+				if (entry.kind === "hook") {
+					if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
+					else dirty = updateHook(harness, entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+				} else if (entry.kind === "statusline") {
+					if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) {
+						addSkip(skipped, file, "Expected statusLine package asset is missing or outside package root.");
+					} else if (install) {
+						const current = draft.value.statusLine;
+						const expected = { type: "command", command: `node ${JSON.stringify(packageAsset(options.pkgRoot, entry.script))}`, refreshInterval: STATUSLINE_REFRESH_INTERVAL };
+						if (current === undefined) {
+						 draft.value.statusLine = expected;
+						 dirty = true;
+						} else if (isRecord(current) && typeof current.command === "string" && ownedCommand(current.command, entry.script)) {
+							const replacement = { ...current, ...expected };
+							if (JSON.stringify(current) !== JSON.stringify(replacement)) { draft.value.statusLine = replacement; dirty = true; }
+						} else addSkip(skipped, file, "Existing statusLine is foreign or malformed; preserve it.");
+					} else {
+						const current = draft.value.statusLine;
+						if (isRecord(current) && typeof current.command === "string" && ownedCommand(current.command, entry.script)) { delete draft.value.statusLine; dirty = true; }
+						else if (current !== undefined) addSkip(skipped, file, "Existing statusLine is foreign or malformed; preserve it.");
+					}
+				}
+			}
+		} else if (harness === "cursor" && file.endsWith(`${path.sep}hooks.json`)) {
+			for (const entry of entries) {
+				if (entry.kind !== "hook") continue;
+				if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
+				else dirty = updateHook(harness, entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+			}
+		} else {
+			dirty = await updateMcp(harness, draft.value, options.pkgRoot, install, skipped, file);
+		}
+		draftFromChange(draft, dirty, changes);
+	}
+	if (harness === "claude") await planClaudeMcp(options, install, cliSteps, skipped);
+	for (const entry of entries) {
+		if (entry.kind === "command" || entry.kind === "plugin") await planSymlink(root, entry, options.pkgRoot, install, changes, skipped);
+	}
+	await planLegacyLinks(root, options.pkgRoot, changes, skipped);
+	await updateStampPlan(harness, options, install, changes, skipped);
+	return attachScope({ changes, skipped, cliSteps }, [root], options.agentDir);
+}
+
+export function planInstall(harness: Harness, options: PlanOptions): Promise<SetupPlan> {
+	return buildPlan(harness, options, true);
+}
+
+export function planUninstall(harness: Harness, options: PlanOptions): Promise<SetupPlan> {
+	return buildPlan(harness, options, false);
+}
+
+export async function readStamp(agentDir: string): Promise<HarnessSetupStamp | undefined> {
+	const draft = await readStampDraft(agentDir);
+	return draft.state === "ok" ? draft.value : undefined;
+}
+
+function withinOrEqual(parent: string, child: string): boolean {
+	return parent === child || inside(parent, child);
+}
+
+async function prospectiveRealPath(file: string): Promise<string> {
+	let cursor = path.resolve(file);
+	const suffix: string[] = [];
+	while (true) {
+		try {
+			const resolved = await realpath(cursor);
+			return path.resolve(resolved, ...suffix.reverse());
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+			const parent = path.dirname(cursor);
+			if (parent === cursor) throw error;
+			suffix.push(path.basename(cursor));
+			cursor = parent;
+		}
+	}
+}
+
+async function assertPlanPathAllowed(file: string, scope: PlanScope): Promise<void> {
+	const parent = await prospectiveRealPath(path.dirname(file));
+	const canonical = path.join(parent, path.basename(file));
+	const stamp = await prospectiveRealPath(scope.stampPath);
+	if (canonical === stamp) return;
+	for (const root of scope.roots) {
+		const realRoot = await prospectiveRealPath(root);
+		if (withinOrEqual(realRoot, canonical)) return;
+	}
+	throw new Error("Planned path is outside resolved harness roots and stamp path.");
+}
+
+async function currentChangeValue(change: PlannedChange): Promise<{ exists: boolean; value?: string; info?: Awaited<ReturnType<typeof lstat>> }> {
+	let info;
+	try {
+		info = await lstat(change.path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false };
+		throw error;
+	}
+	if (change.kind === "json") {
+		if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CONFIG_BYTES) return { exists: true, info };
+		const read = await readCapped(change.path);
+		if (read.state !== "ok") return { exists: true, info };
+		const latest = await lstat(change.path);
+		if (!latest.isFile() || latest.isSymbolicLink() || latest.dev !== info.dev || latest.ino !== info.ino) return { exists: true, info: latest };
+		return { exists: true, value: read.text ?? "", info: latest };
+	}
+	if (!info.isSymbolicLink()) return { exists: true, info };
+	return { exists: true, value: await readlink(change.path), info };
+}
+
+function valueMatches(change: PlannedChange, current: { exists: boolean; value?: string }): boolean {
+	if (change.before === null) return !current.exists;
+	return current.exists && current.value === change.before;
+}
+
+async function makeBackup(change: PlannedChange, current: { exists: boolean; value?: string; info?: Awaited<ReturnType<typeof lstat>> }, timestamp: string): Promise<string | undefined> {
+	if (!current.exists) return undefined;
+	const backup = `${change.path}.harness-bak-${timestamp}`;
+	try {
+		await lstat(backup);
+		throw new Error("Backup path already exists.");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	if (change.kind === "json") {
+		if (!current.info?.isFile() || current.info.isSymbolicLink()) throw new Error("Refusing to back up non-regular config file.");
+		await copyFile(change.path, backup, constants.COPYFILE_EXCL);
+		await chmod(backup, current.info.mode & 0o7777);
+		const backupRead = await readCapped(backup);
+		if (backupRead.state !== "ok" || backupRead.text !== change.before) throw new Error("Config changed while creating backup.");
+	} else {
+		if (!current.info?.isSymbolicLink() || current.value === undefined) throw new Error("Refusing to back up non-symlink destination.");
+		await symlink(current.value, backup);
+	}
+	return backup;
+}
+
+async function assertStillMatches(change: PlannedChange): Promise<boolean> {
+	try {
+		const current = await currentChangeValue(change);
+		return valueMatches(change, current);
+	} catch {
+		return false;
+	}
+}
+
+async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: string): Promise<ApplyResult> {
+	let temp: string | undefined;
+	try {
+		await assertPlanPathAllowed(change.path, scope);
+		const current = await currentChangeValue(change);
+		if (!valueMatches(change, current)) return { path: change.path, applied: false, reason: "Path changed since planning or is not an owned regular file/symlink." };
+		await makeBackup(change, current, timestamp);
+		if (change.kind === "delete") {
+			await assertPlanPathAllowed(change.path, scope);
+			if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no delete performed." };
+			await unlink(change.path);
+			return { path: change.path, applied: true };
+		}
+		const parent = path.dirname(change.path);
+		await mkdir(parent, { recursive: true });
+		temp = path.join(parent, `.${path.basename(change.path)}.harness-tmp-${randomUUID()}`);
+		if (change.kind === "json") {
+			if (change.after === null) throw new Error("JSON change requires after content.");
+			const mode = current.exists && current.info ? current.info.mode & 0o7777 : 0o666;
+			const handle = await open(temp, "wx", mode);
+			try {
+				await handle.writeFile(change.after, "utf8");
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
+			if (current.exists) await chmod(temp, mode);
+		} else {
+			if (change.after === null) throw new Error("Symlink change requires after target.");
+			await symlink(change.after, temp);
+		}
+		await assertPlanPathAllowed(change.path, scope);
+		if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no write performed." };
+		await rename(temp, change.path);
+		temp = undefined;
+		return { path: change.path, applied: true };
+	} catch (error) {
+		return { path: change.path, applied: false, reason: error instanceof Error ? error.message : String(error) };
+	} finally {
+		if (temp) {
+			try {
+				const info = await lstat(temp);
+				if (info.isSymbolicLink() || info.isFile()) await unlink(temp);
+				else await rmTemporary(temp);
+			} catch {
+				// Temp path was already renamed or removed.
+			}
+		}
+	}
+}
+
+async function rmTemporary(file: string): Promise<void> {
+	await unlink(file).catch(() => undefined);
+}
+
+export async function applyPlan(plan: SetupPlan, options: ApplyOptions = {}): Promise<ApplyResult[]> {
+	const scope = (plan as ScopedPlan)[PLAN_SCOPE];
+	if (!scope) return plan.changes.map(({ path: file }) => ({ path: file, applied: false, reason: "Plan lacks trusted path scope." }));
+	const now = typeof options.now === "function" ? options.now() : options.now ?? new Date();
+	const isoTimestamp = now.toISOString();
+	// Windows forbids colons in filenames; preserve ISO timestamps elsewhere.
+	const timestamp = process.platform === "win32" ? isoTimestamp.replaceAll(":", "-") : isoTimestamp;
+	const results: ApplyResult[] = [];
+	for (const change of plan.changes) results.push(await applyOne(change, scope, timestamp));
+	return results;
+}
+
+async function applyStampMutation(agentDir: string, change: PlannedChange, now?: ApplyOptions["now"]): Promise<void> {
+	const plan = attachScope({ changes: [change], skipped: [], cliSteps: [] }, [], agentDir);
+	const [result] = await applyPlan(plan, { now });
+	if (!result?.applied) throw new Error(result?.reason ?? "Stamp mutation failed.");
+}
+
+export async function writeStamp(agentDir: string, stamp: HarnessSetupStamp, options: ApplyOptions = {}): Promise<void> {
+	if (!validStamp(stamp)) throw new Error("Invalid harness setup stamp.");
+	const file = path.join(path.resolve(agentDir), "harness-setup.json");
+	const current = await readStampDraft(agentDir);
+	if (current.state === "invalid") throw new Error("Existing harness setup stamp is invalid or unreadable.");
+	const after = `${JSON.stringify(stamp, null, 2)}\n`;
+	if (after === current.before) return;
+	await applyStampMutation(agentDir, {
+		path: file,
+		kind: "json",
+		before: current.before,
+		after,
+	}, options.now);
+}
+
+export async function removeStampHarness(agentDir: string, harness: Harness, options: ApplyOptions = {}): Promise<void> {
+	const current = await readStampDraft(agentDir);
+	if (current.state === "invalid") throw new Error("Existing harness setup stamp is invalid or unreadable.");
+	if (!current.value || !Object.hasOwn(current.value.harnesses, harness)) return;
+	const next = { ...current.value, harnesses: { ...current.value.harnesses } };
+	delete next.harnesses[harness];
+	await applyStampMutation(agentDir, {
+		path: path.join(path.resolve(agentDir), "harness-setup.json"),
+		kind: "json",
+		before: current.before,
+		after: `${JSON.stringify(next, null, 2)}\n`,
+	}, options.now);
 }
