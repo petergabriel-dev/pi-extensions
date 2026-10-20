@@ -53,6 +53,7 @@ const publishedFiles = [
   "agent/extensions/discussion-notes.ts",
   "agent/extensions/engineering-docs/*.ts",
   "agent/extensions/engineering-docs/README.md",
+  "agent/extensions/harness-setup/*.ts",
   "agent/extensions/filechanges/index.ts",
   "agent/extensions/filechanges/README.md",
   "agent/extensions/notify.ts",
