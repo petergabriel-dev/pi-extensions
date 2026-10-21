@@ -93,6 +93,11 @@
 - **`afterFileEdit` has no preimage/output contract.** Cursor supplies edit metadata such as `edits[].old_string`, not exact pre-edit bytes or supported post-edit output fields. Do not attempt a post-write revert; `preToolUse` denies `Write` before execution.
 - **Cursor shell classification is conservative.** Known reads allow, obvious writes deny, unknown commands ask. New exotic write forms require deny-pattern coverage.
 - **Cursor docs nudge is not a gate.** `.cursor/hooks/docs-nudge.js` asks on `git commit` when staged non-doc changes omit `docs/engineering/**`; malformed input and Git errors allow so commits are never blocked by the nudge.
+- **Claude and Cursor bridge identity is agent-asserted.** MCP arguments choose `harness` and `sessionId`, so a same-user process can present another identity; OpenCode alone overwrites both from the host session (`agent/claude-bridge-client/pi-bridge-mcp.js:160-173`; `agent/opencode-bridge-client/pi-opencode-plugin.js:48-53`). `ADR-0045` F2.
+- **Cursor shell classification trusts read prefixes.** A read command chained with an interpreter write, a `find` delete action, a pipe into an interpreter, or `git diff --output=<file>` passes as read-only; only obvious mutation tokens deny (`agent/cursor-bridge-client/cursor-readonly-hook.js:11-12,57-62`). `ADR-0045` F3.
+- **Cursor `preToolUse` gates one tool name.** Only `write` denies; `edit`, `multiedit`, `delete`, and patch-style names pass (`agent/cursor-bridge-client/cursor-readonly-hook.js:85-90`). `ADR-0045` F4.
+- **Claude hook fails open when it crashes.** Sandbox scratch creation runs outside the error handler, so an unwritable `TMPDIR` exits non-2 (observed exit 1) and Claude treats non-2 as non-blocking; registration has no matcher or fail-closed flag (`agent/claude-bridge-client/pi-readonly-hook.js:90,148`; `agent/extensions/harness-setup/setup.ts:775-779`). `ADR-0045` F5.
+- **Foreign MCP gating diverges by harness.** Claude passes every foreign tool, Cursor denies by mutating name, OpenCode blocks only four names (`agent/claude-bridge-client/pi-readonly-hook.js:159`; `agent/cursor-bridge-client/cursor-readonly-hook.js:72-78`; `agent/opencode-bridge-client/pi-opencode-plugin.js:8-13`). `ADR-0045` F6.
 
 ## Workflow modes and review
 
@@ -110,6 +115,8 @@
 - **Section 4 completion is not full-plan completion.** Tracker progress uses Section 4 only; Section 5 Definition of Done remains a separate closure gate. Report both statuses instead of claiming the whole plan complete.
 - **Custom entries and custom messages use different context channels.** Pi `pi.appendEntry()` custom entries stay out of LLM context; `before_agent_start.message` and `pi.sendMessage()` custom messages enter it, and `@earendil-works/pi-coding-agent/dist/core/messages.js:89-96` maps them to LLM role `user` while dropping `CustomMessage.details`. Put model-required tracker data in message `content`, not only `details`; prefix harness-authored content, as in `agent/extensions/workflow-modes/index.ts`.
 - **One-shot custom messages do not survive compaction reliably.** `@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js#findValidCutPoints` treats `custom_message` entries as valid cut points, so active-mode authority must be regenerated per turn; reserve one-shot announcements for Off transitions.
+- **Review posting is prompt-enforced.** `gh pr review` and `gh pr comment` are in the shell allow-list, and confirmation exists only as prompt prose (`agent/extensions/workflow-modes/policy.ts:17-21`; `agent/extensions/workflow-modes/index.ts:593`). `ADR-0045` F7.
+- **Seatbelt profile is allow-default.** The generated profile is `(allow default)` plus network/write denials, not a read allowlist; a LaunchServices escape remains unproven (`agent/extensions/workflow-modes/sandbox.ts:45-61`; `agent/claude-bridge-client/pi-readonly-hook.js:71-86`). `ADR-0045` F8.
 
 ## Engineering docs
 
@@ -190,6 +197,7 @@
 - Pi Off is intentionally unguarded. Treat it as opting out of workflow guardrails, not as an exclusive-writer guarantee.
 - If a harness exits while Pi stays live, its lease does not expire by time; inspect `/build-lease` and explicitly run `/build-lease release` before another harness builds. If Pi exits/crashes instead, stale presence fails closed after the five-second heartbeat TTL; a stale lease field does not authorize writes.
 - OpenCode task subagents may have a different host `sessionID` from their parent. If identity differs, their writes remain read-only; unit tests do not prove identity inheritance. Verify only in isolated live acceptance.
+- **Lease can be self-granted without a human.** `save_plan` accepts agent-asserted `confirmed:true`, then `recall(mode:"build")` grants the lease; release matches identity supplied in MCP arguments (`agent/extensions/claude-bridge/index.ts:599-606,823-827`; `agent/extensions/claude-bridge/build-lease.ts:82-89`). `ADR-0045` F1.
 
 ## Personal memory and discussion notes
 
