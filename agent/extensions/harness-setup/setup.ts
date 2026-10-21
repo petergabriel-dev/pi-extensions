@@ -5,6 +5,16 @@ import path from "node:path";
 import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "./manifest.ts";
 import type { Harness, HarnessEntry } from "./manifest.ts";
 
+const CLAUDE_PRETOOL_GUARD = "|| exit 2";
+
+function requiresClaudePretoolGuard(harness: Harness, event: string | undefined): boolean {
+	return harness === "claude" && event === "PreToolUse";
+}
+
+function hasClaudePretoolGuard(command: string): boolean {
+	return command.trimEnd().endsWith(CLAUDE_PRETOOL_GUARD);
+}
+
 export type PackageRootState = "user" | "dev-checkout" | "refused";
 export interface PackageRootClassification {
 	state: PackageRootState;
@@ -23,6 +33,7 @@ export type ProblemKind =
 	| "entry-not-ours"
 	| "foreign-status-line"
 	| "legacy-command"
+	| "unguarded-hook"
 	| "stamp-version-mismatch"
 	| "non-macos-claude-bash-warning"
 	| "unreadable";
@@ -362,7 +373,9 @@ async function inspectHooks(
 			const validTarget = await checkTarget(target, entry.script, pkgRoot, harness, entry.dest, problems);
 			const validCursor = harness !== "cursor" || candidate.failClosed === CURSOR_HOOK_FAIL_CLOSED;
 			if (!validCursor) problem(problems, harness, "malformed-shape", `Cursor bridge hook must set failClosed: ${CURSOR_HOOK_FAIL_CLOSED}.`, entry.dest);
-			if (validTarget && validCursor) satisfied.add(entry.dest);
+			const validGuard = !requiresClaudePretoolGuard(harness, entry.event) || hasClaudePretoolGuard(candidate.command as string);
+			if (!validGuard) problem(problems, harness, "unguarded-hook", `Claude PreToolUse hook must end with ${CLAUDE_PRETOOL_GUARD}.`, entry.dest);
+			if (validTarget && validCursor && validGuard) satisfied.add(entry.dest);
 		}
 		if (foundForeign && !satisfied.has(entry.dest)) problem(problems, harness, "entry-not-ours", "Configured hook event contains no owned client entry.", entry.dest);
 	}
@@ -774,9 +787,9 @@ function ownedCommand(command: string | undefined, script: string): boolean {
 
 function expectedHook(harness: Harness, entry: HarnessEntry, pkgRoot: string): Record<string, unknown> {
 	const command = `node ${JSON.stringify(packageAsset(pkgRoot, entry.script))}`;
-	return harness === "cursor"
-		? { command, failClosed: CURSOR_HOOK_FAIL_CLOSED }
-		: { type: "command", command };
+	if (harness === "cursor") return { command, failClosed: CURSOR_HOOK_FAIL_CLOSED };
+	const guarded = requiresClaudePretoolGuard(harness, entry.event) ? `${command} ${CLAUDE_PRETOOL_GUARD}` : command;
+	return { type: "command", command: guarded };
 }
 
 function updateHook(

@@ -89,8 +89,9 @@ function isHarnessName(value) {
 function parseBuildLease(value) {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	if (!BUILD_LEASE_HARNESSES.has(value.harness) || !isSafeId(value.id)) return null;
-	if (typeof value.planId !== "string" || value.planId.trim().length === 0 || !Number.isFinite(value.grantedAt)) return null;
-	return { harness: value.harness, id: value.id, planId: value.planId, grantedAt: value.grantedAt };
+	if (typeof value.planId !== "string" || value.planId.trim().length === 0) return null;
+	if (!Number.isFinite(value.grantedAt) || !Number.isFinite(value.expiresAt) || value.expiresAt <= value.grantedAt) return null;
+	return { harness: value.harness, id: value.id, planId: value.planId, grantedAt: value.grantedAt, expiresAt: value.expiresAt };
 }
 
 function readJson(file) {
@@ -187,7 +188,10 @@ function holdsBuildLease(projectRoot, identity, now = Date.now()) {
 		const paired = findPairedLiveSessions(projectRoot, identity, now);
 		if (paired.length !== 1) return false;
 		const lease = paired[0].presence.buildLease;
-		return Boolean(lease && lease.harness === identity.harness && lease.id === identity.id);
+		return Boolean(lease
+			&& lease.harness === identity.harness
+			&& lease.id === identity.id
+			&& now < lease.expiresAt);
 	} catch {
 		return false;
 	}

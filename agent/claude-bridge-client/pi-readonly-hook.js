@@ -9,6 +9,8 @@ const path = require("node:path");
 const bridgeClient = require("./pi-bridge-mcp.js");
 
 const MUTATION_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const BRIDGE_MCP_PREFIX = "mcp__pi-claude-bridge__";
+const READ_PASSTHROUGH_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch", "TodoRead", "BashOutput", "TaskOutput"]);
 function isDir(p) {
 	try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
@@ -42,6 +44,16 @@ function deny(reason) {
 	};
 }
 
+function ask(reason) {
+	return {
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse",
+			permissionDecision: "ask"
+		},
+		systemMessage: reason
+	};
+}
+
 function allow(updatedInput) {
 	if (!updatedInput) return {};
 	return {
@@ -51,6 +63,31 @@ function allow(updatedInput) {
 			updatedInput
 		}
 	};
+}
+
+function isPlainObject(value) {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function bridgeMcpDecision(input) {
+	if (!bridgeClient.isSafeId(input.session_id)) {
+		return deny("Pi bridge MCP call denied: missing or invalid session_id.");
+	}
+	const toolInput = input.tool_input || input.toolInput || input.input;
+	if (!isPlainObject(toolInput)) {
+		return deny("Pi bridge MCP call denied: tool input must be an object.");
+	}
+	if (toolInput.sessionId !== undefined && toolInput.sessionId !== input.session_id) {
+		return deny("Pi bridge MCP call denied: sessionId does not match session_id.");
+	}
+	if (toolInput.claudeSessionId !== undefined && toolInput.claudeSessionId !== input.session_id) {
+		return deny("Pi bridge MCP call denied: claudeSessionId does not match session_id.");
+	}
+	if (toolInput.harness !== undefined && toolInput.harness !== "claude") {
+		return deny("Pi bridge MCP call denied: harness must be claude.");
+	}
+	const { claudeSessionId, ...rest } = toolInput;
+	return allow({ ...rest, sessionId: input.session_id, harness: "claude" });
 }
 
 function shellQuote(value) {
@@ -125,6 +162,12 @@ function main() {
 		return;
 	}
 
+	const toolName = String(input.tool_name || input.toolName || "");
+	if (toolName.startsWith(BRIDGE_MCP_PREFIX)) {
+		console.log(JSON.stringify(bridgeMcpDecision(input)));
+		return;
+	}
+
 	try {
 		if (bridgeClient.holdsBuildLease(projectRoot, { harness: "claude", id: input.session_id })) {
 			console.log(JSON.stringify(allow()));
@@ -132,7 +175,6 @@ function main() {
 		}
 	} catch {}
 
-	const toolName = String(input.tool_name || input.toolName || "");
 	if (MUTATION_TOOLS.has(toolName)) {
 		console.log(JSON.stringify(deny(`${toolName} is blocked in Pi project ${projectRoot}. Switch to Pi /mode build for mutations.`)));
 		return;
@@ -156,9 +198,20 @@ function main() {
 		return;
 	}
 
-	console.log(JSON.stringify(allow()));
+	if (READ_PASSTHROUGH_TOOLS.has(toolName)) {
+		console.log(JSON.stringify(allow()));
+		return;
+	}
+
+	console.log(JSON.stringify(ask(`${toolName || "Unknown tool"} is not an allowlisted read-only tool in Pi project. Switch to Pi /mode build for mutations.`)));
 }
 
 module.exports = { wrapBashForSandbox };
 
-if (require.main === module) main();
+if (require.main === module) {
+	try {
+		main();
+	} catch (error) {
+		console.log(JSON.stringify(deny(`Pi read-only hook failed closed: ${error instanceof Error ? error.message : String(error)}.`)));
+	}
+}

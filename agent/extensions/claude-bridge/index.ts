@@ -8,7 +8,7 @@ import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
-import { acquireBuildLease, buildLeaseHolderLabel, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, type BuildLease, type BuildLeaseWorkflowState } from "./build-lease.js";
+import { BUILD_LEASE_TTL_MS, approveBuildLease, buildLeaseHolderLabel, canTickPlanTask, isBuildLeaseActive, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -156,6 +156,7 @@ let watcher: FSWatcher | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
 let buildLease: BuildLease | null = null;
+let buildLeaseRequests = new Map<string, BuildLeaseRequest>();
 let presenceInitialized = false;
 let activeContext: ExtensionContext | null = null;
 const pendingSavePlans = new Map<string, PendingEventResult>();
@@ -786,6 +787,13 @@ async function handleReadPlanTasks(pi: ExtensionAPI, request: BridgeRequest): Pr
 }
 
 async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
+	if (!canTickPlanTask(buildLease, request.peer, Date.now())) {
+		return errorResponse(
+			request.id,
+			"build_lease_required",
+			"A valid Build lease is required to tick plan tasks; approve the peer's request in Pi with /build-lease approve, then rerun /pi-build.",
+		);
+	}
 	try {
 		const payload = normalizeTickPlanTaskPayload(request.payload);
 		const result = await requestWorkflowPlanTaskTick(pi, request.id, payload);
@@ -822,9 +830,44 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 	}
 	if (payload.mode === "build") {
 		const leasePeer = request.peer && pairedPeers.has(peerKey(request.peer)) ? request.peer : undefined;
-		const acquired = acquireBuildLease(buildLease, leasePeer, workflowState as BuildLeaseWorkflowState, Date.now());
-		if (!acquired.ok) return errorResponse(request.id, acquired.code, acquired.message);
-		if (acquired.granted) setBuildLease(acquired.lease, activeContext ?? undefined, "granted");
+		const requestKey = leasePeer ? peerKey(leasePeer) : "";
+		const requested = requestBuildLease(
+			buildLease,
+			requestKey ? buildLeaseRequests.get(requestKey) : null,
+			leasePeer,
+			workflowState as BuildLeaseWorkflowState,
+			Date.now(),
+		);
+		if (!requested.ok) return errorResponse(request.id, requested.code, requested.message);
+		if (requested.status === "pending") {
+			if (activeContext?.hasUI !== true) {
+				return errorResponse(
+					request.id,
+					"build_lease_no_approval",
+					"Interactive Pi is required to approve a Build lease; headless Pi cannot approve. Run /pi-build in interactive Pi.",
+				);
+			}
+			if (!buildLeaseRequests.has(requestKey) && buildLeaseRequests.size >= MAX_PEERS) {
+				return errorResponse(
+					request.id,
+					"build_lease_pending_cap",
+					`Cannot hold more than ${MAX_PEERS} pending Build lease requests; approve or unpair an existing requester.`,
+				);
+			}
+			buildLeaseRequests.set(requestKey, requested.entry);
+			if (requested.isNew) {
+				notifyBestEffort(
+					activeContext ?? undefined,
+					`Build lease requested by ${buildLeaseShortId(requested.entry.peer)}; run /build-lease approve in Pi.`,
+					"info",
+				);
+			}
+			return errorResponse(
+				request.id,
+				"build_lease_pending",
+				`Build lease pending for ${buildLeaseShortId(requested.entry.peer)}; approve it in Pi with /build-lease approve, then rerun /pi-build.`,
+			);
+		}
 	} else if (payload.mode === "discuss" || payload.mode === "plan") {
 		const nextLease = releaseBuildLeaseOnRecall(buildLease, request.peer, payload.mode);
 		if (nextLease !== buildLease) setBuildLease(nextLease, activeContext ?? undefined, "released");
@@ -949,6 +992,83 @@ function setBuildLease(next: BuildLease | null, ctx: ExtensionContext | undefine
 		: `Build lease ${action} for ${holder}.`;
 	notifyBestEffort(ctx, message, action === "revoked" ? "warning" : "info");
 	return true;
+}
+
+function buildLeaseShortId(peer: HarnessPeer): string {
+	return `${peer.harness}:${peer.id.slice(0, 8)}`;
+}
+
+function formatLeaseDuration(ms: number): string {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	const remainingMinutes = minutes % 60;
+	return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function workflowProgressOf(workflow: Record<string, unknown> | null): { done: number; total: number } {
+	const progress = workflow?.progress;
+	if (!progress || typeof progress !== "object" || Array.isArray(progress)) return { done: 0, total: 0 };
+	const record = progress as Record<string, unknown>;
+	return {
+		done: typeof record.done === "number" && Number.isFinite(record.done) ? record.done : 0,
+		total: typeof record.total === "number" && Number.isFinite(record.total) ? record.total : 0,
+	};
+}
+
+async function approvePendingBuildLease(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	if (!ctx.hasUI) {
+		notifyBestEffort(ctx, "Build lease approval requires interactive Pi.", "warning");
+		return;
+	}
+	const entries = Array.from(buildLeaseRequests.entries());
+	if (entries.length === 0) {
+		notifyBestEffort(ctx, "No pending Build lease requests.", "info");
+		return;
+	}
+
+	let selected = entries[0];
+	if (entries.length > 1) {
+		const now = Date.now();
+		const labels = entries.map(([, entry]) => `${buildLeaseShortId(entry.peer)} (requested ${formatLeaseDuration(now - entry.requestedAt)} ago)`);
+		const choice = await ctx.ui.select("Approve Build lease", labels);
+		if (!choice) return;
+		const index = labels.indexOf(choice);
+		if (index < 0) return;
+		selected = entries[index];
+	}
+	const [key, entry] = selected;
+	const preview = await requestWorkflowState(pi);
+	if (!preview) {
+		notifyBestEffort(ctx, "Build lease approval needs live workflow state; nothing granted.", "warning");
+		return;
+	}
+	const previewProgress = workflowProgressOf(preview);
+	const planLabel = typeof preview.planId === "string" && preview.planId ? preview.planId : "(none)";
+	const confirmed = await ctx.ui.confirm(
+		"Approve Build lease?",
+		`Peer ${buildLeaseShortId(entry.peer)}\nRequested ${formatLeaseDuration(Date.now() - entry.requestedAt)} ago\nPlan ${planLabel} (${previewProgress.done}/${previewProgress.total})\nExpires in ${formatLeaseDuration(BUILD_LEASE_TTL_MS)}`,
+	);
+	if (!confirmed) {
+		buildLeaseRequests.delete(key);
+		notifyBestEffort(ctx, `Build lease request from ${buildLeaseShortId(entry.peer)} declined.`, "info");
+		return;
+	}
+
+	const fresh = await requestWorkflowState(pi);
+	if (!fresh) {
+		notifyBestEffort(ctx, "Build lease approval needs live workflow state; nothing granted.", "warning");
+		return;
+	}
+	const result = approveBuildLease(buildLease, entry, fresh as BuildLeaseWorkflowState, pairedPeers.has(key), Date.now());
+	if (!result.ok) {
+		notifyBestEffort(ctx, result.message, "warning");
+		return;
+	}
+	buildLeaseRequests.delete(key);
+	setBuildLease(result.lease, ctx, "granted");
 }
 
 async function handleSendMessage(ctx: ExtensionContext, request: BridgeRequest): Promise<BridgeResponse> {
@@ -1134,6 +1254,8 @@ async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths
 				} else {
 					pairedPeers.delete(key);
 					mailbox?.unpair({ kind: peer.harness, id: peer.id });
+					buildLeaseRequests.delete(key);
+					if (buildLease && peerKey(buildLease) === key) setBuildLease(null, ctx, "revoked");
 				}
 				writePresence(paths);
 				response = { id: request.id, ok: true, result: { paired: request.type === "pair", peer } };
@@ -1196,6 +1318,7 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 	const noticeContext = ctx ?? activeContext ?? undefined;
 	const previousLease = buildLease;
 	buildLease = null;
+	buildLeaseRequests = new Map();
 	watcher?.close();
 	watcher = null;
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -1297,8 +1420,14 @@ export default function claudeBridge(pi: ExtensionAPI) {
 					console.warn("claude-bridge could not read workflow state after mode change; retaining build lease.");
 					return;
 				}
-				const nextLease = releaseBuildLeaseOnWorkflowChange(buildLease, workflowState as BuildLeaseWorkflowState);
+				const nextLease = releaseBuildLeaseOnWorkflowChange(buildLease, workflowState as BuildLeaseWorkflowState, Date.now());
 				if (nextLease !== buildLease) setBuildLease(nextLease, activeContext ?? undefined, "revoked");
+				const nextRequests = pruneBuildLeaseRequests(
+					buildLeaseRequests,
+					workflowState as BuildLeaseWorkflowState,
+					(peer) => pairedPeers.has(peerKey(peer)),
+				);
+				if (nextRequests.size !== buildLeaseRequests.size) buildLeaseRequests = nextRequests;
 			} catch (error) {
 				console.warn(`claude-bridge workflow state lookup failed; retaining build lease: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -1306,7 +1435,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	});
 
 	pi.events.on("workflow-modes:build-guard", (data: unknown) => {
-		if (!buildLease || !data || typeof data !== "object") return;
+		if (!buildLease || !isBuildLeaseActive(buildLease, Date.now()) || !data || typeof data !== "object") return;
 		(data as Record<string, unknown>).blockedBy = buildLeaseHolderLabel(buildLease) ?? undefined;
 	});
 
@@ -1352,6 +1481,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		stopActiveBridge(ctx, "session switch");
 		activeContext = ctx;
 		buildLease = null;
+		buildLeaseRequests = new Map();
 		passiveReason = null;
 		cachedMode = null;
 		const projectRoot = findProjectRoot(ctx.cwd ?? process.cwd());
@@ -1402,6 +1532,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 				heartbeatTimer = null;
 				dropPendingMessages(ctx, "bridge ownership change");
 				setBuildLease(null, ctx, "revoked");
+				buildLeaseRequests = new Map();
 				activePaths = null;
 				activeProjectRoot = null;
 				activePiSessionId = null;
@@ -1410,6 +1541,9 @@ export default function claudeBridge(pi: ExtensionAPI) {
 				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
 				return;
+			}
+			if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
+				setBuildLease(null, ctx, "revoked");
 			}
 			writePresence(activePaths);
 		}, HEARTBEAT_MS);
@@ -1424,9 +1558,14 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("build-lease", {
-		description: "Show or release current harness Build lease",
+		description: "Show, approve, or release current harness Build lease",
 		handler: async (args, ctx) => {
-			if (args.trim() === "release") {
+			const action = args.trim();
+			if (action === "approve") {
+				await approvePendingBuildLease(pi, ctx);
+				return;
+			}
+			if (action === "release") {
 				if (!buildLease) {
 					notifyBestEffort(ctx, "No active Build lease.", "info");
 					return;
@@ -1434,8 +1573,22 @@ export default function claudeBridge(pi: ExtensionAPI) {
 				setBuildLease(null, ctx, "released");
 				return;
 			}
-			const holder = buildLeaseHolderLabel(buildLease);
-			notifyBestEffort(ctx, holder ? `Build lease held by ${holder} for plan ${buildLease!.planId}.` : "No active Build lease.", "info");
+			const now = Date.now();
+			if (buildLease && !isBuildLeaseActive(buildLease, now)) setBuildLease(null, ctx, "revoked");
+			const lines: string[] = [];
+			if (buildLease) {
+				lines.push(`Build lease held by ${buildLeaseHolderLabel(buildLease)} for plan ${buildLease.planId}; expires in ${formatLeaseDuration(buildLease.expiresAt - now)}.`);
+			} else {
+				lines.push("No active Build lease.");
+			}
+			if (buildLeaseRequests.size > 0) {
+				lines.push("Pending requests:");
+				for (const entry of buildLeaseRequests.values()) {
+					lines.push(`- ${buildLeaseShortId(entry.peer)} for plan ${entry.planId}, requested ${formatLeaseDuration(now - entry.requestedAt)} ago`);
+				}
+				lines.push("Approve with /build-lease approve.");
+			}
+			notifyBestEffort(ctx, lines.join("\n"), "info");
 		},
 	});
 
