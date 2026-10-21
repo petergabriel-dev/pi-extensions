@@ -11,7 +11,7 @@ const OPENCODE = { harness: "opencode", id: "opencode-session-1" };
 const pluginUrl = pathToFileURL(path.join(__dirname, "pi-opencode-plugin.js")).href;
 let plugin;
 
-function makeProject({ pi = true, lease = false, leaseIdentity = OPENCODE } = {}) {
+function makeProject({ pi = true, lease = false, leaseIdentity = OPENCODE, leaseExpiry = "future" } = {}) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-opencode-plugin-"));
 	if (pi) {
 		fs.mkdirSync(path.join(root, ".pi"), { recursive: true });
@@ -23,6 +23,8 @@ function makeProject({ pi = true, lease = false, leaseIdentity = OPENCODE } = {}
 				fs.chmodSync(dir, 0o700);
 			}
 			const now = new Date().toISOString();
+			const grantedAt = leaseExpiry === "expired" ? Date.now() - 10_000 : Date.now();
+			const expiresAt = leaseExpiry === "expired" ? Date.now() - 1_000 : grantedAt + 4 * 60 * 60 * 1000;
 			fs.writeFileSync(paths.presence, JSON.stringify({
 				schemaVersion: 2,
 				piSessionId: "pi-opencode-session",
@@ -32,7 +34,7 @@ function makeProject({ pi = true, lease = false, leaseIdentity = OPENCODE } = {}
 				startedAt: now,
 				heartbeatAt: now,
 				peers: [{ ...leaseIdentity, pendingCount: 0, inboundPendingCount: 0 }],
-				buildLease: { ...leaseIdentity, planId: "plan-1", grantedAt: Date.now() },
+				buildLease: { ...leaseIdentity, planId: "plan-1", grantedAt, ...(leaseExpiry === "missing" ? {} : { expiresAt }) },
 			}), { mode: 0o600 });
 			fs.chmodSync(paths.presence, 0o600);
 		}
@@ -136,6 +138,26 @@ async function main() {
 				);
 			}
 			await handler({ tool: "execute", sessionID: OPENCODE.id, input: { code: "return 1" } });
+		});
+	});
+
+	await test("expired lease does not bypass mutation guard", async () => {
+		await withProject({ lease: true, leaseExpiry: "expired" }, async (root) => {
+			const { handler } = setup(root);
+			await assert.rejects(
+				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
+				/No live build lease.*Run \/build/,
+			);
+		});
+	});
+
+	await test("lease without expiresAt does not bypass mutation guard", async () => {
+		await withProject({ lease: true, leaseExpiry: "missing" }, async (root) => {
+			const { handler } = setup(root);
+			await assert.rejects(
+				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
+				/No live build lease.*Run \/build/,
+			);
 		});
 	});
 

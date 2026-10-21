@@ -16,7 +16,10 @@ const MUTATION_TOOLS = new Set([
 ]);
 
 function leaseNextStep(projectRoot) {
-	const holder = bridgeClient.listSessions(projectRoot).map((session) => session.buildLease).find(Boolean);
+	const now = Date.now();
+	const holder = bridgeClient.listSessions(projectRoot, now)
+		.map((session) => session.buildLease)
+		.find((lease) => lease && now < lease.expiresAt);
 	if (holder) return `Live build lease held by ${holder.harness}:${holder.id}; ask that holder to run /build-lease release, then run /build here.`;
 	return "No live build lease for this session. Run /build after Pi has an active saved plan.";
 }

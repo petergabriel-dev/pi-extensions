@@ -9,6 +9,12 @@ const hook = path.resolve(__dirname, "cursor-readonly-hook.js");
 const { classifyShell, classifyMcp, classifyTool } = require(hook);
 const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
 const CURSOR = { harness: "cursor", id: "cursor-conversation-1" };
+const LEASE_TTL_MS = 4 * 60 * 60 * 1000;
+
+function leaseFixture(overrides = {}) {
+	const grantedAt = Date.now();
+	return { ...CURSOR, planId: "plan-1", grantedAt, expiresAt: grantedAt + LEASE_TTL_MS, ...overrides };
+}
 
 function tempPiProject() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-hook-"));
@@ -16,7 +22,7 @@ function tempPiProject() {
 	return root;
 }
 
-function addLeasePresence(root, { paired = true, heartbeatAt = new Date().toISOString(), buildLease = { ...CURSOR, planId: "plan-1", grantedAt: Date.now() } } = {}) {
+function addLeasePresence(root, { paired = true, heartbeatAt = new Date().toISOString(), buildLease = leaseFixture() } = {}) {
 	const paths = bridgeClient.bridgePaths(root, "pi-cursor-session");
 	for (const dir of [paths.root, paths.sessions, paths.namespace, paths.requests, paths.responses, paths.processed]) {
 		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -170,7 +176,7 @@ test("live lease allows Cursor shell and tools while leaving MCP policy unchange
 
 test("non-holder lease does not bypass Cursor shell or tool denial", () => {
 	const root = tempPiProject();
-	addLeasePresence(root, { buildLease: { ...CURSOR, id: "another-conversation", planId: "plan-1", grantedAt: Date.now() } });
+	addLeasePresence(root, { buildLease: leaseFixture({ id: "another-conversation" }) });
 	assertPermission(run({ event: "beforeShellExecution", cwd: root, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Write" }), "deny");
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Edit" }), "deny");
@@ -193,6 +199,21 @@ test("unpaired or stale Cursor lease does not bypass denial", () => {
 	addLeasePresence(staleRoot, { heartbeatAt: new Date(Date.now() - 6_000).toISOString() });
 	assertPermission(run({ event: "beforeShellExecution", cwd: staleRoot, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
 	assertPermission(run({ event: "preToolUse", cwd: staleRoot, conversation_id: CURSOR.id, tool_name: "Edit" }), "deny");
+});
+
+test("expired or missing-expiry Cursor lease does not bypass denial", () => {
+	const expiredRoot = tempPiProject();
+	addLeasePresence(expiredRoot, { buildLease: leaseFixture({ grantedAt: Date.now() - 10_000, expiresAt: Date.now() - 1_000 }) });
+	assert.equal(bridgeClient.holdsBuildLease(expiredRoot, CURSOR), false);
+	assertPermission(run({ event: "beforeShellExecution", cwd: expiredRoot, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
+	assertPermission(run({ event: "preToolUse", cwd: expiredRoot, conversation_id: CURSOR.id, tool_name: "Write" }), "deny");
+
+	const legacyRoot = tempPiProject();
+	const { expiresAt, ...legacy } = leaseFixture();
+	addLeasePresence(legacyRoot, { buildLease: legacy });
+	assert.equal(bridgeClient.holdsBuildLease(legacyRoot, CURSOR), false);
+	assertPermission(run({ event: "beforeShellExecution", cwd: legacyRoot, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
+	assertPermission(run({ event: "preToolUse", cwd: legacyRoot, conversation_id: CURSOR.id, tool_name: "Edit" }), "deny");
 });
 
 test("preToolUse allows read tools and shell/MCP passthrough types", () => {

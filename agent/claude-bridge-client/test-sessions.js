@@ -54,6 +54,12 @@ function setBuildLease(paths, buildLease) {
 	writeJson(paths.presence, current);
 }
 
+const LEASE_TTL_MS = 4 * 60 * 60 * 1000;
+function leaseFixture(peer = HARNESS, overrides = {}) {
+	const grantedAt = Date.now();
+	return { harness: peer.harness, id: peer.id, planId: "plan-1", grantedAt, expiresAt: grantedAt + LEASE_TTL_MS, ...overrides };
+}
+
 function parseReadonlyHook(result) {
 	assert.equal(result.code, 0, `hook exit code: ${result.signal || result.code}`);
 	assert.equal(result.stderr, "", "hook errors must stay silent");
@@ -277,9 +283,11 @@ async function main() {
 
 	await test("build lease allows holder tools without Bash wrapping or bridge writes", async (cwd) => {
 		const paths = addSession(cwd, "pi-lease-holder", [HARNESS]);
-		setBuildLease(paths, { harness: HARNESS.harness, id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() });
+		const lease = leaseFixture(HARNESS);
+		setBuildLease(paths, lease);
 		const before = fs.readFileSync(paths.presence, "utf8");
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), true);
+		assert.equal(client.holdsBuildLease(cwd, HARNESS, lease.expiresAt), false, "lease must be inactive at its expiry instant");
 		const edit = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
 			cwd, session_id: HARNESS.id, tool_name: "Edit", tool_input: {},
 		}));
@@ -302,7 +310,7 @@ async function main() {
 
 	await test("non-holder lease does not bypass read-only", async (cwd) => {
 		const paths = addSession(cwd, "pi-lease-nonholder", [HARNESS]);
-		setBuildLease(paths, { harness: "claude", id: "other-session", planId: "plan-1", grantedAt: Date.now() });
+		setBuildLease(paths, leaseFixture({ harness: "claude", id: "other-session" }));
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
 		await assertReadOnlyFallback(cwd);
 		assert.deepEqual(fs.readdirSync(paths.requests), []);
@@ -318,8 +326,30 @@ async function main() {
 
 	await test("malformed lease does not reject presence or bypass read-only", async (cwd) => {
 		const paths = addSession(cwd, "pi-lease-malformed", [HARNESS]);
-		setBuildLease(paths, { harness: "claude", id: HARNESS.id, planId: "", grantedAt: "now" });
+		setBuildLease(paths, { ...leaseFixture(HARNESS), planId: "", grantedAt: "now" });
 		assert.equal(client.listSessions(cwd).length, 1);
+		assert.equal(client.listSessions(cwd)[0].buildLease, null);
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		setBuildLease(paths, leaseFixture(HARNESS, { expiresAt: Date.now() - 1_000 }));
+		assert.equal(client.listSessions(cwd)[0].buildLease, null, "expiresAt before grantedAt must be rejected");
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		await assertReadOnlyFallback(cwd);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("expired lease does not bypass read-only", async (cwd) => {
+		const paths = addSession(cwd, "pi-lease-expired", [HARNESS]);
+		setBuildLease(paths, leaseFixture(HARNESS, { grantedAt: Date.now() - 10_000, expiresAt: Date.now() - 1_000 }));
+		assert.equal(client.listSessions(cwd)[0].buildLease?.id, HARNESS.id, "well-formed expired lease should still be listed");
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
+		await assertReadOnlyFallback(cwd);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("lease without expiresAt does not bypass read-only", async (cwd) => {
+		const paths = addSession(cwd, "pi-lease-no-expiry", [HARNESS]);
+		const { expiresAt, ...legacy } = leaseFixture(HARNESS);
+		setBuildLease(paths, legacy);
 		assert.equal(client.listSessions(cwd)[0].buildLease, null);
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), false);
 		await assertReadOnlyFallback(cwd);
@@ -327,7 +357,7 @@ async function main() {
 	}, noResponder);
 
 	await test("multiple live paired sessions do not bypass read-only", async (cwd) => {
-		const lease = { harness: "claude", id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() };
+		const lease = leaseFixture(HARNESS);
 		const first = addSession(cwd, "pi-lease-one", [HARNESS]);
 		const second = addSession(cwd, "pi-lease-two", [HARNESS]);
 		setBuildLease(first, lease);
@@ -339,7 +369,7 @@ async function main() {
 	}, noResponder);
 
 	await test("build lease lookup across ten live sessions stays under 50ms", async (cwd) => {
-		const lease = { harness: "claude", id: HARNESS.id, planId: "plan-1", grantedAt: Date.now() };
+		const lease = leaseFixture(HARNESS);
 		for (let index = 0; index < 10; index++) {
 			const paths = addSession(cwd, `pi-timing-${index}`, index === 0 ? [HARNESS] : []);
 			if (index === 0) setBuildLease(paths, lease);
