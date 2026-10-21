@@ -85,6 +85,56 @@ test("ambiguous shell asks", () => {
 	assertPermission(result, "ask");
 });
 
+test("quoted separators stay inside one read segment", () => {
+	assert.equal(classifyShell("rg 'a|b' agent").permission, "allow");
+	assert.equal(classifyShell('rg "a;b" agent').permission, "allow");
+	assert.equal(classifyShell("rg 'cost$' agent").permission, "allow");
+});
+
+test("every chained segment must be an allowlisted read", () => {
+	assert.equal(classifyShell("rg bridge agent | head").permission, "allow");
+	assert.equal(classifyShell("pwd; git status --short").permission, "allow");
+	assert.equal(classifyShell("git log -1 --oneline").permission, "allow");
+	for (const command of [
+		"ls && python3 -c pass",
+		"find . -delete",
+		"cat script.sh | bash",
+		"git diff --output=out.patch",
+		"ls;",
+	]) assert.equal(classifyShell(command).permission, "ask", command);
+});
+
+test("hidden writer flags ask", () => {
+	for (const command of [
+		"sort -o out.txt input.txt",
+		"sort --output=out.txt input.txt",
+		"uniq input.txt out.txt",
+		"tree -o out.txt",
+		"rg --pre ./hook pattern .",
+		"find . -exec echo {} +",
+		"find . -fprint out.txt",
+		"file -C",
+		"sed -n 1,5p file",
+		"awk '{print}' file",
+		"git -c core.pager=cat log",
+		"git log --output=out.txt",
+		"git diff --ext-diff",
+		"/bin/ls -la",
+	]) assert.equal(classifyShell(command).permission, "ask", command);
+});
+
+test("dynamic and nested shell syntax asks", () => {
+	for (const command of [
+		"rg $(cat list) .",
+		"rg `cat list` .",
+		'rg "$(cat list)" .',
+		"cat < file",
+		"(ls)",
+		"{ ls }",
+		"ls\ngit status",
+	]) assert.equal(classifyShell(command).permission, "ask", command);
+});
+
 test("mutating non-bridge MCP denied while Pi bridge allowed", () => {
 	const root = tempPiProject();
 	assert.equal(classifyMcp({ mcp_server_name: "filesystem", mcp_tool_name: "write_file" }).permission, "deny");
