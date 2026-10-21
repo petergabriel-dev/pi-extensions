@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-21
+
 ### Added
 
 - Add `/harness` to inspect, install/repair, and uninstall Claude, Cursor, and OpenCode setup.
@@ -14,6 +16,7 @@ All notable changes to this project are documented here.
 ### Changed
 
 - `/harness` Install / repair replaces hand-copied Pi command files (backed up) with package links.
+- Keep `/harness` preview navigation controls visible with arrow and page-key scrolling.
 - Prefix shipped Claude, Cursor, and OpenCode workflow command names with `pi-`.
 - Allow up to two within-task worker slices for substantial disjoint work; parent waits for all results and owns consolidation, verification, commit, and tick.
 - Keep subagent result/failure bodies pending until parent receipt; queue at most one displayed `nextTurn` fallback without auto-starting a turn, and suppress shutdown failure follow-ups.
