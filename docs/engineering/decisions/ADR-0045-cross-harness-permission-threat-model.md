@@ -62,7 +62,7 @@ Consequences:
 
 ## Policy states
 
-These states are normative. They are the target columns for later phases.
+These states are normative. They are the target columns for later phases. ADR-0046 refines the read-only rule for prompt-capable surfaces: unknown tools may ask, but never pass silently.
 
 ### Read-only
 
@@ -92,6 +92,8 @@ These states are normative. They are the target columns for later phases.
 
 Legend: **E** = `verified-exec`, **C** = `code-read`, **N** = `not-verified`. Each cell carries exactly one label. Enforcement points and fail modes are in the same row. Target decisions are in "Target per state".
 
+Updated by ADR-0046 after Phase 2: the Claude, Cursor, and OpenCode rows reflect current code and live acceptance, not the Phase 1 baseline.
+
 | Surface | Shell | Edit / write / delete | Bridge MCP | Foreign MCP | Harness subagents | Bridge state changes | Enforcement point | Fail mode |
 |---|---|---|---|---|---|---|---|---|
 | Pi Discuss | read allow; mutation deny **E** | write/edit blocked **C** | owner, callable **C** | pass **C** | gated by toolset **E** | owner **C** | `agent/extensions/workflow-modes/index.ts:866-920` | closed |
@@ -100,9 +102,9 @@ Legend: **E** = `verified-exec`, **C** = `code-read`, **N** = `not-verified`. Ea
 | Pi Review | read + `gh pr` allow; network sandbox **E** | write/edit blocked **C** | owner, callable **C** | pass **C** | gated by toolset **E** | owner **C** | `agent/extensions/workflow-modes/index.ts:887-897`, `policy.ts:17-21` | closed |
 | Pi Design | plan-level policy **E** | design surface only **C** | owner, callable **C** | pass **C** | gated by toolset **E** | owner **C** | `agent/extensions/workflow-modes/index.ts:869-876` | closed |
 | Pi subagents | per toolset **C** | build toolset only **E** | not in read-only set **C** | per toolset **C** | n/a **C** | build toolset only **E** | `agent/extensions/subagents/policy.ts:46-51` | closed |
-| Claude | sandboxed allow; disable flag deny; no sandbox deny **E** | four named tools deny; others pass **E** | pass **C** | pass **E** | unverified **N** | pass; agent-asserted `confirmed` **C** | `agent/claude-bridge-client/pi-readonly-hook.js:128-159` | open on crash **E** |
-| Cursor | read-prefix allow; mutation regex deny; bypasses **E** | only `write` denies **E** | allow **E** | mutating-name deny; unknown ask **E** | unverified **N** | pass **C** | `agent/cursor-bridge-client/cursor-readonly-hook.js:57-90` | classify-open **E** |
-| OpenCode | sandboxed; no sandbox throws **E** | edit/write/worktree deny; others pass **E** | identity overwritten from host **E** | four names deny; others pass **E** | child identity unverified **N** | pass; identity cannot be spoofed **C** | `agent/opencode-bridge-client/pi-opencode-plugin.js:34-73` | closed |
+| Claude | sandboxed allow; disable flag deny; no sandbox deny **E** | four mutation tools deny; read built-ins pass; other tools ask **E** | bridge prefix allow **E** | foreign MCP ask **E** | subagent write denied in live test **E** | pass; agent-asserted `confirmed` **C** | `agent/claude-bridge-client/pi-readonly-hook.js:125-191`, `agent/extensions/harness-setup/setup.ts:788-793` | closed on crash **E** |
+| Cursor | segment allowlist; hidden writers ask; mutations deny **E** | read allowlist; unknown and patch names deny **E** | allow **E** | mutating-name deny; unknown ask **E** | unverified **N** | pass **C** | `agent/cursor-bridge-client/cursor-readonly-hook.js:71-231` | closed **E** |
+| OpenCode | sandboxed; no sandbox throws **E** | read allowlist; edit/write/worktree and unknown throw **E** | identity overwritten from host **E** | unknown and foreign throw **E** | child identity unverified **N** | pass; identity cannot be spoofed **C** | `agent/opencode-bridge-client/pi-opencode-plugin.js:37-83` | closed **E** |
 
 ## Target per state
 
@@ -121,14 +123,16 @@ Legend: **E** = `verified-exec`, **C** = `code-read`, **N** = `not-verified`. Ea
 
 | ID | Finding | Severity | Current evidence | Target phase |
 |---|---|---|---|---|
-| F1 | Self-escalation without a human: agent asserts `confirmed:true`, then `recall(mode:"build")` grants the lease | High | `agent/extensions/claude-bridge/index.ts:599-606`, `:823-827` **C**; lease decisions **E** | 2 |
-| F2 | Claude and Cursor bridge identity is agent-asserted and replayable by a same-user process | High | `agent/claude-bridge-client/pi-bridge-mcp.js:160-173` **C**; OpenCode overwrite **E** | 2 |
-| F3 | Cursor shell classifier allows a read prefix followed by an interpreter or write, `find -delete`, pipe-to-interpreter, and `git diff --output` | High | `agent/cursor-bridge-client/cursor-readonly-hook.js:11-12`, `:57-62` **E** | 3 |
-| F4 | Cursor `preToolUse` denies only a tool named `write`; `edit`, `multiedit`, `delete`, and patch-style names pass | High | `agent/cursor-bridge-client/cursor-readonly-hook.js:85-90` **E** | 3 |
-| F5 | Claude hook has no matcher and no fail-closed flag; a crash exits non-2, which Claude treats as non-blocking | Medium | crash **E**; registration `agent/extensions/harness-setup/setup.ts:775-779` **C**; host semantics **C** | 4 |
-| F6 | Foreign MCP gating diverges: Claude passes all, Cursor checks names, OpenCode gates four tool names | Medium | `pi-readonly-hook.js:159` **E**, `cursor-readonly-hook.js:72-78` **E**, `pi-opencode-plugin.js:8-13` **E** | 4 |
+| F1 | Self-escalation without a human: agent asserts `confirmed:true`, then `recall(mode:"build")` grants the lease | High | `agent/extensions/claude-bridge/index.ts:599-606`, `:823-827` **C**; lease decisions **E** | 3 |
+| F2 | Claude and Cursor bridge identity is agent-asserted and replayable by a same-user process | High | `agent/claude-bridge-client/pi-bridge-mcp.js:160-173` **C**; OpenCode overwrite **E** | 3 |
+| F3 | Cursor shell classifier allows a read prefix followed by an interpreter or write, `find -delete`, pipe-to-interpreter, and `git diff --output` | High | `agent/cursor-bridge-client/cursor-readonly-hook.js:11-12`, `:57-62` **E** | 2 |
+| F4 | Cursor `preToolUse` denies only a tool named `write`; `edit`, `multiedit`, `delete`, and patch-style names pass | High | `agent/cursor-bridge-client/cursor-readonly-hook.js:85-90` **E** | 2 |
+| F5 | Claude hook has no matcher and no fail-closed flag; a crash exits non-2, which Claude treats as non-blocking | Medium | crash **E**; registration `agent/extensions/harness-setup/setup.ts:775-779` **C**; host semantics **C** | 2 |
+| F6 | Foreign MCP gating diverges: Claude passes all, Cursor checks names, OpenCode gates four tool names | Medium | `pi-readonly-hook.js:159` **E**, `cursor-readonly-hook.js:72-78` **E**, `pi-opencode-plugin.js:8-13` **E** | 2 |
 | F7 | Review posting is prompt-enforced only; `gh pr review` and `gh pr comment` are in the shell allow-list | Medium | `agent/extensions/workflow-modes/policy.ts:17-21` **E**; confirmation prose `agent/extensions/workflow-modes/index.ts:593` **C** | 5 |
 | F8 | Seatbelt profile is `(allow default)` plus denies; LaunchServices escape is a hypothesis, not demonstrated | Low | profile text **E**; escape **N** | 5 |
+
+F3-F6 close in Phase 2; see ADR-0046. F1/F2 remain Phase 3, test hardening is Phase 4, and F7/F8 plus documentation are Phase 5.
 
 ## Consequences
 
@@ -178,9 +182,10 @@ Probes ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containi
 
 ## Open questions
 
-These stay `not-verified` until live harness acceptance. Do not state them as facts.
+Phase 2 live acceptance verified Claude subagent `PreToolUse` firing and the Cursor/OpenCode read, shell, and foreign-MCP names exercised in ADR-0046. These remain `not-verified`; do not state them as facts.
 
-- Do Claude Agent-tool subagent calls fire `PreToolUse` hooks?
-- What are the real Cursor and OpenCode write, delete, and patch tool names?
+- Does Claude enforce hook timeouts as deny?
 - What happens when the OpenCode plugin fails to load?
+- Do Cursor and OpenCode subagents receive the same hook or plugin policy?
+- Does Cursor fire `preToolUse` for shell/MCP tool types in addition to the dedicated events?
 - Can Seatbelt `(allow default)` be escaped through LaunchServices? Not tested, and it must not be tested destructively.
