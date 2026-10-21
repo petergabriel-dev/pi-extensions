@@ -162,6 +162,8 @@ await within(oversized.rpc.stop(), 5_000);
 let stderrBytes = 0;
 let stderrText = "";
 let leakedToParent = false;
+let resolveStderrLimit!: () => void;
+const stderrLimitReached = new Promise<void>((resolve) => { resolveStderrLimit = resolve; });
 const stderrStream = process.stderr as any;
 const originalStderrWrite = stderrStream.write.bind(stderrStream);
 stderrStream.write = (...args: any[]) => {
@@ -172,10 +174,12 @@ const stderr = createProcess("stderr", {
 	stderrSink: (chunk) => {
 		stderrBytes += chunk.byteLength;
 		stderrText += Buffer.from(chunk).toString("utf8");
+		if (stderrBytes >= SUBAGENT_RPC_MAX_STDERR_BYTES) resolveStderrLimit();
 	},
 });
 try {
 	await within(stderr.rpc.getState());
+	await within(stderrLimitReached);
 	const stderrEnd = once(stderr.rpc.child.stderr!, "end");
 	await within(stderr.rpc.stop());
 	await within(stderrEnd);
