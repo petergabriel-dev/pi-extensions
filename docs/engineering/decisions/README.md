@@ -46,3 +46,4 @@
 | ADR-0042 | Active | Design reference directory convention | changing design reference discovery, ingestion, prompt trust boundaries, manifest gates, or scaffold behavior |
 | ADR-0043 | Active | Harness build lease and OpenCode integration | changing harness mutation enforcement, lease ownership or lifecycle, OpenCode bridge integration, or harness command packaging |
 | ADR-0044 | Active | Pi-owned global harness setup | changing `/harness`, user-global harness setup, install manifests, command packaging, or startup health checks |
+| ADR-0045 | Proposed | Cross-harness permission threat model and policy states | changing bridge lease acquisition or release, harness hooks, harness setup hook registration, shell policy, sandbox profiles, foreign MCP gating, subagent toolset validation, or Review posting confirmation |
