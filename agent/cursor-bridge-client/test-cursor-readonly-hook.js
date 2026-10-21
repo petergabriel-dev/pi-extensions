@@ -138,6 +138,7 @@ test("dynamic and nested shell syntax asks", () => {
 test("mutating non-bridge MCP denied while Pi bridge allowed", () => {
 	const root = tempPiProject();
 	assert.equal(classifyMcp({ mcp_server_name: "filesystem", mcp_tool_name: "write_file" }).permission, "deny");
+	assert.equal(classifyMcp({ mcp_server_name: "github", mcp_tool_name: "merge_pull_request" }).permission, "ask");
 	assertPermission(run({ event: "beforeMCPExecution", cwd: root, mcp_server_name: "filesystem", mcp_tool_name: "write_file" }), "deny");
 	assertPermission(run({ event: "beforeMCPExecution", cwd: root, mcp_server_name: "pi-claude-bridge", mcp_tool_name: "save_plan" }), "allow");
 	assertPermission(run({ event: "beforeMCPExecution", cwd: root, mcp_server_name: "pi-claude-bridge", mcp_tool_name: "recall_memory" }), "allow");
@@ -153,23 +154,26 @@ test("preToolUse denies Write before bytes reach disk", () => {
 	assert.equal(fs.readFileSync(file, "utf8"), "original\n");
 });
 
-test("live lease allows Cursor shell and Write while leaving MCP policy unchanged", () => {
+test("live lease allows Cursor shell and tools while leaving MCP policy unchanged", () => {
 	const root = tempPiProject();
 	const paths = addLeasePresence(root);
 	const file = path.join(root, "note.txt");
 	fs.writeFileSync(file, "original\n", "utf8");
 	assertPermission(run({ event: "beforeShellExecution", cwd: root, conversation_id: CURSOR.id, command: "echo changed > note.txt" }), "allow");
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: file, content: "changed\n" } }), "allow");
+	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Edit" }), "allow");
+	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "apply_patch" }), "allow");
 	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "filesystem", mcp_tool_name: "write_file" }), "deny");
 	assert.equal(fs.readFileSync(file, "utf8"), "original\n");
 	assert.deepEqual(fs.readdirSync(paths.requests), []);
 });
 
-test("non-holder lease does not bypass Cursor shell or Write denial", () => {
+test("non-holder lease does not bypass Cursor shell or tool denial", () => {
 	const root = tempPiProject();
 	addLeasePresence(root, { buildLease: { ...CURSOR, id: "another-conversation", planId: "plan-1", grantedAt: Date.now() } });
 	assertPermission(run({ event: "beforeShellExecution", cwd: root, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Write" }), "deny");
+	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Edit" }), "deny");
 });
 
 test("missing or invalid conversation_id keeps Cursor deny behavior", () => {
@@ -188,12 +192,27 @@ test("unpaired or stale Cursor lease does not bypass denial", () => {
 	const staleRoot = tempPiProject();
 	addLeasePresence(staleRoot, { heartbeatAt: new Date(Date.now() - 6_000).toISOString() });
 	assertPermission(run({ event: "beforeShellExecution", cwd: staleRoot, conversation_id: CURSOR.id, command: "echo x > file.txt" }), "deny");
+	assertPermission(run({ event: "preToolUse", cwd: staleRoot, conversation_id: CURSOR.id, tool_name: "Edit" }), "deny");
 });
 
-test("preToolUse allows non-Write tools", () => {
+test("preToolUse allows read tools and shell/MCP passthrough types", () => {
 	const root = tempPiProject();
-	assert.equal(classifyTool({ tool_name: "Read" }).permission, "allow");
+	for (const tool of ["Read", "Grep", "read_file", "list_dir", "shell", "mcp_tool"]) {
+		assert.equal(classifyTool({ tool_name: tool }).permission, "allow", tool);
+	}
 	assertPermission(run({ event: "preToolUse", cwd: root, tool_name: "Read" }), "allow");
+});
+
+test("preToolUse denies mutation and unknown tool names", () => {
+	const root = tempPiProject();
+	for (const tool of ["Write", "Edit", "MultiEdit", "Delete", "delete_file", "apply_patch", "NotebookEdit", "unknown_tool"]) {
+		const classified = classifyTool({ tool_name: tool });
+		assert.equal(classified.permission, "deny", tool);
+		assert.match(classified.reason, new RegExp(tool), tool);
+	}
+	const result = run({ event: "preToolUse", cwd: root, tool_name: "apply_patch" });
+	assertPermission(result, "deny");
+	assert.match(result.user_message, /apply_patch/);
 });
 
 test("afterFileEdit no longer writes or reverts", () => {

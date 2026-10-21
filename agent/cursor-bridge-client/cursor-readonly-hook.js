@@ -8,6 +8,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const PI_BRIDGE_SERVERS = new Set(["pi-claude-bridge", "pi-bridge", "pi"]);
+// Cursor routes shell and MCP through dedicated events; allow those types here so the dedicated classifier decides.
+const PRE_TOOL_READ_TOOLS = new Set([
+	"read", "read_file", "read_multiple_files", "grep", "grep_search", "glob", "file_search",
+	"list", "list_dir", "ls", "find", "search", "codebase_search", "semantic_search",
+	"web_search", "webfetch", "fetch", "get_file_contents",
+]);
+const PRE_TOOL_PASSTHROUGH_TOOLS = new Set([
+	"shell", "bash", "terminal", "run_terminal_cmd", "run_command",
+	"mcp", "mcp_tool", "mcptool", "mcp_execution", "call_mcp_tool",
+]);
 const READ_ONLY_COMMANDS = new Set(["pwd", "ls", "cat", "head", "tail", "wc", "stat", "file", "tree", "diff", "grep", "rg", "find", "jq", "sort", "uniq", "column", "git"]);
 const GIT_READ_SUBCOMMANDS = new Set(["status", "log", "show", "diff", "blame"]);
 const FIND_WRITE_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls"]);
@@ -213,15 +223,16 @@ function toolType(input) {
 function classifyTool(input) {
 	const tool = toolType(input);
 	if (!tool) return { permission: "deny", reason: "preToolUse is missing tool type." };
-	if (tool.toLowerCase() === "write") return { permission: "deny", reason: "Write tool would mutate files in Pi project." };
-	return { permission: "allow" };
+	const normalized = tool.toLowerCase();
+	if (PRE_TOOL_READ_TOOLS.has(normalized) || PRE_TOOL_PASSTHROUGH_TOOLS.has(normalized)) return { permission: "allow" };
+	return { permission: "deny", reason: `${tool} tool is not allowlisted as read-only.` };
 }
 
 function handle(input) {
 	const projectRoot = findPiProjectRoot(hookCwd(input));
 	if (!projectRoot) return allow();
 	const event = eventName(input);
-	if (event === "beforeShellExecution" || (event === "preToolUse" && toolType(input).toLowerCase() === "write")) {
+	if (event === "beforeShellExecution" || event === "preToolUse") {
 		try {
 			const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
 			const conversationId = input.conversation_id;
