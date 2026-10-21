@@ -5,7 +5,7 @@ status: Active
 date: 2026-10-19
 decision: Grant one identity-bound Build lease per Pi session to a paired Claude, Cursor, or OpenCode peer while Pi retains plan, mode, and task-progress ownership.
 why: Harness-native edits need Pi-owned single-writer authorization without moving saved plans or task tracking into harness-local state.
-affects: agent/extensions/claude-bridge/mailbox.ts, agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/test/test_mailbox.ts, agent/extensions/claude-bridge/test/test_build_lease.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_policy.ts, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/harness-commands/claude/discuss.md, agent/harness-commands/claude/plan.md, agent/harness-commands/claude/build.md, agent/harness-commands/opencode/discuss.md, agent/harness-commands/opencode/plan.md, agent/harness-commands/opencode/build.md, .cursor/commands/pi-build.md, package.json, scripts/check-package.mjs, scripts/check-workspace.mjs, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0001-pi-claude-bridge-boundary.md, docs/engineering/decisions/ADR-0019-multi-harness-bridge-cursor-parity.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/README.md
+affects: agent/extensions/claude-bridge/mailbox.ts, agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/test/test_mailbox.ts, agent/extensions/claude-bridge/test/test_build_lease.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_policy.ts, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/harness-commands/claude/pi-discuss.md, agent/harness-commands/claude/pi-plan.md, agent/harness-commands/claude/pi-build.md, agent/harness-commands/cursor/pi-discuss.md, agent/harness-commands/cursor/pi-plan.md, agent/harness-commands/cursor/pi-build.md, agent/harness-commands/opencode/pi-discuss.md, agent/harness-commands/opencode/pi-plan.md, agent/harness-commands/opencode/pi-build.md, .cursor/commands/pi-build.md, package.json, scripts/check-package.mjs, scripts/check-workspace.mjs, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0001-pi-claude-bridge-boundary.md, docs/engineering/decisions/ADR-0019-multi-harness-bridge-cursor-parity.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/README.md
 consequences: Harness hooks fail closed on absent or stale presence; a disconnected harness can leave its lease held until explicit release, and Pi Off remains unguarded.
 readWhen: changing harness mutation enforcement, lease ownership or lifecycle, OpenCode bridge integration, or harness command packaging
 supersedes: None
@@ -24,7 +24,7 @@ Pi owns saved plans, workflow mode, and task progress. Claude and Cursor already
 - Publish an optional `buildLease` in schema-version-2 presence. Client hooks read local presence only; authorization requires exactly one fresh paired Pi namespace and a validated lease matching the hook's host identity. Missing, stale, malformed, ambiguous, mismatched, or unreadable state preserves read-only behavior. Hooks make no bridge requests or Pi-state writes.
 - Release the lease when its holder recalls Discuss or Plan, the active plan is cleared or changed, all plan tasks are complete, Pi enters Build, the holder runs `/build-lease release`, or the owning bridge/session stops or changes. `/build-lease` reports the holder and supports explicit release. While a lease is held, a synchronous workflow guard refuses Pi's `/mode build` transition.
 - Claude, Cursor, and OpenCode keep their existing fail-closed behavior unless host identity matches the lease. OpenCode's plugin replaces MCP identity fields with OpenCode's host `sessionID`; it blocks `edit`, `write`, and worktree mutation tools, sandboxes `shell`, and leaves outer Code Mode `execute` available as a dispatcher so nested tools remain individually guarded.
-- Ship Claude and OpenCode discuss/plan/build templates under `agent/harness-commands/`; keep Cursor's explicit `pi-build` command repo-local and leave neutral Cursor commands unchanged. Each build template treats Pi's returned Build prompt as authoritative, reads/ticks the live tracker through the bridge, commits before ticking, and never edits the saved plan body.
+- Ship `pi-discuss`, `pi-plan`, and `pi-build` templates for Claude, Cursor, and OpenCode under `agent/harness-commands/`. ADR-0044 supersedes this record's prior Cursor repo-local packaging clause; `.cursor/**` remains unshipped and its project-local command symlinks remain. Each build template treats Pi's returned Build prompt as authoritative, reads/ticks the live tracker through the bridge, commits before ticking, and never edits the saved plan body.
 
 ## Why
 
@@ -69,12 +69,15 @@ Code, tests, and shipped surfaces:
 - `agent/cursor-bridge-client/test-cursor-readonly-hook.js`
 - `agent/opencode-bridge-client/pi-opencode-plugin.js`
 - `agent/opencode-bridge-client/test-opencode-plugin.js`
-- `agent/harness-commands/claude/discuss.md`
-- `agent/harness-commands/claude/plan.md`
-- `agent/harness-commands/claude/build.md`
-- `agent/harness-commands/opencode/discuss.md`
-- `agent/harness-commands/opencode/plan.md`
-- `agent/harness-commands/opencode/build.md`
+- `agent/harness-commands/claude/pi-discuss.md`
+- `agent/harness-commands/claude/pi-plan.md`
+- `agent/harness-commands/claude/pi-build.md`
+- `agent/harness-commands/cursor/pi-discuss.md`
+- `agent/harness-commands/cursor/pi-plan.md`
+- `agent/harness-commands/cursor/pi-build.md`
+- `agent/harness-commands/opencode/pi-discuss.md`
+- `agent/harness-commands/opencode/pi-plan.md`
+- `agent/harness-commands/opencode/pi-build.md`
 - `.cursor/commands/pi-build.md`
 - `package.json`
 - `scripts/check-package.mjs`

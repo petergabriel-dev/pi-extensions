@@ -45,3 +45,4 @@
 | ADR-0041 | Active | Multi-session bridge and peer chat | changing bridge ownership, pairing, peer routing, delivery, wake behavior, or adding a harness peer. |
 | ADR-0042 | Active | Design reference directory convention | changing design reference discovery, ingestion, prompt trust boundaries, manifest gates, or scaffold behavior |
 | ADR-0043 | Active | Harness build lease and OpenCode integration | changing harness mutation enforcement, lease ownership or lifecycle, OpenCode bridge integration, or harness command packaging |
+| ADR-0044 | Active | Pi-owned global harness setup | changing `/harness`, user-global harness setup, install manifests, command packaging, or startup health checks |
