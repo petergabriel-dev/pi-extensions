@@ -38,6 +38,24 @@ async function waitFor(file, timeoutMs = TIMEOUT_MS) {
 	}
 	return false;
 }
+const APPROVAL_TIMEOUT_MS = 120_000;
+async function waitForLease(projectRoot, peer, timeoutMs = APPROVAL_TIMEOUT_MS) {
+	const shortId = `${peer.harness}:${peer.id.slice(0, 8)}`;
+	console.log(`ACTION REQUIRED: in interactive Pi run /build-lease approve for ${shortId} (waiting up to ${timeoutMs / 1000}s).`);
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const lease = readJson(paths(projectRoot).presence).buildLease;
+			if (lease
+				&& lease.harness === peer.harness
+				&& lease.id === peer.id
+				&& Number.isFinite(lease.expiresAt)
+				&& lease.expiresAt > lease.grantedAt) return lease;
+		} catch { /* presence may be mid-write */ }
+		await sleep(500);
+	}
+	throw new Error(`Timed out waiting for Build lease approval for ${shortId}; interactive Pi and /build-lease approve are required.`);
+}
 async function sendRequest(projectRoot, type, payload, id = crypto.randomUUID(), peer) {
 	const p = paths(projectRoot);
 	const res = path.join(p.responses, `${id}.json`);
@@ -202,17 +220,9 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	assert(typeof first.response.result.path === "string" && first.response.result.path.endsWith(`${first.response.result.planId}.md`), "save_plan missing plan path");
 	assert(first.response.result.taskCount === 2, "save_plan missing task count");
 
-	const leasePeer = { harness: "claude", id: `build-lease-${id}` };
-	await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), leasePeer);
-	const buildRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "build" }, crypto.randomUUID(), leasePeer);
-	assert(buildRecall.response.ok === true, `build recall with saved plan failed: ${JSON.stringify(buildRecall.response)}`);
-	assert(buildRecall.response.result.buildLease?.harness === leasePeer.harness && buildRecall.response.result.buildLease?.id === leasePeer.id, "build recall did not return granted lease");
-	const presenceWithLease = readJson(paths(projectRoot).presence);
-	assert(presenceWithLease.buildLease?.harness === leasePeer.harness && presenceWithLease.buildLease?.id === leasePeer.id, "presence did not include build lease");
-	const discussRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "discuss" }, crypto.randomUUID(), leasePeer);
-	assert(discussRecall.response.ok === true && discussRecall.response.result.buildLease === null, "holder discuss recall did not release lease");
-	assert(readJson(paths(projectRoot).presence).buildLease == null, "presence retained lease after holder discuss recall");
+	const leasePeer = { harness: "claude", id: "core-protocol-mcp" };
 	await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), leasePeer);
+	await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), leasePeer);
 
 	// Recall must see the saved plan after a successful save.
 	const recall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
@@ -228,20 +238,45 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	const tasks = await sendRequest(projectRoot, "read_plan_tasks", { planId: `core-${id}` });
 	assert(tasks.response.ok, `read_plan_tasks failed: ${JSON.stringify(tasks.response)}`);
 	assert(tasks.response.result.planId === `core-${id}` && tasks.response.result.tasks?.length === 2, "read_plan_tasks result missing seeded tasks");
+
+	const pendingRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "build" }, crypto.randomUUID(), leasePeer);
+	assert(pendingRecall.response.ok === false && pendingRecall.response.error?.code === "build_lease_pending", `build recall did not stay pending: ${JSON.stringify(pendingRecall.response)}`);
+	assert(readJson(paths(projectRoot).presence).buildLease == null, "pending build recall wrote a lease into presence");
+
+	const otherPeer = { harness: "cursor", id: `build-nonholder-${id}` };
+	await sendRequest(projectRoot, "pair", {}, crypto.randomUUID(), otherPeer);
+	const blockedTick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, crypto.randomUUID(), otherPeer);
+	assert(blockedTick.response.error?.code === "build_lease_required", `non-holder tick unexpectedly passed: ${JSON.stringify(blockedTick.response)}`);
+
+	const approvedLease = await waitForLease(projectRoot, leasePeer);
+	assert(approvedLease.expiresAt === approvedLease.grantedAt + 4 * 60 * 60 * 1000, "approved lease expiry is not four hours");
+
+	const buildRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "build" }, crypto.randomUUID(), leasePeer);
+	assert(buildRecall.response.ok === true, `build recall after approval failed: ${JSON.stringify(buildRecall.response)}`);
+	assert(buildRecall.response.result.buildLease?.harness === leasePeer.harness && buildRecall.response.result.buildLease?.id === leasePeer.id, "build recall did not return approved lease");
+	assert(Number.isFinite(buildRecall.response.result.buildLease?.expiresAt), "build recall lease missing expiresAt");
+	const presenceWithLease = readJson(paths(projectRoot).presence);
+	assert(presenceWithLease.buildLease?.harness === leasePeer.harness && presenceWithLease.buildLease?.id === leasePeer.id, "presence did not include build lease");
+	assert(presenceWithLease.buildLease?.expiresAt === approvedLease.expiresAt, "presence lease expiry mismatch");
+
+	const stillBlocked = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, crypto.randomUUID(), otherPeer);
+	assert(stillBlocked.response.error?.code === "build_lease_required", `non-holder tick passed while another peer held the lease: ${JSON.stringify(stillBlocked.response)}`);
+
 	const titleTickId = crypto.randomUUID();
-	const titleTick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, titleTickId);
+	const titleTick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, titleTickId, leasePeer);
 	assert(titleTick.response.ok && titleTick.response.result.progress?.done === 1, `title tick_plan_task failed: ${JSON.stringify(titleTick.response)}`);
 	assert(titleTick.response.result.taskId === tasks.response.result.tasks[0].id, "title tick resolved wrong task");
 	await sleep(POLL_MS * 2);
-	const taskId = tasks.response.result.tasks[1].id;
+	const taskId = tasks.response.result.tasks[0].id;
 	const tickId = crypto.randomUUID();
-	const tick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId }, tickId);
-	assert(tick.response.ok && tick.response.result.progress?.done === 2, `task-id tick_plan_task failed: ${JSON.stringify(tick.response)}`);
+	const tick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId }, tickId, leasePeer);
+	assert(tick.response.ok && tick.response.result.progress?.done === 1 && tick.response.result.idempotent === true, `holder idempotent tick failed: ${JSON.stringify(tick.response)}`);
 	fs.unlinkSync(tick.responsePath);
-	const tickReplay = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId: "different" }, tickId);
+	const tickReplay = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId: "different" }, tickId, leasePeer);
 	assert(JSON.stringify(tickReplay.response) === JSON.stringify(tick.response), "duplicate tick response changed");
 	const recalledAfterTick = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "plan" });
-	assert(recalledAfterTick.response.result.savedPlan?.progress?.done === 2, "recall did not return live tick progress");
+	assert(recalledAfterTick.response.result.savedPlan?.progress?.done === 1, "recall did not return live tick progress");
+	await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), otherPeer);
 
 	// Duplicate save_plan response must remain stable.
 	fs.unlinkSync(first.responsePath);
@@ -275,12 +310,20 @@ test("MCP exposes and dispatches memory entry tools", async ({ projectRoot }) =>
 	], projectRoot).find((response) => response.id === 4);
 	assert(!taskRead.error, `read_plan_tasks MCP error: ${JSON.stringify(taskRead)}`);
 	const taskResult = taskRead.result.structuredContent.result;
-	assert(taskResult.tasks?.length === 2 && taskResult.progress?.done === 2, "read_plan_tasks MCP result missing live task state");
+	assert(taskResult.tasks?.length === 2 && taskResult.progress?.done === 1, "read_plan_tasks MCP result missing live task state");
 	const taskTick = runMcp([
 		{ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "tick_plan_task", arguments: { taskId: taskResult.tasks[0].id, cwd: projectRoot } } },
 	], projectRoot).find((response) => response.id === 5);
 	assert(!taskTick.error, `tick_plan_task MCP error: ${JSON.stringify(taskTick)}`);
 	assert(taskTick.result.structuredContent.result.idempotent === true, "tick_plan_task MCP did not use live idempotency");
+	assert(taskTick.result.structuredContent.result.progress?.done === 1, "tick_plan_task MCP changed completed progress");
+
+	// The approved holder from the saved-plan test still holds the lease; Discuss recall releases it.
+	const leasePeer = { harness: "claude", id: "core-protocol-mcp" };
+	const discussRecall = await sendRequest(projectRoot, "recall", { query: "bridge", mode: "discuss" }, crypto.randomUUID(), leasePeer);
+	assert(discussRecall.response.ok === true && discussRecall.response.result.buildLease === null, "holder discuss recall did not release lease");
+	assert(readJson(paths(projectRoot).presence).buildLease == null, "presence retained lease after holder discuss recall");
+	await sendRequest(projectRoot, "unpair", {}, crypto.randomUUID(), leasePeer);
 });
 
 test("MCP client fails loudly when bridge down", async () => {
