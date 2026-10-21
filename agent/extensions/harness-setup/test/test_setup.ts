@@ -53,6 +53,7 @@ const makeRoots = (root: string) => ({
 	opencode: path.join(root, "opencode"),
 });
 const command = (pkgRoot: string, relative: string): string => `node ${JSON.stringify(path.join(pkgRoot, relative))}`;
+const preToolCommand = (pkgRoot: string, relative: string): string => `${command(pkgRoot, relative)} || exit 2`;
 const installFixture = async (root: string, pkgRoot: string) => {
 	const roots = makeRoots(root);
 	await Promise.all([
@@ -62,7 +63,7 @@ const installFixture = async (root: string, pkgRoot: string) => {
 	]);
 	await writeJson(path.join(roots.claude, "settings.json"), {
 		hooks: {
-			PreToolUse: [{ hooks: [{ type: "command", command: command(pkgRoot, "agent/claude-bridge-client/pi-readonly-hook.js") }] }],
+			PreToolUse: [{ hooks: [{ type: "command", command: preToolCommand(pkgRoot, "agent/claude-bridge-client/pi-readonly-hook.js") }] }],
 			UserPromptSubmit: [{ hooks: [{ type: "command", command: command(pkgRoot, "agent/claude-bridge-client/pi-peer-hook.js") }] }],
 			SessionEnd: [{ hooks: [{ type: "command", command: command(pkgRoot, "agent/claude-bridge-client/pi-peer-hook.js") }] }],
 		},
@@ -801,6 +802,32 @@ try {
 	assert.deepEqual(await readStamp(stampApiDir), { version: "9.8.7", harnesses: {} });
 	assert.ok((await lstat(path.join(stampApiDir, `harness-setup.json.harness-bak-${backupTimestamp(stampBackupIso)}`))).isFile());
 	record("stamp shape, write, read, and harness removal");
+
+	const guardBase = path.join(temp, "claude-pretool-guard");
+	const guardPkg = await createPackage(guardBase);
+	const guardRoots = await installFixture(path.join(guardBase, "fixture"), guardPkg);
+	const guardAgent = path.join(guardBase, "agent-dir");
+	const guardFile = path.join(guardRoots.claude, "settings.json");
+	const installedSettings = JSON.parse(await readFile(guardFile, "utf8"));
+	assert.ok(installedSettings.hooks.PreToolUse[0].hooks[0].command.endsWith("|| exit 2"), "fresh install is guarded");
+	installedSettings.hooks.PreToolUse[0].hooks[0].command = command(guardPkg, "agent/claude-bridge-client/pi-readonly-hook.js");
+	await writeJson(guardFile, installedSettings);
+	const guardInspect = await inspectHarness("claude", { pkgRoot: guardPkg, roots: guardRoots, agentDir: guardAgent });
+	noted(guardInspect.problems, "unguarded-hook");
+	const guardPlan = await planInstall("claude", { pkgRoot: guardPkg, roots: guardRoots, agentDir: guardAgent });
+	const guardChange = guardPlan.changes.find(({ path: file }) => file === guardFile);
+	assert.ok(guardChange, "repair plan includes settings.json");
+	assert.match(guardChange.after, /\|\| exit 2/);
+	const guardResults = await applyPlan(guardPlan);
+	assert.ok(guardResults.every(({ applied: ok }) => ok), JSON.stringify(guardResults));
+	const repaired = JSON.parse(await readFile(guardFile, "utf8"));
+	assert.ok(repaired.hooks.PreToolUse[0].hooks[0].command.endsWith("|| exit 2"), "repair writes the guard");
+	for (const event of ["UserPromptSubmit", "SessionEnd"]) {
+		assert.equal(repaired.hooks[event][0].hooks[0].command.endsWith("|| exit 2"), false, `${event} must stay unguarded`);
+	}
+	const repairedInspect = await inspectHarness("claude", { pkgRoot: guardPkg, roots: guardRoots, agentDir: guardAgent });
+	assert.equal(repairedInspect.state, "ok", JSON.stringify(repairedInspect.problems));
+	record("claude PreToolUse guard installed, legacy flagged, peers unguarded");
 
 	const boundaryBase = path.join(temp, "planner-boundary");
 	const boundaryPkg = await createPackage(boundaryBase);
