@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-21
+
 ### Fixed
 
 - Retarget owned `/harness` command/plugin symlinks from other package roots, including dangling links.
