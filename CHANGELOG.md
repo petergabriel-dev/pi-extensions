@@ -6,12 +6,14 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Add `/harness` to inspect, install/repair, and uninstall Claude, Cursor, and OpenCode setup.
 - Add optional `docs/design/reference/` context to Build and Design prompts.
 - Add `/agents` TUI overlay for recent/live child activity, pending-question answers, and steering running children.
 - Add a single-owner child-question relay through the shared `ask-user-question` FIFO, with source-scoped cancellation, redacted payloads, and RPC-safe `select`/`input` dialogs.
 
 ### Changed
 
+- Prefix shipped Claude, Cursor, and OpenCode workflow command names with `pi-`.
 - Allow up to two within-task worker slices for substantial disjoint work; parent waits for all results and owns consolidation, verification, commit, and tick.
 - Keep subagent result/failure bodies pending until parent receipt; queue at most one displayed `nextTurn` fallback without auto-starting a turn, and suppress shutdown failure follow-ups.
 - Canonicalize writer ownership paths to case-folded real-path keys; warn once per session when local agent definitions shadow bundled keys.

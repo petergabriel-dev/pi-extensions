@@ -2,9 +2,9 @@
 
 ## Workspace and package boundary
 
-This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.8.0`, one Pi package containing eleven extensions, four skills, and two package-owned bundled agent definitions. This repository is package source, not a separate Pi home.
+This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.8.0`, one Pi package containing twelve extensions, four skills, and two package-owned bundled agent definitions. This repository is package source, not a separate Pi home.
 
-- The prepared `0.8.0` release tarball is configured to ship runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships the six Claude/OpenCode command templates under `agent/harness-commands/`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=1 MiB unpacked.
+- The prepared `0.8.0` release tarball is configured to ship runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` command templates under `agent/harness-commands/{claude,cursor,opencode}/`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=1 MiB unpacked.
 - From `0.8.0` onward, the `release` branch mirrors the unpacked tarball file-for-file; only an optional root `.npmrc` may be extra. Main retains engineering docs and development material, including `.cursor/` commands and config; those files are not packaged.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
 - Bundled agent definitions load relative to the package module. Scope overrides are: default user = bundled then user; project = bundled then nearest project; both = bundled then user then project. Later definitions override by name, but a selected valid unsafe explorer override is rejected by the caller’s read-only validator.
@@ -30,6 +30,7 @@ This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.8.0`
 | 9 | `agent/extensions/subagents/index.ts` | `subagent`, `subagents_list`, `subagent_message`, model/effort commands | Discovers agent definitions, enforces toolset/depth/concurrency/ownership policy, relays child questions through the question owner, tracks result receipt, and runs isolated persisted child processes. |
 | 10 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
 | 11 | `agent/extensions/ask-user-question/index.ts` | `ask_user_question` tool | Owns model text/single-/multi-select and child text/single-select UI, source-scoped FIFO serialization, and threshold-defer/resume. Child RPC dialogs use built-in `select`/`input`. |
+| 12 | `agent/extensions/harness-setup/index.ts` | `/harness` command | Inspects and manages owned Claude, Cursor, and OpenCode setup through previewed, confirmed plans; records installed harnesses in the agent-dir stamp. |
 
 ### Agent definitions
 
@@ -51,7 +52,7 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 
 ### Harness clients and project integration
 
-The `.cursor/` MCP config, hooks, and commands below are main-repository integrations only; `.cursor/**` is never included in the npm package or its tarball-mirroring `release` branch. Claude and OpenCode command templates under `agent/harness-commands/` are shipped.
+The `.cursor/` MCP config, hooks, and commands below are main-repository integrations only; `.cursor/**` is never included in the npm package or its tarball-mirroring `release` branch. Nine `pi-*` templates for Claude, Cursor, and OpenCode are shipped under `agent/harness-commands/`. This repository's `.cursor/commands/pi-*` symlinks point to the packaged Cursor templates but remain repo-only.
 
 - `agent/claude-bridge-client/pi-bridge-mcp.js` is the shared Node-stdlib MCP/file-protocol client for Claude Code, Cursor, and OpenCode; client code imports no Pi internals.
 - `agent/claude-bridge-client/pi-readonly-hook.js` is Claude Code’s fail-closed PreToolUse guard outside a matching Pi Build lease. Claude’s `UserPromptSubmit` peer hook injects pending messages as advisory context, then acknowledges included IDs; `SessionEnd` best-effort unpairs.
@@ -60,8 +61,9 @@ The `.cursor/` MCP config, hooks, and commands below are main-repository integra
 - `agent/opencode-bridge-client/pi-opencode-plugin.js` uses OpenCode's `tool.execute.before`, injects host `sessionID` into bridge MCP calls, and enforces lease-scoped edits plus sandboxed shell without Pi imports.
 - `.cursor/mcp.json` registers the shared bridge MCP client.
 - `.cursor/hooks.json` registers Cursor shell, MCP, pre-tool, and commit-nudge guards.
-- `.cursor/commands/pi-discuss.md` and `.cursor/commands/pi-plan.md` define bridge-backed read-only workflows and mandatory capture/save checkpoints; `.cursor/commands/pi-build.md` requests lease-scoped Build.
-- `agent/harness-commands/{claude,opencode}/{discuss,plan,build}.md` provide shipped Claude/OpenCode workflows, including Build handoff and live tracker mapping.
+- `.cursor/commands/pi-discuss.md`, `.cursor/commands/pi-plan.md`, and `.cursor/commands/pi-build.md` are repository symlinks to `agent/harness-commands/cursor/pi-{discuss,plan,build}.md`; they define bridge-backed workflows and remain repo-only.
+- `agent/harness-commands/{claude,cursor,opencode}/pi-{discuss,plan,build}.md` provide the nine shipped harness workflows, including Build handoff and live tracker mapping.
+- `harness-setup` reads the harness manifest, classifies the package root, inspects owned destinations, builds an install/repair/uninstall plan, previews diffs, and requires confirmation before apply. Apply re-reads targets before mutation; config changes and stamp updates use safe backups and atomic replacement. Startup health checks inspect only stamped harnesses and never repair them.
 - `.cursor/commands/{discuss,plan,build}.md` provide a neutral workflow that needs no bridge or Pi session; `.cursor/skills/write-adr/SKILL.md` documents project ADR authoring.
 - `.cursor/hooks/docs-nudge.js` asks for an engineering-doc update on code commits that stage no `docs/engineering/**` path, without blocking the commit.
 
@@ -70,6 +72,7 @@ The `.cursor/` MCP config, hooks, and commands below are main-repository integra
 | State | Location | Owner | Repository status |
 |---|---|---|---|
 | Package source, docs, agent definitions, skills | Repository tracked files | Git / contributors | Versioned |
+| Harness setup stamp | `<agentDir>/harness-setup.json` | `harness-setup` | Pi-owned runtime state; records harnesses managed by this package, excluded from Git |
 | Workflow mode, saved-plan pointers/selection/task progress, Caveman preference | Selected Pi session branch entries; plan body at `<agentDir>/plans/<sessionId>/<planId>.md` | `workflow-modes` | Host session storage; body is atomic, session-scoped, and never repository/Git-branch/bridge-scoped |
 | Discussion notes | Selected Pi session branch tool-result/custom entries | `discussion-notes` | Host session storage |
 | File-change baselines and clear/untrack events | Selected Pi session branch custom entries | `filechanges` | Host session storage |
@@ -121,7 +124,7 @@ After an answered TUI result, `index.ts:726-739` reads `ctx.getContextUsage()` o
 
 `tool_execution_end` (`index.ts:660-671`) waits for `ask-user-question/queue.ts:8-40` to drain, appends the TUI-only `ask-user-question:context-defer` entry, then aborts. `agent_settled` (`index.ts:673-679`) takes the pending batch and sends `buildResumeMessage()` as a fresh user message without `deliverAs`; Pi's non-streaming prompt preflight checks compaction at `@earendil-works/pi-coding-agent/dist/core/agent-session.js:864-868`. `pi.appendEntry()` keeps the marker out of LLM context. A disposable AgentSession harness observed compaction, fresh resume, one batch marker/abort, preserved mixed-tool results, and no unpaired `tool_use`.
 
-Build topology keeps eleven runtime entrypoints (`package.json:37-48`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
+Build topology keeps twelve runtime entrypoints (`package.json:37-48`). Pi's loader exposes one aggregate `noExtensions` option but no per-entrypoint disable option (`@earendil-works/pi-coding-agent/dist/core/resource-loader.d.ts:63-84`). Development tooling is split across:
 
 - seven nested manifests (`agent/extensions/browser/package.json:1`, `agent/extensions/ccc-search/package.json:1`, `agent/extensions/engineering-docs/package.json:1`, `agent/extensions/filechanges/package.json:1`, `agent/extensions/personal-memory/package.json:1`, `agent/extensions/subagents/package.json:1`, `agent/extensions/workflow-modes/package.json:1`);
 - five nested lockfiles (`agent/extensions/browser/package-lock.json:1`, `agent/extensions/ccc-search/package-lock.json:1`, `agent/extensions/filechanges/package-lock.json:1`, `agent/extensions/subagents/package-lock.json:1`, `agent/extensions/workflow-modes/package-lock.json:1`); and
@@ -157,7 +160,7 @@ Claude statusline shows `Pi ✉N` from presence only: no requests, writes, or ac
 
 - The bridge grants one in-memory Build lease per Pi session to a paired `claude`, `cursor`, or `opencode` identity only when a saved plan is active and Pi is not in Build mode. Presence schemaVersion 2 carries optional `buildLease`; old clients ignore it.
 - Hooks read local presence only and allow mutation only when exactly one fresh paired namespace contains a valid lease matching host identity (`session_id`, `conversation_id`, or OpenCode `sessionID`). Missing, malformed, stale, ambiguous, mismatched, or unreadable state keeps existing read-only behavior; there are no bridge round-trips or client-side Pi-state writes.
-- Claude denies mutation tools without a lease and sandbox-wraps Bash through `/usr/bin/sandbox-exec` where available; otherwise Bash denies closed. A matching lease allows its holder's tools and unsandboxed Bash.
+- In `.pi` projects, Claude denies mutation tools without a lease and sandbox-wraps Bash through macOS Seatbelt; no-lease Bash is denied closed on non-macOS platforms. A matching lease allows its holder's tools and unsandboxed Bash.
 - Cursor keeps its shell/MCP classifier and `Write` denial without a matching lease; its `permission: "deny"` contract remains unchanged. A matching lease allows shell and `Write`; no hook writes or reverts files.
 - OpenCode's global plugin replaces model MCP identity with host `sessionID`, blocks direct edit/write/worktree mutations without a matching lease, and wraps `shell` or throws if the sandbox is unavailable. The outer Code Mode `execute` dispatcher remains available; nested mutations are independently guarded.
 - `/build-lease` reports or releases the holder. Pi's synchronous Build guard blocks `/mode build` while leased; plan changes/completion and holder Discuss/Plan recall release the lease. Pi Off remains intentionally unguarded.

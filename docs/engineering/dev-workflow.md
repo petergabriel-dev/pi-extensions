@@ -15,9 +15,9 @@ pi remove npm:@lopezpetergabriel/pi-extensions
 
 Install commands pin the exact `@0.8.0` version. Upgrade an installed package to latest with `pi update npm:@lopezpetergabriel/pi-extensions`. Bare `pi update` updates Pi itself, not package extensions.
 
-The package provides eleven extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Subagent children launch through the parent Pi CLI in RPC mode; no separate terminal transport binary is required. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
+The package provides twelve extensions, four skills, and two bundled agents. `ccc` must be installed separately for `ccc_search`. Subagent children launch through the parent Pi CLI in RPC mode; no separate terminal transport binary is required. Browser tools additionally require a local Chromium binary; install it with `cd agent/extensions/browser && npx playwright install chromium`. Package-owned global copies stay retired under `~/.pi/agent/extensions.disabled/` and `~/.pi/agent/skills.disabled/`; leave only the non-package `~/.pi/agent/skills/find-skills` symlink active. Use `pi list` to confirm package registration; do not restore raw/global copies, which can register extensions twice.
 
-Starting with release `0.8.0`, the npm tarball includes runtime TS/helpers, workflow template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships six Claude/OpenCode command templates: `agent/harness-commands/claude/{discuss,plan,build}.md` and `agent/harness-commands/opencode/{discuss,plan,build}.md`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Main retains engineering docs and development material; `.cursor/` commands/config, including Cursor's `pi-build.md`, are repository-only and never ship. The `release` branch mirrors the unpacked tarball file-for-file, with only an optional root `.npmrc` extra. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
+Starting with release `0.8.0`, the npm tarball includes runtime TS/helpers, workflow template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` command templates across `agent/harness-commands/{claude,cursor,opencode}/`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Main retains engineering docs and development material; `.cursor/` commands/config, including Cursor's `pi-build.md`, are repository-only and never ship. The `release` branch mirrors the unpacked tarball file-for-file, with only an optional root `.npmrc` extra. Release checks reject forbidden files and enforce ≤512 KiB packed and ≤1 MiB unpacked sizes.
 
 For a clean source/release setup, install the root published dependency/lock, then nested development packages. Pi-managed installs disable peer solving; Pi API imports remain `"*"` peers.
 
@@ -139,7 +139,7 @@ Launcher resolves repository root from its own path and executes `pi --no-extens
 On first startup:
 
 1. Review project trust prompt before approval.
-2. Inspect `[Extensions]` header: exactly eleven paths should resolve inside this repository.
+2. Inspect `[Extensions]` header: exactly twelve paths should resolve inside this repository.
 3. Confirm no global extension path appears.
 4. Confirm `.pi/agents` resolves to `agent/agents`.
 5. Exit with `/quit` when done.
@@ -243,7 +243,7 @@ done
 
 | Component | Automated gate | Live/manual acceptance |
 |---|---|---|
-| Root package, eleven entrypoints, four skills, two agents, six bridge runtimes, six harness templates | `npm run check` (includes read-only `check:docs`) | Source header lists eleven extensions once; clean packed artifact loads and discovers bundled explorer/worker; decision index, spokes, and ADRs are current. |
+| Root package, twelve entrypoints, four skills, two agents, six bridge runtimes, nine harness templates | `npm run check` (includes read-only `check:docs`) | Source header lists twelve extensions once; clean packed artifact loads and discovers bundled explorer/worker; decision index, spokes, and ADRs are current. |
 | `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
 | `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |
@@ -255,9 +255,10 @@ done
 | `subagents` | `npm --prefix agent/extensions/subagents test` and `npm --prefix agent/extensions/subagents run typecheck` | `npm run smoke:subagents` exercises installed-Pi RPC launch, question round-trip, nested spawn, and browser proxy; browser reports explicit PASS/SKIP. Smoke is separate from `npm test`. |
 | `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
 | `ask-user-question` | `npm run test:ask-user-question` | Queue/relay tests cover model-child FIFO, source-scoped cancellation, RPC select/input, Other, free text, and unavailable/dismissed paths. |
+| `harness-setup` | `npm run test:harness-setup` | Isolated setup acceptance covers install/repair/idempotence/uninstall, backups, startup warning, root classification, and re-extraction; Cursor real global-command discovery remains unverified. |
 | Claude MCP client + read-only hook | `npm run test:bridge-client`; live core protocol test covers MCP dispatch and bridge-down behavior | `claude mcp list`; no-lease mutation denial and sandbox behavior; lease Build acceptance is a separate live gate. |
-| Cursor MCP/hooks/commands | `npm run test:cursor` and `npm run test:cursor-kit` | Real Cursor bridge commands, no-lease shell/MCP classification and `Write` denial, lease holder allow, neutral commands, and commit nudge. |
-| OpenCode plugin and shipped commands | `npm run test:opencode` plus root package check | Verify user-global plugin/MCP/command setup; live lease Build acceptance requires a separate isolated run. |
+| Cursor MCP/hooks/commands | `npm run test:cursor` and `npm run test:cursor-kit` | Hook/MCP classification, `Write` denial, lease-holder allow, neutral commands, and commit nudge; real Cursor global-command discovery remains unverified. |
+| OpenCode plugin and shipped commands | `npm run test:opencode` plus root package check | `/harness` installs user-global plugin/MCP/commands; OpenCode v2.0.32 loaded the plugin and `pi-*` commands in isolated acceptance. Live lease Build acceptance requires a separate isolated run. |
 | Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |
 
 ## Saved plan workflow
@@ -271,7 +272,7 @@ done
 
 ## Harness Build leases
 
-External `/build` requires an active saved plan and a live Pi session outside Pi Build mode. The bridge grants one lease per Pi session to a paired Claude, Cursor, or OpenCode identity; hooks allow writes only for that matching fresh presence identity. `/build-lease` in Pi shows the holder; `/build-lease release` clears a stale lease when the harness exits while Pi remains live. Holder Discuss/Plan recall, plan clear/switch/completion, and bridge/session shutdown release the lease. Pi `/mode build` is blocked while leased; Pi Off is intentionally unguarded. Build templates commit before the final task tick because completion releases the lease.
+External `/pi-build` requires an active saved plan and a live Pi session outside Pi Build mode. The bridge grants one lease per Pi session to a paired Claude, Cursor, or OpenCode identity; hooks allow writes only for that matching fresh presence identity. `/build-lease` in Pi shows the holder; `/build-lease release` clears a stale lease when the harness exits while Pi remains live. Holder Discuss/Plan recall, plan clear/switch/completion, and bridge/session shutdown release the lease. Pi `/mode build` is blocked while leased; Pi Off is intentionally unguarded. Build templates commit before the final task tick because completion releases the lease.
 
 ## Isolated live bridge protocol test
 
@@ -322,116 +323,58 @@ ps -ax -o pid=,command= | grep -F "/path/to/PI_PROJECT_DIR" | grep '[p]i ' || tr
 
 Both commands should print nothing. Do not signal the current Pi, delete its bridge state, or leave temporary Pi, tmux, or bridge processes running after tests.
 
-## Installed-package consumer bridge setup
+## Installed-package harness setup
 
-Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes npm/Git sources and personal versus project scope (`--local`/`-l`). The roots below are expected from Pi's package-manager layout and still need confirmation in disposable installs; these paths are not claimed as live-verified.
+After `pi install …`, start Pi interactively and run `/harness`. Select Claude, Cursor, or OpenCode → **Install / repair**, inspect the planned diff, then confirm. The extension owns package-managed MCP, hooks/plugin, and `pi-*` command setup; consumers do not hand-merge config or create symlinks. Re-run `/harness` to inspect or repair. In non-TUI mode it reports status and instructs users to open the interactive TUI to apply.
 
-| Install source/scope | Expected `<pkg>` root |
-|---|---|
-| User npm | `~/.pi/agent/npm/node_modules/@lopezpetergabriel/pi-extensions` |
-| Project npm | `.pi/npm/node_modules/@lopezpetergabriel/pi-extensions` |
-| User Git | `~/.pi/agent/git/github.com/petergabriel-dev/pi-extensions` |
-| Project Git | `.pi/git/github.com/petergabriel-dev/pi-extensions` |
+Uninstall owned setup before removing the package: run `/harness`, select Cursor → **Uninstall**, then `pi remove …`. Cursor's `failClosed: true` hooks can block tools globally if the package is removed first. Claude no-lease Bash is Seatbelt-sandboxed only on macOS; it is denied closed elsewhere.
 
-Register Claude Code's user-scope MCP client from installed package root:
+Cursor global commands are named `pi-discuss`, `pi-plan`, and `pi-build`. If real Cursor does not discover them globally, copy the packaged `agent/harness-commands/cursor/pi-*.md` files into the consumer project's `.cursor/commands/`. Real Cursor global-command discovery remains unverified. This repository's `.cursor/commands/pi-*` symlinks point to those packaged Cursor templates, but `.cursor/**` remains repo-only and is excluded from the package.
 
-```bash
-claude mcp add -s user pi-claude-bridge -- node <pkg>/agent/claude-bridge-client/pi-bridge-mcp.js
-```
+OpenCode v2.0.32 loaded the managed plugin and `pi-*` commands in isolated acceptance. Its bridge calls use Code Mode `execute` and synchronous `search({ query, namespace: "pi-claude-bridge" })`; the plugin injects host `sessionID`, not a model-supplied identity.
 
-Preserve existing settings, matchers, and hooks while configuring these commands with `<pkg>` paths:
+### Isolated harness-setup acceptance
 
-| Config/event | Command |
-|---|---|
-| Claude `PreToolUse` | `node <pkg>/agent/claude-bridge-client/pi-readonly-hook.js` |
-| Claude `UserPromptSubmit` and `SessionEnd` | `node <pkg>/agent/claude-bridge-client/pi-peer-hook.js` |
-| Claude `statusLine` | `node <pkg>/agent/claude-bridge-client/pi-statusline.js` |
-| Cursor repo-local `.cursor/hooks.json` `preToolUse` | `node <pkg>/agent/cursor-bridge-client/cursor-readonly-hook.js` |
-
-Keep Cursor `.cursor/` commands/config in the project; the package ships its hook runtime but not `.cursor/**`. After upgrading from `0.7.x`, rerun Claude MCP registration and hook/statusline configuration. Bridge protocols do not interoperate; do not mix old and new clients. Confirm expected filesystem roots in disposable installs before relying on them.
-
-### Claude Code command templates
-
-Set `PKG_ROOT` to the actual installed `<pkg>` root from the table above. Back up or remove existing command files only after inspecting them; these non-forcing symlinks intentionally fail if a destination already exists.
+Build the tarball and set `TGZ` as in the exact-artifact procedure above. From the repository root, extract it under a disposable Pi agent directory and start Pi with isolated harness roots:
 
 ```bash
-: "${PKG_ROOT:?Set PKG_ROOT to the installed package root}"
-mkdir -p "$HOME/.claude/commands"
-ln -s "$PKG_ROOT/agent/harness-commands/claude/discuss.md" "$HOME/.claude/commands/discuss.md"
-ln -s "$PKG_ROOT/agent/harness-commands/claude/plan.md" "$HOME/.claude/commands/plan.md"
-ln -s "$PKG_ROOT/agent/harness-commands/claude/build.md" "$HOME/.claude/commands/build.md"
+: "${TGZ:?Set TGZ to dist/<tgz>}"
+umask 077
+HARNESS_TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pi-harness.XXXXXX")"
+trap 'rm -rf "$HARNESS_TEST_ROOT"' EXIT INT TERM
+export HOME="$HARNESS_TEST_ROOT/home"
+export XDG_CONFIG_HOME="$HARNESS_TEST_ROOT/xdg"
+export CLAUDE_CONFIG_DIR="$HOME/.claude"
+export PI_CODING_AGENT_DIR="$HARNESS_TEST_ROOT/pi-agent"
+PKG_ROOT="$PI_CODING_AGENT_DIR/npm/node_modules/@lopezpetergabriel/pi-extensions"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$PKG_ROOT" "$HARNESS_TEST_ROOT/project/.pi"
+tar -xzf "$TGZ" -C "$PKG_ROOT" --strip-components=1
+npm install --prefix "$PKG_ROOT" --omit=dev --omit=peer --ignore-scripts
+(
+  cd "$HARNESS_TEST_ROOT/project"
+  pi --no-extensions --approve --no-session -e "$PKG_ROOT"
+)
+(
+  cd "$HARNESS_TEST_ROOT/project"
+  opencode --standalone
+)
 ```
 
-### OpenCode user-global setup
+In Pi, run `/harness` and install each harness. Seed foreign hook, statusLine, and command fixtures only in the disposable roots. Repeat install and verify no planned changes; re-extract the tarball into the same package root and confirm status stays `ok`. Check `claude mcp get pi-claude-bridge` points at the extracted package. Delete one stamped symlink, restart Pi, and verify one startup warning. Invoke the Cursor hook with a sample `Write` in the temp `.pi` project and expect denial. Uninstall each harness; verify owned entries are gone, foreign fixtures survive, and backups exist. Also verify a dev-checkout warning and refusal for a temporary/project package root. Use `opencode --standalone` with the same temp roots to check plugin and command loading without reusing a user server.
 
-OpenCode v2.0.32 loads user-global plugins from `~/.config/opencode/plugins/`; custom command Markdown lives in `~/.config/opencode/commands/`. Set `PKG_ROOT` as above. Inspect existing destinations and preserve current config; `ln -s` does not overwrite files.
-
-```bash
-: "${PKG_ROOT:?Set PKG_ROOT to the installed package root}"
-mkdir -p "$HOME/.config/opencode/plugins" "$HOME/.config/opencode/commands"
-ln -s "$PKG_ROOT/agent/opencode-bridge-client/pi-opencode-plugin.js" "$HOME/.config/opencode/plugins/pi-opencode-build-lease.js"
-for command in discuss plan build; do
-  ln -s "$PKG_ROOT/agent/harness-commands/opencode/$command.md" "$HOME/.config/opencode/commands/$command.md"
-done
-```
-
-Merge this MCP entry into `~/.config/opencode/opencode.json`; keep existing settings. Replace `<pkg>` with the absolute installed package root:
-
-```json
-{
-  "mcp": {
-    "pi-claude-bridge": {
-      "type": "local",
-      "command": ["node", "<pkg>/agent/claude-bridge-client/pi-bridge-mcp.js"],
-      "enabled": true
-    }
-  }
-}
-```
-
-OpenCode exposes bridge tools through Code Mode `execute`; each bridge call must first use synchronous `search({ query, namespace: "pi-claude-bridge" })`. The plugin replaces MCP identity with OpenCode's host `sessionID`. Do not configure a model-supplied identity.
+Expected: Claude settings parse and MCP points at the extracted absolute package path; Cursor hooks retain `failClosed: true` and config/commands are present; OpenCode v2.0.32 loads its plugin and `pi-*` commands. Real Cursor global-command discovery remains unverified; use the project-local template fallback without launching real Cursor. Never print or copy real harness config contents. If checking real-home integrity, record SHA-256 hashes only and compare before/after; mtime alone does not establish attribution. Exit Pi and harness CLIs, verify no test processes remain, then allow the trap to remove the temp root.
 
 ## Claude Code bridge workflow
 
-1. Launch workspace Pi in the target project; confirm `Claude bridge: active` and intended nearest `.pi` root.
-2. Register the repo MCP client in Claude's active user registration. Inspect before changing it; remove stale registration before re-adding:
-
-   ```bash
-   claude mcp get pi-claude-bridge
-   claude mcp list
-   claude mcp remove -s user pi-claude-bridge # only when replacing stale registration
-   claude mcp add -s user pi-claude-bridge -- node "$PWD/agent/claude-bridge-client/pi-bridge-mcp.js"
-   claude mcp get pi-claude-bridge
-   claude mcp list
-   ```
-
-   Confirm active registration points to the repo client, not an installed copy. `claude mcp add -s user` updates active user registration; do not edit an assumed sidecar config.
-
-3. Merge hooks into existing Claude settings without replacing other settings or hooks. Append these command-hook entries to the existing `UserPromptSubmit` and `SessionEnd` arrays, preserving all existing entries/matchers; set the single `statusLine` command as shown. Replace `<repo-root>` with repo path in your settings:
-
-   ```json
-   {
-     "hooks": {
-       "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"<repo-root>/agent/claude-bridge-client/pi-peer-hook.js\"" }] }],
-       "SessionEnd": [{ "hooks": [{ "type": "command", "command": "node \"<repo-root>/agent/claude-bridge-client/pi-peer-hook.js\"" }] }]
-     },
-     "statusLine": {
-       "type": "command",
-       "command": "node \"<repo-root>/agent/claude-bridge-client/pi-statusline.js\"",
-       "refreshInterval": 5
-     }
-   }
-   ```
-
-   Keep unrelated settings and hooks. Validate active settings JSON and run `claude doctor`.
-
-4. Use `/discuss` or `/plan` for read-only work. Use `/build` only with an active saved plan while Pi is not in Build mode; the host session identity must hold the lease for mutations. In Pi, use `/build-lease` to inspect or release the holder.
+1. Launch Pi in the target project; confirm `Claude bridge: active` and intended nearest `.pi` root.
+2. In Pi, run `/harness`, choose Claude → **Install / repair**, review the preview, and confirm. The extension manages its MCP registration, hooks, statusLine, and `pi-*` commands without replacing foreign settings. Verify with `claude mcp get pi-claude-bridge` and `claude mcp list`.
+3. Use `/pi-discuss` or `/pi-plan` for read-only work. Use `/pi-build` only with an active saved plan while Pi is not in Build mode; host session identity must hold the lease for mutations. In Pi, use `/build-lease` to inspect or release the holder.
 
 ### Claude bridge live acceptance
 
-Run against a disposable project with isolated Pi agent roots. Register the repo MCP client and hooks above, then verify:
+Run against a disposable project with isolated `HOME`, `XDG_CONFIG_HOME`, and `PI_CODING_AGENT_DIR`. Use the installed package and `/harness` to install Claude setup, then verify:
 
-1. `claude mcp get pi-claude-bridge` and `claude mcp list` show the repo client connected; settings JSON parses, `claude doctor` passes.
+1. `claude mcp get pi-claude-bridge` and `claude mcp list` show the installed package client connected; settings JSON parses, `claude doctor` passes.
 2. Two Pi RPC sessions in one project report active under separate namespaces. Session IDs were captured separately.
 3. Through actual Claude CLI MCP calls, run `list_sessions`, `pair_session`, then `send_message`. Confirm message becomes pending and Pi receives it on its next prompt. Send Pi→Claude with `bridge_message`; statusline script outputs exact `Pi ✉1`; next actual Claude CLI prompt receives injected peer message; acknowledge it and confirm pending count clears. `SessionEnd` unpairs.
 4. Live bridge-client check with `harness: "cursor"` sends Cursor identity to a second Pi; Pi replies with `bridge_message`; `read_messages` retrieves and acknowledges reply. This exercises client protocol, not an interactive Cursor model session.
@@ -450,18 +393,19 @@ Ran in a disposable project with isolated `PI_CODING_AGENT_DIR`, mode-0600 auth/
 - (d) Backdating A's heartbeat by more than 10m and claiming another namespace triggered GC; A's old namespace disappeared, and same-ID resume restored no peers.
 - (e) Shutting down with one outbound message pending dropped it and emitted `claude-bridge dropped 1 pending peer message(s) on shutdown`.
 
-Existing bridge acceptance remains: `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan; `capture_note` updates live Pi Notes UI through `discussion-notes`; `validate_docs_tags` uses engineering-docs validator; `save_plan` appears in Pi `/plan view`; `read_plan_tasks` and `tick_plan_task` use the live branch-backed tracker. Without a matching fresh lease, Claude mutation tools deny and Bash is sandbox-wrapped where supported, otherwise denied closed. Lease-based cross-harness Build acceptance is a separate live gate.
+Existing bridge acceptance remains: `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan; `capture_note` updates live Pi Notes UI through `discussion-notes`; `validate_docs_tags` uses engineering-docs validator; `save_plan` appears in Pi `/plan view`; `read_plan_tasks` and `tick_plan_task` use the live branch-backed tracker. Without a matching fresh lease, Claude mutation tools deny; no-lease Bash is sandboxed only on macOS and denied closed elsewhere. Lease-based cross-harness Build acceptance is a separate live gate.
 
 ## Cursor bridge workflow
 
-Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and bridge command templates are relative and ready from workspace root.
+Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and bridge command templates are relative and ready from workspace root. The repo-local `.cursor/commands/pi-*` symlinks point to packaged Cursor templates. Package consumers use `/harness` to install/repair global config; no hand-merge or symlink setup is needed.
 
-1. Launch Pi and confirm intended bridge root.
-2. Open same root in Cursor.
+1. Launch Pi and confirm intended bridge root. For package consumers, run `/harness`, choose Cursor → **Install / repair**, inspect the preview, and confirm.
+2. Open the same root in Cursor.
 3. Use `/pi-discuss` or `/pi-plan`; pass `conversation_id` as `sessionId` when available. `/pi-build` requires Cursor's host `conversation_id` and an active saved plan; without a valid matching lease, hooks stay read-only.
-4. Verify recall/capture/save plus `read_plan_tasks`/`tick_plan_task` through `pi-claude-bridge`.
-5. Without a matching lease, verify shell classification, non-bridge MCP policy, and `Write` denial from `preToolUse`; the holder is allowed on shell and `Write`.
-6. Use Pi `/build-lease` to inspect/release the holder. Pi `/mode build` is blocked while leased.
+4. If real Cursor does not discover global commands, use project-local copies of packaged `agent/harness-commands/cursor/pi-*.md` in `.cursor/commands/`. Real global-command discovery remains unverified.
+5. Verify recall/capture/save plus `read_plan_tasks`/`tick_plan_task` through `pi-claude-bridge`.
+6. Without a matching lease, verify shell classification, non-bridge MCP policy, and `Write` denial from `preToolUse`; the holder is allowed on shell and `Write`.
+7. Use Pi `/build-lease` to inspect/release the holder. Pi `/mode build` is blocked while leased.
 
 Focused hook gates:
 
@@ -472,13 +416,14 @@ npm run test:cursor-kit
 
 ## OpenCode bridge workflow
 
-OpenCode user-global plugin, MCP, and command symlinks are configured as described above. Use OpenCode v2.0.32 or later with `tool.hook` support.
+Use `/harness` to install/repair the user-global plugin, MCP config, and `pi-*` commands. OpenCode v2.0.32 or later with `tool.hook` support is required.
 
 1. Start Pi in the target `.pi` project and leave Pi outside Build mode; save/select an active plan.
-2. Open the same project root in OpenCode.
-3. Use `/discuss` or `/plan` for read-only work, then `/build` to request the Pi lease. Build templates search Code Mode before each bridge MCP call; do not call the exposed MCP tool directly or supply a model-invented session identity.
-4. Verify holder with Pi `/build-lease`; use `/build-lease release` to revoke a stale holder. Pi `/mode build` is refused while a lease is held.
-5. Run live acceptance in an isolated project; unit tests do not establish OpenCode session, subagent, or command-name behavior.
+2. In Pi, run `/harness`, choose OpenCode → **Install / repair**, inspect the preview, and confirm.
+3. Open the same project root in OpenCode.
+4. Use `/pi-discuss` or `/pi-plan` for read-only work, then `/pi-build` to request the Pi lease. Build templates search Code Mode before each bridge MCP call; do not call the exposed MCP tool directly or supply a model-invented session identity.
+5. Verify holder with Pi `/build-lease`; use `/build-lease release` to revoke a stale holder. Pi `/mode build` is refused while a lease is held.
+6. Run live acceptance in an isolated project; unit tests do not establish OpenCode session or subagent identity behavior.
 
 ## Cursor-neutral workflow
 
