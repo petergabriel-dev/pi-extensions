@@ -565,22 +565,110 @@ try {
 	await assert.rejects(lstat(`${legacyRaceFile}.harness-bak-${backupTimestamp(legacyRaceIso)}`));
 	record("legacy command preimage mismatch aborts without backup or mutation");
 
+	const rootSwitchBase = path.join(temp, "planner-root-switch");
+	const rootSwitchPkgA = await createPackage(path.join(rootSwitchBase, "package-a"));
+	const rootSwitchPkgB = await createPackage(path.join(rootSwitchBase, "package-b"));
+	const rootSwitchRoots = await installFixture(path.join(rootSwitchBase, "fixture"), rootSwitchPkgA);
+	const rootSwitchAgent = path.join(rootSwitchBase, "agent-dir");
+	const rootSwitchPlan = await planInstall("claude", { pkgRoot: rootSwitchPkgB, roots: rootSwitchRoots, agentDir: rootSwitchAgent });
+	const rootSwitchEntries = HARNESS_MANIFEST.claude.filter(({ kind }) => kind === "command");
+	assert.equal(rootSwitchEntries.length, 3);
+	for (const entry of rootSwitchEntries) {
+		const file = path.join(rootSwitchRoots.claude, entry.dest);
+		const change = rootSwitchPlan.changes.find(({ path: changePath }) => changePath === file);
+		assert.ok(change, `root-switch preview includes ${entry.dest}`);
+		assert.equal(change.kind, "symlink");
+		assert.equal(change.before, path.join(rootSwitchPkgA, entry.script));
+		assert.equal(change.after, path.join(rootSwitchPkgB, entry.script));
+	}
+	const rootSwitchIso = "2024-05-06T07:08:09.000Z";
+	const rootSwitchResults = await applyPlan(rootSwitchPlan, { now: new Date(rootSwitchIso) });
+	assert.ok(rootSwitchResults.every(({ applied: ok }) => ok), JSON.stringify(rootSwitchResults));
+	assert.deepEqual(rootSwitchPlan.cliSteps, [
+		{ executable: "claude", args: ["mcp", "remove", "-s", "user", PI_BRIDGE_MCP_KEY] },
+		{ executable: "claude", args: ["mcp", "add", "-s", "user", PI_BRIDGE_MCP_KEY, "--", "node", path.join(rootSwitchPkgB, "agent/claude-bridge-client/pi-bridge-mcp.js")] },
+	]);
+	for (const entry of rootSwitchEntries) {
+		const file = path.join(rootSwitchRoots.claude, entry.dest);
+		const backup = `${file}.harness-bak-${backupTimestamp(rootSwitchIso)}`;
+		assert.equal(await readlink(file), path.join(rootSwitchPkgB, entry.script));
+		assert.ok((await lstat(backup)).isSymbolicLink());
+		assert.equal(await readlink(backup), path.join(rootSwitchPkgA, entry.script));
+	}
+	await writeJson(rootSwitchRoots.claudeMcp, {
+		mcpServers: { [PI_BRIDGE_MCP_KEY]: { command: "node", args: [path.join(rootSwitchPkgB, "agent/claude-bridge-client/pi-bridge-mcp.js")] } },
+	});
+	const rootSwitchInspect = await inspectHarness("claude", { pkgRoot: rootSwitchPkgB, roots: rootSwitchRoots, agentDir: rootSwitchAgent });
+	assert.equal(rootSwitchInspect.state, "ok", JSON.stringify(rootSwitchInspect.problems));
+	record("live owned links retarget across package roots with backups");
+
+	const danglingBase = path.join(temp, "planner-dangling-owned-symlink");
+	const danglingPkgA = await createPackage(path.join(danglingBase, "removed-package"));
+	const danglingPkgB = await createPackage(path.join(danglingBase, "selected-package"));
+	const danglingRoots = await installFixture(path.join(danglingBase, "fixture"), danglingPkgA);
+	const danglingAgent = path.join(danglingBase, "agent-dir");
+	const danglingEntry = HARNESS_MANIFEST.opencode.find(({ kind }) => kind === "plugin")!;
+	const danglingPath = path.join(danglingRoots.opencode, danglingEntry.dest);
+	await rm(danglingPkgA, { recursive: true, force: true });
+	const danglingPlan = await planInstall("opencode", { pkgRoot: danglingPkgB, roots: danglingRoots, agentDir: danglingAgent });
+	const danglingChange = danglingPlan.changes.find(({ path: file }) => file === danglingPath);
+	assert.deepEqual(danglingChange, {
+		path: danglingPath,
+		kind: "symlink",
+		before: path.join(danglingPkgA, danglingEntry.script),
+		after: path.join(danglingPkgB, danglingEntry.script),
+	});
+	const danglingIso = "2024-06-07T08:09:10.000Z";
+	const danglingResults = await applyPlan(danglingPlan, { now: new Date(danglingIso) });
+	assert.ok(danglingResults.every(({ applied: ok }) => ok), JSON.stringify(danglingResults));
+	assert.equal(await readlink(danglingPath), path.join(danglingPkgB, danglingEntry.script));
+	const danglingBackup = `${danglingPath}.harness-bak-${backupTimestamp(danglingIso)}`;
+	assert.ok((await lstat(danglingBackup)).isSymbolicLink());
+	assert.equal(await readlink(danglingBackup), path.join(danglingPkgA, danglingEntry.script));
+	const danglingInspect = await inspectHarness("opencode", { pkgRoot: danglingPkgB, roots: danglingRoots, agentDir: danglingAgent });
+	assert.equal(danglingInspect.state, "ok", JSON.stringify(danglingInspect.problems));
+	record("dangling owned plugin link retargets from removed package root");
+
+	const uninstallOwnedBase = path.join(temp, "planner-uninstall-other-root-symlinks");
+	const uninstallOwnedPkgA = await createPackage(path.join(uninstallOwnedBase, "package-a"));
+	const uninstallOwnedPkgB = await createPackage(path.join(uninstallOwnedBase, "package-b"));
+	const uninstallOwnedRoots = makeRoots(path.join(uninstallOwnedBase, "fixture"));
+	await setupRoot(uninstallOwnedRoots.cursor, "cursor", uninstallOwnedPkgA);
+	const uninstallOwnedPlan = await planUninstall("cursor", { pkgRoot: uninstallOwnedPkgB, roots: uninstallOwnedRoots, agentDir: path.join(uninstallOwnedBase, "agent-dir") });
+	const uninstallOwnedEntries = HARNESS_MANIFEST.cursor.filter(({ kind }) => kind === "command");
+	for (const entry of uninstallOwnedEntries) {
+		const file = path.join(uninstallOwnedRoots.cursor, entry.dest);
+		const change = uninstallOwnedPlan.changes.find(({ path: changePath }) => changePath === file);
+		assert.ok(change, `uninstall plan includes ${entry.dest}`);
+		assert.deepEqual(change, { path: file, kind: "delete", before: path.join(uninstallOwnedPkgA, entry.script), after: null });
+	}
+	const uninstallOwnedResults = await applyPlan(uninstallOwnedPlan);
+	assert.ok(uninstallOwnedResults.every(({ applied: ok }) => ok), JSON.stringify(uninstallOwnedResults));
+	for (const entry of uninstallOwnedEntries) await assert.rejects(lstat(path.join(uninstallOwnedRoots.cursor, entry.dest)));
+	const uninstalledOwnedInspect = await inspectHarness("cursor", { pkgRoot: uninstallOwnedPkgB, roots: uninstallOwnedRoots, agentDir: path.join(uninstallOwnedBase, "agent-dir") });
+	assert.equal(uninstalledOwnedInspect.state, "not-installed", JSON.stringify(uninstalledOwnedInspect.problems));
+	record("uninstall deletes owned links from another package root");
+
 	const foreignLinkBase = path.join(temp, "planner-foreign-symlink");
 	const foreignLinkPkg = await createPackage(foreignLinkBase);
 	const foreignLinkRoots = makeRoots(path.join(foreignLinkBase, "fixture"));
 	const foreignLinkPath = path.join(foreignLinkRoots.cursor, "commands/pi-plan.md");
-	const foreignLinkTarget = path.join(stalePkg, "agent/harness-commands/cursor/pi-plan.md");
+	const foreignLinkTarget = path.join(foreignLinkBase, "elsewhere/pi-plan.md");
+	await mkdir(path.dirname(foreignLinkTarget), { recursive: true });
+	await writeFile(foreignLinkTarget, "foreign command\n");
 	await mkdir(path.dirname(foreignLinkPath), { recursive: true });
 	await symlink(foreignLinkTarget, foreignLinkPath);
 	const foreignLinkPlan = await planInstall("cursor", { pkgRoot: foreignLinkPkg, roots: foreignLinkRoots, agentDir: path.join(foreignLinkBase, "agent-dir") });
-	assert.ok(foreignLinkPlan.skipped.some(({ path: file }) => file === foreignLinkPath));
+	assert.ok(foreignLinkPlan.skipped.some(({ path: file, reason }) => file === foreignLinkPath && reason === "Symlink target is outside selected package; preserve it."));
 	assert.ok(!foreignLinkPlan.changes.some(({ path: file }) => file === foreignLinkPath));
 	assert.ok((await applyPlan(foreignLinkPlan)).every(({ applied: ok }) => ok));
 	assert.equal(await readlink(foreignLinkPath), foreignLinkTarget);
 	const foreignUninstallPlan = await planUninstall("cursor", { pkgRoot: foreignLinkPkg, roots: foreignLinkRoots, agentDir: path.join(foreignLinkBase, "agent-dir") });
-	assert.ok(foreignUninstallPlan.skipped.some(({ path: file }) => file === foreignLinkPath));
+	assert.ok(foreignUninstallPlan.skipped.some(({ path: file, reason }) => file === foreignLinkPath && reason === "Symlink target is outside selected package; preserve it."));
 	assert.ok(!foreignUninstallPlan.changes.some(({ path: file }) => file === foreignLinkPath));
-	record("foreign package symlink preserved on install and uninstall");
+	assert.ok((await applyPlan(foreignUninstallPlan)).every(({ applied: ok }) => ok));
+	assert.equal(await readlink(foreignLinkPath), foreignLinkTarget);
+	record("foreign non-owned symlink preserved on install and uninstall");
 
 	const invalidPlanBase = path.join(temp, "planner-unparseable");
 	const invalidPlanPkg = await createPackage(invalidPlanBase);
