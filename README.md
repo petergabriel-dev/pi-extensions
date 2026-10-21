@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This workspace prepares `@lopezpetergabriel/pi-extensions@0.8.0`, a Pi package and source workspace containing eleven extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+This workspace prepares `@lopezpetergabriel/pi-extensions@0.9.0`, a Pi package and source workspace containing twelve extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -15,13 +15,13 @@ This workspace prepares `@lopezpetergabriel/pi-extensions@0.8.0`, a Pi package a
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.8.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.8.0   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.8.0           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.9.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.9.0   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.9.0           # temporary try
 pi list
 ```
 
-These install commands pin `@0.8.0`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.9.0`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
@@ -32,10 +32,12 @@ Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi upda
 ### Install from Git
 
 ```bash
-pi install git:github.com/petergabriel-dev/pi-extensions@v0.8.0
+pi install git:github.com/petergabriel-dev/pi-extensions@v0.9.0
 ```
 
-Use the [installed-package consumer bridge setup](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/dev-workflow.md#installed-package-consumer-bridge-setup) to register Claude Code and configure repo-local Cursor hooks. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope.
+After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, or OpenCode, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config and `pi-*` commands; consumers do not hand-merge settings or create symlinks. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.
+
+Cursor setup installs global `pi-*` commands. If Cursor does not discover them, use project-local commands: copy `pi-discuss.md`, `pi-plan.md`, and `pi-build.md` from the installed package's `agent/harness-commands/cursor/` into your project's `.cursor/commands/`. Real Cursor global-command discovery remains unverified. This repository's `.cursor/commands/pi-*` symlinks point to the packaged templates, but `.cursor/` is repository-only. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope.
 
 Install `ccc` separately before using `ccc_search`; verify it with `ccc --version`. Raw or global copies of these extensions can load twice alongside the package. Use `pi list` and `pi config` to inspect registrations, then remove or disable duplicates.
 
@@ -52,7 +54,7 @@ npm run check
 
 `npm run bootstrap` installs the lockfile-backed development packages under `agent/extensions/`. `npm run check` verifies the workspace and npm artifact inventory. The launcher runs `pi --no-extensions -e <repository-root>` so global extension discovery is disabled and this checkout is loaded once. Do not replace it with `pi -e .`.
 
-Review the Pi project-trust prompt before approving local resources. On startup, the extension header should list exactly eleven extensions from this repository and no global extension paths. Use `/quit` to exit. Add `--no-session` to the launcher for a disposable parent session:
+Review the Pi project-trust prompt before approving local resources. On startup, the extension header should list exactly twelve extensions from this repository and no global extension paths. Use `/quit` to exit. Add `--no-session` to the launcher for a disposable parent session:
 
 ```bash
 ./bin/pi-workspace --no-session
@@ -98,6 +100,7 @@ In a saved interactive TUI session, `/agents` lists child runs in tree order and
 - `personal-memory` — user-global indexed memory and `/remember`.
 - `subagents` — isolated RPC child Pi processes, automatic user question relay, and the `/agents` TUI overlay.
 - `workflow-modes` — `/mode`, `/plan`, `/caveman`, prompt composition, and read-only/mutation gates.
+- `harness-setup` — `/harness` inspect, install/repair, and uninstall for Claude, Cursor, and OpenCode.
 
 ### Skills and agents
 
@@ -121,7 +124,7 @@ The launcher reuses the current Pi user state; it does not create a separate Pi 
 
 Never add credentials, trust/settings/model files, sessions, plans, personal memory, caches, databases, logs, dependency trees, bridge IPC, CCC indexes, or external symlinks to the repository. The only tracked `.pi/` resource is the internal `.pi/agents` symlink.
 
-Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly five bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, and `agent/cursor-bridge-client/cursor-readonly-hook.js`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=1 MiB` unpacked limits.
+Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` harness command templates across Claude, Cursor, and OpenCode. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=1 MiB` unpacked limits.
 
 ## Documentation
 

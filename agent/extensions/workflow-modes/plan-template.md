@@ -65,7 +65,10 @@ Unchecked top-level task checkboxes seed workflow task tracker when plan is save
   - **NFRs:** [task-specific constraints, or "See Section 1"]
   - **Verification Gate:** [what must be manually confirmed before proceeding to the next task]
   - **Checkpoint:** Commit before starting the next task — do not batch commits across tasks
+  - **Files:** [target files/globs — advisory hint for Build slicing; omit if unknown]
 ```
+
+The Files hint is advisory input for Build slicing, never ownership.
 
 ### Skill Tags
 

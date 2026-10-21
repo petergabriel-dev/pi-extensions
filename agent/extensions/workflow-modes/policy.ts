@@ -33,3 +33,13 @@ export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | 
 	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (mode === "review" && REVIEW_BASH_DENY.test(command));
 	return allowed && !denied;
 }
+
+export function getBuildGuardBlocker(emit: (payload: { blockedBy?: string }) => void): string | undefined {
+	const payload: { blockedBy?: string } = {};
+	try {
+		emit(payload);
+	} catch {
+		return undefined;
+	}
+	return typeof payload.blockedBy === "string" && payload.blockedBy.length > 0 ? payload.blockedBy : undefined;
+}

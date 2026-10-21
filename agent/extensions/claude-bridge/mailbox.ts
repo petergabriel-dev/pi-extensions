@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export const HARNESS_KINDS = ["claude", "cursor", "pi"] as const;
+export const HARNESS_KINDS = ["claude", "cursor", "pi", "opencode"] as const;
 export type HarnessKind = (typeof HARNESS_KINDS)[number];
 
 export interface PeerIdentity {

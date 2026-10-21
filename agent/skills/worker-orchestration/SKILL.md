@@ -52,6 +52,18 @@ Run workers **sequentially** when any are true:
 
 When uncertain, prefer sequential execution or use an explorer first.
 
+## Within-task slicing (saved-plan Build)
+
+- Split only one confirmed saved-plan task. Never fan out across plan tasks.
+- Fan out only when the task has at least two substantial, disjoint slices and `concurrencyCap` is the default 3 or known to be at least 3; otherwise use one worker or work inline.
+- Use at most two slice workers. They share the global lane with nested explorers; keeping one lane free avoids blocking a worker while it waits for its explorer.
+- Treat the task's optional `Files` hint as input, not ownership; parent chooses slices and exact disjoint ownership.
+- Before fan-out, parent writes any shared contract inline. Contract files stay out of slice ownership; embed frozen contract in each slice task. A needed contract change is a scope-change request, not a slice edit.
+- Each slice owns its colocated tests and runs only targeted checks for owned files. Parent ends its turn on early results and waits until every slice result arrives before consolidation or verification.
+- After all slices succeed, parent consolidates and runs the task's Verification Gate. Fix small seams inline; if substantial seam work remains, spawn at most one fixer with union ownership after both slices settle.
+- Any slice failure, block, or scope-change blocks the task. Do not abort running siblings or repair/retry; wait for all results, then report each slice's status (`ok`, `failed`, `blocked`, `scope-change`), files touched, and open questions. No commit or tick.
+- Successful task gets one parent-owned commit and one tracker tick, regardless of slice count.
+
 ## Disjoint File Ownership
 
 For every worker, assign explicit ownership. Examples:

@@ -41,3 +41,7 @@ What you completed or why you stopped.
 - `browser_console`/`browser_network` drain by default; pass `clear:false` to peek.
 - Failed request text varies: live unread fetch returned `net::ERR_EMPTY_RESPONSE`; `ERR_ABORTED` was not reproduced.
 - Persistent profiles retain state; use disposable `PI_BROWSER_PROFILE` for clean checks.
+- Verify UI-visible changes with `browser_goto` plus `browser_screenshot` or `browser_console` before handoff.
+- `browser_goto`, `browser_click`, `browser_fill`, and `browser_eval` exist only in Build.
+- On `Browser gate is off`, stop browser use; do not retry. Under Open Questions, write `blocked: run /browser on`.
+- Skills may name tools you lack; skip those steps and list them under Open Questions.

@@ -54,6 +54,7 @@ export interface SubagentLoadout {
 	cwd: string;
 	extensionPath: string;
 	tools: string[];
+	projectTrusted: boolean;
 	model?: string;
 	thinkingLevel?: string;
 	appendSystemPrompt: string;
@@ -99,6 +100,7 @@ export interface SubagentLaunchOptions {
 	task: string;
 	tools: string[];
 	cavemanEnabled: boolean;
+	projectTrusted?: boolean;
 	model?: string;
 	thinkingLevel?: string;
 	childSessionId?: string;
@@ -260,14 +262,14 @@ export function writeSubagentLoadout(loadout: SubagentLoadout, agentDir: string)
 
 export function readSubagentLoadout(loadoutPath: string): SubagentLoadout {
 	const value: unknown = JSON.parse(fs.readFileSync(loadoutPath, "utf8"));
-	if (!isRecord(value) || value.version !== LOADOUT_VERSION || typeof value.parentSessionId !== "string" || typeof value.childSessionId !== "string" || typeof value.owner !== "string" || typeof value.role !== "string" || typeof value.agentName !== "string" || typeof value.cwd !== "string" || typeof value.extensionPath !== "string" || !isStringArray(value.tools) || typeof value.appendSystemPrompt !== "string" || typeof value.cavemanEnabled !== "boolean") {
+	if (!isRecord(value) || value.version !== LOADOUT_VERSION || typeof value.parentSessionId !== "string" || typeof value.childSessionId !== "string" || typeof value.owner !== "string" || typeof value.role !== "string" || typeof value.agentName !== "string" || typeof value.cwd !== "string" || typeof value.extensionPath !== "string" || !isStringArray(value.tools) || typeof value.appendSystemPrompt !== "string" || typeof value.cavemanEnabled !== "boolean" || (value.projectTrusted !== undefined && typeof value.projectTrusted !== "boolean")) {
 		throw new Error("Invalid subagent loadout.");
 	}
 	const depth = value.depth === undefined ? 0 : value.depth;
 	if ((value.role !== "worker" && value.role !== "explorer") || typeof depth !== "number" || !Number.isInteger(depth) || depth < 0 || (value.subagentAgents !== undefined && !isStringArray(value.subagentAgents)) || (value.fileOwnership !== undefined && !isStringArray(value.fileOwnership))) {
 		throw new Error("Invalid subagent loadout.");
 	}
-	return { ...value, depth } as SubagentLoadout;
+	return { ...value, projectTrusted: value.projectTrusted === true, depth } as SubagentLoadout;
 }
 
 export function buildSubagentCommandArgs(loadout: SubagentLoadout): string[] {
@@ -277,7 +279,7 @@ export function buildSubagentCommandArgs(loadout: SubagentLoadout): string[] {
 		"--tools", loadout.tools.join(","),
 		"--append-system-prompt", loadout.appendSystemPrompt,
 		"--session-id", loadout.childSessionId,
-		"--no-approve",
+		loadout.projectTrusted ? "--approve" : "--no-approve",
 	];
 	if (loadout.model) args.push("--model", loadout.model);
 	if (loadout.thinkingLevel) args.push("--thinking", loadout.thinkingLevel);
@@ -491,6 +493,7 @@ export class SubagentLaunchHost {
 			cwd: options.cwd,
 			extensionPath: options.extensionPath ?? resolveSubagentExtensionPath(),
 			tools: [...options.tools],
+			projectTrusted: options.projectTrusted === true,
 			...(options.model ?? options.agent.model ? { model: options.model ?? options.agent.model } : {}),
 			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			appendSystemPrompt: buildSubagentSystemPrompt(options.agent.systemPrompt, options.cavemanEnabled),

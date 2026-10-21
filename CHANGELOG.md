@@ -4,17 +4,30 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-21
+
 ### Added
 
+- Add `/harness` to inspect, install/repair, and uninstall Claude, Cursor, and OpenCode setup.
+- Add optional `docs/design/reference/` context to Build and Design prompts.
 - Add `/agents` TUI overlay for recent/live child activity, pending-question answers, and steering running children.
 - Add a single-owner child-question relay through the shared `ask-user-question` FIFO, with source-scoped cancellation, redacted payloads, and RPC-safe `select`/`input` dialogs.
 
 ### Changed
 
+- `/harness` Install / repair replaces hand-copied Pi command files (backed up) with package links.
+- Keep `/harness` preview navigation controls visible with arrow and page-key scrolling.
+- Prefix shipped Claude, Cursor, and OpenCode workflow command names with `pi-`.
+- Allow up to two within-task worker slices for substantial disjoint work; parent waits for all results and owns consolidation, verification, commit, and tick.
 - Keep subagent result/failure bodies pending until parent receipt; queue at most one displayed `nextTurn` fallback without auto-starting a turn, and suppress shutdown failure follow-ups.
 - Canonicalize writer ownership paths to case-folded real-path keys; warn once per session when local agent definitions shadow bundled keys.
 - Enforce read-only full-content decision-index, root-spoke, and ADR freshness in root `npm run check`.
 - Route live subagent messages through next-tool-boundary RPC steer; default explorer effort to `low` and prefix/filter bounded child diagnostics safely.
+
+### Fixed
+
+- Restore trusted-project skills for child agents and clarify browser proxy gate usage.
+- Flag failed child browser-proxy and nested-subagent calls as tool errors so parent progress shows `error`, not `ok`.
 
 ## [0.8.0] - 2026-10-13
 
