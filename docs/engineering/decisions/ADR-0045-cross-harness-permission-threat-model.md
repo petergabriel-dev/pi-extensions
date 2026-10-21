@@ -3,10 +3,10 @@ id: ADR-0045
 title: Cross-harness permission threat model and policy states
 status: Proposed
 date: 2026-10-21
-decision: Define one adversary model, three policy states (read-only, approved build, review-only), a trust boundary between harness-supplied identity and agent-asserted MCP arguments, and an evidence-labeled permission matrix for Pi, Pi subagents, Claude, Cursor, and OpenCode; later phases implement acceptance tests against the matrix target columns.
-why: Enforcement is uneven across harnesses. Build authorization can be agent-asserted, Claude hooks fail open when they crash, Cursor trusts read prefixes and only one tool name, OpenCode gates four tool names, and Review posting is prompt-only. Later phases need one normative target and one evidence standard instead of re-auditing each surface.
-affects: docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/README.md, docs/engineering/traps.md, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/pi-bridge-mcp.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/build-lease.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/sandbox.ts, agent/extensions/subagents/policy.ts, agent/extensions/harness-setup/setup.ts
-consequences: Phases 2-5 gain a testable target per cell. Known bypasses are recorded as defects, not sanctioned workflows. ADR-0022 keeps its Active status; its posting clause is scheduled for supersession in a later phase, not superseded here. ADR stays under the 25 KB recall budget, so it omits runnable bypass payloads.
+decision: Define one adversary model, three policy states (read-only, approved build, review-only), a trust boundary between harness-supplied identity and agent-asserted MCP arguments, and an evidence-labeled permission matrix for Pi, Pi subagents, Claude, Cursor, and OpenCode; ADR-0047 closes Phase 3 findings F1 and F2.
+why: Enforcement is uneven across harnesses. Before Phases 2-3, Build authorization could be agent-asserted and tool policy diverged; Review posting remains prompt-only. Later phases need one normative target and one evidence standard instead of re-auditing each surface.
+affects: docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/ADR-0047-human-approved-harness-build-lease.md, docs/engineering/decisions/README.md, docs/engineering/traps.md, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/test/test_build_lease.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/sandbox.ts, agent/extensions/subagents/policy.ts, agent/extensions/harness-setup/setup.ts
+consequences: Phases 2-5 have a testable target per cell; ADR-0047 closes F1/F2 with code, tests, and operator-reported live acceptance. Known bypasses remain defects, not sanctioned workflows. ADR-0022 stays Active; its posting clause is scheduled for later supersession. ADR stays under the 25 KB recall budget and omits runnable bypass payloads.
 readWhen: changing bridge lease acquisition or release, harness hooks, harness setup hook registration, shell policy, sandbox profiles, foreign MCP gating, subagent toolset validation, or Review posting confirmation
 supersedes: None
 extends: ADR-0022, ADR-0043
@@ -22,13 +22,13 @@ Five surfaces can act on a Pi project: Pi main in a workflow mode, Pi subagents,
 - Pi subagents receive an explicit toolset validated by `agent/extensions/subagents/policy.ts`.
 - Harness clients get a read-only default and a Build lease from ADR-0043.
 
-This ADR records what each surface actually decides today, labels the evidence, and sets the target policy states that Phases 2-5 implement. Phase 1 is documentation only: no hook, policy, lease, config, or test changes.
+This ADR records what each surface decides, labels the evidence, and sets target policy states for Phases 2-5. Phase 1 was documentation only. Phase 3 closes F1/F2; ADR-0047 records the lease and identity implementation and live acceptance.
 
 ## Adversary and out of scope
 
 **Adversary in scope:** a prompt-injected or misaligned agent running inside a harness with normal same-user file access. It can:
 
-- assert MCP arguments such as `confirmed: true`, `harness`, and `sessionId`;
+- assert MCP arguments such as an affirmative plan-confirmation value, `harness`, and `sessionId`;
 - choose tool names and shell command shapes;
 - read repository content that may contain injected instructions;
 - write files that the harness hook does not inspect.
@@ -50,15 +50,15 @@ Bypasses listed here are defects. They are never permitted workarounds, and they
 |---|---|---|
 | Claude `session_id`, Cursor `conversation_id`, OpenCode host `sessionID` | Harness process, supplied to the hook/plugin | Trusted as harness identity |
 | `sessionId` / `claudeSessionId` / `harness` inside MCP tool arguments | Agent-controlled call payload | Untrusted; agent-asserted |
-| `confirmed: true` in `save_plan` | Agent-controlled call payload | Untrusted; proves nothing about human approval |
+| Plan-confirmation value in `save_plan` | Agent-controlled call payload | Untrusted; proves nothing about human approval |
 | Presence files and `buildLease` under `.pi/` | Local same-user state | Trusted only as state, not as proof of human intent |
 | Repository text, including plan and docs | Possibly injected | Untrusted as instructions; trusted only as project data |
 
 Consequences:
 
-- Lease binding is only as strong as the identity source. Claude and Cursor accept agent-asserted MCP identity (`agent/claude-bridge-client/pi-bridge-mcp.js:160-173`); OpenCode overwrites bridge arguments from the host `sessionID` (`agent/opencode-bridge-client/pi-opencode-plugin.js:48-53`).
-- `save_plan` accepts `confirmed: true` from the agent (`agent/extensions/claude-bridge/index.ts:599-606`), and `recall(mode:"build")` then grants the lease (`agent/extensions/claude-bridge/index.ts:823-827`). No human-only signal gates either step.
-- Release is matching-identity only (`agent/extensions/claude-bridge/build-lease.ts:82-89`), so an agent that supplies the holder identity can also release it.
+- Lease identity is bound at each hook boundary: Claude stamps from host `session_id` after mismatch rejection; Cursor requires an exact `conversation_id` match; OpenCode overwrites arguments from host `sessionID` (ADR-0047).
+- A Build recall now creates or refreshes a pending request, never a lease. Only `/build-lease approve` in Pi's interactive TUI grants after revalidating pairing, plan, mode, and active holder (ADR-0047). `save_plan` confirmation arguments do not authorize a lease.
+- Bridge task ticks require the active holder identity. Holder unpair and Claude SessionEnd revoke the lease; a same-user agent cannot assert another identity through the covered Claude or Cursor hooks (ADR-0047).
 
 ## Policy states
 
@@ -69,17 +69,17 @@ These states are normative. They are the target columns for later phases. ADR-00
 - Filesystem writes denied on every surface.
 - Shell is either sandboxed with writes denied or restricted to a policy allow-list.
 - Unknown tool names and unknown MCP tools deny; they do not pass.
-- Bridge reads allowed. Bridge state mutations (`save_plan`, `tick_plan_task`, lease acquire/release, pairing) denied.
+- Bridge reads and non-project-write operations `save_plan`, `capture_note`, `save_memory`, messages, and pairing/unpairing remain available. Task ticks require the active Build lease holder; requests never grant leases, and only Pi TUI approval can grant.
 - Harness subagents inherit the same read-only set; they do not gain write tools.
 
 ### Approved build
 
 - Exactly one lease holder per Pi session.
 - Lease identity comes from harness-supplied identity, not from MCP arguments.
-- Grant requires a human approval event, an active saved plan, and Pi not already in Build.
+- Grant requires explicit human Pi TUI approval, an active saved plan, Pi not already in Build, and an unexpired four-hour lease bound to the harness host identity.
 - The holder may run shell and edit tools; other harnesses stay read-only.
 - Foreign MCP tools require an explicit allowlist, not a pass-through.
-- Lease does not survive harness exit indefinitely; explicit release or stale presence revokes it.
+- Lease ends on explicit/lifecycle release or holder unpair and expires after four hours; stale presence always returns hooks to read-only behavior.
 
 ### Review-only
 
@@ -92,7 +92,7 @@ These states are normative. They are the target columns for later phases. ADR-00
 
 Legend: **E** = `verified-exec`, **C** = `code-read`, **N** = `not-verified`. Each cell carries exactly one label. Enforcement points and fail modes are in the same row. Target decisions are in "Target per state".
 
-Updated by ADR-0046 after Phase 2: the Claude, Cursor, and OpenCode rows reflect current code and live acceptance, not the Phase 1 baseline.
+Updated by ADR-0046 after Phase 2 and ADR-0047 after Phase 3: Claude, Cursor, and OpenCode rows reflect current code and live acceptance.
 
 | Surface | Shell | Edit / write / delete | Bridge MCP | Foreign MCP | Harness subagents | Bridge state changes | Enforcement point | Fail mode |
 |---|---|---|---|---|---|---|---|---|
@@ -102,9 +102,9 @@ Updated by ADR-0046 after Phase 2: the Claude, Cursor, and OpenCode rows reflect
 | Pi Review | read + `gh pr` allow; network sandbox **E** | write/edit blocked **C** | owner, callable **C** | pass **C** | gated by toolset **E** | owner **C** | `agent/extensions/workflow-modes/index.ts:887-897`, `policy.ts:17-21` | closed |
 | Pi Design | plan-level policy **E** | design surface only **C** | owner, callable **C** | pass **C** | gated by toolset **E** | owner **C** | `agent/extensions/workflow-modes/index.ts:869-876` | closed |
 | Pi subagents | per toolset **C** | build toolset only **E** | not in read-only set **C** | per toolset **C** | n/a **C** | build toolset only **E** | `agent/extensions/subagents/policy.ts:46-51` | closed |
-| Claude | sandboxed allow; disable flag deny; no sandbox deny **E** | four mutation tools deny; read built-ins pass; other tools ask **E** | bridge prefix allow **E** | foreign MCP ask **E** | subagent write denied in live test **E** | pass; agent-asserted `confirmed` **C** | `agent/claude-bridge-client/pi-readonly-hook.js:125-191`, `agent/extensions/harness-setup/setup.ts:788-793` | closed on crash **E** |
-| Cursor | segment allowlist; hidden writers ask; mutations deny **E** | read allowlist; unknown and patch names deny **E** | allow **E** | mutating-name deny; unknown ask **E** | unverified **N** | pass **C** | `agent/cursor-bridge-client/cursor-readonly-hook.js:71-231` | closed **E** |
-| OpenCode | sandboxed; no sandbox throws **E** | read allowlist; edit/write/worktree and unknown throw **E** | identity overwritten from host **E** | unknown and foreign throw **E** | child identity unverified **N** | pass; identity cannot be spoofed **C** | `agent/opencode-bridge-client/pi-opencode-plugin.js:37-83` | closed **E** |
+| Claude | sandboxed allow; disable flag deny; no sandbox deny **E** | four mutation tools deny; read built-ins pass; other tools ask **E** | host `session_id` stamped; mismatches denied; expiry fail-closed **E** | foreign MCP ask **E** | subagent write denied in live test **E** | safe updates allowed; holder-only tick; human-only grant **E** | `agent/claude-bridge-client/pi-readonly-hook.js:125-191`, `agent/extensions/harness-setup/setup.ts:788-793` | closed on crash **E** |
+| Cursor | segment allowlist; hidden writers ask; mutations deny **E** | read allowlist; unknown and patch names deny **E** | matching `conversation_id` identity required; expiry fail-closed **E** | mutating-name deny; unknown ask **E** | unverified **N** | safe updates allowed; holder-only tick; human-only grant **E** | `agent/cursor-bridge-client/cursor-readonly-hook.js:71-231` | closed **E** |
+| OpenCode | sandboxed; no sandbox throws **E** | read allowlist; edit/write/worktree and unknown throw **E** | host `sessionID` identity overwritten; expiry fail-closed **E** | unknown and foreign throw **E** | child identity unverified **N** | safe updates allowed; holder-only tick; human-only grant **E** | `agent/opencode-bridge-client/pi-opencode-plugin.js:37-83` | closed **E** |
 
 ## Target per state
 
@@ -112,10 +112,10 @@ Updated by ADR-0046 after Phase 2: the Claude, Cursor, and OpenCode rows reflect
 |---|---|---|---|
 | Shell | sandboxed writes denied, or allow-list only | holder: allowed within lease | sandboxed writes denied; scoped `gh pr` reads |
 | Edit / write / delete | deny all tools, including unknown names | holder: allowed; others deny | deny all tools |
-| Bridge MCP | read tools only | holder: read plus plan tick | read tools only |
+| Bridge MCP | Reads and listed non-project-write operations remain available; host identity required; request is not grant | Same operations; only active holder may tick; Pi human approval grants; four-hour expiry | read tools only |
 | Foreign MCP | deny unless explicit read allowlist | deny unless explicit allowlist | deny unless explicit read allowlist |
 | Harness subagents | inherit read-only set | inherit holder rights; no new lease | inherit read-only set |
-| Bridge state changes | deny | holder: plan progress only; grant requires human approval | deny; posting requires human approval |
+| Bridge state changes | allow `save_plan`, `capture_note`, `save_memory`, messages, pairing/unpairing; holder-only task tick; human-only grant | Same safe updates; active holder may tick; human Pi approval only grants; Pi release, holder unpair, workflow change, or expiry revokes | deny; posting requires human approval |
 | Identity | harness-supplied only | harness-supplied only | harness-supplied only |
 | Fail mode | closed | closed outside the holder | closed |
 
@@ -123,8 +123,8 @@ Updated by ADR-0046 after Phase 2: the Claude, Cursor, and OpenCode rows reflect
 
 | ID | Finding | Severity | Current evidence | Target phase |
 |---|---|---|---|---|
-| F1 | Self-escalation without a human: agent asserts `confirmed:true`, then `recall(mode:"build")` grants the lease | High | `agent/extensions/claude-bridge/index.ts:599-606`, `:823-827` **C**; lease decisions **E** | 3 |
-| F2 | Claude and Cursor bridge identity is agent-asserted and replayable by a same-user process | High | `agent/claude-bridge-client/pi-bridge-mcp.js:160-173` **C**; OpenCode overwrite **E** | 3 |
+| F1 | Self-escalation without a human: agent asserts a plan-confirmation value, then Build recall grants the lease (closed by ADR-0047) | High | Request/approval separation, headless refusal, and operator-reported live acceptance **E** | 3 — closed by ADR-0047 |
+| F2 | Claude and Cursor bridge identity is agent-asserted and replayable by a same-user process (closed by ADR-0047) | High | Claude/Cursor mismatch denial, host identity binding, and operator-reported live acceptance **E** | 3 — closed by ADR-0047 |
 | F3 | Cursor shell classifier allows a read prefix followed by an interpreter or write, `find -delete`, pipe-to-interpreter, and `git diff --output` | High | `agent/cursor-bridge-client/cursor-readonly-hook.js:11-12`, `:57-62` **E** | 2 |
 | F4 | Cursor `preToolUse` denies only a tool named `write`; `edit`, `multiedit`, `delete`, and patch-style names pass | High | `agent/cursor-bridge-client/cursor-readonly-hook.js:85-90` **E** | 2 |
 | F5 | Claude hook has no matcher and no fail-closed flag; a crash exits non-2, which Claude treats as non-blocking | Medium | crash **E**; registration `agent/extensions/harness-setup/setup.ts:775-779` **C**; host semantics **C** | 2 |
@@ -132,20 +132,20 @@ Updated by ADR-0046 after Phase 2: the Claude, Cursor, and OpenCode rows reflect
 | F7 | Review posting is prompt-enforced only; `gh pr review` and `gh pr comment` are in the shell allow-list | Medium | `agent/extensions/workflow-modes/policy.ts:17-21` **E**; confirmation prose `agent/extensions/workflow-modes/index.ts:593` **C** | 5 |
 | F8 | Seatbelt profile is `(allow default)` plus denies; LaunchServices escape is a hypothesis, not demonstrated | Low | profile text **E**; escape **N** | 5 |
 
-F3-F6 close in Phase 2; see ADR-0046. F1/F2 remain Phase 3, test hardening is Phase 4, and F7/F8 plus documentation are Phase 5.
+F3-F6 close in Phase 2; see ADR-0046. F1/F2 close in Phase 3; see ADR-0047. Test hardening remains Phase 4, and F7/F8 plus documentation remain Phase 5.
 
 ## Consequences
 
 - Good: Phases 2-5 can derive acceptance tests from "Target per state" without re-auditing each surface.
 - Good: the matrix separates decision evidence from target policy, so a known defect cannot be mistaken for intended behavior.
 - Good: trust boundaries are explicit, so later identity fixes have one reference.
-- Bad/risk: `not-verified` cells remain open until live harness acceptance. They must not be reported as fixed.
+- Bad/risk: remaining `not-verified` cells stay open until live acceptance; they must not be reported as fixed.
 - Bad/risk: ADR-0022 stays Active while this ADR states a stricter posting target. Phase 5 must supersede that clause explicitly instead of silently contradicting it.
 - Bad/risk: every bridge recall ships this ADR into harness context, so bypass descriptions stay structural and non-runnable.
 
 ## Appendix A: Probe table
 
-Probes ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containing `.pi/`. No probe called the live bridge, and no probe executed a wrapped command body. Bypass inputs are shown as neutral shapes, not payloads.
+P1-P10 ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containing `.pi/`; none called the live bridge or executed a wrapped command body. P11 is a reserved, unrun Phase 4 approval-UI probe. Inputs remain neutral shapes, not payloads.
 
 | Probe | Surface | Neutral input shape | Observed | Label |
 |---|---|---|---|---|
@@ -174,11 +174,12 @@ Probes ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containi
 | P7 | Pi `isBashAllowedInMode` | review `gh pr review`, comment, view | allow | **E** |
 | P7 | Pi `isBashAllowedInMode` | review `curl`, `gh pr merge` | deny | **E** |
 | P8 | Lease decisions | no plan / Pi building / Pi peer | three distinct error codes | **E** |
-| P8 | Lease decisions | grant / same-peer repeat / other holder | grant / idempotent / held | **E** |
-| P8 | Lease release | matching discuss/plan vs build vs other identity | release / keep / keep | **E** |
+| P8 | Lease decisions | request / approval / same-peer repeat / other holder | pending / grant after approval / idempotent / held | **E** |
+| P8 | Lease release | holder recall, workflow change, expiry, or unpair | release / revoke / keep | **E** |
 | P9 | Subagent toolset | read set, mutation, unknown, build | ok / error / error / ok | **E** |
 | P10 | Seatbelt profile | generated profile text | allow default, deny network, deny writes | **E** |
 | P10 | `wrapCommand` | launcher forced to `sandbox-exec` | wrapped, sandbox prefix, deny network | **E** |
+| P11 | Pi TUI approval | non-destructive external-input probe | Reserved for Phase 4; not run | **N** |
 
 ## Open questions
 
