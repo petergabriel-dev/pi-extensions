@@ -293,8 +293,8 @@ try {
 	await rm(foreignCommandPath);
 	await writeFile(foreignCommandPath, "user-authored command\n");
 	const foreignCommand = await inspectHarness("cursor", { pkgRoot: foreignPkg, roots: foreignRoots });
-	noted(foreignCommand.problems, "entry-not-ours");
-	assert.ok(foreignCommand.problems.some(({ dest }) => dest === "commands/pi-build.md"), "foreign command file is identified at its destination");
+	noted(foreignCommand.problems, "legacy-command");
+	assert.ok(foreignCommand.problems.some(({ dest, message }) => dest === "commands/pi-build.md" && /Install \/ repair backs it up and replaces it/.test(message)), "plain Pi command explains Install / repair replacement");
 	record("foreign config entries and command files");
 
 	const legacyRoot = path.join(temp, "legacy-command");
@@ -325,10 +325,11 @@ try {
 	await writeFile(outsideLegacy, "foreign symlink target\n");
 	await symlink(outsideLegacy, path.join(legacyForeignCommands, "plan.md"));
 	const legacyForeign = await inspectHarness("claude", { pkgRoot: legacyForeignPkg, roots: makeRoots(legacyForeignRoot) });
+	noted(legacyForeign.problems, "legacy-command");
 	noted(legacyForeign.problems, "entry-not-ours");
-	assert.ok(legacyForeign.problems.some(({ dest }) => dest === "commands/discuss.md"), "plain legacy command is reported");
-	assert.ok(legacyForeign.problems.some(({ dest }) => dest === "commands/plan.md"), "foreign legacy symlink is reported");
-	record("plain and foreign legacy command preservation");
+	assert.ok(legacyForeign.problems.some(({ dest, kind }) => dest === "commands/discuss.md" && kind === "legacy-command"), "plain legacy command is identified for replacement");
+	assert.ok(legacyForeign.problems.some(({ dest, kind }) => dest === "commands/plan.md" && kind === "entry-not-ours"), "foreign legacy symlink is preserved");
+	record("plain and foreign legacy command inspection");
 
 	const stampRoot = path.join(temp, "stamp");
 	const stampPkg = await createPackage(stampRoot);
@@ -456,13 +457,21 @@ try {
 	const plainCommandPath = path.join(skipRoots.claude, "commands/pi-build.md");
 	await rm(plainCommandPath);
 	await writeFile(plainCommandPath, "user-authored command\n");
+	await chmod(plainCommandPath, 0o640);
 	const skipPlan = await planInstall("claude", { pkgRoot: skipPkg, roots: skipRoots, agentDir: path.join(skipBase, "agent-dir") });
 	assert.ok(skipPlan.skipped.some(({ path: file, reason }) => file === skipSettingsFile && /statusLine/.test(reason)));
-	assert.ok(skipPlan.skipped.some(({ path: file }) => file === plainCommandPath));
-	assert.ok((await applyPlan(skipPlan)).every(({ applied: ok }) => ok));
-	assert.match(await readFile(plainCommandPath, "utf8"), /user-authored/);
+	const plainCommandChange = skipPlan.changes.find(({ path: file }) => file === plainCommandPath);
+	assert.equal(plainCommandChange?.legacyFile, true);
+	const skipIso = "2024-01-02T03:04:05.000Z";
+	const skipResults = await applyPlan(skipPlan, { now: new Date(skipIso) });
+	assert.ok(skipResults.every(({ applied: ok }) => ok));
+	const plainCommandResult = skipResults.find(({ path: file }) => file === plainCommandPath)!;
+	assert.equal(plainCommandResult.backup, `${plainCommandPath}.harness-bak-${backupTimestamp(skipIso)}`);
+	assert.equal(await readFile(plainCommandResult.backup!, "utf8"), "user-authored command\n");
+	assert.equal((await lstat(plainCommandResult.backup!)).mode & 0o777, 0o640);
+	assert.equal(await readlink(plainCommandPath), path.join(skipPkg, "agent/harness-commands/claude/pi-build.md"));
 	assert.equal(JSON.parse(await readFile(skipSettingsFile, "utf8")).statusLine.command, "node /opt/user/status.js");
-	record("foreign statusLine and plain user command skipped");
+	record("foreign statusLine preserved and plain Pi command backed up/replaced");
 
 	const legacyPlanBase = path.join(temp, "planner-legacy-link");
 	const legacyPlanPkg = await createPackage(legacyPlanBase);
@@ -475,6 +484,86 @@ try {
 	await assert.rejects(lstat(legacyOwnedPath));
 	assert.ok((await lstat(path.join(legacyPlanRoots.claude, "commands/pi-discuss.md"))).isSymbolicLink());
 	record("owned legacy symlink removal during install");
+
+	const legacyPlainBase = path.join(temp, "planner-legacy-plain");
+	const legacyPlainPkg = await createPackage(legacyPlainBase);
+	const legacyPlainRoots = await installFixture(path.join(legacyPlainBase, "fixture"), legacyPlainPkg);
+	const legacyPlainPrefixed = path.join(legacyPlainRoots.cursor, "commands/pi-plan.md");
+	const legacyPlainUnprefixed = path.join(legacyPlainRoots.cursor, "commands/discuss.md");
+	await rm(legacyPlainPrefixed);
+	await writeFile(legacyPlainPrefixed, "hand-copied prefixed command\n");
+	await chmod(legacyPlainPrefixed, 0o640);
+	await writeFile(legacyPlainUnprefixed, "unrelated command at Pi name\n");
+	const legacyPlainOptions = { pkgRoot: legacyPlainPkg, roots: legacyPlainRoots, agentDir: path.join(legacyPlainBase, "agent-dir"), platform: "darwin" as const };
+	const legacyPlainPlan = await planInstall("cursor", legacyPlainOptions);
+	const prefixedChange = legacyPlainPlan.changes.find(({ path: file }) => file === legacyPlainPrefixed);
+	const unprefixedChange = legacyPlainPlan.changes.find(({ path: file }) => file === legacyPlainUnprefixed);
+	assert.equal(prefixedChange?.legacyFile, true);
+	assert.equal(prefixedChange?.kind, "symlink");
+	assert.equal(unprefixedChange?.legacyFile, true);
+	assert.equal(unprefixedChange?.kind, "delete");
+	const legacyPlainIso = "2024-05-06T07:08:09.000Z";
+	const legacyPlainResults = await applyPlan(legacyPlainPlan, { now: new Date(legacyPlainIso) });
+	assert.ok(legacyPlainResults.every(({ applied: ok }) => ok), JSON.stringify(legacyPlainResults));
+	for (const [file, expected] of [[legacyPlainPrefixed, "hand-copied prefixed command\n"], [legacyPlainUnprefixed, "unrelated command at Pi name\n"]] as const) {
+		const result = legacyPlainResults.find(({ path: resultPath }) => resultPath === file)!;
+		assert.equal(result.backup, `${file}.harness-bak-${backupTimestamp(legacyPlainIso)}`);
+		assert.deepEqual(await readFile(result.backup!), Buffer.from(expected));
+	}
+	assert.equal((await lstat(`${legacyPlainPrefixed}.harness-bak-${backupTimestamp(legacyPlainIso)}`)).mode & 0o777, 0o640);
+	assert.equal(await readlink(legacyPlainPrefixed), path.join(legacyPlainPkg, "agent/harness-commands/cursor/pi-plan.md"));
+	await assert.rejects(lstat(legacyPlainUnprefixed));
+	assert.deepEqual((await planInstall("cursor", legacyPlainOptions)).changes, [], "second install has no file changes");
+	assert.equal((await inspectHarness("cursor", { ...legacyPlainOptions, stamp: await readStamp(legacyPlainOptions.agentDir) })).state, "ok");
+	record("plain Pi command replacement, verified backups, and idempotence");
+
+	const pluginFileBase = path.join(temp, "planner-plain-plugin");
+	const pluginFilePkg = await createPackage(pluginFileBase);
+	const pluginFileRoots = await installFixture(path.join(pluginFileBase, "fixture"), pluginFilePkg);
+	const pluginFile = path.join(pluginFileRoots.opencode, "plugins/pi-opencode-build-lease.js");
+	await rm(pluginFile);
+	await writeFile(pluginFile, "user plugin file\n");
+	const pluginFilePlan = await planInstall("opencode", { pkgRoot: pluginFilePkg, roots: pluginFileRoots, agentDir: path.join(pluginFileBase, "agent-dir") });
+	assert.ok(pluginFilePlan.skipped.some(({ path: skippedPath }) => skippedPath === pluginFile));
+	assert.ok(!pluginFilePlan.changes.some(({ path: changedPath }) => changedPath === pluginFile));
+	assert.ok((await applyPlan(pluginFilePlan)).every(({ applied: ok }) => ok));
+	assert.equal(await readFile(pluginFile, "utf8"), "user plugin file\n");
+	noted((await inspectHarness("opencode", { pkgRoot: pluginFilePkg, roots: pluginFileRoots })).problems, "entry-not-ours");
+	record("plain OpenCode plugin remains foreign and preserved");
+
+	const oversizedLegacyBase = path.join(temp, "planner-oversized-legacy");
+	const oversizedLegacyPkg = await createPackage(oversizedLegacyBase);
+	const oversizedLegacyRoots = await installFixture(path.join(oversizedLegacyBase, "fixture"), oversizedLegacyPkg);
+	const oversizedPrefixed = path.join(oversizedLegacyRoots.cursor, "commands/pi-build.md");
+	const oversizedUnprefixed = path.join(oversizedLegacyRoots.cursor, "commands/build.md");
+	await rm(oversizedPrefixed);
+	const oversizedLegacyText = "x".repeat(MAX_CONFIG_BYTES + 1);
+	await writeFile(oversizedPrefixed, oversizedLegacyText);
+	await writeFile(oversizedUnprefixed, oversizedLegacyText);
+	const oversizedLegacyPlan = await planInstall("cursor", { pkgRoot: oversizedLegacyPkg, roots: oversizedLegacyRoots, agentDir: path.join(oversizedLegacyBase, "agent-dir") });
+	for (const file of [oversizedPrefixed, oversizedUnprefixed]) {
+		assert.ok(oversizedLegacyPlan.skipped.some(({ path: skippedPath, reason }) => skippedPath === file && /unreadable or oversized/.test(reason)));
+		assert.ok(!oversizedLegacyPlan.changes.some(({ path: changedPath }) => changedPath === file));
+	}
+	assert.ok((await applyPlan(oversizedLegacyPlan)).every(({ applied: ok }) => ok));
+	assert.equal((await readFile(oversizedPrefixed, "utf8")).length, MAX_CONFIG_BYTES + 1);
+	assert.equal((await readFile(oversizedUnprefixed, "utf8")).length, MAX_CONFIG_BYTES + 1);
+	record("oversized plain Pi command files remain untouched");
+
+	const legacyRaceBase = path.join(temp, "planner-legacy-toctou");
+	const legacyRacePkg = await createPackage(legacyRaceBase);
+	const legacyRaceRoots = await installFixture(path.join(legacyRaceBase, "fixture"), legacyRacePkg);
+	const legacyRaceFile = path.join(legacyRaceRoots.cursor, "commands/pi-build.md");
+	await rm(legacyRaceFile);
+	await writeFile(legacyRaceFile, "planned command\n");
+	const legacyRacePlan = await planInstall("cursor", { pkgRoot: legacyRacePkg, roots: legacyRaceRoots, agentDir: path.join(legacyRaceBase, "agent-dir") });
+	await writeFile(legacyRaceFile, "changed after planning\n");
+	const legacyRaceIso = "2024-01-02T03:04:05.000Z";
+	const legacyRaceResult = (await applyPlan(legacyRacePlan, { now: new Date(legacyRaceIso) })).find(({ path: file }) => file === legacyRaceFile)!;
+	assert.equal(legacyRaceResult.applied, false);
+	assert.equal(await readFile(legacyRaceFile, "utf8"), "changed after planning\n");
+	await assert.rejects(lstat(`${legacyRaceFile}.harness-bak-${backupTimestamp(legacyRaceIso)}`));
+	record("legacy command preimage mismatch aborts without backup or mutation");
 
 	const foreignLinkBase = path.join(temp, "planner-foreign-symlink");
 	const foreignLinkPkg = await createPackage(foreignLinkBase);
@@ -596,15 +685,19 @@ try {
 			cursor: { pkgRoot: uninstallPkg, installedAt: "2024-01-01T00:00:00.000Z" },
 		},
 	});
+	const plainLegacyUninstallCommand = path.join(uninstallRoots.claude, "commands/discuss.md");
+	await writeFile(plainLegacyUninstallCommand, "leave unprefixed command alone\n");
 	const uninstallPlan = await planUninstall("claude", { pkgRoot: uninstallPkg, roots: uninstallRoots, agentDir: uninstallAgent });
 	assert.deepEqual(uninstallPlan.cliSteps, [{ executable: "claude", args: ["mcp", "remove", "-s", "user", PI_BRIDGE_MCP_KEY] }]);
 	const uninstallBackupIso = "2024-04-05T06:07:08.000Z";
+	assert.ok(!uninstallPlan.changes.some(({ path: file }) => file === foreignUninstallCommand || file === plainLegacyUninstallCommand), "uninstall never plans changes to plain commands");
 	assert.ok((await applyPlan(uninstallPlan, { now: new Date(uninstallBackupIso) })).every(({ applied: ok }) => ok));
 	const uninstalledSettings = JSON.parse(await readFile(uninstallSettingsFile, "utf8"));
 	assert.deepEqual(uninstalledSettings.hooks.PreToolUse[0].hooks, []);
 	assert.deepEqual(uninstalledSettings.hooks.PreToolUse[1], uninstallForeignHook);
 	assert.equal(Object.hasOwn(uninstalledSettings, "statusLine"), false);
 	assert.match(await readFile(foreignUninstallCommand, "utf8"), /preserve this file/);
+	assert.equal(await readFile(plainLegacyUninstallCommand, "utf8"), "leave unprefixed command alone\n");
 	await assert.rejects(lstat(path.join(uninstallRoots.claude, "commands/pi-discuss.md")));
 	await assert.rejects(lstat(path.join(uninstallRoots.claude, "commands/pi-plan.md")));
 	assert.deepEqual(Object.keys((await readStamp(uninstallAgent))!.harnesses), ["cursor"]);

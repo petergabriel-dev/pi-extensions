@@ -252,7 +252,8 @@ function planPreview(harness: Harness, action: "install" | "uninstall", plan: Se
 	if (!plan.changes.length) lines.push("No file changes planned.", "");
 	for (const change of plan.changes) {
 		const patch = createTwoFilesPatch(change.path, change.path, change.before ?? "", change.after ?? "", "", "", { context: 3 });
-		lines.push(`## ${change.path}`, "", diffFence(patch), "");
+		const label = change.legacyFile ? " — replace legacy command (backed up)" : "";
+		lines.push(`## ${change.path}${label}`, "", diffFence(patch), "");
 	}
 	if (plan.skipped.length) {
 		lines.push("## Skipped", ...plan.skipped.map(({ path, reason }) => `- ${path}: ${reason}`), "");
@@ -294,7 +295,7 @@ async function showPreview(ctx: ExtensionCommandContext, content: string): Promi
 async function showOutcomes(ctx: ExtensionCommandContext, fileResults: ApplyResult[], cliResults: string[]): Promise<void> {
 	const lines = ["# Harness setup results", "", "## Files"];
 	if (fileResults.length) {
-		for (const result of fileResults) lines.push(`- ${result.applied ? "Applied" : "Not applied"}: ${result.path}${result.reason ? ` — ${result.reason}` : ""}`);
+		for (const result of fileResults) lines.push(`- ${result.applied ? "Applied" : "Not applied"}: ${result.path}${result.backup ? ` (backup: ${result.backup})` : ""}${result.reason ? ` — ${result.reason}` : ""}`);
 	} else lines.push("- No file changes planned.");
 	lines.push("", "## Claude CLI");
 	if (cliResults.length) lines.push(...cliResults.map((result) => `- ${result}`));

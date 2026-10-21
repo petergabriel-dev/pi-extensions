@@ -13,6 +13,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- `/harness` Install / repair replaces hand-copied Pi command files (backed up) with package links.
 - Prefix shipped Claude, Cursor, and OpenCode workflow command names with `pi-`.
 - Allow up to two within-task worker slices for substantial disjoint work; parent waits for all results and owns consolidation, verification, commit, and tick.
 - Keep subagent result/failure bodies pending until parent receipt; queue at most one displayed `nextTurn` fallback without auto-starting a turn, and suppress shutdown failure follow-ups.

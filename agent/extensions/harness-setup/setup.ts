@@ -179,7 +179,7 @@ function looksLikeOwnedTarget(target: string | undefined, script: string): boole
 	return target === suffix || target.endsWith(`${path.sep}${suffix}`);
 }
 
-async function readCapped(file: string): Promise<{ state: "missing" | "ok" | "oversized" | "unreadable"; text?: string }> {
+async function readCapped(file: string, includeBytes = false): Promise<{ state: "missing" | "ok" | "oversized" | "unreadable"; text?: string; bytes?: Buffer }> {
 	let handle;
 	try {
 		handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -194,7 +194,12 @@ async function readCapped(file: string): Promise<{ state: "missing" | "ok" | "ov
 			total += bytesRead;
 		}
 		if (total > MAX_CONFIG_BYTES) return { state: "oversized" };
-		return { state: "ok", text: buffer.subarray(0, total).toString("utf8") };
+		const content = buffer.subarray(0, total);
+		return {
+			state: "ok",
+			text: content.toString("utf8"),
+			...(includeBytes ? { bytes: Buffer.from(content) } : {}),
+		};
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "ENOENT" ? { state: "missing" } : { state: "unreadable" };
 	} finally {
@@ -430,7 +435,11 @@ async function inspectSymlink(
 	}
 	signal.value = true;
 	if (!info.isSymbolicLink()) {
-		problem(problems, harness, "entry-not-ours", "Expected package symlink destination is not a symlink.", entry.dest);
+		if (entry.kind === "command" && info.isFile()) {
+			problem(problems, harness, "legacy-command", `Plain ${entry.dest} is a command file; Install / repair backs it up and replaces it.`, entry.dest);
+		} else {
+			problem(problems, harness, "entry-not-ours", "Expected package symlink destination is not a symlink.", entry.dest);
+		}
 		return;
 	}
 	let target: string;
@@ -503,7 +512,11 @@ async function inspectLegacyCommands(
 		}
 		signal.value = true;
 		if (!info.isSymbolicLink()) {
-			problem(problems, harness, "entry-not-ours", `Unprefixed ${name}.md is not an owned package symlink; preserve it.`, dest);
+			if (info.isFile()) {
+				problem(problems, harness, "legacy-command", `Plain ${dest} is a command file; Install / repair backs it up and replaces it.`, dest);
+			} else {
+				problem(problems, harness, "entry-not-ours", `Unprefixed ${name}.md is not an owned package symlink; preserve it.`, dest);
+			}
 			continue;
 		}
 		let target: string;
@@ -647,6 +660,8 @@ export interface PlannedChange {
 	kind: "json" | "symlink" | "delete";
 	before: string | null;
 	after: string | null;
+	legacyFile?: true;
+	beforeBytes?: Buffer;
 }
 
 export interface PlannedSkip {
@@ -687,6 +702,7 @@ export interface ApplyResult {
 	path: string;
 	applied: boolean;
 	reason?: string;
+	backup?: string;
 }
 
 interface PlanScope {
@@ -941,6 +957,15 @@ async function planSymlink(
 		return;
 	}
 	if (!info.isSymbolicLink()) {
+		if (install && entry.kind === "command" && info.isFile()) {
+			const read = await readCapped(file, true);
+			if (read.state !== "ok" || read.bytes === undefined) {
+				addSkip(skipped, file, "Legacy command file is unreadable or oversized; preserve it.");
+				return;
+			}
+			changes.push({ path: file, kind: "symlink", before: read.text ?? "", after: expected, legacyFile: true, beforeBytes: read.bytes });
+			return;
+		}
 		addSkip(skipped, file, "Destination is not a symlink; preserve it.");
 		return;
 	}
@@ -974,6 +999,7 @@ async function planSymlink(
 async function planLegacyLinks(
 	root: string,
 	pkgRoot: string,
+	install: boolean,
 	changes: PlannedChange[],
 	skipped: PlannedSkip[],
 ): Promise<void> {
@@ -993,7 +1019,16 @@ async function planLegacyLinks(
 			continue;
 		}
 		if (!info.isSymbolicLink()) {
-			addSkip(skipped, file, "Plain legacy command is not owned; preserve it.");
+			if (install && info.isFile()) {
+				const read = await readCapped(file, true);
+				if (read.state !== "ok" || read.bytes === undefined) {
+					addSkip(skipped, file, "Legacy command file is unreadable or oversized; preserve it.");
+					continue;
+				}
+				changes.push({ path: file, kind: "delete", before: read.text ?? "", after: null, legacyFile: true, beforeBytes: read.bytes });
+			} else {
+				addSkip(skipped, file, "Plain legacy command is not owned; preserve it.");
+			}
 			continue;
 		}
 		let target: string;
@@ -1210,7 +1245,7 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 	for (const entry of entries) {
 		if (entry.kind === "command" || entry.kind === "plugin") await planSymlink(root, entry, options.pkgRoot, install, changes, skipped);
 	}
-	await planLegacyLinks(root, options.pkgRoot, changes, skipped);
+	await planLegacyLinks(root, options.pkgRoot, install, changes, skipped);
 	await updateStampPlan(harness, options, install, changes, skipped);
 	return attachScope({ changes, skipped, cliSteps }, [root], options.agentDir);
 }
@@ -1262,7 +1297,7 @@ async function assertPlanPathAllowed(file: string, scope: PlanScope): Promise<vo
 	throw new Error("Planned path is outside resolved harness roots and stamp path.");
 }
 
-async function currentChangeValue(change: PlannedChange): Promise<{ exists: boolean; value?: string; info?: Awaited<ReturnType<typeof lstat>> }> {
+async function currentChangeValue(change: PlannedChange): Promise<{ exists: boolean; value?: string; bytes?: Buffer; info?: Awaited<ReturnType<typeof lstat>> }> {
 	let info;
 	try {
 		info = await lstat(change.path);
@@ -1270,20 +1305,21 @@ async function currentChangeValue(change: PlannedChange): Promise<{ exists: bool
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false };
 		throw error;
 	}
-	if (change.kind === "json") {
+	if (change.kind === "json" || change.legacyFile) {
 		if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CONFIG_BYTES) return { exists: true, info };
-		const read = await readCapped(change.path);
+		const read = await readCapped(change.path, change.legacyFile === true);
 		if (read.state !== "ok") return { exists: true, info };
 		const latest = await lstat(change.path);
 		if (!latest.isFile() || latest.isSymbolicLink() || latest.dev !== info.dev || latest.ino !== info.ino) return { exists: true, info: latest };
-		return { exists: true, value: read.text ?? "", info: latest };
+		return { exists: true, value: read.text ?? "", ...(read.bytes ? { bytes: read.bytes } : {}), info: latest };
 	}
 	if (!info.isSymbolicLink()) return { exists: true, info };
 	return { exists: true, value: await readlink(change.path), info };
 }
 
-function valueMatches(change: PlannedChange, current: { exists: boolean; value?: string }): boolean {
+function valueMatches(change: PlannedChange, current: { exists: boolean; value?: string; bytes?: Buffer }): boolean {
 	if (change.before === null) return !current.exists;
+	if (change.legacyFile) return current.exists && change.beforeBytes !== undefined && current.bytes?.equals(change.beforeBytes) === true;
 	return current.exists && current.value === change.before;
 }
 
@@ -1296,12 +1332,19 @@ async function makeBackup(change: PlannedChange, current: { exists: boolean; val
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	if (change.kind === "json") {
-		if (!current.info?.isFile() || current.info.isSymbolicLink()) throw new Error("Refusing to back up non-regular config file.");
+	if (change.kind === "json" || change.legacyFile) {
+		if (!current.info?.isFile() || current.info.isSymbolicLink()) {
+			throw new Error(change.legacyFile ? "Refusing to back up non-regular legacy command file." : "Refusing to back up non-regular config file.");
+		}
 		await copyFile(change.path, backup, constants.COPYFILE_EXCL);
 		await chmod(backup, current.info.mode & 0o7777);
-		const backupRead = await readCapped(backup);
-		if (backupRead.state !== "ok" || backupRead.text !== change.before) throw new Error("Config changed while creating backup.");
+		const backupRead = await readCapped(backup, change.legacyFile === true);
+		const backupMatches = change.legacyFile
+			? change.beforeBytes !== undefined && backupRead.bytes?.equals(change.beforeBytes) === true
+			: backupRead.text === change.before;
+		if (backupRead.state !== "ok" || !backupMatches) {
+			throw new Error(change.legacyFile ? "Legacy command changed while creating backup." : "Config changed while creating backup.");
+		}
 	} else {
 		if (!current.info?.isSymbolicLink() || current.value === undefined) throw new Error("Refusing to back up non-symlink destination.");
 		await symlink(current.value, backup);
@@ -1320,16 +1363,17 @@ async function assertStillMatches(change: PlannedChange): Promise<boolean> {
 
 async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: string): Promise<ApplyResult> {
 	let temp: string | undefined;
+	let backup: string | undefined;
 	try {
 		await assertPlanPathAllowed(change.path, scope);
 		const current = await currentChangeValue(change);
 		if (!valueMatches(change, current)) return { path: change.path, applied: false, reason: "Path changed since planning or is not an owned regular file/symlink." };
-		await makeBackup(change, current, timestamp);
+		backup = await makeBackup(change, current, timestamp);
 		if (change.kind === "delete") {
 			await assertPlanPathAllowed(change.path, scope);
-			if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no delete performed." };
+			if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no delete performed.", ...(backup ? { backup } : {}) };
 			await unlink(change.path);
-			return { path: change.path, applied: true };
+			return { path: change.path, applied: true, ...(backup ? { backup } : {}) };
 		}
 		const parent = path.dirname(change.path);
 		await mkdir(parent, { recursive: true });
@@ -1350,12 +1394,12 @@ async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: stri
 			await symlink(change.after, temp);
 		}
 		await assertPlanPathAllowed(change.path, scope);
-		if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no write performed." };
+		if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no write performed.", ...(backup ? { backup } : {}) };
 		await rename(temp, change.path);
 		temp = undefined;
-		return { path: change.path, applied: true };
+		return { path: change.path, applied: true, ...(backup ? { backup } : {}) };
 	} catch (error) {
-		return { path: change.path, applied: false, reason: error instanceof Error ? error.message : String(error) };
+		return { path: change.path, applied: false, reason: error instanceof Error ? error.message : String(error), ...(backup ? { backup } : {}) };
 	} finally {
 		if (temp) {
 			try {
