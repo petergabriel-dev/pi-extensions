@@ -146,8 +146,36 @@ test("mutating non-bridge MCP denied while Pi bridge allowed", () => {
 	assert.equal(classifyMcp({ mcp_server_name: "filesystem", mcp_tool_name: "write_file" }).permission, "deny");
 	assert.equal(classifyMcp({ mcp_server_name: "github", mcp_tool_name: "merge_pull_request" }).permission, "ask");
 	assertPermission(run({ event: "beforeMCPExecution", cwd: root, mcp_server_name: "filesystem", mcp_tool_name: "write_file" }), "deny");
-	assertPermission(run({ event: "beforeMCPExecution", cwd: root, mcp_server_name: "pi-claude-bridge", mcp_tool_name: "save_plan" }), "allow");
-	assertPermission(run({ event: "beforeMCPExecution", cwd: root, mcp_server_name: "pi-claude-bridge", mcp_tool_name: "recall_memory" }), "allow");
+	const bridgeArgs = { sessionId: CURSOR.id, harness: "cursor" };
+	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "pi-claude-bridge", mcp_tool_name: "save_plan", tool_input: bridgeArgs }), "allow");
+	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "pi-claude-bridge", mcp_tool_name: "recall_memory", tool_input: JSON.stringify(bridgeArgs) }), "allow");
+});
+
+test("bridge MCP identity binds to Cursor conversation_id", () => {
+	const root = tempPiProject();
+	const call = (overrides = {}) => run({
+		event: "beforeMCPExecution",
+		cwd: root,
+		conversation_id: CURSOR.id,
+		mcp_server_name: "pi-claude-bridge",
+		tool_name: "recall_memory",
+		tool_input: { sessionId: CURSOR.id, harness: "cursor" },
+		...overrides,
+	});
+	assertPermission(call(), "allow");
+	assertPermission(call({ tool_input: JSON.stringify({ sessionId: CURSOR.id, harness: "cursor" }) }), "allow");
+	for (const [label, overrides] of [
+		["missing sessionId", { tool_input: { harness: "cursor" } }],
+		["mismatched sessionId", { tool_input: { sessionId: "other-conversation", harness: "cursor" } }],
+		["wrong harness", { tool_input: { sessionId: CURSOR.id, harness: "claude" } }],
+		["unparseable args", { tool_input: "{not json" }],
+		["array args", { tool_input: "[]" }],
+		["invalid conversation_id", { conversation_id: "../bad" }],
+	]) {
+		const result = call(overrides);
+		assertPermission(result, "deny");
+		assert.match(result.user_message, /Pi bridge MCP/, label);
+	}
 });
 
 test("preToolUse denies Write before bytes reach disk", () => {
@@ -169,6 +197,8 @@ test("live lease allows Cursor shell and tools while leaving MCP policy unchange
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: file, content: "changed\n" } }), "allow");
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Edit" }), "allow");
 	assertPermission(run({ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "apply_patch" }), "allow");
+	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "pi-claude-bridge", tool_name: "send_message", tool_input: { sessionId: CURSOR.id, harness: "cursor" } }), "allow");
+	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "pi-claude-bridge", tool_name: "send_message", tool_input: { sessionId: "forged-conversation", harness: "cursor" } }), "deny");
 	assertPermission(run({ event: "beforeMCPExecution", cwd: root, conversation_id: CURSOR.id, mcp_server_name: "filesystem", mcp_tool_name: "write_file" }), "deny");
 	assert.equal(fs.readFileSync(file, "utf8"), "original\n");
 	assert.deepEqual(fs.readdirSync(paths.requests), []);

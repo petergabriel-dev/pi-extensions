@@ -207,10 +207,39 @@ function mcpToolName(input) {
 	return String(input.mcp_tool_name || input.name || input.toolName || input.tool_name || input.mcp_tool || input.mcpTool || input.tool?.name || "");
 }
 
+function parseMcpToolInput(input) {
+	const raw = input.tool_input ?? input.toolInput ?? input.arguments ?? input.args;
+	if (raw === undefined || raw === null) return null;
+	let value = raw;
+	if (typeof raw === "string") {
+		try { value = JSON.parse(raw); } catch { return null; }
+	}
+	return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function classifyBridgeMcp(input) {
+	const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
+	const conversationId = input.conversation_id;
+	if (!bridgeClient.isSafeId(conversationId)) {
+		return { permission: "deny", reason: "Pi bridge MCP call requires a valid Cursor conversation_id." };
+	}
+	const args = parseMcpToolInput(input);
+	if (!args) {
+		return { permission: "deny", reason: "Pi bridge MCP arguments are missing or unparseable." };
+	}
+	if (args.sessionId !== conversationId) {
+		return { permission: "deny", reason: "Pi bridge MCP sessionId does not match Cursor conversation_id." };
+	}
+	if (args.harness !== "cursor") {
+		return { permission: "deny", reason: "Pi bridge MCP harness must be cursor." };
+	}
+	return { permission: "allow" };
+}
+
 function classifyMcp(input) {
 	const server = serverName(input);
 	const tool = mcpToolName(input);
-	if (PI_BRIDGE_SERVERS.has(server)) return { permission: "allow" };
+	if (PI_BRIDGE_SERVERS.has(server)) return classifyBridgeMcp(input);
 	if (MUTATING_MCP_RE.test(tool)) return { permission: "deny", reason: `MCP tool ${server ? `${server}/` : ""}${tool || "<unknown>"} appears mutating and is not the Pi bridge.` };
 	return { permission: "ask", reason: `MCP tool ${server ? `${server}/` : ""}${tool || "<unknown>"} is not known read-only.` };
 }
@@ -251,7 +280,8 @@ function handle(input) {
 	if (event === "beforeMCPExecution") {
 		const classified = classifyMcp(input);
 		if (classified.permission === "allow") return allow();
-		if (classified.permission === "deny") return deny(`${classified.reason} Use pi-claude-bridge for Pi state.`);
+		const suffix = PI_BRIDGE_SERVERS.has(serverName(input)) ? "" : " Use pi-claude-bridge for Pi state.";
+		if (classified.permission === "deny") return deny(`${classified.reason}${suffix}`);
 		return ask(`${classified.reason} Continue only if this cannot mutate state.`);
 	}
 	if (event === "preToolUse") {

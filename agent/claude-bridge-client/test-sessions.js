@@ -220,7 +220,11 @@ async function assertReadOnlyFallback(cwd) {
 	const bridge = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
 		cwd, session_id: HARNESS.id, tool_name: "mcp__pi-claude-bridge__recall_memory", tool_input: {},
 	}));
-	assert.deepEqual(bridge, {});
+	assert.deepEqual(bridge.hookSpecificOutput, {
+		hookEventName: "PreToolUse",
+		permissionDecision: "allow",
+		updatedInput: { sessionId: HARNESS.id, harness: "claude" },
+	});
 	const read = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
 		cwd, session_id: HARNESS.id, tool_name: "Read", tool_input: {},
 	}));
@@ -304,8 +308,40 @@ async function main() {
 			cwd, tool_name: "Edit", tool_input: {},
 		}));
 		assert.equal(envOnly.hookSpecificOutput.permissionDecision, "deny", "lease identity must come from hook session_id only");
+		const bridge = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+			cwd, session_id: HARNESS.id, tool_name: "mcp__pi-claude-bridge__send_message", tool_input: { text: "hi", claudeSessionId: HARNESS.id },
+		}));
+		assert.deepEqual(bridge.hookSpecificOutput, {
+			hookEventName: "PreToolUse",
+			permissionDecision: "allow",
+			updatedInput: { text: "hi", sessionId: HARNESS.id, harness: "claude" },
+		}, "holder bridge call must still be stamped");
 		assert.equal(fs.readFileSync(paths.presence, "utf8"), before);
 		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, noResponder);
+
+	await test("bridge MCP identity binds to hook session_id", async (cwd) => {
+		const call = (overrides = {}) => runScript("pi-readonly-hook.js", cwd, {
+			cwd, session_id: HARNESS.id, tool_name: "mcp__pi-claude-bridge__recall_memory", tool_input: {}, ...overrides,
+		});
+		const absent = parseReadonlyHook(await call());
+		assert.deepEqual(absent.hookSpecificOutput.updatedInput, { sessionId: HARNESS.id, harness: "claude" });
+		const supplied = parseReadonlyHook(await call({
+			tool_input: { query: "x", sessionId: HARNESS.id, claudeSessionId: HARNESS.id, harness: "claude" },
+		}));
+		assert.deepEqual(supplied.hookSpecificOutput.updatedInput, { query: "x", sessionId: HARNESS.id, harness: "claude" });
+		for (const [label, overrides] of [
+			["mismatched sessionId", { tool_input: { sessionId: "other-session" } }],
+			["mismatched claudeSessionId", { tool_input: { claudeSessionId: "other-session" } }],
+			["wrong harness", { tool_input: { harness: "cursor" } }],
+			["invalid session_id", { session_id: "../bad" }],
+			["missing session_id", { session_id: undefined }],
+			["unreadable tool input", { tool_input: "not-an-object" }],
+		]) {
+			const denied = parseReadonlyHook(await call(overrides));
+			assert.equal(denied.hookSpecificOutput.permissionDecision, "deny", label);
+			assert.match(denied.systemMessage, /Pi bridge MCP call denied/, label);
+		}
 	}, noResponder);
 
 	await test("non-holder lease does not bypass read-only", async (cwd) => {

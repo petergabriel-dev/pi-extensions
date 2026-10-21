@@ -65,6 +65,31 @@ function allow(updatedInput) {
 	};
 }
 
+function isPlainObject(value) {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function bridgeMcpDecision(input) {
+	if (!bridgeClient.isSafeId(input.session_id)) {
+		return deny("Pi bridge MCP call denied: missing or invalid session_id.");
+	}
+	const toolInput = input.tool_input || input.toolInput || input.input;
+	if (!isPlainObject(toolInput)) {
+		return deny("Pi bridge MCP call denied: tool input must be an object.");
+	}
+	if (toolInput.sessionId !== undefined && toolInput.sessionId !== input.session_id) {
+		return deny("Pi bridge MCP call denied: sessionId does not match session_id.");
+	}
+	if (toolInput.claudeSessionId !== undefined && toolInput.claudeSessionId !== input.session_id) {
+		return deny("Pi bridge MCP call denied: claudeSessionId does not match session_id.");
+	}
+	if (toolInput.harness !== undefined && toolInput.harness !== "claude") {
+		return deny("Pi bridge MCP call denied: harness must be claude.");
+	}
+	const { claudeSessionId, ...rest } = toolInput;
+	return allow({ ...rest, sessionId: input.session_id, harness: "claude" });
+}
+
 function shellQuote(value) {
 	return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
@@ -137,6 +162,12 @@ function main() {
 		return;
 	}
 
+	const toolName = String(input.tool_name || input.toolName || "");
+	if (toolName.startsWith(BRIDGE_MCP_PREFIX)) {
+		console.log(JSON.stringify(bridgeMcpDecision(input)));
+		return;
+	}
+
 	try {
 		if (bridgeClient.holdsBuildLease(projectRoot, { harness: "claude", id: input.session_id })) {
 			console.log(JSON.stringify(allow()));
@@ -144,7 +175,6 @@ function main() {
 		}
 	} catch {}
 
-	const toolName = String(input.tool_name || input.toolName || "");
 	if (MUTATION_TOOLS.has(toolName)) {
 		console.log(JSON.stringify(deny(`${toolName} is blocked in Pi project ${projectRoot}. Switch to Pi /mode build for mutations.`)));
 		return;
@@ -168,7 +198,7 @@ function main() {
 		return;
 	}
 
-	if (toolName.startsWith(BRIDGE_MCP_PREFIX) || READ_PASSTHROUGH_TOOLS.has(toolName)) {
+	if (READ_PASSTHROUGH_TOOLS.has(toolName)) {
 		console.log(JSON.stringify(allow()));
 		return;
 	}
