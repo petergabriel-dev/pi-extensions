@@ -40,6 +40,14 @@ The plugin overwrites `sessionId` and `harness` from OpenCode's host `sessionID`
 6. On success, inspect the diff and commit the task before calling `tick_plan_task` once. Never tick before commit or edit the saved plan to mark progress.
 7. Report task, commit, verification, deviations, and next tracker task. Stop for user confirmation before advancing.
 
+## Build lease refusals
+
+On any refusal below, stop before editing or running shell commands. Never retry in a loop, poll, change identity, or bypass the lease.
+
+- `build_lease_pending`: quote the exact message, including its short id, then tell the user to approve that id in Pi with `/build-lease approve` and rerun `/pi-build`.
+- `build_lease_no_approval`: stop and explain that a Build lease can only be approved in interactive Pi; headless Pi cannot approve.
+- `build_lease_required` from `tick_plan_task`: stop and ask the user to re-approve the Build lease in interactive Pi with `/build-lease approve`, then rerun `/pi-build`.
+
 ## Generic build loop outside Pi
 
 Clarify unclear requirements; inspect relevant code; make the smallest requested change; run relevant checks. For an approved plan, read the current task and context and execute one task at a time. If any check fails, stop and report without committing. On success, inspect the diff and status, run `git diff --check`, make a task-specific commit, then report changes and verification. Do not call Pi bridge tools.
