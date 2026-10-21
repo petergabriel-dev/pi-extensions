@@ -48,9 +48,9 @@
 
 - `/harness` may write only inside resolved, classified Claude/Cursor/OpenCode roots and `<agentDir>/harness-setup.json`; package-root classification must permit the operation.
 - Every apply requires a visible plan preview and explicit confirmation. Apply re-reads each changed path before mutation; a changed preimage aborts that file, while independent planned changes continue.
-- Preserve foreign config entries and user-owned Claude `statusLine` and command files. Never replace or delete destinations not owned by this package.
+- Preserve foreign config entries, user-owned Claude `statusLine`, and command files outside Pi command names. On Install / repair only, readable regular files ≤1 MiB at `commands/{discuss,plan,build}.md` and `commands/pi-{discuss,plan,build}.md` may be replaced or removed only after preview, explicit confirmation, and a sibling backup with original mode verified byte-for-byte against the planned preimage; oversized/unreadable files are preserved. Uninstall never touches plain files; all other foreign/user-owned destinations and symlinks outside the selected package remain untouched.
 - Config inspection accepts bounded strict JSON only. Unparseable, JSONC, malformed, oversized, or unreadable config is skipped without writing that file; independent planned files may proceed.
-- Back up every existing destination, including owned symlinks, before replacement or deletion. Cursor hook config must retain `failClosed: true`.
+- Back up every existing destination selected for replacement or deletion, including owned symlinks and eligible plain Pi command files, before mutation; verify the backup against the planned preimage. Cursor hook config must retain `failClosed: true`.
 - Startup health checks are stamp-gated by `<agentDir>/harness-setup.json`, inspect files only, and are advisory; they never rewrite config or run harness CLIs.
 
 ## Discussion notes

@@ -168,6 +168,7 @@
 ## Harness setup
 
 - **Remove Cursor setup before removing the package.** Cursor hooks use `failClosed: true` and can block tools globally after their hook runtime disappears. Run `/harness`, select Cursor → Uninstall, then `pi remove`.
+- **Install/repair replaces plain files at Pi command names.** Readable regular files up to 1 MiB at `commands/{discuss,plan,build}.md` and `commands/pi-{discuss,plan,build}.md`, including hand-copied or unrelated commands, may be replaced or removed after preview and confirmation; each gets a mode-preserving, byte-verified sibling backup named `*.md.harness-bak-<ts>`. Oversized or unreadable files are preserved. Review the diff; restore with `mv <backup> <original>`. Uninstall leaves plain files untouched. Live dogfood confirmed backup siblings are not listed as commands in Claude Code or OpenCode.
 - **Cursor global command discovery is unverified.** `/harness` installs global `pi-*` commands, but real Cursor discovery has not been confirmed. Workaround: copy the packaged `agent/harness-commands/cursor/pi-*.md` files into a consumer project's `.cursor/commands/`. This repository's `.cursor/commands/pi-*` symlinks are repo-only.
 - **Claude no-lease Bash is platform-dependent.** In `.pi` projects, Seatbelt sandboxing is available only on macOS; elsewhere Bash is denied closed. Do not fall back to unsandboxed approval.
 - **Harness config must be strict JSON.** JSONC, malformed, unreadable, or oversized config is unsupported; `/harness` skips that file without writing it, while independent planned files may proceed.
