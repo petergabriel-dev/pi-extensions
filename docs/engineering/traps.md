@@ -196,9 +196,10 @@
 - Build completion releases the lease as soon as the final task tick lands. Commit first, then tick; a post-tick commit can be denied (`agent/harness-commands/*/build.md`, `.cursor/commands/pi-build.md`).
 - Tree navigation can restore Pi directly into Build without calling `setMode`. `session_tree` re-emits `workflow-modes:changed`; the bridge re-reads state and revokes a held lease when restored mode is Build. Do not assume `/mode build` guard is the only path into Build.
 - Pi Off is intentionally unguarded. Treat it as opting out of workflow guardrails, not as an exclusive-writer guarantee.
-- If a harness exits while Pi stays live, its lease does not expire by time; inspect `/build-lease` and explicitly run `/build-lease release` before another harness builds. If Pi exits/crashes instead, stale presence fails closed after the five-second heartbeat TTL; a stale lease field does not authorize writes.
+- A granted harness lease has fixed four-hour expiry (`expiresAt`). Repeated `/pi-build` does not extend it; if expiry lands mid-build, the next write or tick is denied. Stop and request fresh human approval in interactive Pi, then rerun `/pi-build`. Headless Pi returns `build_lease_no_approval` without recording a request.
+- If a harness exits while Pi stays live, holder unpair or `/build-lease release` revokes its lease; otherwise it remains until lifecycle change or four-hour expiry. If Pi exits/crashes, stale presence fails closed after the five-second heartbeat TTL; a stale lease field never authorizes writes.
 - OpenCode task subagents may have a different host `sessionID` from their parent. If identity differs, their writes remain read-only; unit tests do not prove identity inheritance. Verify only in isolated live acceptance.
-- **Lease can be self-granted without a human.** `save_plan` accepts agent-asserted `confirmed:true`, then `recall(mode:"build")` grants the lease; release matches identity supplied in MCP arguments (`agent/extensions/claude-bridge/index.ts:599-606,823-827`; `agent/extensions/claude-bridge/build-lease.ts:82-89`). `ADR-0045` F1.
+- **Self-grant trap fixed by ADR-0047.** Build recall creates or refreshes a pending request; only human confirmation in interactive Pi `/build-lease approve` grants after revalidation. Agent-supplied `save_plan` confirmation does not authorize a lease.
 
 ## Personal memory and discussion notes
 

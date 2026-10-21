@@ -246,7 +246,7 @@ done
 | Root package, twelve entrypoints, four skills, two agents, six bridge runtimes, nine harness templates | `npm run check` (includes read-only `check:docs`) | Source header lists twelve extensions once; clean packed artifact loads and discovers bundled explorer/worker; decision index, spokes, and ADRs are current. |
 | `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
-| `claude-bridge` | Live `test-core-protocol.js` procedure below | Footer says active; recall/capture/save/validation plus plan task read/tick are visible through live owners. |
+| `claude-bridge` | Live `test-core-protocol.js` procedure below; interactive Pi approval required, bounded wait ≤120s | Footer says active; protocol covers pending/no lease, operator-approved lease with four-hour expiry, holder/non-holder ticks, and live owner dispatch. |
 | `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |
 | `engineering-docs` | `npm --prefix agent/extensions/engineering-docs test`; `npm run check:docs` | `/docs check --check` reports managed docs, healthy spokes/ADRs/tags, and full-content current index. |
 | `filechanges` | Package load/inventory; no dedicated unit suite | Make disposable `edit`/`write`, inspect cumulative diff, verify accept keeps and decline restores/deletes. |
@@ -256,9 +256,9 @@ done
 | `workflow-modes` | `npm --prefix agent/extensions/workflow-modes test` and `npm --prefix agent/extensions/workflow-modes run typecheck` | Switch modes; verify session-scoped plan body/pointer restoration, tracker progress, Caveman restoration, and read-only gates. |
 | `ask-user-question` | `npm run test:ask-user-question` | Queue/relay tests cover model-child FIFO, source-scoped cancellation, RPC select/input, Other, free text, and unavailable/dismissed paths. |
 | `harness-setup` | `npm run test:harness-setup` | Isolated setup acceptance covers install/repair/idempotence/uninstall, backups, startup warning, root classification, re-extraction, the Claude PreToolUse exit-2 guard, and unguarded-own-entry repair; Cursor real global-command discovery remains unverified. |
-| Claude MCP client + read-only hook | `npm run test:bridge-client`; live core protocol test covers MCP dispatch and bridge-down behavior | `claude mcp list`; no-lease mutation denial, unknown/foreign ask, crash deny, and sandbox behavior; lease Build acceptance is a separate live gate. |
-| Cursor MCP/hooks/commands | `npm run test:cursor` and `npm run test:cursor-kit` | Hook/MCP classification, allowlisted shell segments, deny-unknown `preToolUse`, lease-holder allow, neutral commands, and commit nudge; real Cursor global-command discovery remains unverified. |
-| OpenCode plugin and shipped commands | `npm run test:opencode` plus root package check | `/harness` installs user-global plugin/MCP/commands; OpenCode v2.0.32 loaded the plugin and `pi-*` commands in isolated acceptance. The plugin allowlists reads/bridge/shell/`execute` and throws on unknown/foreign names. Live lease Build acceptance requires a separate isolated run. |
+| Claude MCP client + read-only hook | `npm run test:bridge-client`; live core protocol test covers MCP dispatch and bridge-down behavior | `claude mcp list`; no-lease mutation denial, unknown/foreign ask, crash deny, sandbox behavior, and Phase 3 lease approval/expiry acceptance (ADR-0047). |
+| Cursor MCP/hooks/commands | `npm run test:cursor` and `npm run test:cursor-kit` | Hook/MCP classification, identity mismatch denial, lease-holder allow, neutral commands, and commit nudge; approval/identity flow passed in operator-reported isolated acceptance; real Cursor global-command discovery remains unverified. |
+| OpenCode plugin and shipped commands | `npm run test:opencode` plus root package check | `/harness` installs user-global plugin/MCP/commands; OpenCode v2.0.32 loaded the plugin and `pi-*` commands in isolated acceptance. The plugin allowlists reads/bridge/shell/`execute` and throws on unknown/foreign names. Lease approval flow passed in operator-reported isolated acceptance (ADR-0047); subagent `sessionID` inheritance remains not-verified. |
 | Bridge clients under load | Not in root gate | Run dedicated stress harness only against an active disposable bridge and clean all state afterward. |
 
 ## Saved plan workflow
@@ -272,7 +272,7 @@ done
 
 ## Harness Build leases
 
-External `/pi-build` requires an active saved plan and a live Pi session outside Pi Build mode. The bridge grants one lease per Pi session to a paired Claude, Cursor, or OpenCode identity; hooks allow writes only for that matching fresh presence identity. `/build-lease` in Pi shows the holder; `/build-lease release` clears a stale lease when the harness exits while Pi remains live. Holder Discuss/Plan recall, plan clear/switch/completion, and bridge/session shutdown release the lease. Pi `/mode build` is blocked while leased; Pi Off is intentionally unguarded. Build templates commit before the final task tick because completion releases the lease.
+External `/pi-build` needs an active saved plan, paired harness peer, and Pi outside Build. First request returns `build_lease_pending` with no writes; only interactive Pi `/build-lease approve` can grant after confirmation and fresh plan/pairing/mode/holder checks. Approve the exact short id shown, then rerun `/pi-build`; headless Pi returns `build_lease_no_approval` without recording a request. A grant expires at `expiresAt = grantedAt + 4 hours`; hooks require fresh presence, unexpired lease, and matching host identity. Only the active holder may tick tasks; a non-holder or expired lease returns `build_lease_required`. `/build-lease` shows holder, remaining time, and pending requests; `/build-lease release` clears the lease. Holder Discuss/Plan recall or unpair, plan clear/switch/completion, Pi Build mode, expiry, and bridge/session lifecycle revoke it. Expiry mid-build denies the next write or tick; stop and ask for re-approval. Pi `/mode build` is blocked while leased; Pi Off is intentionally unguarded. Commit before the final task tick because completion releases the lease.
 
 ## Isolated live bridge protocol test
 
@@ -312,7 +312,7 @@ Terminal B, same repository root:
 node agent/claude-bridge-client/test-core-protocol.js "/path/to/PI_PROJECT_DIR"
 ```
 
-Expected: all core protocol checks pass, including MCP plan-task dispatch. Return to Terminal A, enter `/quit`, wait for process exit, then let `cleanup` remove temporary state.
+The test prints `ACTION REQUIRED` with the exact `<harness>:<first 8 id chars>` short id and waits up to 120 seconds. In Terminal A, run `/build-lease approve`, review that exact peer, plan/progress, and four-hour expiry, then confirm. Do not approve a different id. The test then verifies the four-hour expiry field in presence and holder-only ticks. Expected: all core protocol checks pass, including pending-without-lease and MCP plan-task dispatch. Return to Terminal A, enter `/quit`, wait for process exit, then let `cleanup` remove temporary state.
 
 Confirm cleanup:
 
@@ -368,7 +368,7 @@ Expected: Claude settings parse and MCP points at the extracted absolute package
 
 1. Launch Pi in the target project; confirm `Claude bridge: active` and intended nearest `.pi` root.
 2. In Pi, run `/harness`, choose Claude → **Install / repair**, review the preview, and confirm. The extension manages its MCP registration, hooks, statusLine, and `pi-*` commands without replacing foreign settings. Verify with `claude mcp get pi-claude-bridge` and `claude mcp list`.
-3. Use `/pi-discuss` or `/pi-plan` for read-only work. Use `/pi-build` only with an active saved plan while Pi is not in Build mode; host session identity must hold the lease for mutations. In Pi, use `/build-lease` to inspect or release the holder.
+3. Use `/pi-discuss` or `/pi-plan` for read-only work. Use `/pi-build` only with an active saved plan while Pi is not in Build mode. On `build_lease_pending`, stop before edits or shell, show the short id, and ask the user to approve it in interactive Pi with `/build-lease approve`; then rerun `/pi-build`. On `build_lease_no_approval` or `build_lease_required`, stop and ask for interactive approval/re-approval. Never retry with another identity. `/build-lease` shows holder, expiry, and pending requests.
 
 ### Claude bridge live acceptance
 
@@ -393,7 +393,7 @@ Ran in a disposable project with isolated `PI_CODING_AGENT_DIR`, mode-0600 auth/
 - (d) Backdating A's heartbeat by more than 10m and claiming another namespace triggered GC; A's old namespace disappeared, and same-ID resume restored no peers.
 - (e) Shutting down with one outbound message pending dropped it and emitted `claude-bridge dropped 1 pending peer message(s) on shutdown`.
 
-Existing bridge acceptance remains: `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan; `capture_note` updates live Pi Notes UI through `discussion-notes`; `validate_docs_tags` uses engineering-docs validator; `save_plan` appears in Pi `/plan view`; `read_plan_tasks` and `tick_plan_task` use the live branch-backed tracker. Without a matching fresh lease, Claude mutation tools deny; no-lease Bash is sandboxed only on macOS and denied closed elsewhere. Lease-based cross-harness Build acceptance is a separate live gate.
+Existing bridge acceptance remains: `recall_memory` returns canonical docs, compact personal-memory index, live prompts, and selected-branch saved plan; `capture_note` updates live Pi Notes UI through `discussion-notes`; `validate_docs_tags` uses engineering-docs validator; `save_plan` appears in Pi `/plan view`; `read_plan_tasks` and `tick_plan_task` use the live branch-backed tracker. Without a matching fresh lease, Claude mutation tools deny; no-lease Bash is sandboxed only on macOS and denied closed elsewhere. Phase 3 lease approval/identity flows were reported passing in isolated acceptance; see ADR-0047. The TUI input-injection assumption remains not-verified, and OpenCode subagent `sessionID` inheritance remains not-verified.
 
 ## Cursor bridge workflow
 
@@ -401,11 +401,11 @@ Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and bridge command template
 
 1. Launch Pi and confirm intended bridge root. For package consumers, run `/harness`, choose Cursor → **Install / repair**, inspect the preview, and confirm.
 2. Open the same root in Cursor.
-3. Use `/pi-discuss` or `/pi-plan`; pass `conversation_id` as `sessionId` when available. `/pi-build` requires Cursor's host `conversation_id` and an active saved plan; without a valid matching lease, hooks stay read-only.
+3. Use `/pi-discuss` or `/pi-plan`. Cursor bridge MCP calls require safe host `conversation_id` and matching `sessionId` plus `harness: "cursor"`; missing or mismatched identity is denied. `/pi-build` requires an active saved plan; without an approved, unexpired lease, hooks stay read-only.
 4. If real Cursor does not discover global commands, use project-local copies of packaged `agent/harness-commands/cursor/pi-*.md` in `.cursor/commands/`. Real global-command discovery remains unverified.
 5. Verify recall/capture/save plus `read_plan_tasks`/`tick_plan_task` through `pi-claude-bridge`.
-6. Without a matching lease, verify shell classification, non-bridge MCP policy, and `Write` denial from `preToolUse`; the holder is allowed on shell and `Write`.
-7. Use Pi `/build-lease` to inspect/release the holder. Pi `/mode build` is blocked while leased.
+6. Before approval, verify shell/MCP policy and `Write` denial; pending approval must not authorize writes. After approving the exact short id in Pi, verify only the matching holder is allowed. Forged identity and expired/missing-expiry lease stay denied; only the holder may tick.
+7. Pi `/build-lease` shows holder, remaining time, and pending requests; use `/build-lease release` when needed. Pi `/mode build` is blocked while leased.
 
 Focused hook gates:
 
@@ -421,9 +421,9 @@ Use `/harness` to install/repair the user-global plugin, MCP config, and `pi-*` 
 1. Start Pi in the target `.pi` project and leave Pi outside Build mode; save/select an active plan.
 2. In Pi, run `/harness`, choose OpenCode → **Install / repair**, inspect the preview, and confirm.
 3. Open the same project root in OpenCode.
-4. Use `/pi-discuss` or `/pi-plan` for read-only work, then `/pi-build` to request the Pi lease. Build templates search Code Mode before each bridge MCP call; do not call the exposed MCP tool directly or supply a model-invented session identity.
-5. Verify holder with Pi `/build-lease`; use `/build-lease release` to revoke a stale holder. Pi `/mode build` is refused while a lease is held.
-6. Run live acceptance in an isolated project; unit tests do not establish OpenCode session or subagent identity behavior.
+4. Use `/pi-discuss` or `/pi-plan` for read-only work, then `/pi-build` to request a lease. On `build_lease_pending`, stop before edits or shell and ask the user to approve the exact short id in interactive Pi; rerun `/pi-build` only after approval. Headless Pi cannot approve. Build templates search Code Mode before each bridge MCP call; do not call the exposed MCP tool directly or supply a model-invented session identity.
+5. Pi `/build-lease` shows holder, remaining time, and pending requests; use `/build-lease release` to revoke a stale holder. Leases expire after four hours; expiry mid-build denies the next write or tick and requires re-approval. Pi `/mode build` is refused while a lease is held.
+6. Phase 3 approval/write flow passed in operator-reported isolated acceptance (ADR-0047). OpenCode subagent `sessionID` inheritance remains not-verified; unit tests do not establish it.
 
 ## Cursor-neutral workflow
 
