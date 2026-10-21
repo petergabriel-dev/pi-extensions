@@ -970,30 +970,46 @@ async function planSymlink(
 		return;
 	}
 	let raw: string;
-	let target: string;
-	let packagePath: string;
 	try {
-		[raw, target, packagePath] = await Promise.all([readlink(file), realpath(file), realpath(pkgRoot)]);
+		raw = await readlink(file);
 	} catch {
 		addSkip(skipped, file, "Symlink target cannot be verified; preserve it.");
 		return;
 	}
-	if (!inside(packagePath, target)) {
+	let packagePath: string;
+	try {
+		packagePath = await realpath(pkgRoot);
+	} catch {
+		addSkip(skipped, file, "Symlink target cannot be verified; preserve it.");
+		return;
+	}
+	let target: string | undefined;
+	try {
+		target = await realpath(file);
+	} catch {
+		// Match inspection: dangling owned links are classified by their raw target.
+	}
+	if (target !== undefined && inside(packagePath, target)) {
+		if (!install) {
+			changes.push({ path: file, kind: "delete", before: raw, after: null });
+		} else {
+			let expectedTarget: string;
+			try {
+				expectedTarget = await realpath(expected);
+			} catch {
+				addSkip(skipped, file, "Expected package asset cannot be verified.");
+				return;
+			}
+			if (target !== expectedTarget) changes.push({ path: file, kind: "symlink", before: raw, after: expected });
+		}
+		return;
+	}
+	if (!looksLikeOwnedTarget(target ?? raw, entry.script)) {
 		addSkip(skipped, file, "Symlink target is outside selected package; preserve it.");
 		return;
 	}
-	if (!install) {
-		changes.push({ path: file, kind: "delete", before: raw, after: null });
-	} else {
-		let expectedTarget: string;
-		try {
-			expectedTarget = await realpath(expected);
-		} catch {
-			addSkip(skipped, file, "Expected package asset cannot be verified.");
-			return;
-		}
-		if (target !== expectedTarget) changes.push({ path: file, kind: "symlink", before: raw, after: expected });
-	}
+	if (!install) changes.push({ path: file, kind: "delete", before: raw, after: null });
+	else changes.push({ path: file, kind: "symlink", before: raw, after: expected });
 }
 
 async function planLegacyLinks(
