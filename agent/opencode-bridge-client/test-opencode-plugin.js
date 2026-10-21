@@ -106,6 +106,8 @@ async function main() {
 		await withProject({ lease: true }, async (root) => {
 			const { handler } = setup(root);
 			await handler({ tool: "edit", sessionID: OPENCODE.id, input: { filePath: "note.txt" } });
+			await handler({ tool: "apply_patch", sessionID: OPENCODE.id, input: {} });
+			await handler({ tool: "mcp__github__merge_pull_request", sessionID: OPENCODE.id, input: {} });
 		});
 	});
 
@@ -134,6 +136,28 @@ async function main() {
 				);
 			}
 			await handler({ tool: "execute", sessionID: OPENCODE.id, input: { code: "return 1" } });
+		});
+	});
+
+	await test("non-holder read tools and bridge tools pass", async () => {
+		await withProject({}, async (root) => {
+			const { handler } = setup(root);
+			for (const tool of ["read", "grep", "glob", "list", "todoread", "webfetch"]) {
+				await handler({ tool, sessionID: OPENCODE.id, input: {} });
+			}
+			await handler({ tool: "pi-claude-bridge_recall_memory", sessionID: OPENCODE.id, input: {} });
+		});
+	});
+
+	await test("patch, unknown, and foreign MCP tools throw with the tool name", async () => {
+		await withProject({}, async (root) => {
+			const { handler } = setup(root);
+			for (const tool of ["apply_patch", "patch", "unknown_tool", "filesystem_write_file", "github_merge_pull_request", "mcp__github__merge_pull_request"]) {
+				await assert.rejects(
+					handler({ tool, sessionID: OPENCODE.id, input: {} }),
+					new RegExp(`${tool} is not an allowlisted read-only tool`),
+				);
+			}
 		});
 	});
 

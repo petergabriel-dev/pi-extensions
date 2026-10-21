@@ -5,6 +5,9 @@ const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
 const readonlyHook = require("../claude-bridge-client/pi-readonly-hook.js");
 
 const BRIDGE_TOOL_PREFIX = "pi-claude-bridge_";
+const READ_TOOLS = new Set(["read", "grep", "glob", "list", "ls", "find", "todoread", "webfetch", "websearch", "skill", "question"]);
+// Code Mode dispatches nested tools through this hook, so the dispatcher itself must stay callable.
+const PASSTHROUGH_TOOLS = new Set(["execute"]);
 const MUTATION_TOOLS = new Set([
 	"edit",
 	"write",
@@ -56,6 +59,8 @@ export default {
 			// Code Mode dispatches nested tools through this hook; keep it available for bridge recall.
 			if (bridgeClient.holdsBuildLease(projectRoot, { harness: "opencode", id: event.sessionID })) return;
 
+			if (toolName.startsWith(BRIDGE_TOOL_PREFIX)) return;
+
 			if (MUTATION_TOOLS.has(toolName)) {
 				throw new Error(`OpenCode ${toolName} is blocked in Pi project ${projectRoot}. ${leaseNextStep(projectRoot)}`);
 			}
@@ -69,7 +74,12 @@ export default {
 					throw new Error(`OpenCode shell is blocked in Pi project ${projectRoot}: macOS Seatbelt sandbox is unavailable. ${leaseNextStep(projectRoot)} Use a supported macOS sandbox to run shell without a lease.`);
 				}
 				input.command = wrapped;
+				return;
 			}
+
+			if (READ_TOOLS.has(toolName) || PASSTHROUGH_TOOLS.has(toolName)) return;
+
+			throw new Error(`OpenCode ${toolName} is not an allowlisted read-only tool in Pi project ${projectRoot}. ${leaseNextStep(projectRoot)}`);
 		});
 	},
 };
