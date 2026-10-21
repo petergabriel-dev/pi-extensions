@@ -272,9 +272,9 @@ async function showPreview(ctx: ExtensionCommandContext, content: string): Promi
 	return ctx.ui.custom<boolean>((tui, theme, _keybindings, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+		container.addChild(new Text(theme.fg("dim", "↑↓ / PgUp/PgDn scroll • Enter continue • Esc back"), 1, 0));
 		const scroll = new ScrollView(new Markdown(content, 1, 0, getMarkdownTheme()), { scrollbar: "auto", overscroll: "contain" });
 		container.addChild(scroll);
-		container.addChild(new Text(theme.fg("dim", "↑↓ scroll • enter continue • esc back"), 1, 0));
 		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 		return {
 			render: (width) => container.render(width),
