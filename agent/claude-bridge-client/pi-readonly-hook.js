@@ -9,6 +9,8 @@ const path = require("node:path");
 const bridgeClient = require("./pi-bridge-mcp.js");
 
 const MUTATION_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const BRIDGE_MCP_PREFIX = "mcp__pi-claude-bridge__";
+const READ_PASSTHROUGH_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch", "TodoRead", "BashOutput", "TaskOutput"]);
 function isDir(p) {
 	try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
@@ -37,6 +39,16 @@ function deny(reason) {
 		hookSpecificOutput: {
 			hookEventName: "PreToolUse",
 			permissionDecision: "deny"
+		},
+		systemMessage: reason
+	};
+}
+
+function ask(reason) {
+	return {
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse",
+			permissionDecision: "ask"
 		},
 		systemMessage: reason
 	};
@@ -156,9 +168,20 @@ function main() {
 		return;
 	}
 
-	console.log(JSON.stringify(allow()));
+	if (toolName.startsWith(BRIDGE_MCP_PREFIX) || READ_PASSTHROUGH_TOOLS.has(toolName)) {
+		console.log(JSON.stringify(allow()));
+		return;
+	}
+
+	console.log(JSON.stringify(ask(`${toolName || "Unknown tool"} is not an allowlisted read-only tool in Pi project. Switch to Pi /mode build for mutations.`)));
 }
 
 module.exports = { wrapBashForSandbox };
 
-if (require.main === module) main();
+if (require.main === module) {
+	try {
+		main();
+	} catch (error) {
+		console.log(JSON.stringify(deny(`Pi read-only hook failed closed: ${error instanceof Error ? error.message : String(error)}.`)));
+	}
+}

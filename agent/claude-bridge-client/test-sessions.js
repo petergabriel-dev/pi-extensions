@@ -141,9 +141,9 @@ function startMailboxResponder(cwd, initialMessages = [], failedAcks = 0) {
 	return { requests, stop: () => clearInterval(timer) };
 }
 
-function runScript(scriptName, cwd, input, processCwd = cwd) {
+function runScript(scriptName, cwd, input, processCwd = cwd, env = process.env) {
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [path.join(__dirname, scriptName)], { cwd: processCwd, stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn(process.execPath, [path.join(__dirname, scriptName)], { cwd: processCwd, stdio: ["pipe", "pipe", "pipe"], env });
 		let stdout = "";
 		let stderr = "";
 		const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
@@ -201,6 +201,24 @@ async function assertReadOnlyFallback(cwd) {
 		cwd, session_id: HARNESS.id, tool_name: "Bash", tool_input: { command: "echo read-only" },
 	}));
 	assertBashUsesExistingPolicy(bash);
+	const foreign = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+		cwd, session_id: HARNESS.id, tool_name: "mcp__github__merge_pull_request", tool_input: {},
+	}));
+	assert.equal(foreign.hookSpecificOutput.permissionDecision, "ask");
+	assert.match(foreign.systemMessage, /merge_pull_request/);
+	const unknown = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+		cwd, session_id: HARNESS.id, tool_name: "apply_patch", tool_input: {},
+	}));
+	assert.equal(unknown.hookSpecificOutput.permissionDecision, "ask");
+	assert.match(unknown.systemMessage, /apply_patch/);
+	const bridge = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+		cwd, session_id: HARNESS.id, tool_name: "mcp__pi-claude-bridge__recall_memory", tool_input: {},
+	}));
+	assert.deepEqual(bridge, {});
+	const read = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+		cwd, session_id: HARNESS.id, tool_name: "Read", tool_input: {},
+	}));
+	assert.deepEqual(read, {});
 }
 
 async function waitFor(fn, timeoutMs = 1_000) {
@@ -270,6 +288,10 @@ async function main() {
 			cwd, session_id: HARNESS.id, tool_name: "Bash", tool_input: { command: "echo unsandboxed" },
 		}));
 		assert.deepEqual(bash, {});
+		const foreign = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+			cwd, session_id: HARNESS.id, tool_name: "mcp__github__merge_pull_request", tool_input: {},
+		}));
+		assert.deepEqual(foreign, {});
 		const envOnly = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
 			cwd, tool_name: "Edit", tool_input: {},
 		}));
@@ -326,6 +348,27 @@ async function main() {
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), true);
 		const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
 		assert.ok(elapsedMs < 50, `lease lookup took ${elapsedMs.toFixed(2)}ms`);
+	}, noResponder);
+
+	await test("readonly hook fails closed when scratch creation throws", async (cwd) => {
+		const sandboxAvailable = process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC !== "1"
+			&& process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec");
+		if (!sandboxAvailable) {
+			console.log("SKIP crash case: sandbox-exec unavailable");
+			return;
+		}
+		const scratch = path.join(cwd, "unwritable");
+		fs.mkdirSync(scratch);
+		fs.chmodSync(scratch, 0o500);
+		try {
+			const output = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+				cwd, session_id: HARNESS.id, tool_name: "Bash", tool_input: { command: "echo read-only" },
+			}, cwd, { ...process.env, TMPDIR: scratch }));
+			assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
+			assert.match(output.systemMessage, /failed closed/);
+		} finally {
+			fs.chmodSync(scratch, 0o700);
+		}
 	}, noResponder);
 
 	await test("single live session auto-pairs then routes request", async (cwd, responder) => {
