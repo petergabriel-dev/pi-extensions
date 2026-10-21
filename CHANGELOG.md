@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-21
+
+### Changed
+
+- External `/pi-build` leases need human approval: the first build recall returns `build_lease_pending`; run Pi `/build-lease approve` for the shown short id, then rerun. Headless Pi returns `build_lease_no_approval`.
+- Leases expire 4 hours after grant; unpairing the holder revokes it; only the holder can tick plan tasks (`build_lease_required`). `/build-lease` shows remaining time and pending requests.
+- Claude PreToolUse hook asks on unknown tools, `Task`/`Agent`, and foreign MCP tools; hook errors deny.
+- Cursor shell commands are classified per segment against a read allowlist; dynamic syntax, interpreters, and unknown commands ask; unknown `preToolUse` tools deny.
+- OpenCode plugin passes only read, bridge, sandboxed shell, and Code Mode tools; others throw.
+
+### Fixed
+
+- Claude and Cursor hooks bind Pi bridge MCP identity to the host session; forged `sessionId`/`harness` arguments deny.
+- `/harness` adds `|| exit 2` to the Claude PreToolUse hook so a hook that cannot start blocks the call.
+
+### Upgrade
+
+- Rerun `/harness` → Install / repair for Claude (inspection reports `unguarded-hook`). Leases from before 0.9.2 (no `expiresAt`) are not honored; request and approve a new one.
+
 ## [0.9.1] - 2026-10-21
 
 ### Fixed
