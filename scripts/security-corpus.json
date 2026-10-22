@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "seed-read-shell",
+      "class": "read",
+      "kind": "shell",
+      "command": "ls",
+      "expect": {
+        "claude": { "darwin": "wrap", "linux": "deny" },
+        "cursor": "allow",
+        "opencode": { "darwin": "wrap", "linux": "throw" },
+        "pi-discuss": ["wrap", "allow"],
+        "pi-plan": ["wrap", "allow"]
+      }
+    },
+    {
+      "id": "seed-write-shell",
+      "class": "write",
+      "kind": "shell",
+      "command": "printf mutated > seed.txt",
+      "expect": {
+        "claude": { "darwin": "wrap", "linux": "deny" },
+        "cursor": "deny",
+        "opencode": { "darwin": "wrap", "linux": "throw" },
+        "pi-discuss": "deny",
+        "pi-plan": "deny"
+      }
+    }
+  ]
+}
