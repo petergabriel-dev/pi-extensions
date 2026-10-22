@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -26,13 +27,32 @@ const OUTCOMES = new Set(["allow", "wrap", "ask", "deny", "throw"]);
 const CLASSES = new Set(["read", "write", "ambiguous"]);
 const PLATFORM_KEYS = new Set(["darwin", "linux", "sandbox-disabled", "default"]);
 const EXEC_TIMEOUT_MS = 10_000;
+const LEASE_TTL_MS = 4 * 60 * 60 * 1000;
+const LEASE_STATES = new Set([
+	"none",
+	"holder-self",
+	"holder-other",
+	"expired",
+	"missing-expiry",
+	"stale-heartbeat",
+	"double-paired",
+	"cross-session",
+] as const);
 
 type Column = (typeof COLUMNS)[number];
+type HarnessColumn = "claude" | "cursor" | "opencode";
 type Outcome = "allow" | "wrap" | "ask" | "deny" | "throw";
 type CaseClass = "read" | "write" | "ambiguous";
+type LeaseState = "none" | "holder-self" | "holder-other" | "expired" | "missing-expiry" | "stale-heartbeat" | "double-paired" | "cross-session";
 type Expectation = string | string[] | Record<string, string | string[]>;
 type ExpectationMap = Partial<Record<Column, Expectation>>;
 type CorpusDefaults = Partial<Record<CaseClass, ExpectationMap>>;
+
+const HARNESS_IDENTITIES: Record<HarnessColumn, { harness: HarnessColumn; id: string }> = {
+	claude: { harness: "claude", id: "claude-security-seed" },
+	cursor: { harness: "cursor", id: "cursor-security-seed" },
+	opencode: { harness: "opencode", id: "opencode-security-seed" },
+};
 
 interface SecurityCase {
 	id: string;
@@ -43,6 +63,7 @@ interface SecurityCase {
 	server?: string;
 	input?: unknown;
 	identity?: string | null;
+	lease?: LeaseState;
 	execute: boolean;
 	knownGap?: string;
 	columns?: Column[];
@@ -181,6 +202,11 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	if (toolKind && (!columns || columns.some((column) => column.startsWith("pi-")))) {
 		fail(`case ${id}: ${kind} cases must pin Claude, Cursor, or OpenCode columns`);
 	}
+	const lease = value.lease;
+	if (lease !== undefined) {
+		if (typeof lease !== "string" || !LEASE_STATES.has(lease as LeaseState)) fail(`case ${id}: unknown lease state ${JSON.stringify(lease)}`);
+		if (!columns || columns.some((column) => column.startsWith("pi-"))) fail(`case ${id}: lease cases must pin Claude, Cursor, or OpenCode columns`);
+	}
 	const ownExpectation = value.expect === undefined ? {} : parseExpectationMap(value.expect, `case ${id}`);
 	const expectation: ExpectationMap = { ...(defaults[caseClass as CaseClass] ?? {}), ...ownExpectation };
 	const targetColumns = columns ?? COLUMNS;
@@ -198,6 +224,7 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 		...(typeof server === "string" ? { server } : {}),
 		...(input !== undefined ? { input } : {}),
 		...(identity !== undefined ? { identity } : {}),
+		...(typeof lease === "string" ? { lease: lease as LeaseState } : {}),
 		execute,
 		...(typeof knownGap === "string" ? { knownGap } : {}),
 		...(columns ? { columns } : {}),
@@ -564,6 +591,117 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	}
 }
 
+function harnessIdentity(column: HarnessColumn): { harness: HarnessColumn; id: string } {
+	return HARNESS_IDENTITIES[column];
+}
+
+function otherHarnessIdentity(column: HarnessColumn): { harness: HarnessColumn; id: string } {
+	return { harness: column, id: `${column}-other-security-seed` };
+}
+
+function makeLease(
+	identity: { harness: HarnessColumn; id: string },
+	options: { expired?: boolean; missingExpiry?: boolean } = {},
+): Record<string, unknown> {
+	const now = Date.now();
+	const grantedAt = options.expired ? now - 10_000 : now;
+	const lease: Record<string, unknown> = {
+		harness: identity.harness,
+		id: identity.id,
+		planId: "security-plan",
+		grantedAt,
+	};
+	if (!options.missingExpiry) lease.expiresAt = options.expired ? now - 1_000 : grantedAt + LEASE_TTL_MS;
+	return lease;
+}
+
+function writePresence(
+	ctx: RunnerContext,
+	piSessionId: string,
+	peers: Array<{ harness: HarnessColumn; id: string }>,
+	buildLease?: Record<string, unknown>,
+	heartbeatAt = new Date().toISOString(),
+): void {
+	const memory = path.join(ctx.repo, ".pi", "memory");
+	const bridgeRoot = path.join(memory, "bridge");
+	const sessions = path.join(bridgeRoot, "sessions");
+	const namespace = path.join(sessions, piSessionId);
+	const directories = [
+		memory,
+		bridgeRoot,
+		sessions,
+		namespace,
+		path.join(namespace, "requests"),
+		path.join(namespace, "responses"),
+		path.join(namespace, "processed"),
+	];
+	for (const directory of directories) {
+		mkdirSync(directory, { recursive: true, mode: 0o700 });
+		chmodSync(directory, 0o700);
+	}
+	const presence = {
+		schemaVersion: 2,
+		piSessionId,
+		name: `security ${piSessionId}`,
+		mode: "plan",
+		pid: process.pid,
+		startedAt: new Date(Date.now() - 60_000).toISOString(),
+		heartbeatAt,
+		peers: peers.map((peer) => ({ ...peer, pendingCount: 0, inboundPendingCount: 0 })),
+		...(buildLease === undefined ? {} : { buildLease }),
+	};
+	const file = path.join(namespace, "presence.json");
+	writeFileSync(file, `${JSON.stringify(presence, null, 2)}\n`, { mode: 0o600 });
+	chmodSync(file, 0o600);
+}
+
+function clearLeaseFixtures(ctx: RunnerContext): void {
+	rmSync(path.join(ctx.repo, ".pi", "memory", "bridge"), { recursive: true, force: true });
+}
+
+function setupLease(testCase: SecurityCase, column: HarnessColumn, ctx: RunnerContext): void {
+	clearLeaseFixtures(ctx);
+	const state = testCase.lease;
+	if (state === undefined || state === "none") return;
+	const self = harnessIdentity(column);
+	const other = otherHarnessIdentity(column);
+	switch (state) {
+		case "holder-self":
+			writePresence(ctx, "pi-security-lease", [self], makeLease(self));
+			return;
+		case "holder-other":
+			writePresence(ctx, "pi-security-lease", [self, other], makeLease(other));
+			return;
+		case "expired":
+			writePresence(ctx, "pi-security-lease", [self], makeLease(self, { expired: true }));
+			return;
+		case "missing-expiry":
+			writePresence(ctx, "pi-security-lease", [self], makeLease(self, { missingExpiry: true }));
+			return;
+		case "stale-heartbeat":
+			writePresence(ctx, "pi-security-lease", [self], makeLease(self), new Date(Date.now() - 6_000).toISOString());
+			return;
+		case "double-paired":
+			writePresence(ctx, "pi-security-a", [self], makeLease(self));
+			writePresence(ctx, "pi-security-b", [self], makeLease(self));
+			return;
+		case "cross-session":
+			writePresence(ctx, "pi-security-a", [self], makeLease(self));
+			writePresence(ctx, "pi-security-b", [other], makeLease(other));
+			return;
+		default:
+			fail(`case ${testCase.id}: unimplemented lease state ${JSON.stringify(state)}`);
+	}
+}
+
+function resetRepo(ctx: RunnerContext): void {
+	clearLeaseFixtures(ctx);
+	runGit(ctx.repo, ["reset", "--hard", "HEAD"], ctx.env);
+	runGit(ctx.repo, ["clean", "-fdx"], ctx.env);
+	rmSync(path.join(ctx.repo, ".pi"), { recursive: true, force: true });
+	mkdirSync(path.join(ctx.repo, ".pi"), { recursive: true });
+}
+
 function installedHookCommand(settings: Record<string, unknown>, event: string, script: string): string | undefined {
 	const hooks = settings.hooks;
 	if (!isRecord(hooks)) return undefined;
@@ -598,7 +736,6 @@ function reportFailure(testCase: SecurityCase, column: Column, expected: string[
 
 async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: string): Promise<number> {
 	const stats = Object.fromEntries(COLUMNS.map((column) => [column, { pass: 0, fail: 0, knownGap: 0 }])) as Record<Column, ColumnStats>;
-	const initial = snapshotRepo(ctx.repo, ctx.env);
 	let failures = 0;
 
 	for (const testCase of cases) {
@@ -606,76 +743,82 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 			const expectation = testCase.expect[column];
 			if (expectation === undefined) continue;
 			const expected = outcomesFor(expectation, column, platform, ctx.sandboxDisabled);
-			let result: RunResult;
 			try {
-				result = await runColumn(testCase, column, ctx);
-			} catch (error) {
-				result = { outcome: "throw", detail: error instanceof Error ? error.message : String(error) };
-			}
+				if (column === "claude" || column === "cursor" || column === "opencode") setupLease(testCase, column, ctx);
+				const before = snapshotRepo(ctx.repo, ctx.env);
+				let result: RunResult;
+				try {
+					result = await runColumn(testCase, column, ctx);
+				} catch (error) {
+					result = { outcome: "throw", detail: error instanceof Error ? error.message : String(error) };
+				}
 
-			const matched = expected.includes(result.outcome);
-			if (testCase.knownGap) {
-				if (matched) {
+				const matched = expected.includes(result.outcome);
+				if (testCase.knownGap) {
+					if (matched) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, `gap closed: remove knownGap marker ${testCase.knownGap}`);
+					} else {
+						stats[column].knownGap += 1;
+					}
+					continue;
+				}
+				if (!matched) {
 					stats[column].fail += 1;
 					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, `gap closed: remove knownGap marker ${testCase.knownGap}`);
+					reportFailure(testCase, column, expected, result.outcome, result.detail);
+					continue;
+				}
+
+				if (testCase.kind === "shell" && testCase.execute && (result.outcome === "wrap" || result.outcome === "allow")) {
+					const command = result.command ?? testCase.command;
+					if (!command) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, "allowed shell outcome has no command");
+						continue;
+					}
+					const executed = executeCommand(command, ctx);
+					if (executed.error) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, `execution failed: ${executed.error.message}`);
+						continue;
+					}
+					if (testCase.class === "read" && executed.status !== 0) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, `read command exited ${executed.status}`);
+						continue;
+					}
+					const after = snapshotRepo(ctx.repo, ctx.env);
+					const mutated = after !== before;
+					if (testCase.mutation === "allowed" && !mutated) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, "expected mutation but repository is unchanged");
+						continue;
+					}
+					if (testCase.mutation === "none" && mutated) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, "repository changed unexpectedly");
+						continue;
+					}
 				} else {
-					stats[column].knownGap += 1;
+					const after = snapshotRepo(ctx.repo, ctx.env);
+					if (after !== before) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, "repository changed without an executed command");
+						continue;
+					}
 				}
-				continue;
+				stats[column].pass += 1;
+			} finally {
+				resetRepo(ctx);
 			}
-			if (!matched) {
-				stats[column].fail += 1;
-				failures += 1;
-				reportFailure(testCase, column, expected, result.outcome, result.detail);
-				continue;
-			}
-
-			if (testCase.kind === "shell" && testCase.execute && (result.outcome === "wrap" || result.outcome === "allow")) {
-				const command = result.command ?? testCase.command;
-				if (!command) {
-					stats[column].fail += 1;
-					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, "allowed shell outcome has no command");
-					continue;
-				}
-				const executed = executeCommand(command, ctx);
-				if (executed.error) {
-					stats[column].fail += 1;
-					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, `execution failed: ${executed.error.message}`);
-					continue;
-				}
-				if (testCase.class === "read" && executed.status !== 0) {
-					stats[column].fail += 1;
-					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, `read command exited ${executed.status}`);
-					continue;
-				}
-				const after = snapshotRepo(ctx.repo, ctx.env);
-				const mutated = after !== initial;
-				if (testCase.mutation === "allowed" && !mutated) {
-					stats[column].fail += 1;
-					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, "expected mutation but repository is unchanged");
-					continue;
-				}
-				if (testCase.mutation === "none" && mutated) {
-					stats[column].fail += 1;
-					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, "repository changed unexpectedly");
-					continue;
-				}
-			} else {
-				const after = snapshotRepo(ctx.repo, ctx.env);
-				if (after !== initial) {
-					stats[column].fail += 1;
-					failures += 1;
-					reportFailure(testCase, column, expected, result.outcome, "repository changed without an executed command");
-					continue;
-				}
-			}
-			stats[column].pass += 1;
 		}
 	}
 

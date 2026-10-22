@@ -141,6 +141,33 @@ assert.equal(replaced.lease.grantedAt, now);
 assert.equal(replaced.lease.expiresAt, now + BUILD_LEASE_TTL_MS);
 assert.notEqual(replaced.lease, expiredLease);
 
+// Two peers can queue; only one approval grants, expiry or release opens the next grant.
+const requestA = requestBuildLease(null, null, claude, workflow, now);
+const requestB = requestBuildLease(null, requestA.ok && requestA.status === "pending" ? requestA.entry : null, cursor, workflow, now);
+if (!requestA.ok || requestA.status !== "pending" || !requestB.ok || requestB.status !== "pending") {
+	throw new Error("Expected two pending lease requests");
+}
+assert.equal(requestA.isNew, true);
+assert.equal(requestB.isNew, true);
+const approvedA = approveBuildLease(null, requestA.entry, workflow, true, now);
+if (!approvedA.ok) throw new Error("Expected A lease approval");
+assert.equal(approvedA.lease.harness, claude.harness);
+assert.equal(approvedA.lease.id, claude.id);
+const heldB = approveBuildLease(approvedA.lease, requestB.entry, workflow, true, now + 1);
+expectRefusal(heldB, "build_lease_held");
+assert.match(heldB.message, /claude:claude-session/);
+const approvedBAfterExpiry = approveBuildLease(approvedA.lease, requestB.entry, workflow, true, approvedA.lease.expiresAt);
+if (!approvedBAfterExpiry.ok) throw new Error("Expected B lease approval after A expiry");
+assert.equal(approvedBAfterExpiry.lease.harness, cursor.harness);
+assert.equal(approvedBAfterExpiry.lease.id, cursor.id);
+const approvedAAgain = approveBuildLease(null, requestA.entry, workflow, true, now + 2);
+if (!approvedAAgain.ok) throw new Error("Expected A lease approval after B expiry");
+const releasedA = releaseBuildLeaseOnRecall(approvedAAgain.lease, claude, "plan");
+assert.equal(releasedA, null);
+const approvedBAfterRelease = approveBuildLease(releasedA, requestB.entry, workflow, true, now + 3);
+if (!approvedBAfterRelease.ok) throw new Error("Expected B lease approval after A release");
+assert.equal(approvedBAfterRelease.lease.id, cursor.id);
+
 // Tick is holder-only and fail-closed.
 assert.equal(canTickPlanTask(activeLease, claude, now), true);
 assert.equal(canTickPlanTask(activeLease, claude, activeLease.expiresAt), false);

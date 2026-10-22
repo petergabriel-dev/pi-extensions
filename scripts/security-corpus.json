@@ -865,6 +865,115 @@
       "expect": { "opencode": "throw" }
     },
     {
+      "id": "lease-none-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "none"
+    },
+    {
+      "id": "lease-holder-self-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "holder-self",
+      "mutation": "allowed",
+      "expect": { "claude": "allow", "cursor": "allow", "opencode": "allow" }
+    },
+    {
+      "id": "lease-holder-other-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "holder-other"
+    },
+    {
+      "id": "lease-expired-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "expired"
+    },
+    {
+      "id": "lease-missing-expiry-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "missing-expiry"
+    },
+    {
+      "id": "lease-stale-heartbeat-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "stale-heartbeat"
+    },
+    {
+      "id": "lease-double-paired-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "double-paired"
+    },
+    {
+      "id": "lease-cross-session-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "cross-session",
+      "knownGap": "F10"
+    },
+    {
+      "id": "claude-mcp-lease-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "lease": "holder-other",
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "claude-other-security-seed", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-mcp-lease-forged-harness",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "lease": "holder-other",
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "claude-security-seed", "harness": "cursor" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "cursor-mcp-lease-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "lease": "holder-other",
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "input": { "query": "x", "sessionId": "cursor-other-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-mcp-lease-forged-harness",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "lease": "holder-other",
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "input": { "query": "x", "sessionId": "cursor-security-seed", "harness": "claude" },
+      "expect": { "cursor": "deny" }
+    },
+    {
       "id": "pi-plan-wildcard-test",
       "class": "write",
       "kind": "shell",
