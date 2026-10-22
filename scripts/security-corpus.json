@@ -974,6 +974,142 @@
       "expect": { "cursor": "deny" }
     },
     {
+      "id": "claude-stdin-empty",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["claude"],
+      "stdinKind": "empty",
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-stdin-non-json",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["claude"],
+      "stdinKind": "non-json",
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-stdin-array",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["claude"],
+      "stdinKind": "array",
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-stdin-oversized",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["claude"],
+      "stdinKind": "oversized",
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "cursor-stdin-empty",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["cursor"],
+      "stdinKind": "empty",
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-stdin-non-json",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["cursor"],
+      "stdinKind": "non-json",
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-stdin-array",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["cursor"],
+      "stdinKind": "array",
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-stdin-oversized",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["cursor"],
+      "stdinKind": "oversized",
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "opencode-event-null",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": null,
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-array",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": [],
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-string",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": "not-an-object",
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-missing-tool",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": {},
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-non-string-tool",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": { "tool": 123, "sessionID": "opencode-security-seed", "input": {} },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-bridge-missing-session",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": { "tool": "pi-claude-bridge_recall_memory", "input": {} },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-bridge-null-input",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": { "tool": "pi-claude-bridge_recall_memory", "sessionID": "opencode-security-seed", "input": null },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-bridge-array-input",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": { "tool": "pi-claude-bridge_recall_memory", "sessionID": "opencode-security-seed", "input": [] },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-event-shell-null-input",
+      "class": "ambiguous",
+      "kind": "event",
+      "columns": ["opencode"],
+      "event": { "tool": "shell", "sessionID": "opencode-security-seed", "input": null },
+      "expect": { "opencode": "throw" }
+    },
+    {
       "id": "pi-plan-wildcard-test",
       "class": "write",
       "kind": "shell",

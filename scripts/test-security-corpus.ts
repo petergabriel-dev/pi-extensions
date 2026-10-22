@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
+	copyFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -16,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { applyPlan, planInstall } from "../agent/extensions/harness-setup/setup.ts";
+import { HARNESS_MANIFEST } from "../agent/extensions/harness-setup/manifest.ts";
 import type { Harness } from "../agent/extensions/harness-setup/manifest.ts";
 import { isBashAllowedInMode } from "../agent/extensions/workflow-modes/policy.ts";
 import { detectLauncher, wrapCommand } from "../agent/extensions/workflow-modes/sandbox.ts";
@@ -38,12 +40,16 @@ const LEASE_STATES = new Set([
 	"double-paired",
 	"cross-session",
 ] as const);
+const STDIN_KINDS = new Set(["empty", "non-json", "array", "oversized"] as const);
+const CRASH_VARIANTS = ["missing", "syntax", "throws"] as const;
 
 type Column = (typeof COLUMNS)[number];
 type HarnessColumn = "claude" | "cursor" | "opencode";
 type Outcome = "allow" | "wrap" | "ask" | "deny" | "throw";
 type CaseClass = "read" | "write" | "ambiguous";
 type LeaseState = "none" | "holder-self" | "holder-other" | "expired" | "missing-expiry" | "stale-heartbeat" | "double-paired" | "cross-session";
+type StdinKind = "empty" | "non-json" | "array" | "oversized";
+type CrashVariant = (typeof CRASH_VARIANTS)[number];
 type Expectation = string | string[] | Record<string, string | string[]>;
 type ExpectationMap = Partial<Record<Column, Expectation>>;
 type CorpusDefaults = Partial<Record<CaseClass, ExpectationMap>>;
@@ -64,6 +70,9 @@ interface SecurityCase {
 	input?: unknown;
 	identity?: string | null;
 	lease?: LeaseState;
+	stdin?: string;
+	stdinKind?: StdinKind;
+	event?: unknown;
 	execute: boolean;
 	knownGap?: string;
 	columns?: Column[];
@@ -177,6 +186,9 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	const server = value.server;
 	const input = value.input;
 	const identity = value.identity;
+	const stdin = value.stdin;
+	const stdinKind = value.stdinKind;
+	const event = value.event;
 	if (toolKind) {
 		if (typeof tool !== "string" || !tool.trim()) fail(`case ${id}: tool is required for ${kind} cases`);
 		if (input !== undefined && input !== null && !isRecord(input)) fail(`case ${id}: input must be an object or null`);
@@ -202,6 +214,25 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	if (toolKind && (!columns || columns.some((column) => column.startsWith("pi-")))) {
 		fail(`case ${id}: ${kind} cases must pin Claude, Cursor, or OpenCode columns`);
 	}
+	if (kind === "stdin") {
+		if (!columns || columns.some((column) => column === "opencode" || column.startsWith("pi-"))) {
+			fail(`case ${id}: stdin cases must pin Claude and/or Cursor columns`);
+		}
+		if (stdin !== undefined && typeof stdin !== "string") fail(`case ${id}: stdin must be a string`);
+		if (stdinKind !== undefined && (typeof stdinKind !== "string" || !STDIN_KINDS.has(stdinKind as StdinKind))) {
+			fail(`case ${id}: stdinKind must be empty, non-json, array, or oversized`);
+		}
+		if (stdin === undefined && stdinKind === undefined) fail(`case ${id}: stdin or stdinKind is required`);
+		if (stdin !== undefined && stdinKind !== undefined) fail(`case ${id}: use stdin or stdinKind, not both`);
+	} else if (stdin !== undefined || stdinKind !== undefined) {
+		fail(`case ${id}: stdin fields are only valid for stdin cases`);
+	}
+	if (kind === "event") {
+		if (!columns || columns.length !== 1 || columns[0] !== "opencode") fail(`case ${id}: event cases must pin the opencode column`);
+		if (event === undefined) fail(`case ${id}: event is required for event cases`);
+	} else if (event !== undefined) {
+		fail(`case ${id}: event is only valid for event cases`);
+	}
 	const lease = value.lease;
 	if (lease !== undefined) {
 		if (typeof lease !== "string" || !LEASE_STATES.has(lease as LeaseState)) fail(`case ${id}: unknown lease state ${JSON.stringify(lease)}`);
@@ -225,6 +256,9 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 		...(input !== undefined ? { input } : {}),
 		...(identity !== undefined ? { identity } : {}),
 		...(typeof lease === "string" ? { lease: lease as LeaseState } : {}),
+		...(typeof stdin === "string" ? { stdin } : {}),
+		...(typeof stdinKind === "string" ? { stdinKind: stdinKind as StdinKind } : {}),
+		...(event !== undefined ? { event } : {}),
 		execute,
 		...(typeof knownGap === "string" ? { knownGap } : {}),
 		...(columns ? { columns } : {}),
@@ -428,6 +462,46 @@ async function opencodeToolOutcome(testCase: SecurityCase, ctx: RunnerContext): 
 	return { outcome: "allow" };
 }
 
+function stdinPayload(testCase: SecurityCase): string {
+	if (testCase.stdin !== undefined) return testCase.stdin;
+	switch (testCase.stdinKind) {
+		case "empty":
+			return "";
+		case "non-json":
+			return "{not json";
+		case "array":
+			return "[]";
+		case "oversized":
+			return "x".repeat(1024 * 1024);
+		default:
+			fail(`case ${testCase.id}: stdin payload is missing`);
+	}
+}
+
+function stdinOutcome(testCase: SecurityCase, column: "claude" | "cursor", ctx: RunnerContext): RunResult {
+	const command = column === "claude" ? ctx.claudeCommand : ctx.cursorCommands.beforeShellExecution;
+	if (!command) fail(`installed ${column} stdin hook is missing`);
+	const captured = spawnCaptured(command, stdinPayload(testCase), ctx.repo, ctx.env);
+	if (captured.error) return hookFailure(captured.error, captured.result);
+	if (captured.result.status !== 0) return hookFailure(captured.result.error, captured.result);
+	const parsed = parseHookOutput(captured.result.stdout);
+	if (column === "claude") return claudeDecision(parsed);
+	const permission = parsed.permission;
+	if (permission === "allow") return { outcome: "allow" };
+	if (permission === "ask") return { outcome: "ask" };
+	if (permission === "deny") return { outcome: "deny" };
+	return { outcome: "throw", detail: `unknown Cursor permission ${JSON.stringify(permission)}` };
+}
+
+async function opencodeEventOutcome(testCase: SecurityCase, ctx: RunnerContext): Promise<RunResult> {
+	try {
+		await ctx.opencodeHandler(testCase.event);
+	} catch (error) {
+		return { outcome: "throw", detail: error instanceof Error ? error.message : String(error) };
+	}
+	return { outcome: "allow" };
+}
+
 function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx: RunnerContext): RunResult {
 	const command = testCase.command ?? "";
 	const mode = column === "pi-discuss" ? "discuss" : "plan";
@@ -443,6 +517,14 @@ function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx
 }
 
 async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerContext): Promise<RunResult> {
+	if (testCase.kind === "stdin") {
+		if (column !== "claude" && column !== "cursor") fail(`case ${testCase.id}: stdin case cannot run on ${column}`);
+		return stdinOutcome(testCase, column, ctx);
+	}
+	if (testCase.kind === "event") {
+		if (column !== "opencode") fail(`case ${testCase.id}: event case cannot run on ${column}`);
+		return opencodeEventOutcome(testCase, ctx);
+	}
 	if (column === "pi-discuss" || column === "pi-plan") {
 		if (testCase.kind !== "shell") fail(`case ${testCase.id}: ${testCase.kind} case cannot run on ${column}`);
 		return piOutcome(testCase, column, ctx);
@@ -830,6 +912,142 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 	return failures;
 }
 
+function copyPackageAsset(sourceRoot: string, targetRoot: string, relative: string): void {
+	const target = path.join(targetRoot, ...relative.split("/"));
+	mkdirSync(path.dirname(target), { recursive: true });
+	copyFileSync(path.join(sourceRoot, ...relative.split("/")), target);
+}
+
+function copyPackageForHarness(pkgRoot: string, harness: Harness): void {
+	copyPackageAsset(PACKAGE_ROOT, pkgRoot, "package.json");
+	for (const entry of HARNESS_MANIFEST[harness]) copyPackageAsset(PACKAGE_ROOT, pkgRoot, entry.script);
+	if (harness === "opencode") {
+		for (const script of ["pi-bridge-mcp.js", "pi-readonly-hook.js"]) {
+			copyPackageAsset(PACKAGE_ROOT, pkgRoot, `agent/claude-bridge-client/${script}`);
+		}
+	}
+}
+
+function crashRoots(home: string): { claude: string; claudeMcp: string; cursor: string; opencode: string } {
+	return {
+		claude: path.join(home, ".claude"),
+		claudeMcp: path.join(home, ".claude.json"),
+		cursor: path.join(home, ".cursor"),
+		opencode: path.join(home, ".config", "opencode"),
+	};
+}
+
+function crashAsset(harness: Harness): string {
+	if (harness === "claude") return "agent/claude-bridge-client/pi-readonly-hook.js";
+	if (harness === "cursor") return "agent/cursor-bridge-client/cursor-readonly-hook.js";
+	return "agent/opencode-bridge-client/pi-opencode-plugin.js";
+}
+
+function mutateCrashAsset(pkgRoot: string, harness: Harness, variant: CrashVariant): void {
+	const file = path.join(pkgRoot, ...crashAsset(harness).split("/"));
+	if (variant === "missing") {
+		rmSync(file, { force: true });
+		return;
+	}
+	if (variant === "syntax") {
+		writeFileSync(file, "function broken( {\n", "utf8");
+		return;
+	}
+	writeFileSync(file, "throw new Error(\"security corpus crash\");\n", "utf8");
+}
+
+async function installCrashPackage(
+	ctx: RunnerContext,
+	harness: Harness,
+	variant: CrashVariant,
+): Promise<{ home: string; pkgRoot: string; roots: ReturnType<typeof crashRoots> }> {
+	const root = path.join(ctx.runtime, `crash-${harness}-${variant}`);
+	const home = path.join(root, "home");
+	const pkgRoot = path.join(root, "pkg");
+	const agentDir = path.join(home, ".pi", "agent");
+	for (const directory of [home, agentDir]) mkdirSync(directory, { recursive: true });
+	copyPackageForHarness(pkgRoot, harness);
+	const roots = crashRoots(home);
+	const plan = await planInstall(harness, { pkgRoot, roots, agentDir });
+	const results = await applyPlan(plan);
+	const failed = results.find((result) => !result.applied);
+	if (failed) fail(`installing crash package ${harness}/${variant} failed at ${failed.path}: ${failed.reason ?? "unknown error"}`);
+	// Setup skips a missing package asset, so mutate the file the installed command points at.
+	mutateCrashAsset(pkgRoot, harness, variant);
+	return { home, pkgRoot, roots };
+}
+
+async function runCrashChecks(ctx: RunnerContext): Promise<number> {
+	let pass = 0;
+	let failures = 0;
+	let hostLimits = 0;
+	const stdin = JSON.stringify({ session_id: "claude-security-seed", cwd: ctx.repo, tool_name: "Read", tool_input: {} });
+
+	for (const harness of ["claude", "cursor"] as const) {
+		for (const variant of CRASH_VARIANTS) {
+			try {
+				const installed = await installCrashPackage(ctx, harness, variant);
+				if (harness === "claude") {
+					const settings = JSON.parse(readFileSync(path.join(installed.roots.claude, "settings.json"), "utf8")) as Record<string, unknown>;
+					const command = installedHookCommand(settings, "PreToolUse", "pi-readonly-hook.js");
+					if (!command) fail("installed Claude PreToolUse command is missing");
+					if (!command.trimEnd().endsWith("|| exit 2")) fail("installed Claude PreToolUse command is missing the || exit 2 guard");
+					const captured = spawnCaptured(command, stdin, ctx.repo, ctx.env);
+					if (captured.error) throw captured.error;
+					if (captured.result.status !== 2) {
+						fail(`installed Claude command exited ${captured.result.status ?? "without status"}: ${captured.result.stderr.trim()}`);
+					}
+					pass += 1;
+					console.log(`CRASH claude ${variant} installed-command-exit=2`);
+				} else {
+					const hooks = JSON.parse(readFileSync(path.join(installed.roots.cursor, "hooks.json"), "utf8")) as Record<string, unknown>;
+					for (const event of ["beforeShellExecution", "beforeMCPExecution", "preToolUse"] as const) {
+						if (!installedCursorHookCommand(hooks, event)) fail(`installed Cursor ${event} hook is missing`);
+					}
+					const command = installedCursorHookCommand(hooks, "beforeShellExecution");
+					if (!command) fail("installed Cursor beforeShellExecution command is missing");
+					const captured = spawnCaptured(command, stdin, ctx.repo, ctx.env);
+					if (captured.error) throw captured.error;
+					const status = captured.result.status;
+					if (typeof status !== "number" || status === 0) fail(`broken Cursor hook exited ${status ?? "without status"}`);
+					pass += 1;
+					hostLimits += 1;
+					console.log(`CRASH cursor ${variant} installed-hook-exit=${status} failClosed=true`);
+					console.log(`HOST_LIMIT cursor ${variant}: Cursor host enforcement of failClosed after a nonzero hook exit is outside this in-process runner.`);
+				}
+			} catch (error) {
+				failures += 1;
+				console.error(`FAIL CRASH ${harness} ${variant}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+
+	try {
+		const installed = await installCrashPackage(ctx, "opencode", "throws");
+		const pluginPath = path.join(installed.roots.opencode, "plugins", "pi-opencode-build-lease.js");
+		if (!existsSync(pluginPath)) fail("installed OpenCode plugin is missing");
+		let loadError: unknown;
+		try {
+			await import(`${pathToFileURL(pluginPath).href}?crash=${Date.now()}`);
+		} catch (error) {
+			loadError = error;
+		}
+		if (!(loadError instanceof Error) || !loadError.message.includes("security corpus crash")) {
+			fail(`broken OpenCode plugin did not fail during load: ${loadError instanceof Error ? loadError.message : String(loadError)}`);
+		}
+		pass += 1;
+		hostLimits += 1;
+		console.log("CRASH opencode plugin-load failed-as-expected");
+		console.log("HOST_LIMIT opencode plugin-load: OpenCode host policy for a failed plugin load is outside this in-process runner.");
+	} catch (error) {
+		failures += 1;
+		console.error(`FAIL CRASH opencode plugin-load: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
+	console.log(`SUMMARY crash pass=${pass} fail=${failures} hostLimit=${hostLimits}`);
+	return failures;
+}
+
 function corruptExpectation(cases: SecurityCase[]): void {
 	const first = cases[0];
 	if (!first) fail("corpus has no cases");
@@ -864,7 +1082,8 @@ async function main(): Promise<void> {
 		if (sandboxDisabled) process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
 		else delete process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
 		const failures = await runCorpus(cases, ctx, process.platform);
-		if (failures > 0) process.exitCode = 1;
+		const crashFailures = await runCrashChecks(ctx);
+		if (failures + crashFailures > 0) process.exitCode = 1;
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
