@@ -289,6 +289,582 @@
       "command": "env ls"
     },
     {
+      "id": "claude-tool-edit",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Edit",
+      "input": { "file_path": "seed.txt", "old_string": "original", "new_string": "mutated" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-tool-write",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Write",
+      "input": { "file_path": "seed.txt", "content": "mutated" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-tool-multiedit",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "MultiEdit",
+      "input": { "file_path": "seed.txt", "edits": [] },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-tool-notebookedit",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "NotebookEdit",
+      "input": { "notebook_path": "note.ipynb" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-tool-write-file",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "write_file",
+      "input": { "path": "variant.txt", "content": "mutated" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-str-replace-editor",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "str_replace_editor",
+      "input": { "path": "variant.txt", "old_str": "original", "new_str": "mutated" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-patch-name",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Patch",
+      "input": { "patch": "*** Begin Patch" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-lowercase-write",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "write",
+      "input": { "file_path": "variant.txt", "content": "mutated" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "apply_patch",
+      "input": { "patch": "*** Begin Patch" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-unknown",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "unknown_tool",
+      "input": {},
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-task",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Task",
+      "input": { "description": "probe" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-agent",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Agent",
+      "input": { "description": "probe" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-tool-read",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Read",
+      "input": { "file_path": "seed.txt" },
+      "expect": { "claude": "allow" }
+    },
+    {
+      "id": "claude-tool-grep",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["claude"],
+      "tool": "Grep",
+      "input": { "pattern": "original", "path": "." },
+      "expect": { "claude": "allow" }
+    },
+    {
+      "id": "claude-mcp-foreign-write",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__other__write_file",
+      "input": { "path": "foreign.txt", "content": "mutated" },
+      "expect": { "claude": "ask" }
+    },
+    {
+      "id": "claude-mcp-bridge-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "claude-security-seed", "harness": "claude" },
+      "expect": { "claude": "allow" }
+    },
+    {
+      "id": "claude-mcp-bridge-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "other-session", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-mcp-bridge-forged-alias",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": { "query": "x", "claudeSessionId": "other-session", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-mcp-bridge-forged-harness",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "claude-security-seed", "harness": "cursor" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-mcp-bridge-missing-identity",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "identity": null,
+      "input": { "query": "x", "sessionId": "claude-security-seed", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "claude-mcp-bridge-missing-args",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__recall_memory",
+      "input": null,
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "cursor-tool-write",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "Write",
+      "input": { "path": "seed.txt", "content": "mutated" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-edit",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "Edit",
+      "input": { "path": "seed.txt", "old_string": "original", "new_string": "mutated" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-delete",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "Delete",
+      "input": { "path": "seed.txt" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "apply_patch",
+      "input": { "patch": "*** Begin Patch" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-multiedit",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "multiedit",
+      "input": { "path": "seed.txt", "edits": [] },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-write-file",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "write_file",
+      "input": { "path": "variant.txt", "content": "mutated" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-str-replace-editor",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "str_replace_editor",
+      "input": { "path": "variant.txt", "old_str": "original", "new_str": "mutated" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-patch-name",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "Patch",
+      "input": { "patch": "*** Begin Patch" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-lowercase-write",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "write",
+      "input": { "path": "variant.txt", "content": "mutated" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-unknown",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "unknown_tool",
+      "input": {},
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-task",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "Task",
+      "input": { "description": "probe" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-agent",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "Agent",
+      "input": { "description": "probe" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-tool-read",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "read",
+      "input": { "path": "seed.txt" },
+      "expect": { "cursor": "allow" }
+    },
+    {
+      "id": "cursor-tool-read-file",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "read_file",
+      "input": { "path": "seed.txt" },
+      "expect": { "cursor": "allow" }
+    },
+    {
+      "id": "cursor-mcp-foreign-write",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "filesystem",
+      "tool": "write_file",
+      "input": { "path": "foreign.txt", "content": "mutated" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-mcp-bridge-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "input": { "query": "x", "sessionId": "cursor-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "allow" }
+    },
+    {
+      "id": "cursor-mcp-bridge-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "input": { "query": "x", "sessionId": "other-session", "harness": "cursor" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-mcp-bridge-forged-harness",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "input": { "query": "x", "sessionId": "cursor-security-seed", "harness": "claude" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-mcp-bridge-missing-identity",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "identity": null,
+      "input": { "query": "x", "sessionId": "cursor-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "cursor-mcp-bridge-missing-args",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "recall_memory",
+      "input": null,
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "opencode-tool-edit",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "edit",
+      "input": { "filePath": "seed.txt", "oldString": "original", "newString": "mutated" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-write",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "write",
+      "input": { "filePath": "seed.txt", "content": "mutated" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "patch",
+      "input": { "filePath": "seed.txt", "patch": "*** Begin Patch" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-worktree-create",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "opencode_worktree_create",
+      "input": { "name": "probe" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-worktree-remove",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "opencode_worktree_remove",
+      "input": { "directory": "probe" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-worktree-other",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "opencode_worktree_rebase",
+      "input": {},
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-write-file",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "write_file",
+      "input": { "path": "variant.txt", "content": "mutated" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-str-replace-editor",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "str_replace_editor",
+      "input": { "path": "variant.txt", "old_str": "original", "new_str": "mutated" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-patch-name",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "Patch",
+      "input": { "patch": "*** Begin Patch" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-case-write",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "Write",
+      "input": { "filePath": "variant.txt", "content": "mutated" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "apply_patch",
+      "input": { "patch": "*** Begin Patch" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-unknown",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "unknown_tool",
+      "input": {},
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-task",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "task",
+      "input": { "description": "probe" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-agent",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "agent",
+      "input": { "description": "probe" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-tool-read",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "read",
+      "input": { "filePath": "seed.txt" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-tool-grep",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["opencode"],
+      "tool": "grep",
+      "input": { "pattern": "original" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-foreign-write",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "filesystem_write_file",
+      "input": { "path": "foreign.txt", "content": "mutated" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-mcp-bridge-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_recall_memory",
+      "input": { "query": "x", "sessionId": "opencode-security-seed", "harness": "opencode" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-bridge-forged-sanitized",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_recall_memory",
+      "input": { "query": "x", "sessionId": "other-session", "claudeSessionId": "alias", "harness": "claude" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-bridge-forged-harness",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_recall_memory",
+      "input": { "query": "x", "sessionId": "opencode-security-seed", "harness": "claude" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-bridge-missing-identity",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_recall_memory",
+      "identity": null,
+      "input": { "query": "x", "sessionId": "opencode-security-seed", "harness": "opencode" },
+      "expect": { "opencode": "throw" }
+    },
+    {
+      "id": "opencode-mcp-bridge-missing-args",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_recall_memory",
+      "input": null,
+      "expect": { "opencode": "throw" }
+    },
+    {
       "id": "pi-plan-wildcard-test",
       "class": "write",
       "kind": "shell",

@@ -39,6 +39,10 @@ interface SecurityCase {
 	class: CaseClass;
 	kind: string;
 	command?: string;
+	tool?: string;
+	server?: string;
+	input?: unknown;
+	identity?: string | null;
 	execute: boolean;
 	knownGap?: string;
 	columns?: Column[];
@@ -147,6 +151,20 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	} else if (command !== undefined && typeof command !== "string") {
 		fail(`case ${id}: command must be a string`);
 	}
+	const toolKind = kind === "tool" || kind === "mcp";
+	const tool = value.tool;
+	const server = value.server;
+	const input = value.input;
+	const identity = value.identity;
+	if (toolKind) {
+		if (typeof tool !== "string" || !tool.trim()) fail(`case ${id}: tool is required for ${kind} cases`);
+		if (input !== undefined && input !== null && !isRecord(input)) fail(`case ${id}: input must be an object or null`);
+		if (server !== undefined && typeof server !== "string") fail(`case ${id}: server must be a string`);
+		if (identity !== undefined && identity !== null
+			&& (typeof identity !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity))) {
+			fail(`case ${id}: identity must be a safe id or null`);
+		}
+	}
 	const knownGap = value.knownGap;
 	if (knownGap !== undefined && (typeof knownGap !== "string" || !/^F\d+$/.test(knownGap))) {
 		fail(`case ${id}: knownGap must use an F<n> finding id`);
@@ -159,6 +177,9 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 			return column as Column;
 		});
 		if (new Set(columns).size !== columns.length) fail(`case ${id}: columns contains duplicates`);
+	}
+	if (toolKind && (!columns || columns.some((column) => column.startsWith("pi-")))) {
+		fail(`case ${id}: ${kind} cases must pin Claude, Cursor, or OpenCode columns`);
 	}
 	const ownExpectation = value.expect === undefined ? {} : parseExpectationMap(value.expect, `case ${id}`);
 	const expectation: ExpectationMap = { ...(defaults[caseClass as CaseClass] ?? {}), ...ownExpectation };
@@ -173,6 +194,10 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 		class: caseClass as CaseClass,
 		kind,
 		...(typeof command === "string" ? { command } : {}),
+		...(typeof tool === "string" ? { tool } : {}),
+		...(typeof server === "string" ? { server } : {}),
+		...(input !== undefined ? { input } : {}),
+		...(identity !== undefined ? { identity } : {}),
 		execute,
 		...(typeof knownGap === "string" ? { knownGap } : {}),
 		...(columns ? { columns } : {}),
@@ -253,6 +278,23 @@ function hookFailure(error: unknown, result: ReturnType<typeof spawnSync>): RunR
 	return { outcome: "throw", detail };
 }
 
+function claudeDecision(parsed: Record<string, unknown>, command?: string): RunResult {
+	const hook = parsed.hookSpecificOutput;
+	if (hook === undefined) {
+		if (Object.keys(parsed).length === 0) return { outcome: "allow", ...(command !== undefined ? { command } : {}) };
+		return { outcome: "throw", detail: "hook output is missing hookSpecificOutput" };
+	}
+	if (!isRecord(hook)) return { outcome: "throw", detail: "hookSpecificOutput is not an object" };
+	const decision = hook.permissionDecision;
+	if (decision === "deny") return { outcome: "deny" };
+	if (decision === "ask") return { outcome: "ask" };
+	if (decision !== "allow") return { outcome: "throw", detail: `unknown permissionDecision ${JSON.stringify(decision)}` };
+	if (command !== undefined && isRecord(hook.updatedInput) && typeof hook.updatedInput.command === "string" && hook.updatedInput.command !== command) {
+		return { outcome: "wrap", command: hook.updatedInput.command };
+	}
+	return { outcome: "allow", ...(command !== undefined ? { command } : {}) };
+}
+
 function claudeOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
 	const command = testCase.command ?? "";
 	const input = JSON.stringify({
@@ -264,17 +306,21 @@ function claudeOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
 	const captured = spawnCaptured(ctx.claudeCommand, input, ctx.repo, ctx.env);
 	if (captured.error) return hookFailure(captured.error, captured.result);
 	if (captured.result.status !== 0) return hookFailure(captured.result.error, captured.result);
-	const parsed = parseHookOutput(captured.result.stdout);
-	const hook = parsed.hookSpecificOutput;
-	if (!isRecord(hook)) return { outcome: "throw", detail: "hook output is missing hookSpecificOutput" };
-	const decision = hook.permissionDecision;
-	if (decision === "deny") return { outcome: "deny" };
-	if (decision === "ask") return { outcome: "ask" };
-	if (decision !== "allow") return { outcome: "throw", detail: `unknown permissionDecision ${JSON.stringify(decision)}` };
-	if (isRecord(hook.updatedInput) && typeof hook.updatedInput.command === "string" && hook.updatedInput.command !== command) {
-		return { outcome: "wrap", command: hook.updatedInput.command };
-	}
-	return { outcome: "allow", command };
+	return claudeDecision(parseHookOutput(captured.result.stdout), command);
+}
+
+function claudeToolOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
+	const identity = testCase.identity === undefined ? "claude-security-seed" : testCase.identity;
+	const input: Record<string, unknown> = {
+		cwd: ctx.repo,
+		tool_name: testCase.tool,
+	};
+	if (identity !== null) input.session_id = identity;
+	if (testCase.input !== undefined && testCase.input !== null) input.tool_input = testCase.input;
+	const captured = spawnCaptured(ctx.claudeCommand, JSON.stringify(input), ctx.repo, ctx.env);
+	if (captured.error) return hookFailure(captured.error, captured.result);
+	if (captured.result.status !== 0) return hookFailure(captured.result.error, captured.result);
+	return claudeDecision(parseHookOutput(captured.result.stdout));
 }
 
 function cursorOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
@@ -314,6 +360,47 @@ async function opencodeOutcome(testCase: SecurityCase, ctx: RunnerContext): Prom
 	return { outcome: "allow", command };
 }
 
+function cursorToolOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
+	const identity = testCase.identity === undefined ? "cursor-security-seed" : testCase.identity;
+	const event = testCase.kind === "mcp" ? "beforeMCPExecution" : "preToolUse";
+	const input: Record<string, unknown> = {
+		hook_event_name: event,
+		cwd: ctx.repo,
+	};
+	if (identity !== null) input.conversation_id = identity;
+	if (event === "beforeMCPExecution") {
+		input.mcp_server_name = testCase.server ?? "";
+		input.mcp_tool_name = testCase.tool;
+	} else {
+		input.tool_name = testCase.tool;
+	}
+	if (testCase.input !== undefined && testCase.input !== null) input.tool_input = testCase.input;
+	const hook = ctx.cursorCommands[event];
+	if (!hook) fail(`installed Cursor ${event} hook is missing`);
+	const captured = spawnCaptured(hook, JSON.stringify(input), ctx.repo, ctx.env);
+	if (captured.error) return hookFailure(captured.error, captured.result);
+	if (captured.result.status !== 0) return hookFailure(captured.result.error, captured.result);
+	const parsed = parseHookOutput(captured.result.stdout);
+	const permission = parsed.permission;
+	if (permission === "allow") return { outcome: "allow" };
+	if (permission === "ask") return { outcome: "ask" };
+	if (permission === "deny") return { outcome: "deny" };
+	return { outcome: "throw", detail: `unknown Cursor permission ${JSON.stringify(permission)}` };
+}
+
+async function opencodeToolOutcome(testCase: SecurityCase, ctx: RunnerContext): Promise<RunResult> {
+	const identity = testCase.identity === undefined ? "opencode-security-seed" : testCase.identity;
+	const event: Record<string, unknown> = { tool: testCase.tool };
+	if (identity !== null) event.sessionID = identity;
+	if (testCase.input !== undefined && testCase.input !== null) event.input = testCase.input;
+	try {
+		await ctx.opencodeHandler(event);
+	} catch (error) {
+		return { outcome: "throw", detail: error instanceof Error ? error.message : String(error) };
+	}
+	return { outcome: "allow" };
+}
+
 function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx: RunnerContext): RunResult {
 	const command = testCase.command ?? "";
 	const mode = column === "pi-discuss" ? "discuss" : "plan";
@@ -329,10 +416,21 @@ function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx
 }
 
 async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerContext): Promise<RunResult> {
-	if (column === "claude") return claudeOutcome(testCase, ctx);
-	if (column === "cursor") return cursorOutcome(testCase, ctx);
-	if (column === "opencode") return opencodeOutcome(testCase, ctx);
-	return piOutcome(testCase, column, ctx);
+	if (column === "pi-discuss" || column === "pi-plan") {
+		if (testCase.kind !== "shell") fail(`case ${testCase.id}: ${testCase.kind} case cannot run on ${column}`);
+		return piOutcome(testCase, column, ctx);
+	}
+	if (testCase.kind === "shell") {
+		if (column === "claude") return claudeOutcome(testCase, ctx);
+		if (column === "cursor") return cursorOutcome(testCase, ctx);
+		return opencodeOutcome(testCase, ctx);
+	}
+	if (testCase.kind === "tool" || testCase.kind === "mcp") {
+		if (column === "claude") return claudeToolOutcome(testCase, ctx);
+		if (column === "cursor") return cursorToolOutcome(testCase, ctx);
+		return opencodeToolOutcome(testCase, ctx);
+	}
+	fail(`case ${testCase.id}: unsupported kind ${testCase.kind}`);
 }
 
 function runGit(repo: string, args: string[], env: NodeJS.ProcessEnv): string {
