@@ -37,10 +37,10 @@
       "command": "cat seed.txt"
     },
     {
-      "id": "read-rg",
+      "id": "read-grep",
       "class": "read",
       "kind": "shell",
-      "command": "rg original ."
+      "command": "grep -r original ."
     },
     {
       "id": "read-git-status",

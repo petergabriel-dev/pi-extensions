@@ -194,7 +194,7 @@ function assertBashUsesExistingPolicy(output) {
 		assert.match(output.hookSpecificOutput.updatedInput.command, /^\/usr\/bin\/sandbox-exec /);
 	} else {
 		assert.equal(output.hookSpecificOutput?.permissionDecision, "deny");
-		assert.match(output.systemMessage, /sandbox-exec is unavailable/);
+		assert.match(output.systemMessage, /\(sandbox-exec\) is unavailable/);
 	}
 }
 
@@ -266,7 +266,7 @@ async function main() {
 	assert.deepEqual(client.resolveHarnessIdentity({}, { CLAUDE_CODE_SESSION_ID: "env-id" }), { harness: "claude", id: "env-id" });
 	assert.equal(client.resolveHarnessIdentity({}, {}), null);
 	assert.equal(typeof readonlyHook.wrapBashForSandbox, "function");
-	if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+	if (process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC !== "1" && process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
 		const wrapped = readonlyHook.wrapBashForSandbox("true", process.cwd());
 		assert.equal(typeof wrapped, "string");
 		assert.match(wrapped, /\(deny appleevent-send\)/);
