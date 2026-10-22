@@ -50,6 +50,7 @@ type CaseClass = "read" | "write" | "ambiguous";
 type LeaseState = "none" | "holder-self" | "holder-other" | "expired" | "missing-expiry" | "stale-heartbeat" | "double-paired" | "cross-session";
 type StdinKind = "empty" | "non-json" | "array" | "oversized";
 type CrashVariant = (typeof CRASH_VARIANTS)[number];
+type SandboxEvidence = "P11";
 type Expectation = string | string[] | Record<string, string | string[]>;
 type ExpectationMap = Partial<Record<Column, Expectation>>;
 type CorpusDefaults = Partial<Record<CaseClass, ExpectationMap>>;
@@ -75,6 +76,7 @@ interface SecurityCase {
 	event?: unknown;
 	execute: boolean;
 	knownGap?: string;
+	sandboxEvidence?: SandboxEvidence;
 	columns?: Column[];
 	mutation: "none" | "allowed";
 	expect: Partial<Record<Column, Expectation>>;
@@ -146,6 +148,13 @@ function parseExpectationMap(value: unknown, where: string): ExpectationMap {
 	return expectation;
 }
 
+function expectationHasOutcome(value: Expectation | undefined, outcome: Outcome): boolean {
+	if (typeof value === "string") return value === outcome;
+	if (Array.isArray(value)) return value.includes(outcome);
+	if (isRecord(value)) return Object.values(value).some((entry) => expectationHasOutcome(entry as Expectation, outcome));
+	return false;
+}
+
 function containmentViolation(command: string): string | null {
 	if (/(^|[\s"'=])~(?=$|[\s"'/])/.test(command)) return "home-relative path";
 	if (/\$(?:\{HOME\}|HOME\b)/.test(command)) return "$HOME reference";
@@ -202,6 +211,13 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	if (knownGap !== undefined && (typeof knownGap !== "string" || !/^F\d+$/.test(knownGap))) {
 		fail(`case ${id}: knownGap must use an F<n> finding id`);
 	}
+	const sandboxEvidence = value.sandboxEvidence;
+	if (sandboxEvidence !== undefined) {
+		if (sandboxEvidence !== "P11") fail(`case ${id}: sandboxEvidence must be P11`);
+		if (kind !== "shell") fail(`case ${id}: sandboxEvidence is only valid for shell cases`);
+		if (execute) fail(`case ${id}: sandboxEvidence requires execute false`);
+		if (knownGap !== undefined) fail(`case ${id}: use knownGap or sandboxEvidence, not both`);
+	}
 	let columns: Column[] | undefined;
 	if (value.columns !== undefined) {
 		if (!Array.isArray(value.columns) || value.columns.length === 0) fail(`case ${id}: columns must be a non-empty array`);
@@ -244,6 +260,13 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	for (const column of targetColumns) {
 		if (expectation[column] === undefined) fail(`case ${id}: missing expectation for ${column}`);
 	}
+	const expectsWrap = targetColumns.some((column) => expectationHasOutcome(expectation[column], "wrap"));
+	if (sandboxEvidence !== undefined && !expectsWrap) {
+		fail(`case ${id}: sandboxEvidence requires an expected wrap outcome`);
+	}
+	if (kind === "shell" && !execute && knownGap === undefined && sandboxEvidence === undefined && expectsWrap) {
+		fail(`case ${id}: non-executed wrapped shell case requires knownGap or sandboxEvidence P11`);
+	}
 	const mutation = value.mutation === undefined ? "none" : value.mutation;
 	if (mutation !== "none" && mutation !== "allowed") fail(`case ${id}: mutation must be none or allowed`);
 	return {
@@ -261,6 +284,7 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 		...(event !== undefined ? { event } : {}),
 		execute,
 		...(typeof knownGap === "string" ? { knownGap } : {}),
+		...(typeof sandboxEvidence === "string" ? { sandboxEvidence: sandboxEvidence as SandboxEvidence } : {}),
 		...(columns ? { columns } : {}),
 		mutation,
 		expect: expectation,

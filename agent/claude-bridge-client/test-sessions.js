@@ -266,6 +266,13 @@ async function main() {
 	assert.deepEqual(client.resolveHarnessIdentity({}, { CLAUDE_CODE_SESSION_ID: "env-id" }), { harness: "claude", id: "env-id" });
 	assert.equal(client.resolveHarnessIdentity({}, {}), null);
 	assert.equal(typeof readonlyHook.wrapBashForSandbox, "function");
+	if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+		const wrapped = readonlyHook.wrapBashForSandbox("true", process.cwd());
+		assert.equal(typeof wrapped, "string");
+		assert.match(wrapped, /\(deny appleevent-send\)/);
+		const scratch = /TMPDIR='([^']+)'/.exec(wrapped)?.[1];
+		if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
+	}
 
 	await test("session listing filters stale presence", async (cwd) => {
 		addSession(cwd, "pi-live", [{ ...HARNESS, pendingCount: 2, inboundPendingCount: 1 }]);

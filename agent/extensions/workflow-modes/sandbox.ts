@@ -51,6 +51,7 @@ export function buildSeatbeltProfile(options: { cwd: string; homeDir?: string; s
 		"(version 1)",
 		"(allow default)",
 		...(options.allowNetwork ? [] : ["(deny network*)"]),
+		"(deny appleevent-send)",
 		"(deny file-write*)",
 		`(allow file-write* (literal ${JSON.stringify(scratch)}))`,
 		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,

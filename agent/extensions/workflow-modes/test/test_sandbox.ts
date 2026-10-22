@@ -25,11 +25,13 @@ console.log("Running test_sandbox...");
 	assert.match(profile, /\(deny file-write\*\)/);
 	assert.match(profile, /\(allow file-write\* \(subpath "\/tmp\/pi-scratch"\)\)/);
 	assert.match(profile, /\(deny network\*\)/);
+	assert.match(profile, /\(deny appleevent-send\)/);
 	assert.match(profile, /repo read-only: \/repo/);
 	assert.match(profile, /home read-only: \/Users\/example/);
 
 	const networkProfile = buildSeatbeltProfile({ cwd: "/repo", homeDir: "/Users/example", scratchDir: "/tmp/pi-scratch", allowNetwork: true });
 	assert.doesNotMatch(networkProfile, /\(deny network\*\)/);
+	assert.match(networkProfile, /\(deny appleevent-send\)/);
 	assert.match(networkProfile, /\(deny file-write\*\)/);
 	assert.match(networkProfile, /\(allow file-write\* \(subpath "\/tmp\/pi-scratch"\)\)/);
 }
@@ -42,10 +44,12 @@ console.log("Running test_sandbox...");
 	assert.match(result.command, /TMPDIR='\/tmp\/pi-scratch'/);
 	assert.match(result.command, /PYTHONDONTWRITEBYTECODE=1/);
 	assert.match(result.command, /deny network\*/);
+	assert.match(result.command, /deny appleevent-send/);
 	assert.match(result.command, /deny file-write\*/);
 
 	const networkResult = wrapCommand("gh pr diff 1", { cwd: "/repo", scratchDir: "/tmp/pi-scratch", launcher: "sandbox-exec", allowNetwork: true });
 	assert.doesNotMatch(networkResult.command, /deny network\*/);
+	assert.match(networkResult.command, /deny appleevent-send/);
 	assert.match(networkResult.command, /deny file-write\*/);
 }
 

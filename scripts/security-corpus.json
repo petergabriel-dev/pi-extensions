@@ -1110,6 +1110,48 @@
       "expect": { "opencode": "throw" }
     },
     {
+      "id": "ui-apple-events-keystroke",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "osascript -e 'tell application \"System Events\" to keystroke \"x\"' -e 'tell application \"System Events\" to key code 36'",
+      "columns": ["claude", "cursor", "opencode"],
+      "execute": false,
+      "sandboxEvidence": "P11",
+      "expect": {
+        "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
+        "cursor": ["ask", "deny"],
+        "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" }
+      }
+    },
+    {
+      "id": "ui-cmux-send-keys",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "cmux send --surface surface:1 'x\\n'",
+      "columns": ["claude", "cursor", "opencode"],
+      "execute": false,
+      "sandboxEvidence": "P11",
+      "expect": {
+        "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
+        "cursor": ["ask", "deny"],
+        "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" }
+      }
+    },
+    {
+      "id": "ui-tiocsti",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "python3 -c 'import fcntl, termios; fcntl.ioctl(0, termios.TIOCSTI, b\"x\")'",
+      "columns": ["claude", "cursor", "opencode"],
+      "execute": false,
+      "sandboxEvidence": "P11",
+      "expect": {
+        "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
+        "cursor": ["ask", "deny"],
+        "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" }
+      }
+    },
+    {
       "id": "pi-plan-wildcard-test",
       "class": "write",
       "kind": "shell",

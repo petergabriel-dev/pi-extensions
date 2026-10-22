@@ -113,6 +113,7 @@ function seatbeltProfile(projectRoot, scratchDir) {
 		"(version 1)",
 		"(allow default)",
 		"(deny network*)",
+		"(deny appleevent-send)",
 		"(deny file-write*)",
 		`(allow file-write* (literal ${JSON.stringify(scratch)}))`,
 		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
