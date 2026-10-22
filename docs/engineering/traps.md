@@ -191,6 +191,15 @@
 - `command.execute.before` fallback is unavailable in this runtime: `ctx.command.hook` is absent, and `ctx.command` exposes only `list`, `reload`, and `transform`.
 - OpenCode `v2.0.32` model tool catalog exposed `edit`, `write`, `shell`, and `execute`; `patch` and `multiedit` were absent. In the probe, throwing blocked `edit`, `write`, and `execute`, while changing `event.input.command` changed shell output from `task1-original-shell` to `task1-shell-rewrite`. Code Mode exposed `worktree_create` and `worktree_remove`; the shipped plugin allowlists known read tools, `pi-claude-bridge_*`, `execute`, and sandbox-wrapped `shell`, and throws on other names including edit/write/worktree and foreign MCP. It intentionally leaves outer `execute` available as dispatcher; `test-opencode-plugin.js` covers these boundaries. Subagent `sessionID` inheritance remains unverified live behavior; shipped `/pi-build` avoids the built-in `build` name collision.
 
+## Security regression corpus
+
+- **Git reads can rewrite `.git/index` stat cache.** The corpus snapshot hashes repo files except `.git/index` and also includes `git ls-files -s`; removing the exclusion can report false mutations, while dropping the Git listing can miss tracked-state changes.
+- **Build leases are per Pi session, not project-wide.** Two live Pi sessions can each grant a lease in one project; `lease-cross-session-write` pins this known gap as F10. Do not treat a lease in one session as excluding writers authorized by another.
+- **Pi Plan regex fallback is not a shell parser.** Without a structural sandbox launcher, explicit writers are denied but wildcard expansion remains a documented limit; `pi-plan-wildcard-test` pins it as F9. Prefer structural sandboxing where available.
+- **Cursor `failClosed` is only asserted at config level.** The runner checks installed `failClosed: true` and verifies broken hooks exit nonzero; actual Cursor host enforcement of that exit is outside the runner.
+- **OpenCode plugin-load failure is a host limit.** The runner verifies a broken installed plugin fails during import, but cannot establish how OpenCode handles that failure.
+- **Sandbox-disabled lane is separate evidence.** `npm run test:security` runs a second pass with existing `PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC=1`; it checks fallback denial behavior, not the macOS Seatbelt lane.
+
 ## Harness Build lease traps
 
 - Build completion releases the lease as soon as the final task tick lands. Commit first, then tick; a post-tick commit can be denied (`agent/harness-commands/*/build.md`, `.cursor/commands/pi-build.md`).

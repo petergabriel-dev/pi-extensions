@@ -216,6 +216,22 @@ This runs:
 
 It does not start Pi, call a model, run live bridge protocol tests, exercise file-change rollback interactively, or verify terminal notification rendering.
 
+## Security corpus regression test
+
+Run the shared adversarial corpus with:
+
+```bash
+npm run test:security
+```
+
+The runner exercises installed Claude and Cursor hook commands and the installed OpenCode plugin against disposable harness roots, `HOME`, and a temporary Git repo. It evaluates Pi Discuss/Plan shell policy and sandbox wrapping, executes only loader-validated contained cases, and compares repo snapshots before/after each case. The snapshot excludes `.git/index` stat-cache rewrites and includes `git ls-files -s` so tracked-file changes still count. The command runs both the normal lane and the existing sandbox-disabled lane, then reports launcher, execution totals, and pass/fail/known-gap counts by column.
+
+The runner does not launch Claude Code, Cursor, OpenCode, or Pi CLIs; it does not use a model or live bridge. It tests installed config/plugin entrypoints and policy decisions, not host enforcement behavior such as Cursor's reaction to `failClosed` or OpenCode's response to a failed plugin load. GitHub Actions runs `npm run test:security` in the `security-macos` job on `macos-latest` with Node 22; the Ubuntu `test` job also runs it through `npm test`.
+
+Add cases by editing only `scripts/security-corpus.json`: assign a unique id, class, kind, expected outcomes, and columns where needed. For executable shell cases, the loader allows no absolute path except `/dev/null` and rejects `~`, `$HOME`, and `..` references; mark uncontained or UI-injection cases `execute: false`. Keep runnable adversarial text in the corpus, not engineering docs or ADRs.
+
+Use `knownGap: "F<n>"` only for a reproduced, documented finding. The case passes as a known gap only while actual behavior differs from its expected safe outcome. When it starts matching, the runner fails with `gap closed: remove knownGap marker`; remove the marker and keep the safe expectation as a regression check. Record each remaining gap in ADR-0045 by finding id.
+
 Useful focused commands:
 
 ```bash
