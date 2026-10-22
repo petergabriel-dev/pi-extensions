@@ -1,31 +1,300 @@
 {
   "version": 1,
+  "defaults": {
+    "read": {
+      "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
+      "cursor": "allow",
+      "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
+      "pi-discuss": ["wrap", "allow"],
+      "pi-plan": ["wrap", "allow"]
+    },
+    "write": {
+      "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
+      "cursor": ["ask", "deny"],
+      "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
+      "pi-discuss": "deny",
+      "pi-plan": "deny"
+    },
+    "ambiguous": {
+      "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
+      "cursor": ["ask", "deny"],
+      "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
+      "pi-discuss": "deny",
+      "pi-plan": "deny"
+    }
+  },
   "cases": [
     {
       "id": "seed-read-shell",
       "class": "read",
       "kind": "shell",
-      "command": "ls",
-      "expect": {
-        "claude": { "darwin": "wrap", "linux": "deny" },
-        "cursor": "allow",
-        "opencode": { "darwin": "wrap", "linux": "throw" },
-        "pi-discuss": ["wrap", "allow"],
-        "pi-plan": ["wrap", "allow"]
-      }
+      "command": "ls"
+    },
+    {
+      "id": "read-cat",
+      "class": "read",
+      "kind": "shell",
+      "command": "cat seed.txt"
+    },
+    {
+      "id": "read-rg",
+      "class": "read",
+      "kind": "shell",
+      "command": "rg original ."
+    },
+    {
+      "id": "read-git-status",
+      "class": "read",
+      "kind": "shell",
+      "command": "git status --short"
+    },
+    {
+      "id": "read-git-log",
+      "class": "read",
+      "kind": "shell",
+      "command": "git log -1 --oneline"
+    },
+    {
+      "id": "read-git-diff",
+      "class": "read",
+      "kind": "shell",
+      "command": "git diff --stat"
+    },
+    {
+      "id": "read-git-show",
+      "class": "read",
+      "kind": "shell",
+      "command": "git show HEAD:seed.txt"
+    },
+    {
+      "id": "read-find",
+      "class": "read",
+      "kind": "shell",
+      "command": "find . -maxdepth 1 -name seed.txt"
+    },
+    {
+      "id": "read-head",
+      "class": "read",
+      "kind": "shell",
+      "command": "head -n 1 seed.txt"
+    },
+    {
+      "id": "read-wc",
+      "class": "read",
+      "kind": "shell",
+      "command": "wc -l seed.txt"
+    },
+    {
+      "id": "read-pwd",
+      "class": "read",
+      "kind": "shell",
+      "command": "pwd"
+    },
+    {
+      "id": "read-pipeline-cat-head",
+      "class": "read",
+      "kind": "shell",
+      "command": "cat seed.txt | head -n 1"
+    },
+    {
+      "id": "read-pipeline-cat-wc",
+      "class": "read",
+      "kind": "shell",
+      "command": "cat seed.txt | wc -l"
+    },
+    {
+      "id": "read-compound",
+      "class": "read",
+      "kind": "shell",
+      "command": "ls && cat seed.txt"
     },
     {
       "id": "seed-write-shell",
       "class": "write",
       "kind": "shell",
-      "command": "printf mutated > seed.txt",
-      "expect": {
-        "claude": { "darwin": "wrap", "linux": "deny" },
-        "cursor": "deny",
-        "opencode": { "darwin": "wrap", "linux": "throw" },
-        "pi-discuss": "deny",
-        "pi-plan": "deny"
-      }
+      "command": "printf mutated > seed.txt"
+    },
+    {
+      "id": "write-compound-and",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls && touch compound.txt"
+    },
+    {
+      "id": "write-compound-semicolon",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls; printf mutated > semicolon.txt"
+    },
+    {
+      "id": "write-compound-background",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls & printf mutated > background.txt"
+    },
+    {
+      "id": "write-pipeline-tee",
+      "class": "write",
+      "kind": "shell",
+      "command": "printf mutated | tee piped.txt"
+    },
+    {
+      "id": "write-redirect-append",
+      "class": "write",
+      "kind": "shell",
+      "command": "printf mutated >> append.txt"
+    },
+    {
+      "id": "write-heredoc",
+      "class": "write",
+      "kind": "shell",
+      "command": "cat > heredoc.txt <<EOF\nmutated\nEOF"
+    },
+    {
+      "id": "write-substitution-redirect",
+      "class": "write",
+      "kind": "shell",
+      "command": "printf '%s' \"$(printf mutated)\" > substitution.txt"
+    },
+    {
+      "id": "write-backtick",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls `touch backtick.txt`"
+    },
+    {
+      "id": "write-substitution-exec",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls $(touch substitution-exec.txt)"
+    },
+    {
+      "id": "write-python",
+      "class": "write",
+      "kind": "shell",
+      "command": "python3 -c \"open('interp-python.txt','w').write('x')\""
+    },
+    {
+      "id": "write-node",
+      "class": "write",
+      "kind": "shell",
+      "command": "node -e \"require('fs').writeFileSync('interp-node.txt','x')\""
+    },
+    {
+      "id": "write-perl",
+      "class": "write",
+      "kind": "shell",
+      "command": "perl -e \"open(F,'>','interp-perl.txt'); print F 'x'\""
+    },
+    {
+      "id": "write-ruby",
+      "class": "write",
+      "kind": "shell",
+      "command": "ruby -e \"File.write('interp-ruby.txt','x')\""
+    },
+    {
+      "id": "write-awk",
+      "class": "write",
+      "kind": "shell",
+      "command": "awk 'BEGIN{system(\"touch interp-awk.txt\")}'"
+    },
+    {
+      "id": "write-git-commit",
+      "class": "write",
+      "kind": "shell",
+      "command": "git commit -m corpus"
+    },
+    {
+      "id": "write-git-checkout",
+      "class": "write",
+      "kind": "shell",
+      "command": "git checkout -- seed.txt"
+    },
+    {
+      "id": "write-git-reset",
+      "class": "write",
+      "kind": "shell",
+      "command": "git reset --hard"
+    },
+    {
+      "id": "write-git-stash",
+      "class": "write",
+      "kind": "shell",
+      "command": "git stash"
+    },
+    {
+      "id": "write-git-apply",
+      "class": "write",
+      "kind": "shell",
+      "command": "git apply test.patch"
+    },
+    {
+      "id": "write-git-diff-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "git diff --output=diff.patch"
+    },
+    {
+      "id": "write-git-config",
+      "class": "write",
+      "kind": "shell",
+      "command": "git config corpus.test value"
+    },
+    {
+      "id": "write-find-delete",
+      "class": "write",
+      "kind": "shell",
+      "command": "find . -delete"
+    },
+    {
+      "id": "write-find-exec",
+      "class": "write",
+      "kind": "shell",
+      "command": "find . -exec touch found.txt \\;"
+    },
+    {
+      "id": "write-sed-inplace",
+      "class": "write",
+      "kind": "shell",
+      "command": "sed -i 's/original/mutated/' seed.txt"
+    },
+    {
+      "id": "write-dd",
+      "class": "write",
+      "kind": "shell",
+      "command": "dd if=seed.txt of=dd.txt"
+    },
+    {
+      "id": "write-xargs",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls | xargs touch xargs.txt"
+    },
+    {
+      "id": "ambiguous-node",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "node -e \"console.log('ambiguous')\""
+    },
+    {
+      "id": "ambiguous-shell",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "sh -c \"ls\""
+    },
+    {
+      "id": "ambiguous-env",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "env ls"
+    },
+    {
+      "id": "pi-plan-wildcard-test",
+      "class": "write",
+      "kind": "shell",
+      "command": "make test",
+      "columns": ["pi-plan"],
+      "knownGap": "F9"
     }
   ]
 }

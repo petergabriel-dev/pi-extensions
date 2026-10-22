@@ -24,7 +24,17 @@ assert.strictEqual(isBashAllowedInMode("awk '{print $1}' file", "discuss"), true
 
 assert.strictEqual(isBashAllowedInMode("git commit -m nope", "discuss"), false);
 assert.strictEqual(isBashAllowedInMode("echo nope > file", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("ls > file", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("ls >> file", "discuss"), false);
 assert.strictEqual(isBashAllowedInMode("find . -delete", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("find . -exec touch x \\;", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("ls | xargs touch x", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("git diff --output=out.patch", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("git apply test.patch", "plan"), false);
+assert.strictEqual(isBashAllowedInMode("git config corpus.test value", "plan"), false);
+assert.strictEqual(isBashAllowedInMode("awk 'BEGIN{system(\"touch x\")}'", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("ls `touch x`", "discuss"), false);
+assert.strictEqual(isBashAllowedInMode("ls $(touch x)", "discuss"), false);
 assert.strictEqual(isBashAllowedInMode("write file", "discuss"), false);
 assert.strictEqual(isBashAllowedInMode("format", "discuss"), false);
 

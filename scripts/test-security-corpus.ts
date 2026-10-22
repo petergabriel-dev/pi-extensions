@@ -24,13 +24,15 @@ const DEFAULT_CORPUS = path.join(PACKAGE_ROOT, "scripts", "security-corpus.json"
 const COLUMNS = ["claude", "cursor", "opencode", "pi-discuss", "pi-plan"] as const;
 const OUTCOMES = new Set(["allow", "wrap", "ask", "deny", "throw"]);
 const CLASSES = new Set(["read", "write", "ambiguous"]);
-const PLATFORM_KEYS = new Set(["darwin", "linux", "default"]);
+const PLATFORM_KEYS = new Set(["darwin", "linux", "sandbox-disabled", "default"]);
 const EXEC_TIMEOUT_MS = 10_000;
 
 type Column = (typeof COLUMNS)[number];
 type Outcome = "allow" | "wrap" | "ask" | "deny" | "throw";
 type CaseClass = "read" | "write" | "ambiguous";
 type Expectation = string | string[] | Record<string, string | string[]>;
+type ExpectationMap = Partial<Record<Column, Expectation>>;
+type CorpusDefaults = Partial<Record<CaseClass, ExpectationMap>>;
 
 interface SecurityCase {
 	id: string;
@@ -51,6 +53,7 @@ interface RunnerContext {
 	scratchDir: string;
 	env: NodeJS.ProcessEnv;
 	launcher: ReturnType<typeof detectLauncher>;
+	sandboxDisabled: boolean;
 	claudeCommand: string;
 	cursorCommands: Partial<Record<"beforeShellExecution" | "beforeMCPExecution" | "preToolUse", string>>;
 	opencodeHandler: (event: unknown) => Promise<void>;
@@ -98,6 +101,17 @@ function validateOutcomeValue(value: unknown, where: string): void {
 	fail(`${where}: expectation must be a string, string array, or platform map`);
 }
 
+function parseExpectationMap(value: unknown, where: string): ExpectationMap {
+	if (!isRecord(value)) fail(`${where} must be an object`);
+	const expectation: ExpectationMap = {};
+	for (const [column, expectationValue] of Object.entries(value)) {
+		if (!COLUMNS.includes(column as Column)) fail(`${where}: unknown column ${JSON.stringify(column)}`);
+		validateOutcomeValue(expectationValue, `${where} ${column}`);
+		expectation[column as Column] = expectationValue as Expectation;
+	}
+	return expectation;
+}
+
 function containmentViolation(command: string): string | null {
 	if (/(^|[\s"'=])~(?=$|[\s"'/])/.test(command)) return "home-relative path";
 	if (/\$(?:\{HOME\}|HOME\b)/.test(command)) return "$HOME reference";
@@ -109,7 +123,7 @@ function containmentViolation(command: string): string | null {
 	return null;
 }
 
-function parseCase(value: unknown, index: number): SecurityCase {
+function parseCase(value: unknown, index: number, defaults: CorpusDefaults): SecurityCase {
 	if (!isRecord(value)) fail(`cases[${index}] must be an object`);
 	const id = value.id;
 	if (typeof id !== "string" || !/^[a-z0-9][a-z0-9-]{0,127}$/.test(id)) {
@@ -146,15 +160,12 @@ function parseCase(value: unknown, index: number): SecurityCase {
 		});
 		if (new Set(columns).size !== columns.length) fail(`case ${id}: columns contains duplicates`);
 	}
-	const expect = value.expect;
-	if (!isRecord(expect)) fail(`case ${id}: expect must be an object`);
-	const expectation: Partial<Record<Column, Expectation>> = {};
-	for (const [column, expectationValue] of Object.entries(expect)) {
-		if (!COLUMNS.includes(column as Column)) fail(`case ${id}: unknown expectation column ${JSON.stringify(column)}`);
-		validateOutcomeValue(expectationValue, `case ${id} ${column}`);
-		expectation[column as Column] = expectationValue as Expectation;
+	const ownExpectation = value.expect === undefined ? {} : parseExpectationMap(value.expect, `case ${id}`);
+	const expectation: ExpectationMap = { ...(defaults[caseClass as CaseClass] ?? {}), ...ownExpectation };
+	const targetColumns = columns ?? COLUMNS;
+	for (const column of targetColumns) {
+		if (expectation[column] === undefined) fail(`case ${id}: missing expectation for ${column}`);
 	}
-	if (Object.keys(expectation).length === 0) fail(`case ${id}: at least one column expectation is required`);
 	const mutation = value.mutation === undefined ? "none" : value.mutation;
 	if (mutation !== "none" && mutation !== "allowed") fail(`case ${id}: mutation must be none or allowed`);
 	return {
@@ -180,7 +191,15 @@ function loadCorpus(file: string): SecurityCase[] {
 	if (!isRecord(parsed)) fail("corpus root must be an object");
 	if (parsed.version !== 1) fail("corpus version must be 1");
 	if (!Array.isArray(parsed.cases) || parsed.cases.length === 0) fail("corpus cases must be a non-empty array");
-	const cases = parsed.cases.map((value, index) => parseCase(value, index));
+	const defaults: CorpusDefaults = {};
+	if (parsed.defaults !== undefined) {
+		if (!isRecord(parsed.defaults)) fail("corpus defaults must be an object");
+		for (const [caseClass, value] of Object.entries(parsed.defaults)) {
+			if (!CLASSES.has(caseClass)) fail(`unknown default class ${JSON.stringify(caseClass)}`);
+			defaults[caseClass as CaseClass] = parseExpectationMap(value, `defaults.${caseClass}`);
+		}
+	}
+	const cases = parsed.cases.map((value, index) => parseCase(value, index, defaults));
 	const ids = new Set<string>();
 	for (const entry of cases) {
 		if (ids.has(entry.id)) fail(`duplicate case id ${entry.id}`);
@@ -189,11 +208,11 @@ function loadCorpus(file: string): SecurityCase[] {
 	return cases;
 }
 
-function outcomesFor(expectation: Expectation | undefined, column: Column, platform: string): string[] {
+function outcomesFor(expectation: Expectation | undefined, column: Column, platform: string, sandboxDisabled: boolean): string[] {
 	if (expectation === undefined) fail(`${column}: expectation is missing`);
 	if (typeof expectation === "string") return [expectation];
 	if (Array.isArray(expectation)) return expectation;
-	const value = expectation[platform] ?? expectation.default;
+	const value = (sandboxDisabled ? expectation["sandbox-disabled"] : undefined) ?? expectation[platform] ?? expectation.default;
 	if (value === undefined) fail(`${column}: no expectation for platform ${platform}`);
 	return Array.isArray(value) ? value : [value];
 }
@@ -357,7 +376,7 @@ function executeCommand(command: string, ctx: RunnerContext) {
 	});
 }
 
-async function createContext(): Promise<RunnerContext> {
+async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	const runtime = mkdtempSync(path.join(tmpdir(), "pi-security-corpus-"));
 	const home = path.join(runtime, "home");
 	const repo = path.join(runtime, "repo");
@@ -381,6 +400,7 @@ async function createContext(): Promise<RunnerContext> {
 		GIT_CONFIG_NOSYSTEM: "1",
 	};
 	delete env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
+	if (sandboxDisabled) env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
 	runGit(repo, ["init", "-q"], env);
 	runGit(repo, ["config", "user.email", "security-corpus@example.invalid"], env);
 	runGit(repo, ["config", "user.name", "Security Corpus"], env);
@@ -435,6 +455,7 @@ async function createContext(): Promise<RunnerContext> {
 			scratchDir,
 			env,
 			launcher: detectLauncher(),
+			sandboxDisabled,
 			claudeCommand,
 			cursorCommands,
 			opencodeHandler: handler,
@@ -486,7 +507,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 		for (const column of testCase.columns ?? COLUMNS) {
 			const expectation = testCase.expect[column];
 			if (expectation === undefined) continue;
-			const expected = outcomesFor(expectation, column, platform);
+			const expected = outcomesFor(expectation, column, platform, ctx.sandboxDisabled);
 			let result: RunResult;
 			try {
 				result = await runColumn(testCase, column, ctx);
@@ -588,14 +609,19 @@ async function main(): Promise<void> {
 	}
 	const cases = loadCorpus(DEFAULT_CORPUS);
 	if (args.includes("--corrupt-expectation")) corruptExpectation(cases);
-	const ctx = await createContext();
+	const sandboxDisabled = args.includes("--sandbox-disabled");
+	const ctx = await createContext(sandboxDisabled);
 	let previousHome: string | undefined;
 	let previousTmpdir: string | undefined;
+	let previousSandboxDisabled: string | undefined;
 	try {
 		previousHome = process.env.HOME;
 		previousTmpdir = process.env.TMPDIR;
+		previousSandboxDisabled = process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
 		process.env.HOME = ctx.home;
 		process.env.TMPDIR = ctx.scratchDir;
+		if (sandboxDisabled) process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
+		else delete process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
 		const failures = await runCorpus(cases, ctx, process.platform);
 		if (failures > 0) process.exitCode = 1;
 	} finally {
@@ -603,6 +629,8 @@ async function main(): Promise<void> {
 		else process.env.HOME = previousHome;
 		if (previousTmpdir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = previousTmpdir;
+		if (previousSandboxDisabled === undefined) delete process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
+		else process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = previousSandboxDisabled;
 		rmSync(ctx.runtime, { recursive: true, force: true });
 	}
 }

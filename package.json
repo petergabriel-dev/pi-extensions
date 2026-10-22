@@ -86,7 +86,7 @@
     "typecheck": "npm --prefix agent/extensions/browser run typecheck && npm --prefix agent/extensions/ccc-search run typecheck && npm --prefix agent/extensions/personal-memory run typecheck && npm --prefix agent/extensions/subagents run typecheck && npm --prefix agent/extensions/workflow-modes run typecheck",
     "test:cursor": "node agent/cursor-bridge-client/test-cursor-readonly-hook.js",
     "test:opencode": "node agent/opencode-bridge-client/test-opencode-plugin.js",
-    "test:security": "npx --yes tsx scripts/test-security-corpus.ts",
+    "test:security": "npx --yes tsx scripts/test-security-corpus.ts && npx --yes tsx scripts/test-security-corpus.ts --sandbox-disabled",
     "test:cursor-kit": "node .cursor/hooks/test-docs-nudge.js"
   },
   "dependencies": {
