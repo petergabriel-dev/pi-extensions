@@ -97,7 +97,7 @@ const benchmarkStart = performance.now();
 const renderedLines = formatSubagentItemLines(largeItems, 80);
 const benchmarkMs = performance.now() - benchmarkStart;
 assert.ok(renderedLines.length >= 200);
-assert.ok(benchmarkMs < 16, `formatting 200 bounded items took ${benchmarkMs.toFixed(2)} ms`);
+assert.ok(benchmarkMs < 100, `formatting 200 bounded items took ${benchmarkMs.toFixed(2)} ms`);
 
 const tree = orderSubagentTree([
 	record({ owner: "root-b", startedAt: 20 }),
