@@ -145,7 +145,7 @@ F3-F6 close in Phase 2; see ADR-0046. F1/F2 close in Phase 3; see ADR-0047. Test
 
 ## Appendix A: Probe table
 
-P1-P10 ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containing `.pi/`; none called the live bridge or executed a wrapped command body. P11 is a reserved, unrun Phase 4 approval-UI probe. Inputs remain neutral shapes, not payloads.
+P1-P10 ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containing `.pi/`; none called the live bridge or executed a wrapped command body. P11 ran operator-supervised on macOS 26.6.2 (arm64) with a dummy cmux pane and focused terminal, using neutral markers only; it never targeted Pi or a live approval. Inputs remain neutral shapes, not payloads.
 
 | Probe | Surface | Neutral input shape | Observed | Label |
 |---|---|---|---|---|
@@ -179,7 +179,17 @@ P1-P10 ran on macOS with Node 25.8.2 in a throwaway `mktemp -d` project containi
 | P9 | Subagent toolset | read set, mutation, unknown, build | ok / error / error / ok | **E** |
 | P10 | Seatbelt profile | generated profile text | allow default, deny network, deny writes | **E** |
 | P10 | `wrapCommand` | launcher forced to `sandbox-exec` | wrapped, sandbox prefix, deny network | **E** |
-| P11 | Pi TUI approval | non-destructive external-input probe | Reserved for Phase 4; not run | **N** |
+| P11 | Pi TUI approval | non-destructive external-input probe | read-only shells: Claude/OpenCode block all 3 vectors; Cursor asks all 3; sink empty | **E** |
+
+P11 sink results (sink checked after each probe; no cell produced bytes):
+
+| Vector | Claude | Cursor | OpenCode |
+|---|---|---|---|
+| Apple Events keystroke | blocked: Seatbelt privilege violation | ask: not executed | blocked: Seatbelt privilege violation |
+| tmux/cmux send-keys | blocked: socket operation not permitted | ask: not executed | blocked: socket operation not permitted |
+| TIOCSTI on own tty | blocked: `/dev/tty` operation not permitted | ask: not executed | blocked: `/dev/tty` operation not permitted |
+
+Host controls reached the same dummy sink through unsandboxed Apple Events and cmux send-keys; unsandboxed TIOCSTI injected into its own pty. The live sink and focus therefore rule out a dead-target false negative. ADR-0047 A1 is verified for the probed read-only states; Cursor operator-approved execution and Build mode were not probed.
 
 ## Open questions
 

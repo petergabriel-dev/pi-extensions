@@ -6,8 +6,8 @@ date: 2026-10-21
 decision: A harness Build request becomes a four-hour identity-bound lease only after explicit Pi TUI approval; only its active holder may tick plan tasks.
 why: A bridge request is agent-controlled, so lease authorization must come from a human event at Pi while host-supplied identity and bounded expiry constrain its authority.
 affects: agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/test/test_build_lease.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/harness-commands/claude/pi-build.md, agent/harness-commands/cursor/pi-build.md, agent/harness-commands/opencode/pi-build.md, .cursor/commands/pi-build.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/ADR-0047-human-approved-harness-build-lease.md, docs/engineering/decisions/README.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md
-consequences: Human approval adds a round trip and leases can expire mid-build; headless requests fail closed; TUI trust assumes agents cannot inject input; this is not OS-level enforcement.
-readWhen: changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, or Pi approval UI
+consequences: Human approval adds a round trip and leases can expire mid-build; headless requests fail closed; TUI trust is verified for the probed read-only input-isolation states; this is not OS-level enforcement.
+readWhen: changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, Pi approval UI, or TUI input-isolation assumptions
 supersedes: None
 extends: ADR-0043, ADR-0045
 ---
@@ -41,7 +41,7 @@ ADR-0043 introduced a Pi-owned Build lease, but lease requests could grant thems
 
 ### TUI trust assumption
 
-Human approval treats Pi TUI confirmation as a human signal. Assumption A1: an agent cannot drive Pi's TUI through keystroke injection. This was not tested; a non-destructive probe is deferred to Phase 4 (Appendix A, P11). This decision makes no claim of OS-level enforcement.
+Human approval treats Pi TUI confirmation as a human signal. Assumption A1: an agent cannot drive Pi's TUI through keystroke injection. Phase 4 P11 probed Apple Events keystroke, tmux/cmux send-keys, and TIOCSTI from Claude, Cursor, and OpenCode read-only shells against a dummy sink, with no real Pi approval pending or targeted. Claude and OpenCode blocked all three vectors at the Seatbelt boundary; Cursor's classifier returned ask for all three; no sink received input. Host controls reached the sink, so A1 is **verified** for the probed read-only states. Cursor operator-approved or Build-mode execution and OS-level enforcement remain outside this claim.
 
 ## Why
 
@@ -70,7 +70,7 @@ Operator-reported acceptance ran in an isolated disposable project with harness 
 | Headless Build request returns no-approval refusal | Pass **E** |
 | Automated `npm test` gate after acceptance | Pass **E** |
 
-Assumption checks: A2 (Claude honors `updatedInput`) **verified** by matching calls succeeding and forged identity denial; A3 (Cursor supplies hook arguments and `conversation_id`) **verified** by matching calls succeeding and forged identity denial; A4 (`hasUI` distinguishes interactive approval from headless refusal) **verified** by the reported interactive and headless flows. A1 remains **not-verified** pending the Phase 4 probe.
+Assumption checks: A2 (Claude honors `updatedInput`) **verified** by matching calls succeeding and forged identity denial; A3 (Cursor supplies hook arguments and `conversation_id`) **verified** by matching calls succeeding and forged identity denial; A4 (`hasUI` distinguishes interactive approval from headless refusal) **verified** by the reported interactive and headless flows; A1 **verified** by the P11 read-only probe: all three injection vectors were blocked or operator-gated, the sink stayed empty, and host controls reached it.
 
 ## Affects
 
@@ -106,7 +106,7 @@ Code and harness surfaces:
 ## Consequences
 
 - Good: no bridge request self-grants; Pi owns approval, lease state, and task progress; identity is bound at each harness boundary; expired authority fails closed.
-- Bad/risk: approval adds a round trip, four hours may expire mid-build, and requesters must stop and ask for re-approval. Human intent depends on the TUI trust assumption until Phase 4 probes it.
+- Bad/risk: approval adds a round trip, four hours may expire mid-build, and requesters must stop and ask for re-approval. Human intent depends on the TUI trust assumption; P11 verified it for the probed read-only states only.
 - Bad/risk: if a harness disappears without unpairing, the lease remains until another lifecycle event or expiry; `/build-lease release` remains the operator escape hatch.
 
 ## Read when

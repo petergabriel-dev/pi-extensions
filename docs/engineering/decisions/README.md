@@ -48,4 +48,4 @@
 | ADR-0044 | Active | Pi-owned global harness setup | changing `/harness`, user-global harness setup, install manifests, command packaging, or startup health checks |
 | ADR-0045 | Proposed | Cross-harness permission threat model and policy states | changing bridge lease acquisition or release, harness hooks, harness setup hook registration, shell policy, sandbox profiles, foreign MCP gating, subagent toolset validation, or Review posting confirmation |
 | ADR-0046 | Active | Cross-harness tool classification and deny-unknown policy | changing harness read allowlists, Cursor shell classification, Claude PreToolUse registration or fail-closed behavior, foreign MCP gating, or OpenCode execute-hook policy |
-| ADR-0047 | Active | Human-approved harness Build lease | changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, or Pi approval UI |
+| ADR-0047 | Active | Human-approved harness Build lease | changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, Pi approval UI, or TUI input-isolation assumptions |
