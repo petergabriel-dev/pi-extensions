@@ -90,6 +90,7 @@ interface RunnerContext {
 	env: NodeJS.ProcessEnv;
 	launcher: ReturnType<typeof detectLauncher>;
 	sandboxDisabled: boolean;
+	executed: number;
 	claudeCommand: string;
 	cursorCommands: Partial<Record<"beforeShellExecution" | "beforeMCPExecution" | "preToolUse", string>>;
 	opencodeHandler: (event: unknown) => Promise<void>;
@@ -687,6 +688,7 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 			env,
 			launcher: detectLauncher(),
 			sandboxDisabled,
+			executed: 0,
 			claudeCommand,
 			cursorCommands,
 			opencodeHandler: handler,
@@ -885,6 +887,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 						reportFailure(testCase, column, expected, result.outcome, "allowed shell outcome has no command");
 						continue;
 					}
+					ctx.executed += 1;
 					const executed = executeCommand(command, ctx);
 					if (executed.error) {
 						stats[column].fail += 1;
@@ -928,7 +931,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 		}
 	}
 
-	console.log(`SUMMARY launcher=${ctx.launcher}`);
+	console.log(`SUMMARY launcher=${ctx.launcher} executed=${ctx.executed}`);
 	for (const column of COLUMNS) {
 		const entry = stats[column];
 		console.log(`${column}: pass=${entry.pass} fail=${entry.fail} knownGap=${entry.knownGap}`);
@@ -1105,7 +1108,11 @@ async function main(): Promise<void> {
 		process.env.TMPDIR = ctx.scratchDir;
 		if (sandboxDisabled) process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
 		else delete process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
-		const failures = await runCorpus(cases, ctx, process.platform);
+		let failures = await runCorpus(cases, ctx, process.platform);
+		if (process.platform === "darwin" && !sandboxDisabled && ctx.executed === 0) {
+			console.error(`FAIL macOS Seatbelt lane executed 0 cases (launcher=${ctx.launcher})`);
+			failures += 1;
+		}
 		const crashFailures = await runCrashChecks(ctx);
 		if (failures + crashFailures > 0) process.exitCode = 1;
 	} finally {
