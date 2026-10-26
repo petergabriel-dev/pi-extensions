@@ -974,6 +974,13 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 
 				const matched = expected.includes(result.outcome);
 				if (testCase.knownGap) {
+					const after = snapshotRepo(ctx.repo, ctx.env);
+					if (after !== before) {
+						stats[column].fail += 1;
+						failures += 1;
+						reportFailure(testCase, column, expected, result.outcome, "repository changed without an executed command");
+						continue;
+					}
 					if (matched) {
 						stats[column].fail += 1;
 						failures += 1;
@@ -1219,6 +1226,38 @@ function assertSandboxWrapperRecognizer(): void {
 	assert.equal(isRecognizedSandboxWrapper("echo sandboxed"), false);
 }
 
+async function assertKnownGapMutationFails(ctx: RunnerContext): Promise<void> {
+	const testCase: SecurityCase = {
+		id: "known-gap-mutation-regression",
+		class: "write",
+		kind: "event",
+		event: { fixture: true },
+		execute: false,
+		knownGap: "F10",
+		columns: ["opencode"],
+		mutation: "none",
+		expect: { opencode: "deny" },
+	};
+	const output: string[] = [];
+	const originalLog = console.log;
+	const originalError = console.error;
+	const originalHandler = ctx.opencodeHandler;
+	let failures: number;
+	try {
+		ctx.opencodeHandler = async () => writeFileSync(path.join(ctx.repo, "benign-hook-write.txt"), "fixture\n", "utf8");
+		console.log = (...args) => output.push(args.map(String).join(" "));
+		console.error = (...args) => output.push(args.map(String).join(" "));
+		failures = await runCorpus([testCase], ctx, process.platform);
+	} finally {
+		ctx.opencodeHandler = originalHandler;
+		console.log = originalLog;
+		console.error = originalError;
+	}
+	assert.equal(failures, 1, "known-gap repository mutation must fail");
+	assert.match(output.join("\n"), /repository changed without an executed command/);
+	assert.match(output.join("\n"), /opencode: pass=0 fail=1 knownGap=0/);
+}
+
 function assertCorpusValidation(): void {
 	const defaults: CorpusDefaults = { write: { claude: "deny", cursor: "deny" } };
 	const knownGapCase = {
@@ -1282,6 +1321,7 @@ async function main(): Promise<void> {
 		process.env.TMPDIR = ctx.scratchDir;
 		if (sandboxDisabled) process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
 		else delete process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
+		await assertKnownGapMutationFails(ctx);
 		runSandboxPreflight(ctx);
 		let failures = await runCorpus(cases, ctx, process.platform);
 		if (process.platform === "darwin" && ctx.confined === 0) {
