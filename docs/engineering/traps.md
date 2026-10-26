@@ -194,11 +194,14 @@
 ## Security regression corpus
 
 - **Git reads can rewrite `.git/index` stat cache.** The corpus snapshot hashes repo files except `.git/index` and also includes `git ls-files -s`; removing the exclusion can report false mutations, while dropping the Git listing can miss tracked-state changes.
+- **Inherited Git/XDG variables can redirect fixture state.** `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, and other inherited `GIT_*` values can point Git outside disposable repo; inherited `XDG_CONFIG_HOME` can redirect config. Runner removes inherited `GIT_*`, sets `GIT_CONFIG_NOSYSTEM=1`, and resets `XDG_CONFIG_HOME` under temporary `HOME`.
+- **bwrap tmpfs scratch can hide repo.** `--tmpfs` overlays its target; if scratch path equals repo or contains it, command's repo view is masked. Keep runner scratch separate from repo; wrapper recognition of `--ro-bind / /` and `--unshare-net` does not prove mount topology.
 - **Build leases are per Pi session, not project-wide.** Two live Pi sessions can each grant a lease in one project; `lease-cross-session-write` pins this known gap as F10. Do not treat a lease in one session as excluding writers authorized by another.
-- **Pi Plan regex fallback is not a shell parser.** Without a structural sandbox launcher, explicit writers are denied but wildcard expansion remains a documented limit; `pi-plan-wildcard-test` pins it as F9. Prefer structural sandboxing where available.
+- **Pi Plan regex fallback is not a shell parser.** Without a structural sandbox launcher, explicit writers are denied but wildcard expansion remains a documented limit; `pi-plan-wildcard-test` pins it as F9 with `piLauncher: "none"` and explicit `deny`. Prefer structural sandboxing where available.
 - **Cursor `failClosed` is only asserted at config level.** The runner checks installed `failClosed: true` and verifies broken hooks exit nonzero; actual Cursor host enforcement of that exit is outside the runner.
 - **OpenCode plugin-load failure is a host limit.** The runner verifies a broken installed plugin fails during import, but cannot establish how OpenCode handles that failure.
-- **Sandbox-disabled lane is separate evidence.** `npm run test:security` runs a second pass with existing `PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC=1`; it checks fallback denial behavior, not the macOS Seatbelt lane.
+- **Sandbox-disabled lane is separate evidence.** `npm run test:security` runs a second pass with existing `PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC=1` and forces Pi `piLauncher: "none"`; it tests external-hook and Pi fallback decisions. Eligible raw `allow` commands still require runner Seatbelt confinement on macOS; without it they are skipped.
+- **K1: Seatbelt cannot nest.** Product wrapper executes without an outer Seatbelt layer, so a profile regression could write outside repo before repo snapshot. Recognizer checks deny-write/network text and product-profile assertions mitigate this, not proof of full outside-repo confinement.
 
 ## Harness Build lease traps
 
