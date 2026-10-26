@@ -44,26 +44,6 @@ const LEASE_STATES = new Set([
 ] as const);
 const STDIN_KINDS = new Set(["empty", "non-json", "array", "oversized"] as const);
 const CRASH_VARIANTS = ["missing", "syntax", "throws"] as const;
-const PROFILE = Object.fromEntries(["runGit", "spawnCaptured", "executeCommand", "snapshotRepo", "resetRepo", "runCorpus"]
-	.map((name) => [name, { calls: 0, elapsedMs: 0 }])) as Record<string, { calls: number; elapsedMs: number }>;
-
-function profile<T>(name: string, fn: () => T): T {
-	const timing = PROFILE[name], started = performance.now();
-	timing.calls++;
-	try { return fn(); } finally { timing.elapsedMs += performance.now() - started; }
-}
-
-async function profileAsync<T>(name: string, fn: () => Promise<T>): Promise<T> {
-	const timing = PROFILE[name], started = performance.now();
-	timing.calls++;
-	try { return await fn(); } finally { timing.elapsedMs += performance.now() - started; }
-}
-
-function reportProfile(mainElapsedMs: number): void {
-	console.log("PROFILE nested timings overlap; totals are not additive");
-	for (const [name, timing] of Object.entries(PROFILE)) console.log(`PROFILE ${name} calls=${timing.calls} elapsed-ms=${timing.elapsedMs.toFixed(1)}`);
-	console.log(`PROFILE main calls=1 elapsed-ms=${mainElapsedMs.toFixed(1)}`);
-}
 
 type Column = (typeof COLUMNS)[number];
 type HarnessColumn = "claude" | "cursor" | "opencode";
@@ -373,10 +353,6 @@ function formatExpected(values: string[]): string {
 }
 
 function spawnCaptured(command: string, input: string, cwd: string, env: NodeJS.ProcessEnv) {
-	return profile("spawnCaptured", () => spawnCapturedImpl(command, input, cwd, env));
-}
-
-function spawnCapturedImpl(command: string, input: string, cwd: string, env: NodeJS.ProcessEnv) {
 	const result = spawnSync("sh", ["-c", command], {
 		input,
 		cwd,
@@ -614,10 +590,6 @@ async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerCont
 }
 
 function runGit(repo: string, args: string[], env: NodeJS.ProcessEnv): string {
-	return profile("runGit", () => runGitImpl(repo, args, env));
-}
-
-function runGitImpl(repo: string, args: string[], env: NodeJS.ProcessEnv): string {
 	const result = spawnSync("git", args, { cwd: repo, env, encoding: "utf8", timeout: EXEC_TIMEOUT_MS });
 	if (result.error) fail(`git ${args.join(" ")} failed: ${result.error.message}`);
 	if (result.status !== 0) fail(`git ${args.join(" ")} exited ${result.status}: ${result.stderr.trim()}`);
@@ -625,10 +597,6 @@ function runGitImpl(repo: string, args: string[], env: NodeJS.ProcessEnv): strin
 }
 
 function snapshotRepo(repo: string, env: NodeJS.ProcessEnv): string {
-	return profile("snapshotRepo", () => snapshotRepoImpl(repo, env));
-}
-
-function snapshotRepoImpl(repo: string, env: NodeJS.ProcessEnv): string {
 	const lines: string[] = [];
 	const walk = (directory: string, prefix: string): void => {
 		const entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
@@ -654,10 +622,6 @@ function snapshotRepoImpl(repo: string, env: NodeJS.ProcessEnv): string {
 }
 
 function executeCommand(command: string, ctx: RunnerContext) {
-	return profile("executeCommand", () => executeCommandImpl(command, ctx));
-}
-
-function executeCommandImpl(command: string, ctx: RunnerContext) {
 	return spawnSync("sh", ["-c", command], {
 		cwd: ctx.repo,
 		env: ctx.env,
@@ -943,10 +907,6 @@ function setupLease(testCase: SecurityCase, column: HarnessColumn, ctx: RunnerCo
 }
 
 function resetRepo(ctx: RunnerContext): void {
-	profile("resetRepo", () => resetRepoImpl(ctx));
-}
-
-function resetRepoImpl(ctx: RunnerContext): void {
 	clearLeaseFixtures(ctx);
 	runGit(ctx.repo, ["reset", "--hard", "HEAD"], ctx.env);
 	runGit(ctx.repo, ["clean", "-fdx"], ctx.env);
@@ -986,11 +946,7 @@ function reportFailure(testCase: SecurityCase, column: Column, expected: string[
 	if (detail) console.error(`  ${detail}`);
 }
 
-function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: string): Promise<number> {
-	return profileAsync("runCorpus", () => runCorpusImpl(cases, ctx, platform));
-}
-
-async function runCorpusImpl(cases: SecurityCase[], ctx: RunnerContext, platform: string): Promise<number> {
+async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: string): Promise<number> {
 	const stats = Object.fromEntries(COLUMNS.map((column) => [column, { pass: 0, fail: 0, knownGap: 0 }])) as Record<Column, ColumnStats>;
 	let failures = 0;
 
@@ -1385,8 +1341,7 @@ async function main(): Promise<void> {
 	}
 }
 
-const mainStartedAt = performance.now();
 void main().catch((error: unknown) => {
 	console.error(error instanceof Error ? error.message : String(error));
 	process.exitCode = 1;
-}).finally(() => reportProfile(performance.now() - mainStartedAt));
+});
