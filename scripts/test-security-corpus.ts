@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -608,6 +609,32 @@ function executeCommand(command: string, ctx: RunnerContext) {
 	});
 }
 
+function createRunnerEnv(source: NodeJS.ProcessEnv, home: string, scratchDir: string, repo: string): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...source };
+	for (const key of Object.keys(env)) {
+		if (key.startsWith("GIT_")) delete env[key];
+	}
+	return {
+		...env,
+		HOME: home,
+		TMPDIR: scratchDir,
+		CLAUDE_PROJECT_DIR: repo,
+		GIT_CONFIG_NOSYSTEM: "1",
+		XDG_CONFIG_HOME: path.join(home, ".config"),
+	};
+}
+
+function assertRunnerEnvIsolation(): void {
+	const env = createRunnerEnv({
+		GIT_DIR: "fixture",
+		GIT_WORK_TREE: "fixture",
+		GIT_INDEX_FILE: "fixture",
+		XDG_CONFIG_HOME: "fixture",
+	}, "/home", "/tmp", "/repo");
+	assert.deepEqual(Object.keys(env).filter((key) => key.startsWith("GIT_")).sort(), ["GIT_CONFIG_NOSYSTEM"]);
+	assert.equal(env.XDG_CONFIG_HOME, path.join("/home", ".config"));
+}
+
 async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	const runtime = mkdtempSync(path.join(tmpdir(), "pi-security-corpus-"));
 	const home = path.join(runtime, "home");
@@ -624,22 +651,16 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	mkdirSync(path.join(repo, ".pi"), { recursive: true });
 	writeFileSync(path.join(repo, "seed.txt"), "original\n", "utf8");
 
-	const env: NodeJS.ProcessEnv = {
-		...process.env,
-		HOME: home,
-		TMPDIR: scratchDir,
-		CLAUDE_PROJECT_DIR: repo,
-		GIT_CONFIG_NOSYSTEM: "1",
-	};
+	const env = createRunnerEnv(process.env, home, scratchDir, repo);
 	delete env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
 	if (sandboxDisabled) env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
-	runGit(repo, ["init", "-q"], env);
-	runGit(repo, ["config", "user.email", "security-corpus@example.invalid"], env);
-	runGit(repo, ["config", "user.name", "Security Corpus"], env);
-	runGit(repo, ["add", "seed.txt"], env);
-	runGit(repo, ["commit", "-qm", "seed"], env);
 
 	try {
+		runGit(repo, ["init", "-q"], env);
+		runGit(repo, ["config", "user.email", "security-corpus@example.invalid"], env);
+		runGit(repo, ["config", "user.name", "Security Corpus"], env);
+		runGit(repo, ["add", "seed.txt"], env);
+		runGit(repo, ["commit", "-qm", "seed"], env);
 		for (const harness of ["claude", "cursor", "opencode"] as const satisfies Harness[]) {
 			const plan = await planInstall(harness, { pkgRoot: PACKAGE_ROOT, roots, agentDir });
 			const results = await applyPlan(plan);
@@ -1084,6 +1105,7 @@ function corruptExpectation(cases: SecurityCase[]): void {
 }
 
 async function main(): Promise<void> {
+	assertRunnerEnvIsolation();
 	const args = process.argv.slice(2);
 	const validateIndex = args.indexOf("--validate-corpus");
 	if (validateIndex !== -1) {
