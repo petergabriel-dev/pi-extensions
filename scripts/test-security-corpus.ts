@@ -6,6 +6,7 @@ import {
 	copyFileSync,
 	existsSync,
 	mkdirSync,
+	realpathSync,
 	mkdtempSync,
 	readFileSync,
 	readdirSync,
@@ -86,12 +87,15 @@ interface SecurityCase {
 interface RunnerContext {
 	runtime: string;
 	home: string;
+	workDir: string;
 	repo: string;
 	scratchDir: string;
 	env: NodeJS.ProcessEnv;
 	launcher: ReturnType<typeof detectLauncher>;
 	sandboxDisabled: boolean;
 	executed: number;
+	confined: number;
+	skippedUnconfined: number;
 	claudeCommand: string;
 	cursorCommands: Partial<Record<"beforeShellExecution" | "beforeMCPExecution" | "preToolUse", string>>;
 	opencodeHandler: (event: unknown) => Promise<void>;
@@ -609,6 +613,62 @@ function executeCommand(command: string, ctx: RunnerContext) {
 	});
 }
 
+function shellQuote(value: string): string {
+	return "'" + value.replaceAll("'", "'\"'\"'") + "'";
+}
+
+function isRecognizedSandboxWrapper(command: string): boolean {
+	const seatbelt = command.match(/^\/usr\/bin\/sandbox-exec\s+-p\s+'([\s\S]*)'\s+\/usr\/bin\/env(?:\s|$)/);
+	if (seatbelt) return seatbelt[1].includes("(deny file-write*)") && seatbelt[1].includes("(deny network*)");
+
+	const bwrapMarker = command.indexOf(" /bin/bash -lc ");
+	if (bwrapMarker < 0) return false;
+	const bwrapArgs = command.slice(0, bwrapMarker);
+	return /^bwrap(?:\s|$)/.test(bwrapArgs)
+		&& /(?:^|\s)--ro-bind\s+\/\s+\/(?:\s|$)/.test(bwrapArgs)
+		&& /(?:^|\s)--unshare-net(?:\s|$)/.test(bwrapArgs);
+}
+
+function sandboxCommand(command: string, ctx: RunnerContext): string {
+	// Keep all writes inside disposable work/, while TMPDIR stays isolated in work/tmp.
+	const wrapped = wrapCommand(command, {
+		cwd: ctx.repo,
+		scratchDir: ctx.workDir,
+		launcher: "sandbox-exec",
+	});
+	const from = `TMPDIR=${shellQuote(realpathSync(ctx.workDir))}`;
+	const to = `TMPDIR=${shellQuote(realpathSync(ctx.scratchDir))}`;
+	if (!wrapped.wrapped || !wrapped.command.includes(from)) fail("unrecognized sandbox wrapper");
+	const confined = wrapped.command.replace(from, to);
+	if (!isRecognizedSandboxWrapper(confined)) fail("unrecognized sandbox wrapper");
+	return confined;
+}
+
+function runSandboxPreflight(ctx: RunnerContext): void {
+	if (process.platform !== "darwin") return;
+	if (!existsSync("/usr/bin/sandbox-exec")) fail("macOS sandbox preflight failed: /usr/bin/sandbox-exec is missing");
+
+	const homeProbe = path.join(ctx.home, ".sandbox-preflight-write");
+	const repoProbe = path.join(ctx.repo, ".sandbox-preflight-write");
+	rmSync(homeProbe, { force: true });
+	rmSync(repoProbe, { force: true });
+	try {
+		const homeResult = executeCommand(sandboxCommand(`touch ${shellQuote(homeProbe)}`, ctx), ctx);
+		if (homeResult.error || homeResult.status === 0 || typeof homeResult.status !== "number" || existsSync(homeProbe)) {
+			fail(`macOS sandbox preflight failed: HOME write was not denied${homeResult.error ? ` (${homeResult.error.message})` : ""}`);
+		}
+
+		const repoResult = executeCommand(sandboxCommand(`touch ${shellQuote(repoProbe)}`, ctx), ctx);
+		if (repoResult.error || repoResult.status !== 0 || !existsSync(repoProbe)) {
+			fail(`macOS sandbox preflight failed: repo write was not allowed${repoResult.error ? ` (${repoResult.error.message})` : ""}`);
+		}
+		console.log("PREFLIGHT confined=2 home-write=denied repo-write=allowed");
+	} finally {
+		rmSync(homeProbe, { force: true });
+		rmSync(repoProbe, { force: true });
+	}
+}
+
 function createRunnerEnv(source: NodeJS.ProcessEnv, home: string, scratchDir: string, repo: string): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...source };
 	for (const key of Object.keys(env)) {
@@ -638,8 +698,9 @@ function assertRunnerEnvIsolation(): void {
 async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	const runtime = mkdtempSync(path.join(tmpdir(), "pi-security-corpus-"));
 	const home = path.join(runtime, "home");
-	const repo = path.join(runtime, "repo");
-	const scratchDir = path.join(runtime, "tmp");
+	const workDir = path.join(runtime, "work");
+	const repo = path.join(workDir, "repo");
+	const scratchDir = path.join(workDir, "tmp");
 	const agentDir = path.join(home, ".pi", "agent");
 	const roots = {
 		claude: path.join(home, ".claude"),
@@ -647,7 +708,7 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 		cursor: path.join(home, ".cursor"),
 		opencode: path.join(home, ".config", "opencode"),
 	};
-	for (const directory of [home, repo, scratchDir, agentDir]) mkdirSync(directory, { recursive: true });
+	for (const directory of [home, workDir, repo, scratchDir, agentDir]) mkdirSync(directory, { recursive: true });
 	mkdirSync(path.join(repo, ".pi"), { recursive: true });
 	writeFileSync(path.join(repo, "seed.txt"), "original\n", "utf8");
 
@@ -704,12 +765,15 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 		return {
 			runtime,
 			home,
+			workDir,
 			repo,
 			scratchDir,
 			env,
 			launcher: detectLauncher(),
 			sandboxDisabled,
 			executed: 0,
+			confined: 0,
+			skippedUnconfined: 0,
 			claudeCommand,
 			cursorCommands,
 			opencodeHandler: handler,
@@ -882,6 +946,13 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 					result = { outcome: "throw", detail: error instanceof Error ? error.message : String(error) };
 				}
 
+				if (testCase.kind === "shell" && result.outcome === "wrap" && !isRecognizedSandboxWrapper(result.command ?? "")) {
+					stats[column].fail += 1;
+					failures += 1;
+					reportFailure(testCase, column, expected, result.outcome, "unrecognized sandbox wrapper");
+					continue;
+				}
+
 				const matched = expected.includes(result.outcome);
 				if (testCase.knownGap) {
 					if (matched) {
@@ -908,23 +979,46 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 						reportFailure(testCase, column, expected, result.outcome, "allowed shell outcome has no command");
 						continue;
 					}
-					ctx.executed += 1;
-					const executed = executeCommand(command, ctx);
-					if (executed.error) {
-						stats[column].fail += 1;
-						failures += 1;
-						reportFailure(testCase, column, expected, result.outcome, `execution failed: ${executed.error.message}`);
-						continue;
+
+					let executionCommand = command;
+					let shouldExecute = true;
+					if (result.outcome === "allow") {
+						if (!existsSync("/usr/bin/sandbox-exec")) {
+							ctx.skippedUnconfined += 1;
+							shouldExecute = false;
+						} else {
+							try {
+								executionCommand = sandboxCommand(command, ctx);
+							} catch (error) {
+								stats[column].fail += 1;
+								failures += 1;
+								reportFailure(testCase, column, expected, result.outcome, error instanceof Error ? error.message : String(error));
+								continue;
+							}
+						}
 					}
-					if (testCase.class === "read" && executed.status !== 0) {
-						stats[column].fail += 1;
-						failures += 1;
-						reportFailure(testCase, column, expected, result.outcome, `read command exited ${executed.status}`);
-						continue;
+
+					if (shouldExecute) {
+						ctx.executed += 1;
+						ctx.confined += 1;
+						const executed = executeCommand(executionCommand, ctx);
+						if (executed.error) {
+							stats[column].fail += 1;
+							failures += 1;
+							reportFailure(testCase, column, expected, result.outcome, `execution failed: ${executed.error.message}`);
+							continue;
+						}
+						if (testCase.class === "read" && executed.status !== 0) {
+							stats[column].fail += 1;
+							failures += 1;
+							reportFailure(testCase, column, expected, result.outcome, `read command exited ${executed.status}`);
+							continue;
+						}
 					}
+
 					const after = snapshotRepo(ctx.repo, ctx.env);
 					const mutated = after !== before;
-					if (testCase.mutation === "allowed" && !mutated) {
+					if (shouldExecute && testCase.mutation === "allowed" && !mutated) {
 						stats[column].fail += 1;
 						failures += 1;
 						reportFailure(testCase, column, expected, result.outcome, "expected mutation but repository is unchanged");
@@ -952,7 +1046,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 		}
 	}
 
-	console.log(`SUMMARY launcher=${ctx.launcher} executed=${ctx.executed}`);
+	console.log(`SUMMARY launcher=${ctx.launcher} executed=${ctx.executed} confined=${ctx.confined} skippedUnconfined=${ctx.skippedUnconfined}`);
 	for (const column of COLUMNS) {
 		const entry = stats[column];
 		console.log(`${column}: pass=${entry.pass} fail=${entry.fail} knownGap=${entry.knownGap}`);
@@ -1096,6 +1190,16 @@ async function runCrashChecks(ctx: RunnerContext): Promise<number> {
 	return failures;
 }
 
+function assertSandboxWrapperRecognizer(): void {
+	const seatbelt = "/usr/bin/sandbox-exec -p '(version 1)\\n(deny file-write*)\\n(deny network*)' /usr/bin/env TMPDIR='/tmp' /bin/bash -lc 'true'";
+	const bwrap = "bwrap --unshare-net --ro-bind / / --tmpfs '/tmp' --setenv TMPDIR '/tmp' /bin/bash -lc 'true'";
+	assert.equal(isRecognizedSandboxWrapper(seatbelt), true);
+	assert.equal(isRecognizedSandboxWrapper("/usr/bin/sandbox-exec -p '(deny file-write*)' /usr/bin/env /bin/bash -lc 'true'"), false);
+	assert.equal(isRecognizedSandboxWrapper(bwrap), true);
+	assert.equal(isRecognizedSandboxWrapper("bwrap --ro-bind / / /bin/bash -lc 'true'"), false);
+	assert.equal(isRecognizedSandboxWrapper("echo sandboxed"), false);
+}
+
 function corruptExpectation(cases: SecurityCase[]): void {
 	const first = cases[0];
 	if (!first) fail("corpus has no cases");
@@ -1106,6 +1210,7 @@ function corruptExpectation(cases: SecurityCase[]): void {
 
 async function main(): Promise<void> {
 	assertRunnerEnvIsolation();
+	assertSandboxWrapperRecognizer();
 	const args = process.argv.slice(2);
 	const validateIndex = args.indexOf("--validate-corpus");
 	if (validateIndex !== -1) {
@@ -1130,9 +1235,10 @@ async function main(): Promise<void> {
 		process.env.TMPDIR = ctx.scratchDir;
 		if (sandboxDisabled) process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
 		else delete process.env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
+		runSandboxPreflight(ctx);
 		let failures = await runCorpus(cases, ctx, process.platform);
-		if (process.platform === "darwin" && !sandboxDisabled && ctx.executed === 0) {
-			console.error(`FAIL macOS Seatbelt lane executed 0 cases (launcher=${ctx.launcher})`);
+		if (process.platform === "darwin" && ctx.confined === 0) {
+			console.error(`FAIL macOS Seatbelt lane confined 0 corpus executions (launcher=${ctx.launcher})`);
 			failures += 1;
 		}
 		const crashFailures = await runCrashChecks(ctx);
