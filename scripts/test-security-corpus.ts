@@ -92,6 +92,7 @@ interface RunnerContext {
 	scratchDir: string;
 	env: NodeJS.ProcessEnv;
 	launcher: ReturnType<typeof detectLauncher>;
+	piLauncher: ReturnType<typeof detectLauncher>;
 	sandboxDisabled: boolean;
 	executed: number;
 	confined: number;
@@ -533,17 +534,19 @@ async function opencodeEventOutcome(testCase: SecurityCase, ctx: RunnerContext):
 }
 
 function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx: RunnerContext): RunResult {
-	const command = testCase.command ?? "";
+	const command = (testCase.command ?? "").trim();
 	const mode = column === "pi-discuss" ? "discuss" : "plan";
-	if (!isBashAllowedInMode(command, mode)) return { outcome: "deny" };
-	if (ctx.launcher === "none") return { outcome: "allow", command };
-	const wrapped = wrapCommand(command, {
-		cwd: ctx.repo,
-		scratchDir: ctx.scratchDir,
-		launcher: ctx.launcher,
-	});
-	if (!wrapped.wrapped) return { outcome: "allow", command };
-	return { outcome: "wrap", command: wrapped.command };
+	try {
+		const wrapped = wrapCommand(command, {
+			cwd: ctx.repo,
+			scratchDir: ctx.scratchDir,
+			launcher: ctx.piLauncher,
+		});
+		if (wrapped.wrapped) return { outcome: "wrap", command: wrapped.command };
+	} catch {
+		// Match workflow-modes: wrapping failure falls back to conservative policy.
+	}
+	return isBashAllowedInMode(command, mode) ? { outcome: "allow", command } : { outcome: "deny" };
 }
 
 async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerContext): Promise<RunResult> {
@@ -713,6 +716,7 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	writeFileSync(path.join(repo, "seed.txt"), "original\n", "utf8");
 
 	const env = createRunnerEnv(process.env, home, scratchDir, repo);
+	const launcher = detectLauncher();
 	delete env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC;
 	if (sandboxDisabled) env.PI_READONLY_HOOK_DISABLE_SANDBOX_EXEC = "1";
 
@@ -769,7 +773,8 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 			repo,
 			scratchDir,
 			env,
-			launcher: detectLauncher(),
+			launcher,
+			piLauncher: sandboxDisabled ? "none" : launcher,
 			sandboxDisabled,
 			executed: 0,
 			confined: 0,
@@ -1046,7 +1051,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 		}
 	}
 
-	console.log(`SUMMARY launcher=${ctx.launcher} executed=${ctx.executed} confined=${ctx.confined} skippedUnconfined=${ctx.skippedUnconfined}`);
+	console.log(`SUMMARY launcher=${ctx.launcher} piLauncher=${ctx.piLauncher} executed=${ctx.executed} confined=${ctx.confined} skippedUnconfined=${ctx.skippedUnconfined}`);
 	for (const column of COLUMNS) {
 		const entry = stats[column];
 		console.log(`${column}: pass=${entry.pass} fail=${entry.fail} knownGap=${entry.knownGap}`);

@@ -5,22 +5,22 @@
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": "allow",
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
-      "pi-discuss": ["wrap", "allow"],
-      "pi-plan": ["wrap", "allow"]
+      "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "allow"], "sandbox-disabled": "allow" },
+      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "allow"], "sandbox-disabled": "allow" }
     },
     "write": {
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": ["ask", "deny"],
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
-      "pi-discuss": "deny",
-      "pi-plan": "deny"
+      "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
+      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
     },
     "ambiguous": {
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": ["ask", "deny"],
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
-      "pi-discuss": "deny",
-      "pi-plan": "deny"
+      "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
+      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
     }
   },
   "cases": [
@@ -1152,12 +1152,29 @@
       }
     },
     {
+      "id": "pi-seatbelt-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "printf blocked > pi-seatbelt-write.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "mutation": "none"
+    },
+    {
+      "id": "pi-seatbelt-ambiguous-write",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "git status --short; printf blocked > pi-seatbelt-ambiguous.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "mutation": "none"
+    },
+    {
       "id": "pi-plan-wildcard-test",
       "class": "write",
       "kind": "shell",
       "command": "make test",
       "columns": ["pi-plan"],
-      "knownGap": "F9"
+      "knownGap": "F9",
+      "expect": { "pi-plan": "deny" }
     }
   ]
 }
