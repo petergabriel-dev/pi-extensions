@@ -79,6 +79,7 @@ interface SecurityCase {
 	execute: boolean;
 	knownGap?: string;
 	sandboxEvidence?: SandboxEvidence;
+	piLauncher?: "none";
 	columns?: Column[];
 	mutation: "none" | "allowed";
 	expect: Partial<Record<Column, Expectation>>;
@@ -256,14 +257,26 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	} else if (event !== undefined) {
 		fail(`case ${id}: event is only valid for event cases`);
 	}
+	const piLauncher = value.piLauncher;
+	if (piLauncher !== undefined) {
+		if (piLauncher !== "none") fail(`case ${id}: piLauncher must be none`);
+		if (!columns || columns.some((column) => !column.startsWith("pi-"))) {
+			fail(`case ${id}: piLauncher is only valid for cases targeting Pi columns`);
+		}
+	}
 	const lease = value.lease;
 	if (lease !== undefined) {
 		if (typeof lease !== "string" || !LEASE_STATES.has(lease as LeaseState)) fail(`case ${id}: unknown lease state ${JSON.stringify(lease)}`);
 		if (!columns || columns.some((column) => column.startsWith("pi-"))) fail(`case ${id}: lease cases must pin Claude, Cursor, or OpenCode columns`);
 	}
 	const ownExpectation = value.expect === undefined ? {} : parseExpectationMap(value.expect, `case ${id}`);
-	const expectation: ExpectationMap = { ...(defaults[caseClass as CaseClass] ?? {}), ...ownExpectation };
 	const targetColumns = columns ?? COLUMNS;
+	if (knownGap !== undefined) {
+		for (const column of targetColumns) {
+			if (ownExpectation[column] === undefined) fail(`case ${id}: knownGap requires explicit expectation for ${column}`);
+		}
+	}
+	const expectation: ExpectationMap = { ...(defaults[caseClass as CaseClass] ?? {}), ...ownExpectation };
 	for (const column of targetColumns) {
 		if (expectation[column] === undefined) fail(`case ${id}: missing expectation for ${column}`);
 	}
@@ -292,6 +305,7 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 		execute,
 		...(typeof knownGap === "string" ? { knownGap } : {}),
 		...(typeof sandboxEvidence === "string" ? { sandboxEvidence: sandboxEvidence as SandboxEvidence } : {}),
+		...(piLauncher === "none" ? { piLauncher } : {}),
 		...(columns ? { columns } : {}),
 		mutation,
 		expect: expectation,
@@ -540,7 +554,7 @@ function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx
 		const wrapped = wrapCommand(command, {
 			cwd: ctx.repo,
 			scratchDir: ctx.scratchDir,
-			launcher: ctx.piLauncher,
+			launcher: testCase.piLauncher ?? ctx.piLauncher,
 		});
 		if (wrapped.wrapped) return { outcome: "wrap", command: wrapped.command };
 	} catch {
@@ -1205,6 +1219,33 @@ function assertSandboxWrapperRecognizer(): void {
 	assert.equal(isRecognizedSandboxWrapper("echo sandboxed"), false);
 }
 
+function assertCorpusValidation(): void {
+	const defaults: CorpusDefaults = { write: { claude: "deny", cursor: "deny" } };
+	const knownGapCase = {
+		id: "known-gap-default",
+		class: "write",
+		kind: "shell",
+		command: "touch fixture.txt",
+		columns: ["claude", "cursor"],
+		knownGap: "F1",
+	};
+	assert.throws(() => parseCase(knownGapCase, 0, defaults), /knownGap requires explicit expectation for claude/);
+	assert.throws(() => parseCase({ ...knownGapCase, expect: { claude: "deny" } }, 0, defaults), /knownGap requires explicit expectation for cursor/);
+	const piCase = {
+		id: "pi-launcher-none",
+		class: "write",
+		kind: "shell",
+		command: "make test",
+		columns: ["pi-plan"],
+		piLauncher: "none",
+		expect: { "pi-plan": "deny" },
+	};
+	assert.equal(parseCase(piCase, 0, {}).piLauncher, "none");
+	assert.throws(() => parseCase({ ...piCase, piLauncher: "bwrap" }, 0, {}), /piLauncher must be none/);
+	assert.throws(() => parseCase({ ...piCase, columns: ["claude"], expect: { claude: "deny" } }, 0, {}), /piLauncher is only valid for cases targeting Pi columns/);
+	assert.throws(() => parseCase({ ...piCase, columns: ["pi-plan", "claude"], expect: { "pi-plan": "deny", claude: "deny" } }, 0, {}), /piLauncher is only valid for cases targeting Pi columns/);
+}
+
 function corruptExpectation(cases: SecurityCase[]): void {
 	const first = cases[0];
 	if (!first) fail("corpus has no cases");
@@ -1216,6 +1257,7 @@ function corruptExpectation(cases: SecurityCase[]): void {
 async function main(): Promise<void> {
 	assertRunnerEnvIsolation();
 	assertSandboxWrapperRecognizer();
+	assertCorpusValidation();
 	const args = process.argv.slice(2);
 	const validateIndex = args.indexOf("--validate-corpus");
 	if (validateIndex !== -1) {

@@ -929,7 +929,12 @@
       "command": "echo lease-mutation > lease.txt",
       "columns": ["claude", "cursor", "opencode"],
       "lease": "cross-session",
-      "knownGap": "F10"
+      "knownGap": "F10",
+      "expect": {
+        "claude": ["wrap", "deny", "ask", "throw"],
+        "cursor": ["wrap", "deny", "ask", "throw"],
+        "opencode": ["wrap", "deny", "ask", "throw"]
+      }
     },
     {
       "id": "claude-mcp-lease-forged-session",
@@ -1174,6 +1179,7 @@
       "command": "make test",
       "columns": ["pi-plan"],
       "knownGap": "F9",
+      "piLauncher": "none",
       "expect": { "pi-plan": "deny" }
     }
   ]
