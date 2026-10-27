@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, getBuildGuardBlocker, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
@@ -590,7 +590,7 @@ export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless 
 
 export const PLAN_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When \`subagent\` is available, default to it with \`agent: "explorer"\` for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal. Keep input validation, error handling that prevents data loss, security, accessibility, and explicitly requested features non-negotiable.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
 
-export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Never auto-post a review: ask for explicit user confirmation immediately before publishing. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
+export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
 export const DESIGN_PROMPT = `Workflow mode: Design. Design-system work only. Write only under docs/design/ and declared token files; never app/component source or docs/engineering/. Inspect existing styles and components before creating tokens or specs; adopt or extract existing system instead of inventing a parallel one. If project builds on named base library (for example, shadcn), record it in docs/design/README.md and derive component specs from base components rather than reinventing them. Start tokens before components. Use /* @primitive */ and /* @semantic */ layers in token CSS. Semantic tokens define both light and dark values. Build roughly ten foundation component specs, curated enough to constrain later implementation. Never hard-code values: use token variables. Accessibility is non-negotiable. Every component spec and preview must be responsive-ready: mobile-first, fluid layouts, no fixed pixel widths; every component spec includes a Responsive section. Preview pages use a single-column vertical layout with stacked sections — never grid galleries or multi-column tile layouts. Previews must be viewable in both themes through project's theme-switch convention. Design surface only; suggest /mode build for component code.`;
 
@@ -863,8 +863,8 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
-	pi.on("tool_call", async (event) => {
-			if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review" && currentMode !== "design") return;
+	pi.on("tool_call", async (event, ctx) => {
+		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review" && currentMode !== "design") return;
 
 		if (MUTATION_TOOLS.has(event.toolName)) {
 			if (currentMode === "design") {
@@ -882,19 +882,26 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (event.toolName !== "bash") return;
-		const command = String((event.input as { command?: unknown }).command ?? "").trim();
+		const originalCommand = String((event.input as { command?: unknown }).command ?? "");
+		const command = originalCommand.trim();
 
-		// Review has an explicit allow-list; enforce it before sandboxing so a
-		// missing or failing launcher cannot turn the review sandbox into a bypass.
+		// Review allow-list and posting approval both run before sandboxing so
+		// missing or failing launchers cannot bypass either policy.
 		if (currentMode === "review" && !isBashAllowedInMode(command, "review")) {
 			return {
 				block: true,
 				reason: formatModeBlockReason(currentMode, "bash command was blocked; only read commands and approved gh PR commands were allowed."),
 			};
 		}
+		if (currentMode === "review" && !await confirmReviewPost(originalCommand, ctx.hasUI, ctx.ui)) {
+			return {
+				block: true,
+				reason: formatModeBlockReason(currentMode, "GitHub posting was declined or unavailable; stop and do not retry."),
+			};
+		}
 
 		try {
-			const wrapped = wrapCommand(command, { cwd: process.cwd(), ...(currentMode === "review" ? { allowNetwork: true } : {}) });
+			const wrapped = wrapCommand(currentMode === "review" ? originalCommand : command, { cwd: process.cwd(), ...(currentMode === "review" ? { allowNetwork: true } : {}) });
 			if (wrapped.wrapped) {
 				(event.input as { command?: string }).command = wrapped.command;
 				return;
