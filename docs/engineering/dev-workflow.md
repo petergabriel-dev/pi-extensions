@@ -493,7 +493,9 @@ command -v gh
 gh auth status
 ```
 
-Unit/typecheck success does not prove live GitHub access. Review mode keeps filesystem read-only, allows only scoped read/approved `gh` commands, drafts verdict first, and requires explicit confirmation before posting.
+Review mode keeps filesystem read-only, allows only scoped read/approved `gh` commands, and drafts verdict first. Each admitted `gh pr review` or `gh pr comment` command requires a fresh confirmation showing the sanitized original command; only literal `true` from `ctx.ui.confirm` with `ctx.hasUI === true` authorizes that invocation. Approval is never cached. Decline, missing UI/headless execution, or dialog error blocks posting (`agent/extensions/workflow-modes/policy.ts:42-49`; `agent/extensions/workflow-modes/index.ts:888-904`). Subagent `confirm` requests are cancelled, while `select`/`subagent_message` answers are not posting approval (`agent/extensions/subagents/launch.ts:424-435, 990-1001`; `agent/extensions/subagents/index.ts:1122-1130`). After any block, stop; do not retry or rephrase the command to bypass the gate.
+
+Automated policy tests use stub UIs to check sanitizer and fail-closed outcomes (`agent/extensions/workflow-modes/test/test_policy.ts:59-114`); they do not prove the interactive dialog or an actual user's decline. Manual interactive decline verification remains explicitly deferred; do not claim manual or CI proof. Unit/typecheck success also does not prove live GitHub access.
 
 ## Plan-mode test restrictions
 
