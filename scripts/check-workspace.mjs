@@ -22,6 +22,7 @@ const extensions = [
 const skills = [
   "agent/skills/grill",
   "agent/skills/grill-with-docs",
+  "agent/skills/impeccable",
   "agent/skills/playwright-cli",
   "agent/skills/web-debug",
   "agent/skills/web-design-guidelines",

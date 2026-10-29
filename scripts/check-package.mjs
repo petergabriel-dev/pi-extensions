@@ -110,7 +110,7 @@ assert.deepEqual(
   [...files].filter((file) => file.startsWith("agent/agents/")).sort(),
   expectedAgents,
 );
-const expectedSkillRoots = ["grill", "grill-with-docs", "playwright-cli", "web-debug", "web-design-guidelines", "worker-orchestration"];
+const expectedSkillRoots = ["grill", "grill-with-docs", "impeccable", "playwright-cli", "web-debug", "web-design-guidelines", "worker-orchestration"];
 // Only nested `agent/skills/<name>/...` paths are skill roots; top-level files
 // such as THIRD_PARTY_NOTICES.md ship as package assets, not skills.
 assert.deepEqual(
@@ -121,6 +121,10 @@ for (const file of [
   "agent/skills/THIRD_PARTY_NOTICES.md",
   "agent/skills/grill/SKILL.md",
   "agent/skills/grill-with-docs/SKILL.md",
+  "agent/skills/impeccable/SKILL.md",
+  "agent/skills/impeccable/references/critique.md",
+  "agent/skills/impeccable/references/polish.md",
+  "agent/skills/impeccable/references/audit.md",
   "agent/skills/playwright-cli/SKILL.md",
   "agent/skills/web-design-guidelines/SKILL.md",
   "agent/skills/web-design-guidelines/references/guidelines.md",
