@@ -25,7 +25,7 @@
 | ADR-0021 | Superseded | Session-branch workflow plans |  |
 | ADR-0022 | Active | Network-allowed read-only Review sandbox | changing Review mode command policy, sandbox wrapping, fallback behavior, or GitHub review workflows |
 | ADR-0023 | Active | Workspace source and runtime separation | changing package resources or allowlists, dependencies, launcher flags, repository/runtime ownership, project agent discovery, ignored state, npm installation, or migration policy |
-| ADR-0024 | Active | Design mode and design docs root | changing Design prompts, design scaffolds, token parsing, preview themes, base-library guidance, build prompt composition, frontend component guidance, or bridge prompt recall |
+| ADR-0024 | Superseded | Design mode and design docs root | changing Design prompts, design scaffolds, token parsing, preview themes, base-library guidance, build prompt composition, frontend component guidance, or bridge prompt recall |
 | ADR-0025 | Active | Workflow mode announcement channel | changing workflow-mode prompt composition, mode transitions, before_agent_start messages, tool block reasons, compaction behavior, or provider continuation/cache behavior |
 | ADR-0026 | Active | Session-scoped workflow plan files and task tracking | changing /plan save/select/view/clear, plan-file paths or retention, task seeding/ticking, workflow markers, bridge plan access, or session ancestry semantics |
 | ADR-0027 | Active | Static host access and agent-directory injection | changing Pi host imports, agent-directory or plan/memory path resolution, extension test isolation, or workspace package checks |
@@ -50,3 +50,4 @@
 | ADR-0046 | Active | Cross-harness tool classification and deny-unknown policy | changing harness read allowlists, Cursor shell classification, Claude PreToolUse registration or fail-closed behavior, foreign MCP gating, or OpenCode execute-hook policy |
 | ADR-0047 | Active | Human-approved harness Build lease | changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, Pi approval UI, or TUI input-isolation assumptions |
 | ADR-0048 | Active | Shared adversarial security regression corpus | Changing corpus schema or loader, installed hook/plugin execution, mutation oracle, known-gap convention, or security CI lanes. |
+| ADR-0049 | Active | Plan-owned frontend specifications without Design mode | changing workflow modes, frontend plan specs, design-doc write gates, tick notes, visual verification, or Open Design references |

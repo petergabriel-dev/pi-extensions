@@ -6,7 +6,7 @@ date: 2026-10-19
 updated: 2026-10-29
 decision: Store optional external design references as committed snapshots under docs/design/reference/, separate from canonical design docs and manifest rules; manual copies remain allowed, and `/docs pull-design` may snapshot linked Open Design projects on demand without live sync.
 why: Reviewable source-agnostic snapshots avoid live-tool coupling while keeping untrusted references distinct from instructions and documented specs; on-demand pull removes hand-copying without changing that boundary.
-affects: agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/engineering-docs/filesystem.ts, agent/extensions/engineering-docs/open-design.ts, agent/extensions/engineering-docs/index.ts, agent/extensions/engineering-docs/test/test_design.ts, agent/extensions/engineering-docs/test/test_open_design.ts, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/decisions/README.md, docs/engineering/decisions/ADR-0024-design-mode-and-design-docs-root.md, docs/engineering/decisions/ADR-0037-design-token-adherence-advisory.md, docs/engineering/decisions/ADR-0042-design-reference-dir.md
+affects: agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/engineering-docs/filesystem.ts, agent/extensions/engineering-docs/open-design.ts, agent/extensions/engineering-docs/index.ts, agent/extensions/engineering-docs/test/test_design.ts, agent/extensions/engineering-docs/test/test_open_design.ts, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/decisions/README.md, docs/engineering/decisions/ADR-0024-design-mode-and-design-docs-root.md, docs/engineering/decisions/ADR-0037-design-token-adherence-advisory.md, docs/engineering/decisions/ADR-0042-design-reference-dir.md, docs/engineering/decisions/ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md
 consequences: Snapshots stay reviewable and source-independent; manual copies can become stale, on-demand pulls inherit the local Open Design layout and schema, and reference content remains untrusted and cannot replace documented specs.
 readWhen: changing design reference discovery, ingestion, pull snapshots, prompt trust boundaries, manifest gates, or scaffold behavior
 supersedes: None
@@ -31,7 +31,7 @@ Rejected alternatives:
 - Live OD CLI/daemon/MCP: adds live-tool coupling instead of committed snapshots.
 - OD-specific root directory (for example `docs/design/open-design/`): binds the convention to one source; a provenance subfolder under `reference/` remains allowed.
 - General `/docs import`: adds a broad ingestion surface instead of explicit manual drops; `/docs pull-design` is a narrow, read-only Open Design snapshot.
-- Design-mode agent copy: adds a separate reference-copy workflow.
+- Separate reference-copy workflow: adds another path instead of ordinary committed snapshots.
 - OD satisfying documented-spec gate: confuses supplemental references with canonical specs.
 - Manifest-only gating: couples reference presence to a separate design-manifest condition.
 - Scaffolded stub directory: turns an optional directory into a scaffold-created one.
@@ -47,6 +47,7 @@ Docs:
 - `docs/engineering/decisions/ADR-0024-design-mode-and-design-docs-root.md`
 - `docs/engineering/decisions/ADR-0037-design-token-adherence-advisory.md`
 - `docs/engineering/decisions/ADR-0042-design-reference-dir.md`
+- `docs/engineering/decisions/ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md`
 
 Code:
 
@@ -70,7 +71,7 @@ Code:
 
 ## Relationship
 
-ADR-0024 and ADR-0037 remain Active and are not superseded.
+ADR-0024 is superseded by ADR-0049, which removes Design mode and makes Plan-owned specs authoritative. ADR-0037 remains Active for read-only token advisories. This ADR remains Active for optional reference snapshots; Plan may use them as untrusted visual input, never instructions or canonical specs.
 
 ## Supersedes
 

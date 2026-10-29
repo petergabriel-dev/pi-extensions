@@ -5,7 +5,7 @@ status: Active
 date: 2026-09-18
 decision: Surface bounded, read-only design-token advisories after successful source write/edit results; never block the mutation or replace its content.
 why: Catch newly introduced raw colors in the same turn while keeping writes reliable, avoiding a source-analysis pipeline, and preserving the existing design-manifest boundary.
-affects: agent/extensions/engineering-docs/design-adherence.ts, agent/extensions/engineering-docs/tracking.ts, agent/extensions/engineering-docs/test/test_design_adherence.ts, agent/extensions/engineering-docs/package.json, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/decisions/ADR-0024-design-mode-and-design-docs-root.md, docs/engineering/decisions/ADR-0037-design-token-adherence-advisory.md, docs/engineering/decisions/README.md
+affects: agent/extensions/engineering-docs/design-adherence.ts, agent/extensions/engineering-docs/tracking.ts, agent/extensions/engineering-docs/test/test_design_adherence.ts, agent/extensions/engineering-docs/package.json, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/decisions/ADR-0024-design-mode-and-design-docs-root.md, docs/engineering/decisions/ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md, docs/engineering/decisions/ADR-0037-design-token-adherence-advisory.md, docs/engineering/decisions/README.md
 consequences: Successful write/edit results may gain one bounded advisory block; missing or invalid design manifests and any advisory error pass through unchanged, while token indexing adds only bounded manifest/token-file reads with in-process mtime caching.
 readWhen: changing design-token parsing, source-write result handling, advisory scope or formatting, design-manifest permissions, or exact-match guidance
 supersedes: None
@@ -33,7 +33,8 @@ Docs:
 
 - [architecture.md](../architecture.md)
 - [invariants.md](../invariants.md)
-- [ADR-0024-design-mode-and-design-docs-root.md](ADR-0024-design-mode-and-design-docs-root.md)
+- [ADR-0024-design-mode-and-design-docs-root.md](ADR-0024-design-mode-and-design-docs-root.md) (historical boundary)
+- [ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md](ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md)
 - [decisions index](README.md)
 
 Code:
@@ -59,15 +60,15 @@ Code:
 - **Nearest-color matching:** Rejected because perceptual closeness is not semantic intent and can recommend the wrong token.
 - **Auto-repair:** Rejected because replacing source text can alter behavior, requires final-file context, and turns advisory guidance into an unsafe mutation.
 
-## Relationship to ADR-0024
+## Relationship to ADR-0049
 
-ADR-0024 remains Active and is not superseded. It defines Design mode, the `docs/design/` root, manifest-declared token-file permissions, and design-system guidance. This ADR adds a read-only source-write advisory that consumes that manifest boundary; it does not change Design write permissions, manifest schema, prompt guidance, or preview rules.
+ADR-0049 supersedes ADR-0024's Design-mode workflow and makes Plan the owner of frontend specifications. This ADR remains Active for its read-only, manifest-gated token advisory; it grants no write permission. Design-doc and declared token-file writes are limited to Build/Off.
 
 ## Read when
 
 - changing `design-adherence.ts` detection, token indexing, cache bounds, or advisory formatting
 - changing `tracking.ts` successful `write`/`edit` result handling or extension/path filters
-- changing design manifest validation, token-file permissions, or the relationship to Design mode
+- changing design manifest validation, token-file permissions, or the relationship to Plan-owned frontend specifications
 - considering source extraction, confidence scoring, nearest-color suggestions, line mapping, or auto-repair
 
 ## Supersedes

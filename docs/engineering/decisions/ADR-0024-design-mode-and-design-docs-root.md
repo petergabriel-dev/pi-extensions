@@ -1,8 +1,9 @@
 ---
 id: ADR-0024
 title: Design mode and design docs root
-status: Active
+status: Superseded
 date: 2026-07-22
+supersededBy: ADR-0049
 decision: Design specs and previews are responsive-ready and vertical; Design adopts documented existing systems before inventing new ones, supports both dark-theme roots, and Build receives design-system guidance only when docs/design/manifest.json exists.
 why: Keep design artifacts implementation-ready without changing non-design Build prompts or making undocumented component creation a hard gate; preserve existing project systems without dead manifest metadata.
 affects: agent/extensions/engineering-docs/design.ts, agent/extensions/engineering-docs/filesystem.ts, agent/extensions/engineering-docs/test/test_design.ts, agent/extensions/workflow-modes/index.ts, docs/engineering/decisions/ADR-0024-design-mode-and-design-docs-root.md, docs/engineering/decisions/README.md
@@ -11,6 +12,8 @@ readWhen: changing Design prompts, design scaffolds, token parsing, preview them
 ---
 
 # ADR-0024: Design mode and design docs root
+
+> Superseded by [ADR-0049: Plan-owned frontend specifications without Design mode](ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md). This record describes the former Design workflow; current frontend decisions belong in Plan, and design-doc writes are limited to Build/Off.
 
 ## Decision
 
@@ -61,6 +64,10 @@ Code:
 
 - changing Design prompts, design write gates, token parsing, docs/design scaffolding, preview themes, base-library guidance, or bridge prompt recall
 
+## Superseded by
+
+- [ADR-0049: Plan-owned frontend specifications without Design mode](ADR-0049-plan-owned-frontend-specs-and-design-mode-removal.md)
+
 ## Supersedes
 
-- (none)
+- None
