@@ -262,15 +262,25 @@ test("save_plan is visible through recall duplicate response stable", async ({ p
 	const stillBlocked = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, crypto.randomUUID(), otherPeer);
 	assert(stillBlocked.response.error?.code === "build_lease_required", `non-holder tick passed while another peer held the lease: ${JSON.stringify(stillBlocked.response)}`);
 
-	const titleTickId = crypto.randomUUID();
-	const titleTick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title }, titleTickId, leasePeer);
-	assert(titleTick.response.ok && titleTick.response.result.progress?.done === 1, `title tick_plan_task failed: ${JSON.stringify(titleTick.response)}`);
-	assert(titleTick.response.result.taskId === tasks.response.result.tasks[0].id, "title tick resolved wrong task");
-	await sleep(POLL_MS * 2);
 	const taskId = tasks.response.result.tasks[0].id;
+	for (const [label, note] of [["empty", ""], ["whitespace", "   "], ["oversized", "x".repeat(501)], ["wrong-type", 17]]) {
+		const invalid = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId, note }, crypto.randomUUID(), leasePeer);
+		assert(invalid.response.ok === false && invalid.response.error?.code === "tick_plan_task_failed" && invalid.response.error.message.includes("note"), `${label} tick note not clearly rejected: ${JSON.stringify(invalid.response)}`);
+	}
+	const unknownKey = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId, note: "valid note", unexpected: true }, crypto.randomUUID(), leasePeer);
+	assert(unknownKey.response.ok === false && unknownKey.response.error?.code === "tick_plan_task_failed" && unknownKey.response.error.message.includes("accepts only"), `unknown tick key not rejected: ${JSON.stringify(unknownKey.response)}`);
+
+	const firstNote = "unverified: visual browser unavailable";
+	const titleTickId = crypto.randomUUID();
+	const titleTick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, title: tasks.response.result.tasks[0].title, note: `  ${firstNote}  ` }, titleTickId, leasePeer);
+	assert(titleTick.response.ok && titleTick.response.result.progress?.done === 1, `title tick_plan_task failed: ${JSON.stringify(titleTick.response)}`);
+	assert(titleTick.response.result.taskId === taskId, "title tick resolved wrong task");
+	assert(titleTick.response.result.note === firstNote, "tick_plan_task did not return trimmed persisted note");
+	await sleep(POLL_MS * 2);
 	const tickId = crypto.randomUUID();
-	const tick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId }, tickId, leasePeer);
+	const tick = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId, note: "unverified: replacement reason" }, tickId, leasePeer);
 	assert(tick.response.ok && tick.response.result.progress?.done === 1 && tick.response.result.idempotent === true, `holder idempotent tick failed: ${JSON.stringify(tick.response)}`);
+	assert(tick.response.result.note === firstNote, "idempotent tick replaced first note");
 	fs.unlinkSync(tick.responsePath);
 	const tickReplay = await sendRequest(projectRoot, "tick_plan_task", { planId: `core-${id}`, taskId: "different" }, tickId, leasePeer);
 	assert(JSON.stringify(tickReplay.response) === JSON.stringify(tick.response), "duplicate tick response changed");
@@ -293,8 +303,11 @@ test("MCP exposes and dispatches memory entry tools", async ({ projectRoot }) =>
 		{ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "save_memory", arguments: { name, description: "Saved through MCP", type: "reference", body: `MCP body ${id}`, cwd: projectRoot } } },
 		{ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "recall_memory_entry", arguments: { slug: `core-mcp-memory-${id}`, cwd: projectRoot } } },
 	], projectRoot);
-	const listed = responses.find((response) => response.id === 1)?.result?.tools?.map((tool) => tool.name) || [];
+	const listedTools = responses.find((response) => response.id === 1)?.result?.tools || [];
+	const listed = listedTools.map((tool) => tool.name);
 	assert(listed.includes("recall_memory_entry"), "recall_memory_entry missing from tools/list");
+	const tickTool = listedTools.find((tool) => tool.name === "tick_plan_task");
+	assert(tickTool?.inputSchema?.properties?.note?.minLength === 1 && tickTool.inputSchema.properties.note.maxLength === 500, "tick_plan_task MCP schema omitted bounded note");
 	assert(listed.includes("save_memory"), "save_memory missing from tools/list");
 	assert(listed.includes("read_plan_tasks"), "read_plan_tasks missing from tools/list");
 	assert(listed.includes("tick_plan_task"), "tick_plan_task missing from tools/list");
@@ -312,11 +325,12 @@ test("MCP exposes and dispatches memory entry tools", async ({ projectRoot }) =>
 	const taskResult = taskRead.result.structuredContent.result;
 	assert(taskResult.tasks?.length === 2 && taskResult.progress?.done === 1, "read_plan_tasks MCP result missing live task state");
 	const taskTick = runMcp([
-		{ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "tick_plan_task", arguments: { taskId: taskResult.tasks[0].id, cwd: projectRoot } } },
+		{ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "tick_plan_task", arguments: { taskId: taskResult.tasks[0].id, note: "unverified: MCP retry", cwd: projectRoot } } },
 	], projectRoot).find((response) => response.id === 5);
 	assert(!taskTick.error, `tick_plan_task MCP error: ${JSON.stringify(taskTick)}`);
 	assert(taskTick.result.structuredContent.result.idempotent === true, "tick_plan_task MCP did not use live idempotency");
 	assert(taskTick.result.structuredContent.result.progress?.done === 1, "tick_plan_task MCP changed completed progress");
+	assert(taskTick.result.structuredContent.result.note === "unverified: visual browser unavailable", "tick_plan_task MCP did not return first persisted note");
 
 	// The approved holder from the saved-plan test still holds the lease; Discuss recall releases it.
 	const leasePeer = { harness: "claude", id: "core-protocol-mcp" };

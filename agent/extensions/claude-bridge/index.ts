@@ -18,6 +18,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
 const NAMESPACE_GC_TTL_MS = 10 * 60_000;
+const MAX_TICK_PLAN_TASK_NOTE_LENGTH = 500;
 
 interface BridgePaths {
 	projectRoot: string;
@@ -117,8 +118,8 @@ interface ReadPlanTasksPayload {
 }
 
 type TickPlanTaskPayload =
-	| { taskId: string; planId?: string }
-	| { title: string; planId?: string };
+	| { taskId: string; planId?: string; note?: string }
+	| { title: string; planId?: string; note?: string };
 
 interface RecallEntryPayload {
 	slug: string;
@@ -600,19 +601,27 @@ function normalizeReadPlanTasksPayload(payload: Record<string, unknown>): ReadPl
 	return typeof payload.planId === "string" ? { planId: payload.planId.trim() } : {};
 }
 
+function normalizeTickPlanTaskNote(value: unknown): string {
+	if (typeof value !== "string") throw new Error(`tick_plan_task note must be a string of 1-${MAX_TICK_PLAN_TASK_NOTE_LENGTH} characters after trimming.`);
+	const note = value.trim();
+	if (note.length === 0 || note.length > MAX_TICK_PLAN_TASK_NOTE_LENGTH) throw new Error(`tick_plan_task note must be a string of 1-${MAX_TICK_PLAN_TASK_NOTE_LENGTH} characters after trimming.`);
+	return note;
+}
+
 function normalizeTickPlanTaskPayload(payload: Record<string, unknown>): TickPlanTaskPayload {
-	if (Object.keys(payload).some((key) => !["taskId", "title", "planId"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, and planId.");
+	if (Object.keys(payload).some((key) => !["taskId", "title", "planId", "note"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, planId, and note.");
 	const hasTaskId = Object.prototype.hasOwnProperty.call(payload, "taskId");
 	const hasTitle = Object.prototype.hasOwnProperty.call(payload, "title");
 	if (hasTaskId === hasTitle) throw new Error("tick_plan_task requires exactly one of taskId or title.");
 	if (payload.planId !== undefined && (typeof payload.planId !== "string" || payload.planId.trim().length === 0)) throw new Error("tick_plan_task planId must be a non-empty string when provided.");
 	const planId = typeof payload.planId === "string" ? payload.planId.trim() : undefined;
+	const note = payload.note === undefined ? undefined : normalizeTickPlanTaskNote(payload.note);
 	if (hasTaskId) {
 		if (typeof payload.taskId !== "string" || payload.taskId.trim().length === 0 || payload.taskId.length > 128) throw new Error("tick_plan_task requires taskId string of at most 128 characters.");
-		return { taskId: payload.taskId.trim(), ...(planId ? { planId } : {}) };
+		return { taskId: payload.taskId.trim(), ...(planId ? { planId } : {}), ...(note ? { note } : {}) };
 	}
 	if (typeof payload.title !== "string" || payload.title.trim().length === 0 || payload.title.length > 512) throw new Error("tick_plan_task requires title string of at most 512 characters.");
-	return { title: payload.title, ...(planId ? { planId } : {}) };
+	return { title: payload.title, ...(planId ? { planId } : {}), ...(note ? { note } : {}) };
 }
 
 function normalizeRecallEntryPayload(payload: Record<string, unknown>): RecallEntryPayload {
@@ -797,6 +806,7 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 				...(result.nextTask ? { nextTask: result.nextTask } : {}),
 				idempotent: result.idempotent === true,
 				outOfOrder: result.outOfOrder === true,
+				...(typeof result.note === "string" ? { note: result.note } : {}),
 			},
 		};
 	} catch (error) {

@@ -129,13 +129,33 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	const seededTaskId = editedTurn.message?.details?.nextTask?.id;
 	if (!seededTaskId || editedTurn.message?.details?.progress?.done !== 0 || editedTurn.message?.details?.progress?.total !== 1) throw new Error("tracker marker missing seeded task state");
 	operations.length = 0;
-	const ticked = await tickTool.execute("tick-call", { taskId: seededTaskId }, undefined, undefined, context);
-	if ((operations[0]?.data as { event?: string; planId?: string; taskId?: string })?.event !== "tick" || (operations[0]?.data as { taskId?: string })?.taskId !== seededTaskId) throw new Error("task tick was not appended");
+	const tickNote = "unverified: browser unavailable";
+	const ticked = await tickTool.execute("tick-call", { taskId: seededTaskId, note: "  " + tickNote + "  " }, undefined, undefined, context);
+	const storedTick = operations[0]?.data as { event?: string; planId?: string; taskId?: string; note?: string };
+	if (storedTick?.event !== "tick" || storedTick.taskId !== seededTaskId || storedTick.note !== tickNote) throw new Error("task tick note was not trimmed and appended");
 	if (readFileSync(savedDetails.path, "utf8") !== "# Hand edited\\n\\n## Section 4 — Tasks\\n- [ ] Edited task\\n") throw new Error("task tick mutated plan file");
-	if (!(ticked.details as { progress?: { done: number; total: number }; idempotent?: boolean }).progress || (ticked.details as { progress: { done: number; total: number } }).progress.done !== 1 || (ticked.details as { idempotent?: boolean }).idempotent) throw new Error("task tick result missing progress");
+	const tickedDetails = ticked.details as { note?: string; progress?: { done: number; total: number }; idempotent?: boolean };
+	if (!tickedDetails.progress || tickedDetails.progress.done !== 1 || tickedDetails.note !== tickNote || tickedDetails.idempotent) throw new Error("task tick result missing progress or note");
+	if (!String(ticked.content?.[0]?.text).includes(JSON.stringify(tickNote))) throw new Error("task tick text omitted safely quoted note");
 	if (!statuses.some((status) => status.includes(savedDetails.planId!) && status.includes("1/1"))) throw new Error("status did not update task progress");
-	const repeated = await tickTool.execute("tick-call-replay", { taskId: seededTaskId }, undefined, undefined, context);
-	if (!(repeated.details as { idempotent?: boolean }).idempotent || operations.length !== 1) throw new Error("repeated task tick was not idempotent");
+	const repeated = await tickTool.execute("tick-call-replay", { taskId: seededTaskId, note: "replacement note" }, undefined, undefined, context);
+	if (!(repeated.details as { idempotent?: boolean; note?: string }).idempotent || (repeated.details as { note?: string }).note !== tickNote || operations.length !== 1 || (operations[0]?.data as { note?: string }).note !== tickNote) throw new Error("repeated task tick changed first note or was not idempotent");
+	for (const [label, note] of [["empty", ""], ["whitespace", "   "], ["oversized", "x".repeat(501)], ["wrong-type", 17]] as const) {
+		let noteError = "";
+		try {
+			await tickTool.execute("tick-invalid-" + label, { taskId: seededTaskId, note }, undefined, undefined, context);
+		} catch (error) {
+			noteError = error instanceof Error ? error.message : String(error);
+		}
+		if (!noteError.includes("note") || !noteError.includes("500")) throw new Error(label + " tick note was not rejected clearly");
+	}
+	let extraKeyError = "";
+	try {
+		await tickTool.execute("tick-invalid-key", { taskId: seededTaskId, unknown: true }, undefined, undefined, context);
+	} catch (error) {
+		extraKeyError = error instanceof Error ? error.message : String(error);
+	}
+	if (!extraKeyError.includes("only taskId, title, and note")) throw new Error("unknown tick key was not rejected clearly");
 	const tickedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { progress?: { done: number; total: number }; nextTask?: unknown } } };
 	if (tickedTurn.message?.details?.progress?.done !== 1 || tickedTurn.message?.details?.progress?.total !== 1 || tickedTurn.message?.details?.nextTask !== undefined) throw new Error("task tick did not survive marker refresh");
 	const tickedBranch = [...branchEntries];
