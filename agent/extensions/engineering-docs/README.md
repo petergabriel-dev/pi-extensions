@@ -15,6 +15,7 @@ This extension creates and maintains `docs/engineering/` as a project knowledge 
 - **Workflow-mode gates** — block docs writes in Discuss/Plan mode
 - **Tag validation** — validate `[DOCS:*]` and `[ADR:*]` task tags, including `[DOCS:design]`
 - **Design docs** — scaffold `docs/design/`, generate token reference, and check preview token usage
+- **Design reference pull** — snapshot linked Open Design projects into `docs/design/reference/open-design/`
 
 ## Commands
 
@@ -47,6 +48,17 @@ Create missing `docs/design/` manifest, README, component spec template, and pre
 ### `/docs update-tokens`
 
 Generate deterministic `docs/design/tokens.md` from manifest-declared token CSS. Blocked outside Design/Build/Off mode.
+
+### `/docs pull-design`
+
+Snapshot linked Open Design projects into `docs/design/reference/open-design/<slug>-<id8>/`.
+
+- Reads the local Open Design app database read-only and matches projects whose `linkedDirs` realpath is the project root or inside it.
+- Interactive Pi: choose one project or all; an existing snapshot is replaced only after confirmation.
+- Copies top-level regular `.html`, `.md`, `.sketch.json`, and `*.artifact.json` files; skips symlinks; caps at 5 MiB per file and 25 MiB total.
+- Requires Design, Build, or Off mode. Design and Build prompts then pick up `docs/design/reference/`.
+- Headless Pi lists matching projects and writes nothing.
+- Depends on the macOS Open Design layout and `projects` schema; a missing database, missing `sqlite3`, or unknown schema reports an error without writing.
 
 ### `/docs check`
 

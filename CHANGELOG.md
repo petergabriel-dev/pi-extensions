@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `/docs pull-design` snapshots linked Open Design projects into `docs/design/reference/open-design/<slug>-<id8>/`: read-only discovery, an interactive one/all picker with replace confirmation, bounded HTML/Markdown/artifact copies, and a headless listing mode.
+
 ### Fixed
 
 - Home `~/.pi` (Pi's global agent dir) no longer marks a project, so harnesses started under `$HOME` without a nearer marker are not treated as read-only Pi projects.
