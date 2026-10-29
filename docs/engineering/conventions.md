@@ -8,6 +8,12 @@
 - **Declare resources explicitly.** New extensions or skills require `package.json` manifest updates plus `scripts/check-workspace.mjs` inventory updates. New project agents require `agent/agents/` and integrity-check updates.
 - **Keep project links internal.** Versioned symlinks must resolve inside repository. `.pi/agents` points to `agent/agents`; external skill/config symlinks are not package resources.
 
+## Bundled skill content
+
+- Keep package skills Markdown-only, with local references; do not add scripts, binaries, runtime fetches, or automatic install steps. `playwright-cli` may document its one-time manual `npm install -g @playwright/cli@latest` prerequisite.
+- For third-party derivatives, pin the upstream commit and record repository URL, source paths, SPDX license, full license/NOTICE text, and a modification summary in `agent/skills/THIRD_PARTY_NOTICES.md`. Derived skill frontmatter points to that notice file and names the SPDX license. Verify licensing before adapting; never copy unlicensed wrappers.
+- Derived design/QA skills include a mode-aware section separating read-only planning/review from Build implementation and preserving the frozen plan spec. Package skills that mention Pi-only tools provide explicit Pi mappings and usable non-Pi fallbacks.
+
 ## Source and runtime separation
 
 - Version source/config/docs only. Ignore credentials, settings snapshots, sessions, plans, personal memory, bridge IPC, caches, DBs, logs, dependency trees, and CCC indexes.

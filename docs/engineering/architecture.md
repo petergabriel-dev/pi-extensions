@@ -2,9 +2,9 @@
 
 ## Workspace and package boundary
 
-This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.10.0`, one Pi package containing twelve extensions, four skills, and two package-owned bundled agent definitions. This repository is package source, not a separate Pi home.
+This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.10.0`, one Pi package containing twelve extensions, 23 skills, and two package-owned bundled agent definitions. This repository is package source, not a separate Pi home.
 
-- The prepared `0.10.0` release tarball is configured to ship runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` command templates under `agent/harness-commands/{claude,cursor,opencode}/`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=1 MiB unpacked.
+- The prepared `0.10.0` release tarball is configured to ship runtime TS/helpers, workflow plan template, agent/skill Markdown, README.md, LICENSE, CHANGELOG.md, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` command templates under `agent/harness-commands/{claude,cursor,opencode}/`. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/locks/tsconfigs, `.pi`, `node_modules`, and runtime/user state. Package gates enforce <=512 KiB packed and <=2 MiB unpacked.
 - From `0.8.0` onward, the `release` branch mirrors the unpacked tarball file-for-file; only an optional root `.npmrc` may be extra. Main retains engineering docs and development material, including `.cursor/` commands and config; those files are not packaged.
 - `bin/pi-workspace` resolves the repository root from its own location, then runs `pi --no-extensions -e <root>` for source development. The source checkout’s `.pi/agents` link is a dev/project mechanism, not npm agent registration.
 - Bundled agent definitions load relative to the package module. Scope overrides are: default user = bundled then user; project = bundled then nearest project; both = bundled then user then project. Later definitions override by name, but a selected valid unsafe explorer override is rejected by the caller’s read-only validator.
@@ -30,7 +30,7 @@ This workspace prepares package version `@lopezpetergabriel/pi-extensions@0.10.0
 | 9 | `agent/extensions/subagents/index.ts` | `subagent`, `subagents_list`, `subagent_message`, model/effort commands | Discovers agent definitions, enforces toolset/depth/concurrency/ownership policy, relays child questions through the question owner, tracks result receipt, and runs isolated persisted child processes. |
 | 10 | `agent/extensions/workflow-modes/index.ts` | `/mode`, `/plan`, `/caveman`; prompt/tool hooks | Owns branch-local workflow mode, session-scoped saved-plan pointers/task progress, Caveman preference, prompt composition, and read-only mode gates. |
 | 11 | `agent/extensions/ask-user-question/index.ts` | `ask_user_question` tool | Owns model text/single-/multi-select and child text/single-select UI, source-scoped FIFO serialization, and threshold-defer/resume. Child RPC dialogs use built-in `select`/`input`. |
-| 12 | `agent/extensions/harness-setup/index.ts` | `/harness` command | Inspects and manages owned Claude, Cursor, and OpenCode setup through previewed, confirmed plans; records installed harnesses in the agent-dir stamp. |
+| 12 | `agent/extensions/harness-setup/index.ts` | `/harness` command | Inspects and manages Claude, Cursor, and OpenCode setup, including 23 package-skill directory links, through previewed, confirmed plans; records installed harnesses in the agent-dir stamp. |
 
 ### Agent definitions
 
@@ -43,12 +43,15 @@ Subagent discovery is module-relative for bundled definitions. Scope defaults to
 
 ### Skills
 
-| Skill | Purpose |
-|---|---|
-| `agent/skills/grill` | One-question-at-a-time plan interrogation with a recommended answer. |
-| `agent/skills/grill-with-docs` | Domain-aware interrogation that inspects code/docs, captures discussion notes, updates context docs, and offers ADRs only for durable trade-offs. |
-| `agent/skills/web-debug` | Evidence-first browser debugging for console, network, DOM, storage, session, and UI symptoms. |
-| `agent/skills/worker-orchestration` | Contract-first A+B orchestration with disjoint ownership, staged discovery (inventory → parent selection → bounded inspect), default budgets (inventory no reads/≤10 `grep`/`find`/`ls`; inspect ≤5 files/≤10 reads), sequential preference, parent-owned integration, and at most two within-task slices at default/≥3 concurrencyCap to leave a nested-explorer slot. |
+The package ships 23 skills: four existing workflow/debug skills and 19 design/verification skills. `package.json` and `/harness` share one checked inventory; skill content is Markdown with local references.
+
+| Group | Skills | Purpose |
+|---|---|---|
+| Existing | `grill`, `grill-with-docs`, `web-debug`, `worker-orchestration` | Planning, docs-aware discovery, browser debugging, and scoped agent orchestration. |
+| Design and verification | `impeccable`, `web-design-guidelines`, `playwright-cli` | Frozen-spec design guidance, offline UI QA, and cross-harness visual verification. |
+| Emil Kowalski (16) | `emil-design-eng`, `animate`, `animate-expo`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `remove-animations`, `animation-performance`, `animation-vocabulary`, `apple-design`, `write-swift`, `pick-ui-library`, `prototype`, `mobile-native`, `break-ui`, `ask-sonner` | Design, motion, mobile, prototyping, and UI engineering playbooks. |
+
+`harness-setup` links each package skill directory into Claude, Cursor, and OpenCode skill roots. It preserves foreign destinations and does not export to `~/.agents/skills`.
 
 ### Harness clients and project integration
 
@@ -63,7 +66,7 @@ The `.cursor/` MCP config, hooks, and commands below are main-repository integra
 - `.cursor/hooks.json` registers Cursor shell, MCP, pre-tool, and commit-nudge guards.
 - `.cursor/commands/pi-discuss.md`, `.cursor/commands/pi-plan.md`, and `.cursor/commands/pi-build.md` are repository symlinks to `agent/harness-commands/cursor/pi-{discuss,plan,build}.md`; they define bridge-backed workflows and remain repo-only.
 - `agent/harness-commands/{claude,cursor,opencode}/pi-{discuss,plan,build}.md` provide the nine shipped harness workflows, including Build handoff and live tracker mapping.
-- `harness-setup` reads the harness manifest, classifies the package root, inspects owned destinations, builds an install/repair/uninstall plan, previews diffs, and requires confirmation before apply. Apply re-reads targets before mutation; config changes and stamp updates use safe backups and atomic replacement. Startup health checks inspect only stamped harnesses and never repair them.
+- `harness-setup` reads the harness manifest, classifies the package root, inspects owned destinations, and previews confirmed install/repair/uninstall plans. It manages bridge config, commands/plugins, and the 23 package-skill directory links; owned links are backed up before retarget/removal and foreign files, directories, and symlinks are preserved. Config changes and stamp updates use safe backups and atomic replacement. Startup health checks inspect only stamped harnesses and never repair them; the `playwright-cli` PATH advisory never executes the CLI.
 - `.cursor/commands/{discuss,plan,build}.md` provide a neutral workflow that needs no bridge or Pi session; `.cursor/skills/write-adr/SKILL.md` documents project ADR authoring.
 - `.cursor/hooks/docs-nudge.js` asks for an engineering-doc update on code commits that stage no `docs/engineering/**` path, without blocking the commit.
 
@@ -171,15 +174,15 @@ Claude statusline shows `Pi ✉N` from presence only: no requests, writes, or ac
 
 `workflow-modes` reconstructs branch-local contracts from selected session ancestry:
 
-- `workflow-mode-set` selects Off, Discuss, Plan, Build, Review, or Design.
+- `workflow-mode-set` selects Off, Discuss, Plan, Build, or Review.
 - `workflow-plan` stores plan pointer set/activate/clear events plus task ticks. The immutable plan body lives at `<agentDir>/plans/<sessionId>/<planId>.md`; only its session-scoped pointer and progress state live in branch entries.
 - `caveman-mode-state` stores Caveman preference; no explicit entry means enabled.
 
-`/plan save` writes the bounded plan body atomically, seeds Section 4 tasks, then appends the durable pointer before activating it. `/plan select`, `/plan view`, and `/plan clear` operate on plans visible in selected ancestry; clear deactivates the pointer but does not delete its file. `workflow_plan_tick` records one completed task per confirmation, so the tracker—not immutable Section 4 checkboxes—is the Build queue. Before each turn, workflow-modes rereads the active body and sends a compact marker message whose content names plan identity, progress, and next task. Its structured details retain host metadata such as path and savedAt; Pi drops those details during LLM conversion (`@earendil-works/pi-coding-agent/dist/core/messages.js:89-96`).
+`/plan save` writes the bounded plan body atomically, seeds Section 4 tasks, then appends the durable pointer before activating it. `/plan select`, `/plan view`, and `/plan clear` operate on plans visible in selected ancestry; clear deactivates the pointer but does not delete its file. `workflow_plan_tick` records one completed task per confirmation, so the tracker—not immutable Section 4 checkboxes—is the Build queue. An optional note is trimmed and validated to 1–500 characters at workflow and bridge boundaries; the first note persists on idempotent re-ticks. Before each turn, workflow-modes rereads the active body and sends a compact marker message whose content names plan identity, progress, and next task. Its structured details retain host metadata such as path and savedAt; Pi drops those details during LLM conversion (`@earendil-works/pi-coding-agent/dist/core/messages.js:89-96`).
 
-Off injects no workflow/style prompt. Discuss, Plan, Build, Review, and Design compose mode prompt plus the active saved-plan body when present (`workflow-modes/caveman.ts`), then Caveman or normal-style override. Build and Design reference prompt lines are gated on `docs/design/reference/` presence, independently of the manifest; Claude bridge passes cwd for both modes for parity. Build's existing design-aware guidance remains manifest-gated. Design scopes design-system work to `docs/design/` plus manifest-declared token CSS; component source remains Build work. Plan-template resolution is module-relative.
+Off injects no workflow/style prompt. Discuss, Plan, Build, and Review compose their mode prompt plus the active saved-plan body when present (`workflow-modes/caveman.ts`), then Caveman or normal-style override. Plan is read-only and browser-blind; it owns frontend taste and freezes contract-level component specs, scheduling design docs and tokens before component work. Build implements those specs literally, writes `docs/design/` and declared token files only in Build/Off, and gates frontend ticks on reviewed screenshots or an honest `unverified:` note. Plan and Build add reference guidance only when `docs/design/reference/` exists; snapshots are untrusted visual data. Plan-template resolution is module-relative.
 
-Discuss, Plan, and Review block mutation tools, including browser navigation, evaluation, actions, and page close. Design allows `write`/`edit` only inside `docs/design/**` or manifest-declared token files, failing closed to `docs/design/**` when manifest is missing or invalid; browser mutation tools remain blocked there. Design Bash reuses Plan's sandboxed read/test policy. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
+Discuss, Plan, and Review block mutation tools, including browser navigation, evaluation, actions, and page close. Build/Off are the only modes that permit `docs/design/**` and validated manifest `tokenFiles` writes. Unknown or restored legacy `design` mode fails closed for writes and browser navigation. Discuss/Plan Bash prefers structural sandboxing with network denied; Review admits only scoped read/approved `gh` commands, keeps filesystem writes denied, and permits network. If sandbox wrapping is unavailable or fails, conservative regex policy applies.
 
 The extension publishes `workflow-modes:get/state`, `workflow-modes:changed`, and `workflow-modes:save-plan/result` events. Engineering docs consumes state for write gating; subagents queries it before worker spawn; bridge uses it for recall and plan save.
 

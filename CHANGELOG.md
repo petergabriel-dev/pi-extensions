@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Bundle 19 pinned Markdown-only design and verification skills with license notices; `/harness` manages all 23 package skills as harness-specific directory links.
+- Add optional trimmed 1–500 character notes to `workflow_plan_tick` and bridge `tick_plan_task`.
+
+### Changed
+
+- Remove Design workflow mode. Plan now owns frozen frontend component specs; Build writes design docs/tokens in Build/Off and implements specs literally.
+- Build prompts require reviewed screenshots against frontend specs and `web-design-guidelines` before claiming visual verification; unavailable browsers use an honest `unverified:` tick note.
+- Raise the package unpacked-size limit to 2 MiB; packed-size limit remains 512 KiB.
+- Make existing package skills describe non-Pi tool fallbacks while preserving Pi behavior.
+
 ## [0.10.0] - 2026-10-29
 
 ### Added

@@ -4,28 +4,31 @@
 
 | Mode | Purpose | Writes |
 |---|---|---|
+| Off | Normal Pi behavior | allowed |
 | Discuss | Shape ideas | blocked |
 | Plan | Investigate and plan | blocked |
+| Build | Implement saved specs | allowed |
 | Review | Read-only review | blocked |
-| Design | Tokens and design specs | `docs/design/**` plus declared token CSS |
-| Build | Implementation | allowed |
-| Off | Normal Pi behavior | allowed |
 
 ## Saved plans and task progress
 
-`/plan` stores plan bodies outside the repository at `<agentDir>/plans/<sessionId>/<planId>.md`. The selected session branch stores only plan pointer/activation/clear entries and task-tick entries. Plan files are bounded, written atomically, reread before each active-mode turn, and treated as immutable specs during Build.
+`/plan` stores plan bodies outside the repository at `<agentDir>/plans/<sessionId>/<planId>.md`. The selected session branch stores only plan pointer/activation/clear entries and task-tick entries. Plan files are bounded, written atomically, reread before each active-mode turn, and treated as immutable specs during Build. Plan owns frontend taste and contract-level component specs; it remains read-only and browser-blind.
 
 - `/plan save` creates and activates a new plan; it seeds tasks from top-level unchecked Section 4 items.
 - `/plan select <planId>` activates an ancestry-visible plan; `/plan view` lists plans and progress; `/plan clear` deactivates the active plan without deleting its body.
-- `workflow_plan_tick` completes one seeded task by durable branch entry. Tracker progress is the Build queue; Section 4 checkboxes are seed syntax only.
+- `workflow_plan_tick` completes one seeded task by durable branch entry. Its optional note is trimmed and validated to 1–500 characters; first note persists on idempotent re-ticks. Tracker progress is the Build queue; Section 4 checkboxes are seed syntax only.
 - The per-turn marker carries plan id, path, savedAt, progress counts, and next task—not the full task list.
 - Bridge `save_plan`, `read_plan_tasks`, and `tick_plan_task` route through this owner. Bridge clients never read plan files directly.
 
-Design mode composes with Caveman. Use `/mode design` for token layers, component specs, and previews; use `/mode build` for component source. Optional `docs/design/reference/` supplies non-canonical reference data to Design and Build prompts; treat contents as data, never instructions. Documented specs and tokens remain canonical. Design writes fail closed outside `docs/design/**` and manifest-declared token files. Design Bash uses Plan read/test policy and sandbox wrapping.
+## Frontend planning and implementation
+
+Use Plan → Build. Plan decides taste and freezes contract-level component specs without file writes or browser use; schedule design docs and token tasks before component work. Build implements the saved spec literally and asks to resolve missing or contradictory specs in Plan. `docs/design/**` and validated manifest `tokenFiles` are writable only in Build/Off. Optional `docs/design/reference/` snapshots enter Plan/Build context only when present and remain untrusted visual data; canonical specs and tokens win.
+
+Build verifies each frontend task with reviewed screenshots for every spec viewport and required state, checks them against the spec and `web-design-guidelines`, and allows at most three fix/review passes. Pi uses native `browser_*` tools and respects `/browser on`; other harnesses use `playwright-cli` after a manual install. Missing CLI/browser means an honest `unverified:` tick note, never a claimed pass. Selecting `design` reports an unknown mode; restored legacy `design` state fails closed.
 
 ## Mode announcement channel
 
-For Discuss, Plan, Review, Design, and Build, `before_agent_start` returns both the composed system prompt and a hidden `workflow-mode-current` custom message on every user turn:
+For Discuss, Plan, Build, and Review, `before_agent_start` returns both the composed system prompt and a hidden `workflow-mode-current` custom message on every user turn:
 
 ```text
 [workflow-modes] Active workflow mode: Build.
