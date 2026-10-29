@@ -24,6 +24,7 @@ const skills = [
   "agent/skills/grill-with-docs",
   "agent/skills/playwright-cli",
   "agent/skills/web-debug",
+  "agent/skills/web-design-guidelines",
   "agent/skills/worker-orchestration",
 ];
 

@@ -229,3 +229,38 @@ available under the Apache 2.0 license (https://github.com/puppeteer/puppeteer/b
 ```
 
 - Modified by pi-extensions: Condensed the CLI guidance into Markdown-only instructions and trimmed references; removed automatic/local installation, code execution, and test-generation workflows; added frozen-spec, mode-aware visual QA with required viewport/state screenshots and Pi native-browser preference. The prerequisite remains manual-only.
+
+## Vercel Labs Web Interface Guidelines rules
+
+- Repository URL: https://github.com/vercel-labs/web-interface-guidelines
+- Pinned commit SHA: `434b7f91364665f2f733b310ec54809bf8f37937`
+- Upstream paths: `command.md`, `LICENSE`
+- SPDX license: MIT
+- License text:
+
+```text
+MIT License
+
+Copyright (c) 2025 Vercel Labs
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+- Upstream NOTICE text (if any): `None` (no NOTICE file at the pinned commit).
+- Modified by pi-extensions: Vendored the MIT-licensed rules from `command.md` as a local reference; omitted its slash-command wrapper/output template and did not copy the unlicensed `vercel-labs/agent-skills` skill. Added a Pi-authored, model-invoked skill with mode-aware code and screenshot review.
