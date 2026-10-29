@@ -23,24 +23,17 @@ import { wrapCommand } from "./sandbox.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 const absentBuild = composeWorkflowPrompt("build", true, undefined, cwd);
-const absentDesign = composeWorkflowPrompt("design", true, undefined, cwd);
-for (const prompt of [absentBuild, absentDesign]) {
-	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
-}
+if (absentBuild?.includes(BUILD_REFERENCE_PROMPT) || absentBuild?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
 if (absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("missing manifest injected design block");
 mkdirSync(join(cwd, "docs/design/reference"), { recursive: true });
 const referenceBuild = composeWorkflowPrompt("build", true, undefined, cwd);
-if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("reference failed to inject Build prompt independently of manifest");
-if (!composeWorkflowPrompt("design", true, undefined, cwd)?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference failed to inject Design prompt");
+if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || referenceBuild.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference failed to inject only the Build prompt independently of manifest");
 for (const mode of ["discuss", "plan", "review"] as const) {
 	const prompt = composeWorkflowPrompt(mode, true, undefined, cwd);
 	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error(mode + " mode injected a reference prompt");
 }
 const noCwdBuild = composeWorkflowPrompt("build", true);
-const noCwdDesign = composeWorkflowPrompt("design", true);
-for (const prompt of [noCwdBuild, noCwdDesign]) {
-	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference prompt injected without cwd");
-}
+if (noCwdBuild?.includes(BUILD_REFERENCE_PROMPT) || noCwdBuild?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference prompt injected without cwd");
 mkdirSync(join(cwd, "docs/design"), { recursive: true });
 writeFileSync(join(cwd, "docs/design/manifest.json"), "{}");
 if (!composeWorkflowPrompt("build", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("manifest failed to inject design block");
@@ -51,8 +44,7 @@ if (designAwareIndex < 0 || referenceIndex <= designAwareIndex) throw new Error(
 if (!buildPrompt?.includes("workflow_plan_tick") || !buildPrompt.includes("authoritative queue") || !buildPrompt.includes("immutable seed text")) throw new Error("Build prompt omitted tracker queue rules");
 if (!buildPrompt.includes("at most two parallel slice workers") || !buildPrompt.includes("concurrencyCap is default or at least 3") || !buildPrompt.includes("Wait for every slice result before consolidating") || !buildPrompt.includes("Never fan out across saved-plan tasks") || buildPrompt.includes("exactly one worker per task")) throw new Error("Build prompt omitted within-task slicing rules or retained the single-worker rule");
 if (!buildPrompt?.includes("end your turn; results arrive as a new turn") || !buildPrompt.includes("only when the user asks for status or to find a transcript or log") || !buildPrompt.includes("live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks")) throw new Error("Build prompt omitted automatic delegation delivery guidance");
-if (composeWorkflowPrompt("design", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("non-build mode used cwd");
-for (const mode of ["discuss", "plan", "build", "review", "design"] as const) {
+for (const mode of ["discuss", "plan", "build", "review"] as const) {
 	const message = composeModeMessage(mode);
 	if (message?.customType !== MODE_MESSAGE_TYPE) throw new Error(mode + " mode message customType changed");
 	if (message?.content !== "[workflow-modes] Active workflow mode: " + MODE_LABELS[mode] + ".") throw new Error(mode + " mode message content invalid");
@@ -292,15 +284,15 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	if ((operations[2]?.data as { mode?: string })?.mode !== "build") throw new Error("failed Off send did not restore durable mode");
 	const restored = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string } };
 	if (!restored.message?.content?.startsWith("[workflow-modes] Active workflow mode: Build.")) throw new Error("failed Off send did not restore in-memory mode");
-	for (const mode of ["discuss", "plan", "review", "design"] as const) {
+	for (const mode of ["discuss", "plan", "review"] as const) {
 		const reason = formatModeBlockReason(mode, "operation was blocked.");
 		if (!reason.includes("Workflow mode was " + MODE_LABELS[mode] + " at tool-call time.")) throw new Error(mode + " block reason was not mode-stamped");
 		if (!reason.includes("latest [workflow-modes] line")) throw new Error(mode + " block reason omitted authoritative line");
 		if (reason.includes("/mode")) throw new Error(mode + " block reason instructed a mode switch");
 	}
 	const toolCall = handlers.get("tool_call");
-	const modeContext = (mode: string) => ({
-		sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode } }], getSessionId: () => "session-test" },
+	const modeContext = (mode: string, priorMode?: string) => ({
+		sessionManager: { getBranch: () => [...(priorMode ? [{ type: "custom", customType: MODE_ENTRY, data: { mode: priorMode } }] : []), { type: "custom", customType: MODE_ENTRY, data: { mode } }], getSessionId: () => "session-test" },
 		ui: context.ui,
 	});
 	handlers.get("session_start")?.({}, modeContext("discuss"));
@@ -331,9 +323,19 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	handlers.get("session_start")?.({}, modeContext("review"));
 	const reviewBlock = await toolCall?.({ toolName: "bash", input: { command: "curl example.com" } }) as { reason?: string };
 	if (!reviewBlock.reason?.startsWith("bash command was blocked;")) throw new Error("Review block reason was not past-tense");
-	handlers.get("session_start")?.({}, modeContext("design"));
-	const designBlock = await toolCall?.({ toolName: "edit", input: { path: "src/not-a-token.css" } }) as { reason?: string };
-	if (!designBlock.reason?.startsWith("edit was blocked outside the design surface")) throw new Error("Design block reason was not past-tense");
+	handlers.get("session_start")?.({}, modeContext("design", "build"));
+	const legacyTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string }; systemPrompt?: string };
+	if (!legacyTurn.message?.content?.includes("UNKNOWN (read-only") || !legacyTurn.systemPrompt?.includes("unknown or legacy")) throw new Error("legacy mode was not announced as read-only");
+	for (const toolName of ["write", "edit", "browser_goto"]) {
+		const blocked = await toolCall?.({ toolName, input: { path: "docs/design/manifest.json" } }) as { block?: boolean; reason?: string };
+		if (blocked.block !== true || !blocked.reason?.includes("Unknown workflow mode")) throw new Error("legacy mode allowed " + toolName);
+	}
+	const legacyBash = await toolCall?.({ toolName: "bash", input: { command: "echo x > file" } }) as { block?: boolean; reason?: string };
+	if (legacyBash.block !== true || !legacyBash.reason?.includes("Unknown workflow mode")) throw new Error("legacy mode allowed Bash");
+	operations.length = 0;
+	warnings.length = 0;
+	await commands.get("mode")?.handler("design", context);
+	if (operations.length !== 0 || !warnings.some((message) => message.includes("Unknown mode"))) throw new Error("/mode design was not rejected as unknown");
 });
 `;
 try {

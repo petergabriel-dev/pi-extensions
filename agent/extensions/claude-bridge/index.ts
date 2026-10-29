@@ -72,7 +72,7 @@ interface BridgeResponse {
 
 interface RecallPayload {
 	query?: string;
-	mode?: "discuss" | "plan" | "build" | "design";
+	mode?: "discuss" | "plan" | "build";
 }
 
 type CaptureNoteType = "requirement" | "decision" | "constraint" | "action" | "question" | "preference" | "implementation" | "lesson";
@@ -541,7 +541,6 @@ export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled
 		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
 		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
 		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled, undefined, cwd),
-		designPrompt: composeWorkflowPrompt("design", cavemanEnabled, undefined, cwd),
 		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
 		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
@@ -550,7 +549,7 @@ export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled
 
 function normalizeRecallPayload(payload: Record<string, unknown>): RecallPayload {
 	const query = typeof payload.query === "string" ? payload.query : "";
-	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" || payload.mode === "design" ? payload.mode : "plan";
+	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" ? payload.mode : "plan";
 	return { query, mode };
 }
 

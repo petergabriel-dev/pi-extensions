@@ -1,5 +1,3 @@
-import { isDesignSurfacePath, loadDesignManifest } from "../engineering-docs/design.js";
-
 export const READ_COMMANDS = String.raw`pwd|ls|find|rg|grep|cat|head|tail|wc|jq|tree|diff|stat|file|sort|uniq|column`;
 export const READ_GIT_COMMANDS = String.raw`diff|log|show|status|blame`;
 export const READ_SED_AWK = String.raw`sed\s+-n|awk`;
@@ -49,11 +47,7 @@ export async function confirmReviewPost(command: string, hasUI: boolean, ui?: Re
 	}
 }
 
-export async function isDesignWriteAllowed(cwd: string, filePath: string): Promise<boolean> {
-	return isDesignSurfacePath(cwd, filePath, await loadDesignManifest(cwd));
-}
-
-export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review" | "design"): boolean {
+export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review"): boolean {
 	const normalized = command.trim().replace(/\s+/g, " ");
 	const allowed = mode === "discuss" ? DISCUSS_BASH_ALLOW.test(normalized) : mode === "review" ? REVIEW_BASH_ALLOW.test(command.trim()) : PLAN_BASH_ALLOW.test(normalized);
 	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (mode === "review" && REVIEW_BASH_DENY.test(command));

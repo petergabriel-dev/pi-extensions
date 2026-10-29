@@ -1,4 +1,4 @@
-export type CavemanWorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
+export type CavemanWorkflowMode = "off" | "discuss" | "plan" | "build" | "review";
 
 export const CAVEMAN_ENTRY = "caveman-mode-state";
 
@@ -8,7 +8,6 @@ export const MODE_LABELS: Record<CavemanWorkflowMode, string> = {
 	plan: "Plan",
 	build: "Build",
 	review: "Review",
-	design: "Design",
 };
 
 export const NORMAL_MODE_PROMPT = `
@@ -64,7 +63,6 @@ export interface WorkflowPromptSet {
 	plan: string;
 	build: string;
 	review: string;
-	design: string;
 }
 
 export interface WorkflowPlanMarker {

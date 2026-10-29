@@ -7,13 +7,13 @@ import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isDesignWriteAllowed } from "./policy.js";
+import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_DENY, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
 import { wrapCommand } from "./sandbox.js";
 
-export type Mode = "off" | "discuss" | "plan" | "build" | "review" | "design";
+export type Mode = "off" | "discuss" | "plan" | "build" | "review";
 export type PlanEvent = "set" | "activate" | "clear" | "tick";
 export const PLAN_AUTHORING_TOOL = "workflow_plan_save";
 export const PLAN_TASK_TICK_TOOL = "workflow_plan_tick";
@@ -47,7 +47,7 @@ export function formatModeBlockReason(mode: Mode, detail: string): string {
 	return `${detail} Workflow mode was ${MODE_LABELS[mode]} at tool-call time. Check the latest [workflow-modes] line for the current mode.`;
 }
 
-let currentMode: Mode = "off";
+let currentMode: Mode | undefined = "off";
 let cavemanEnabled = true;
 let currentPlan: string | undefined;
 let currentPlanId: string | undefined;
@@ -69,7 +69,6 @@ function normalizeMode(raw: string): Mode | undefined {
 	if (value === "plan" || value === "planning") return "plan";
 	if (value === "build" || value === "building") return "build";
 	if (value === "review" || value === "reviewing") return "review";
-	if (value === "design" || value === "designing") return "design";
 	return undefined;
 }
 
@@ -114,7 +113,7 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 		const e = entry as { type?: string; customType?: string; data?: unknown };
 		if (e.type !== "custom" || e.customType !== MODE_ENTRY) continue;
 		const mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
-		if (mode) currentMode = mode;
+		currentMode = mode;
 	}
 	cavemanEnabled = resolveCavemanEnabled(branch);
 	const plan = resolveSavedPlanState(branch, PLAN_ENTRY);
@@ -194,9 +193,10 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 }
 
 function updateStatus(ctx: ExtensionContext): void {
-	const cavemanStatus = `${cavemanEnabled ? "ON" : "OFF"}${currentMode === "off" ? " (inactive)" : ""}`;
+	const cavemanStatus = `${cavemanEnabled ? "ON" : "OFF"}${currentMode === "off" || currentMode === undefined ? " (inactive)" : ""}`;
 	const planStatus = currentPlanId ? `${currentPlanId} ${currentPlanProgress.done}/${currentPlanProgress.total}` : "OFF";
-	ctx.ui.setStatus(STATUS_KEY, `Mode: ${MODE_LABELS[currentMode]} Saved Plan: ${planStatus} Caveman: ${cavemanStatus}`);
+	const modeLabel = currentMode === undefined ? "Unknown (read-only)" : MODE_LABELS[currentMode];
+	ctx.ui.setStatus(STATUS_KEY, `Mode: ${modeLabel} Saved Plan: ${planStatus} Caveman: ${cavemanStatus}`);
 }
 
 async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Promise<void> {
@@ -267,10 +267,10 @@ async function selectOverlay(ctx: ExtensionCommandContext, title: string, items:
 
 async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify("Use /mode <off|discuss|plan|build|review|design>.", "warning");
+		ctx.ui.notify("Use /mode <off|discuss|plan|build|review>.", "warning");
 		return;
 	}
-	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review", "design"] as Mode[]).map((mode) => ({
+	const items: SelectItem[] = (["off", "discuss", "plan", "build", "review"] as Mode[]).map((mode) => ({
 		value: mode,
 		label: `${MODE_LABELS[mode]}${mode === currentMode ? " (current)" : ""}`,
 		description:
@@ -282,9 +282,7 @@ async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 						? "Grill implementation plan; read/search only"
 						: mode === "review"
 							? "Review changes; read-only"
-							: mode === "design"
-								? "Design tokens and component specs"
-								: "Build with normal tools",
+							: "Build with normal tools",
 	}));
 	const choice = await selectOverlay(ctx, "Select Workflow Mode", items);
 	if (choice) await setMode(pi, ctx, choice as Mode);
@@ -592,7 +590,7 @@ export const PLAN_PROMPT = `Workflow mode: Plan. Behave like a relentless implem
 
 export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
-export const DESIGN_PROMPT = `Workflow mode: Design. Design-system work only. Write only under docs/design/ and declared token files; never app/component source or docs/engineering/. Inspect existing styles and components before creating tokens or specs; adopt or extract existing system instead of inventing a parallel one. If project builds on named base library (for example, shadcn), record it in docs/design/README.md and derive component specs from base components rather than reinventing them. Start tokens before components. Use /* @primitive */ and /* @semantic */ layers in token CSS. Semantic tokens define both light and dark values. Build roughly ten foundation component specs, curated enough to constrain later implementation. Never hard-code values: use token variables. Accessibility is non-negotiable. Every component spec and preview must be responsive-ready: mobile-first, fluid layouts, no fixed pixel widths; every component spec includes a Responsive section. Preview pages use a single-column vertical layout with stacked sections — never grid galleries or multi-column tile layouts. Previews must be viewable in both themes through project's theme-switch convention. Design surface only; suggest /mode build for component code.`;
+export const UNKNOWN_MODE_PROMPT = `Workflow mode state is unknown or legacy. Treat the workspace as read-only: do not use mutation tools or Bash. Select a supported workflow mode before continuing.`;
 
 export const BUILD_PROMPT = `Workflow mode: Build. Implement requested changes using the available tools.
 
@@ -683,11 +681,17 @@ export function composeWorkflowPrompt(mode: Mode, enabled: boolean, savedPlan?: 
 			...(hasDesignReference ? [BUILD_REFERENCE_PROMPT] : []),
 		].join("\n\n")
 		: BUILD_PROMPT;
-	const designPrompt = mode === "design" && hasDesignReference ? `${DESIGN_PROMPT}\n\n${DESIGN_REFERENCE_PROMPT}` : DESIGN_PROMPT;
-	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: buildPrompt, review: REVIEW_PROMPT, design: designPrompt }, savedPlan);
+	return composePrompt(mode, enabled, { discuss: DISCUSS_PROMPT, plan: PLAN_PROMPT, build: buildPrompt, review: REVIEW_PROMPT }, savedPlan);
 }
 
-export function composeModeMessage(mode: Mode, plan?: WorkflowPlanMarker) {
+export function composeModeMessage(mode: Mode | undefined, plan?: WorkflowPlanMarker) {
+	if (mode === undefined) {
+		return {
+			customType: MODE_MESSAGE_TYPE,
+			content: "[workflow-modes] Active workflow mode: UNKNOWN (read-only; legacy or invalid mode).",
+			display: false,
+		};
+	}
 	const marker = composeModeMarker(mode, plan);
 	if (!marker) return undefined;
 	return {
@@ -854,7 +858,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const activeContext = ctx ?? latestContext;
 		const marker = activeContext ? await refreshPlanFromDisk(activeContext) : undefined;
-		const extra = composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan, process.cwd());
+		const extra = currentMode === undefined
+			? UNKNOWN_MODE_PROMPT
+			: composeWorkflowPrompt(currentMode, cavemanEnabled, currentPlan, process.cwd());
 		const message = composeModeMessage(currentMode, marker);
 		if (!extra || !message) return;
 		return {
@@ -864,17 +870,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review" && currentMode !== "design") return;
+		if (currentMode === undefined) {
+			if (MUTATION_TOOLS.has(event.toolName) || event.toolName === "bash") {
+				return { block: true, reason: `Unknown workflow mode was restored; ${event.toolName} was blocked. Select a supported mode before continuing.` };
+			}
+			return;
+		}
+		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review") return;
 
 		if (MUTATION_TOOLS.has(event.toolName)) {
-			if (currentMode === "design") {
-				const filePath = String((event.input as { path?: unknown }).path ?? "");
-				if (filePath && await isDesignWriteAllowed(process.cwd(), filePath)) return;
-				return {
-					block: true,
-					reason: formatModeBlockReason(currentMode, `${event.toolName} was blocked outside the design surface (docs/design/** and declared token files).`),
-				};
-			}
 			return {
 				block: true,
 				reason: formatModeBlockReason(currentMode, `${event.toolName} was blocked.`),
@@ -913,10 +917,10 @@ export default function (pi: ExtensionAPI) {
 		const normalized = command.replace(/\s+/g, " ");
 		const allowed = currentMode === "review"
 			? isBashAllowedInMode(normalized, "review")
-			: currentMode === "plan" || currentMode === "design" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
+			: currentMode === "plan" ? PLAN_BASH_ALLOW.test(normalized) : DISCUSS_BASH_ALLOW.test(normalized);
 		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (currentMode === "review" && REVIEW_BASH_DENY.test(normalized));
 		if (!allowed || denied) {
-			const allowedThen = currentMode === "plan" || currentMode === "design"
+			const allowedThen = currentMode === "plan"
 				? "discovery plus tests/builds/checks"
 				: currentMode === "review" ? "read commands plus approved gh PR commands" : "pwd, ls, find, rg, grep, ccc search";
 			return {
@@ -941,12 +945,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mode", {
-		description: "Select workflow mode: Off, Discuss, Plan, Build, Review, or Design",
+		description: "Select workflow mode: Off, Discuss, Plan, Build, or Review",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) return chooseMode(pi, ctx);
 			const mode = normalizeMode(arg);
-			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, review, or design.", "warning");
+			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, or review.", "warning");
 			await setMode(pi, ctx, mode);
 		},
 	});

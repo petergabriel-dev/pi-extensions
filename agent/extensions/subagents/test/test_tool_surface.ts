@@ -59,6 +59,7 @@ let browserRequest: unknown;
 let overlayComponent: { handleInput?(data: string): void; render?(width: number): string[]; dispose?(): void } | undefined;
 let overlayOptions: unknown;
 
+let workflowMode: unknown = "build";
 const events = {
 	on(name: string, handler: (data: unknown) => void) {
 		const listeners = eventHandlers.get(name) ?? new Set();
@@ -73,7 +74,7 @@ const events = {
 			for (const listener of eventHandlers.get("browser:result") ?? []) listener({ requestId: request.requestId, owner: request.owner, ok: true, result: { content: [{ type: "text", text: "browser result" }], details: {} } });
 		}
 		if (name === "workflow-modes:get") {
-			for (const listener of eventHandlers.get("workflow-modes:state") ?? []) listener({ mode: "build", cavemanEnabled: true });
+			for (const listener of eventHandlers.get("workflow-modes:state") ?? []) listener({ mode: workflowMode, cavemanEnabled: true });
 		}
 		if (name === ASK_QUESTION_REQUEST_EVENT) {
 			const request = data as QuestionUiRequest;
@@ -308,6 +309,12 @@ try {
 	assert.equal(settings.subagents.effort.explorer, "inherit");
 	assert.equal(settings.subagents.effort.worker, undefined);
 	await handlers.get("session_start")?.({}, context);
+
+	workflowMode = "design";
+	const legacyModeResult = await registeredTools.get("subagent")!.execute("call-legacy-mode", { task: "legacy mode task", agentScope: "project" }, new AbortController().signal, undefined, context);
+	assert.match((legacyModeResult as { content: Array<{ text: string }> }).content[0]!.text, /workflow-modes returned invalid mode state/);
+	assert.equal(launched, undefined, "legacy Design mode must not launch a mutating subagent");
+	workflowMode = "build";
 
 	const launchResult = await registeredTools.get("subagent")!.execute("call-1", { task: "surface task", agentScope: "project" }, new AbortController().signal, undefined, context);
 	assert.match((launchResult as { content: Array<{ text: string }> }).content[0]!.text, /started asynchronously over rpc/);
