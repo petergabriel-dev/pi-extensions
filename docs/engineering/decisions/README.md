@@ -31,7 +31,7 @@
 | ADR-0027 | Active | Static host access and agent-directory injection | changing Pi host imports, agent-directory or plan/memory path resolution, extension test isolation, or workspace package checks |
 | ADR-0028 | Active | Title-addressable workflow plan task ticks | changing workflow_plan_tick, task reference resolution, tracker recovery, workflow markers, CustomMessage conversion, prompt-cache behavior, or bridge plan tools |
 | ADR-0029 | Active | Consolidated extension dev tooling | changing runtime extension boundaries, root or nested package tooling, bootstrap, extension tests/typechecks, Pi host development dependency versions, or workspace manifest checks |
-| ADR-0030 | Active | Agent-driven browser verification | changing browser tools, Chromium or playwright-core setup, browser profile/lifecycle, console/network capture, page actions, screenshot handling, or browser package tests |
+| ADR-0030 | Active | Agent-driven browser verification | changing browser tools, Chromium or playwright-core setup, browser profile/lifecycle, console/network capture, page actions, screenshot handling, cross-harness `playwright-cli` guidance, or browser package tests |
 | ADR-0031 | Active | Subagent browser access | changing browser page ownership, browser:* proxy events, subagent browser tools, explorer capability validation, or workflow-mode browser gating |
 | ADR-0032 | Active | Ask-user-question UI serialization | changing ask_user_question modes, question UI ownership, queue or cancellation semantics, root test registration, worker extension loading, workflow-mode prompt composition, or question routing |
 | ADR-0033 | Active | Pi-independent Cursor kit | changing Cursor commands, hooks, ADR skill, root spoke ownership, docs write-back workflow, or cross-harness bridge boundaries |
@@ -51,3 +51,4 @@
 | ADR-0047 | Active | Human-approved harness Build lease | changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, Pi approval UI, or TUI input-isolation assumptions |
 | ADR-0048 | Active | Shared adversarial security regression corpus | Changing corpus schema or loader, installed hook/plugin execution, mutation oracle, known-gap convention, or security CI lanes. |
 | ADR-0049 | Active | Plan-owned frontend specifications without Design mode | changing workflow modes, frontend plan specs, design-doc write gates, tick notes, visual verification, or Open Design references |
+| ADR-0050 | Active | Bundled design skills and cross-harness export | changing bundled skill content, provenance or licenses, package skill inventory, `/harness` skill links, or cross-harness visual verification |

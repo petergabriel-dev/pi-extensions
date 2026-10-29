@@ -3,10 +3,10 @@ id: ADR-0044
 title: Pi-owned global harness setup
 status: Active
 date: 2026-10-21
-decision: Use Pi's `/harness` extension to preview and apply user-global setup from one manifest, managing matching command/plugin symlinks across roots without exporting skills.
-why: A Pi-owned, classified and reversible flow avoids npx, native plugins, or docs-only setup; inspection and repair must agree on owned symlinks, as config entries already retarget across package roots.
-affects: agent/extensions/harness-setup/index.ts, agent/extensions/harness-setup/manifest.ts, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, agent/harness-commands/claude/pi-discuss.md, agent/harness-commands/claude/pi-plan.md, agent/harness-commands/claude/pi-build.md, agent/harness-commands/cursor/pi-discuss.md, agent/harness-commands/cursor/pi-plan.md, agent/harness-commands/cursor/pi-build.md, agent/harness-commands/opencode/pi-discuss.md, agent/harness-commands/opencode/pi-plan.md, agent/harness-commands/opencode/pi-build.md, .cursor/commands/pi-discuss.md, .cursor/commands/pi-plan.md, .cursor/commands/pi-build.md, package.json, scripts/check-package.mjs, scripts/check-workspace.mjs, README.md, CHANGELOG.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0019-multi-harness-bridge-cursor-parity.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/ADR-0044-harness-setup-extension.md, docs/engineering/decisions/README.md
-consequences: Install / repair may replace or remove readable regular files up to 1 MiB at the six Pi command names only after preview, confirmation, and a mode-preserving sibling backup verified byte-for-byte against the planned preimage; oversized/unreadable files and other foreign/user-owned destinations remain preserved. Matching owned command/plugin symlinks are managed across package roots: Install / repair retargets them and Uninstall deletes them after preview and sibling backup; other foreign symlinks remain untouched. Uninstall leaves plain files and backups in place; restoration is manual, with no restore logic. Live dogfood found backup siblings absent from Claude Code/OpenCode command lists; Cursor global command discovery remains unverified.
+decision: Use Pi's `/harness` extension to preview and apply user-global setup from one manifest, managing matching command, plugin, and package-skill symlinks across roots.
+why: A Pi-owned, classified and reversible flow avoids npx, native plugins, or docs-only setup; inspection and repair must agree on owned symlinks across package roots.
+affects: agent/extensions/harness-setup/index.ts, agent/extensions/harness-setup/manifest.ts, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, agent/harness-commands/claude/pi-discuss.md, agent/harness-commands/claude/pi-plan.md, agent/harness-commands/claude/pi-build.md, agent/harness-commands/cursor/pi-discuss.md, agent/harness-commands/cursor/pi-plan.md, agent/harness-commands/cursor/pi-build.md, agent/harness-commands/opencode/pi-discuss.md, agent/harness-commands/opencode/pi-plan.md, agent/harness-commands/opencode/pi-build.md, .cursor/commands/pi-discuss.md, .cursor/commands/pi-plan.md, .cursor/commands/pi-build.md, package.json, scripts/check-package.mjs, scripts/check-workspace.mjs, agent/skills/THIRD_PARTY_NOTICES.md, docs/engineering/decisions/ADR-0050-bundled-design-skills-and-harness-export.md, README.md, CHANGELOG.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/decisions/ADR-0019-multi-harness-bridge-cursor-parity.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/ADR-0044-harness-setup-extension.md, docs/engineering/decisions/README.md
+consequences: Install / repair may replace or remove readable regular files up to 1 MiB at the six Pi command names only after preview, confirmation, and a mode-preserving sibling backup verified byte-for-byte against the planned preimage; oversized/unreadable files and other foreign/user-owned destinations remain preserved. Matching owned command/plugin/package-skill symlinks are managed across package roots: Install / repair retargets them and Uninstall deletes them after preview and sibling backup; other foreign files, directories, and symlinks remain untouched. Uninstall leaves plain files and backups in place; restoration is manual, with no restore logic. Live dogfood found backup siblings absent from Claude Code/OpenCode command lists; Cursor global command discovery remains unverified.
 readWhen: changing `/harness`, user-global harness setup, install manifests, command packaging, or startup health checks
 supersedes: ADR-0043 Cursor template packaging clause
 extends: ADR-0019, ADR-0043
@@ -24,7 +24,7 @@ The package needs one supported path for installing its Claude, Cursor, and Open
 - Install for user-global Claude, Cursor, and OpenCode roots from one central manifest. Permit user npm/Git package roots, warn on development checkouts, and refuse project, temporary, or unsupported roots before setup.
 - For every apply, show a plan preview and require explicit confirmation. On Install / repair only, replace or remove readable plain regular files up to 1 MiB at `commands/{discuss,plan,build}.md` and `commands/pi-{discuss,plan,build}.md` after a mode-preserving sibling backup is verified byte-for-byte against the planned preimage. At owned command/plugin destinations, symlinks whose targets match a manifest asset path are owned across package roots: Install / repair retargets them; Uninstall deletes them. Preview every planned change; back up each existing owned symlink before mutation. Preserve other foreign/user-owned config and files, including foreign symlinks. Uninstall leaves plain files and backups untouched; no restore logic is provided.
 - Run startup health checks only when `<agentDir>/harness-setup.json` stamp exists. Checks are advisory and filesystem-only: no harness CLI execution and no automatic repair.
-- Export commands only, never skills. Use `pi-discuss`, `pi-plan`, and `pi-build` command names; ship all three Cursor templates alongside Claude and OpenCode templates.
+- Export Pi commands, plugins, and package skills from the manifest. ADR-0050 governs the skill inventory, licensing, and directory links; this ADR continues to govern setup lifecycle and safety boundaries. Use `pi-discuss`, `pi-plan`, and `pi-build` command names; ship all three Cursor templates alongside Claude and OpenCode templates.
 - Preserve Cursor hook config `failClosed: true`. Real Cursor global command discovery remains unverified; keep repository `.cursor/commands/pi-*` symlinks, and document copying packaged templates into consumer-project `.cursor/commands/` as fallback. This decision does not claim live Cursor confirmation.
 
 ## Why
@@ -70,7 +70,7 @@ Code, tests, package, and command templates:
 
 ## Consequences
 
-- Good: one previewed, confirmed, backup-protected setup path preserves foreign content while managing matching command/plugin symlinks across roots.
+- Good: one previewed, confirmed, backup-protected setup path preserves foreign content while managing matching command/plugin/skill symlinks across roots.
 - Good: inspection and planner share one ownership rule; live and dangling owned links in another root can be repaired or removed.
 - Good: eligible plain files at prefixed Pi destinations become package links, while unprefixed files are removed; mode-preserving backups allow manual restoration.
 - Good: package-root classification and stamp-gated filesystem-only checks constrain setup and startup behavior.
@@ -82,7 +82,7 @@ Code, tests, package, and command templates:
 ## Read when
 
 - changing `/harness` setup, supported harness roots, package-root classification, or manifest ownership
-- changing command names, shipped command templates, Cursor hook safety, or startup health checks
+- changing command names, shipped command templates, Cursor hook safety, startup health checks, or package-skill export
 
 ## Extends
 
@@ -92,3 +92,7 @@ Code, tests, package, and command templates:
 ## Supersedes
 
 - ADR-0043's clause keeping Cursor's explicit `pi-build` command repo-local; only that packaging clause is superseded, not ADR-0043's Build lease decision.
+
+## Partially superseded by
+
+- ADR-0050 supersedes this ADR's earlier “Export commands only, never skills” clause and governs package-skill inventory, licensing, and export. This ADR remains active for all other setup, preview, backup, and ownership boundaries.
