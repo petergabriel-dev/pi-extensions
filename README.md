@@ -131,6 +131,8 @@ Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpe
 - Hooks and mode policies are workflow guardrails against a prompt-injected or misaligned agent, not security-grade isolation.
 - OS sandboxing covers shell commands only: Seatbelt on macOS; bwrap for Pi on Linux when available. Seatbelt uses an allow-default profile plus denials, not a strict allowlist (F8, accepted limit).
 - In `.pi` projects, Claude no-lease Bash is denied off macOS; it does not fall back to unsandboxed approval.
+- `~/.pi` is Pi's global agent dir and never marks a project. Dedicated edit tools are checked against the nearest Pi root of their target, so a write into another Pi project needs that project's own Build lease.
+- Bash and patch-style tools with no path field can still write into a Pi project from a session outside it; the target check covers dedicated edit tools only and this gap is not fixed (F11).
 - Host handling of Cursor `failClosed`, Claude exit-2 guards, and OpenCode plugin-load failure remains unverified; config and runner checks are not host-enforcement proof.
 - Pi Off is unguarded. Pi Review posting requires fresh human Pi approval for each command; decline, no UI/headless execution, or confirmation error blocks posting.
 - Open gaps: Pi Plan fallback without a sandbox can admit unsafe command expansion (F9); leases are per Pi session, not project-wide single-writer locks (F10). Plan acceptance #1/#3 remain unmet pending follow-up.

@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Home `~/.pi` (Pi's global agent dir) no longer marks a project, so harnesses started under `$HOME` without a nearer marker are not treated as read-only Pi projects.
+- Dedicated edit tools now resolve their target's nearest Pi root: writing into another Pi project requires that project's own Build lease, and relative or symlinked targets cannot bypass the check.
+
 ## [0.9.2] - 2026-10-21
 
 ### Changed
