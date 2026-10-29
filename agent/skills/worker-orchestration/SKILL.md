@@ -1,13 +1,18 @@
 ---
 name: worker-orchestration
-description: Guides contract-first orchestration of Pi worker subagents. Use when decomposing implementation work across workers, deciding parallel vs sequential execution, assigning disjoint file ownership, or doing a final integration pass.
+description: Guides contract-first orchestration of worker agents across harnesses. Use when decomposing implementation work, deciding parallel vs sequential slices, assigning disjoint file ownership, or integrating results.
 ---
 
 # Worker Orchestration
 
-Use this skill when coordinating worker subagents for implementation work.
+Use this skill when coordinating scoped worker agents for implementation work.
 
-## Current Pi Surface
+## Tool mapping
+
+- **Pi:** use `subagent`, `subagents_list`, and `subagent_message` as described below. `agentScope`, `fileOwnership`, and `concurrencyCap` are Pi-only parameters; adapt their intent to the host API instead of passing those names blindly.
+- **Other harnesses:** use the native subagent/task tool. If none is available, keep the same contract and work through slices sequentially inline. Pi-specific session, RPC, and lifecycle details below apply only in Pi.
+
+## Pi-only tool surface
 
 Parent starts work with `subagent` using `agent: "worker"`; discovery uses `agent: "explorer"`. After `subagent`, end your turn; results arrive as a new turn. Use `subagents_list` only when the user asks for status or to find a transcript or log; use `subagent_message` for live steering. Child questions go to the user automatically; do not answer them yourself unless the user asks. Nested children use `subagent` only when their agent definition allowlists the child and depth remains bounded.
 
@@ -55,7 +60,7 @@ When uncertain, prefer sequential execution or use an explorer first.
 ## Within-task slicing (saved-plan Build)
 
 - Split only one confirmed saved-plan task. Never fan out across plan tasks.
-- Fan out only when the task has at least two substantial, disjoint slices and `concurrencyCap` is the default 3 or known to be at least 3; otherwise use one worker or work inline.
+- Fan out only when the task has at least two substantial, disjoint slices and Pi's `concurrencyCap` is the default 3 or known to be at least 3 (or the host's equivalent capacity allows it); otherwise use one worker or work inline.
 - Use at most two slice workers. They share the global lane with nested explorers; keeping one lane free avoids blocking a worker while it waits for its explorer.
 - Treat the task's optional `Files` hint as input, not ownership; parent chooses slices and exact disjoint ownership.
 - Before fan-out, parent writes any shared contract inline. Contract files stay out of slice ownership; embed frozen contract in each slice task. A needed contract change is a scope-change request, not a slice edit.
@@ -102,7 +107,7 @@ Explorers are leaves. Do not ask them to edit or spawn another agent. Workers ma
 3. **Inspect spawn:** ask an explorer to inspect ≤5 selected files with ≤10 `read` calls. Return findings so far plus what would be read next when the limit is reached.
 4. **Sequence narrowly:** discovery is inventory → selection → inspect. Prefer many small sequential spawns over a few broad ones; narrow reads inside owned worker scope remain allowed.
 
-These are default budgets and may be overridden per task. Put the chosen budgets in the task string: `SubagentParams` carries only `task`, `agent`, `agentScope`, and `fileOwnership` (`agent/extensions/subagents/index.ts:58-68`); no tool-level budget enforcement exists.
+These are default budgets and may be overridden per task. In Pi, `SubagentParams` carries only `task`, `agent`, `agentScope`, and `fileOwnership` (`agent/extensions/subagents/index.ts:58-68`); these are Pi-specific fields, with no tool-level budget enforcement. Other harnesses use their native schema.
 
 `subagent_message` cannot interrupt a running tool. For a live child it sends RPC `steer`, delivered at the child's next tool boundary; use abort as the hard stop. Parent cancellation sends RPC `abort`, closes child stdin, then escalates to `SIGTERM` after one second and `SIGKILL` 500ms later. Verify child-process and lifecycle-resource cleanup afterward.
 
