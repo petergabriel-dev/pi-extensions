@@ -488,3 +488,64 @@ The `skill/reference/ios.md` and `skill/reference/android.md` platform reference
 ```
 
 - Modified by pi-extensions: Adapted the core skill and critique/polish/audit guidance into manual Markdown workflows; removed executable setup, detector, and persistence paths; redirected product context, tokens, and component specs to `docs/design/`. Omitted scripts, agents, and iOS/Android reference files; the latter are the only content attributed to ehmo in the upstream NOTICE.
+
+## Emil Kowalski — 16 design and engineering skills
+
+- Repository URL: https://github.com/emilkowalski/skills
+- Pinned commit SHA: `a81dbca07f2217b7103e510c0f13f8d5b017afc9`
+- Upstream paths:
+  - `performance-cheatsheet.md`
+  - `ui-cheatsheet.md`
+  - `skills/animate/SKILL.md`
+  - `skills/animate/RECIPES.md`
+  - `skills/animate-expo/SKILL.md`
+  - `skills/animate-expo/RECIPES.md`
+  - `skills/animation-performance/SKILL.md`
+  - `skills/animation-vocabulary/SKILL.md`
+  - `skills/apple-design/SKILL.md`
+  - `skills/ask-sonner/SKILL.md`
+  - `skills/ask-sonner/API.md`
+  - `skills/break-ui/SKILL.md`
+  - `skills/break-ui/CATALOG.md`
+  - `skills/emil-design-eng/SKILL.md`
+  - `skills/find-animation-opportunities/SKILL.md`
+  - `skills/improve-animations/SKILL.md`
+  - `skills/improve-animations/AUDIT.md`
+  - `skills/improve-animations/PLAN-TEMPLATE.md`
+  - `skills/mobile-native/SKILL.md`
+  - `skills/pick-ui-library/SKILL.md`
+  - `skills/prototype/SKILL.md`
+  - `skills/prototype/PICKER.md`
+  - `skills/remove-animations/SKILL.md`
+  - `skills/review-animations/SKILL.md`
+  - `skills/review-animations/STANDARDS.md`
+  - `skills/write-swift/SKILL.md`
+- SPDX license: MIT
+- License text:
+
+```text
+MIT License
+
+Copyright (c) 2026 Emil Kowalski
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+- Upstream NOTICE text (if any): None; no NOTICE file exists at the pinned commit.
+- Modified by pi-extensions: Replaced upstream entrypoints with concise Pi mode-aware skills and moved detailed guidance into local Markdown references. Removed install/network instructions and initial-response wrappers; aligned actions with frozen frontend specs, semantic motion tokens, and `docs/design/`; omitted repository scripts, binaries, `.pl`, and upstream README.

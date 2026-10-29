@@ -20,13 +20,29 @@ const extensions = [
   "agent/extensions/workflow-modes/index.ts",
 ];
 const skills = [
+  "agent/skills/animate",
+  "agent/skills/animate-expo",
+  "agent/skills/animation-performance",
+  "agent/skills/animation-vocabulary",
+  "agent/skills/apple-design",
+  "agent/skills/ask-sonner",
+  "agent/skills/break-ui",
+  "agent/skills/emil-design-eng",
+  "agent/skills/find-animation-opportunities",
   "agent/skills/grill",
   "agent/skills/grill-with-docs",
   "agent/skills/impeccable",
+  "agent/skills/improve-animations",
+  "agent/skills/mobile-native",
+  "agent/skills/pick-ui-library",
   "agent/skills/playwright-cli",
+  "agent/skills/prototype",
+  "agent/skills/remove-animations",
+  "agent/skills/review-animations",
   "agent/skills/web-debug",
   "agent/skills/web-design-guidelines",
   "agent/skills/worker-orchestration",
+  "agent/skills/write-swift",
 ];
 
 const HOST_PACKAGE_LITERAL = /["'`](?:@earendil-works\/pi-|@mariozechner\/pi-)[^"'`]*["'`]/;

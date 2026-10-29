@@ -110,7 +110,23 @@ assert.deepEqual(
   [...files].filter((file) => file.startsWith("agent/agents/")).sort(),
   expectedAgents,
 );
-const expectedSkillRoots = ["grill", "grill-with-docs", "impeccable", "playwright-cli", "web-debug", "web-design-guidelines", "worker-orchestration"];
+const expectedSkillRoots = [
+  "animate", "animate-expo", "animation-performance", "animation-vocabulary", "apple-design", "ask-sonner",
+  "break-ui", "emil-design-eng", "find-animation-opportunities", "grill", "grill-with-docs", "impeccable",
+  "improve-animations", "mobile-native", "pick-ui-library", "playwright-cli", "prototype", "remove-animations",
+  "review-animations", "web-debug", "web-design-guidelines", "worker-orchestration", "write-swift",
+];
+const derivedSkillRoots = [
+  "animate", "animate-expo", "animation-performance", "animation-vocabulary", "apple-design", "ask-sonner",
+  "break-ui", "emil-design-eng", "find-animation-opportunities", "improve-animations", "mobile-native",
+  "pick-ui-library", "prototype", "remove-animations", "review-animations", "write-swift",
+];
+for (const skill of derivedSkillRoots) {
+  const skillFile = `agent/skills/${skill}/SKILL.md`;
+  assert.ok(files.has(skillFile), `missing derived skill: ${skillFile}`);
+  const size = (await readFile(path.join(root, skillFile))).byteLength;
+  assert.ok(size <= 12 * 1024, `derived SKILL.md exceeds 12 KiB: ${skillFile} (${size} bytes)`);
+}
 // Only nested `agent/skills/<name>/...` paths are skill roots; top-level files
 // such as THIRD_PARTY_NOTICES.md ship as package assets, not skills.
 assert.deepEqual(
