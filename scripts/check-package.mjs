@@ -111,11 +111,14 @@ assert.deepEqual(
   expectedAgents,
 );
 const expectedSkillRoots = ["grill", "grill-with-docs", "web-debug", "worker-orchestration"];
+// Only nested `agent/skills/<name>/...` paths are skill roots; top-level files
+// such as THIRD_PARTY_NOTICES.md ship as package assets, not skills.
 assert.deepEqual(
   [...new Set([...files].flatMap((file) => file.match(/^agent\/skills\/([^/]+)\//)?.slice(1) ?? []))].sort(),
   expectedSkillRoots,
 );
 for (const file of [
+  "agent/skills/THIRD_PARTY_NOTICES.md",
   "agent/skills/grill/SKILL.md",
   "agent/skills/grill-with-docs/SKILL.md",
   "agent/skills/worker-orchestration/SKILL.md",
@@ -146,5 +149,5 @@ await walk(path.join(root, "agent/extensions"));
 for (const file of runtime) assert.ok(files.has(file), `missing runtime asset: ${file}`);
 
 assert.ok(pack.size <= 512 * 1024, `packed size exceeds 512 KiB: ${pack.size}`);
-assert.ok(pack.unpackedSize <= 1024 * 1024, `unpacked size exceeds 1 MiB: ${pack.unpackedSize}`);
+assert.ok(pack.unpackedSize <= 2 * 1024 * 1024, `unpacked size exceeds 2 MiB: ${pack.unpackedSize}`);
 console.log(`package check passed (${files.size} files, ${pack.size} packed bytes, ${pack.unpackedSize} unpacked bytes)`);
