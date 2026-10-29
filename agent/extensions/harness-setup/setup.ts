@@ -1,9 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, open, readlink, realpath, rename, symlink, unlink } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, open, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
 import path from "node:path";
 import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "./manifest.ts";
 import type { Harness, HarnessEntry } from "./manifest.ts";
+
+export const PLAYWRIGHT_CLI_ADVISORY = "playwright-cli not found on PATH; install manually with npm install -g @playwright/cli@latest before cross-harness visual verification.";
+
+export async function playwrightCliAdvisory(env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env): Promise<string | undefined> {
+	const directories = (env.PATH ?? "").split(path.delimiter).filter(Boolean);
+	const extensions = process.platform === "win32"
+		? (env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+		: [""];
+	for (const directory of directories) {
+		for (const extension of extensions) {
+			const executable = path.join(directory, `playwright-cli${extension}`);
+			try {
+				if (!(await stat(executable)).isFile()) continue;
+				await access(executable, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+				return undefined;
+			} catch {
+				// PATH health check is filesystem-only; never execute the CLI.
+			}
+		}
+	}
+	return PLAYWRIGHT_CLI_ADVISORY;
+}
 
 const CLAUDE_PRETOOL_GUARD = "|| exit 2";
 
@@ -623,7 +645,7 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 		const mcp = await readConfig(mcpFile, harness, ".claude.json", problems);
 		if (mcp.exists && !mcp.value && problems.some((item) => item.dest === ".claude.json")) signal.value = true;
 		await inspectMcp(harness, mcp, mcpEntry, options.pkgRoot, satisfied, problems, signal);
-		await inspectCommandEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
+		await inspectSymlinkEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
 	} else if (harness === "cursor") {
 		const hooks = await readConfig(path.join(root, "hooks.json"), harness, "hooks.json", problems);
 		if (hooks.exists && !hooks.value && problems.some((item) => item.dest === "hooks.json")) signal.value = true;
@@ -631,14 +653,14 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 		const mcp = await readConfig(path.join(root, "mcp.json"), harness, "mcp.json", problems);
 		if (mcp.exists && !mcp.value && problems.some((item) => item.dest === "mcp.json")) signal.value = true;
 		await inspectMcp(harness, mcp, entries.find(({ kind }) => kind === "mcp")!, options.pkgRoot, satisfied, problems, signal);
-		await inspectCommandEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
+		await inspectSymlinkEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
 	} else {
 		const plugin = entries.find(({ kind }) => kind === "plugin")!;
 		await inspectSymlink(harness, root, plugin, options.pkgRoot, satisfied, problems, signal);
 		const config = await readConfig(path.join(root, "opencode.json"), harness, "opencode.json", problems);
 		if (config.exists && !config.value && problems.some((item) => item.dest === "opencode.json")) signal.value = true;
 		await inspectMcp(harness, config, entries.find(({ kind }) => kind === "mcp")!, options.pkgRoot, satisfied, problems, signal);
-		await inspectCommandEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
+		await inspectSymlinkEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
 	}
 
 	await inspectLegacyCommands(harness, root, options.pkgRoot, problems, signal);
@@ -652,7 +674,7 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 	return { state: problems.some(({ severity }) => severity === "error") ? "needs-fix" : "ok", problems };
 }
 
-async function inspectCommandEntries(
+async function inspectSymlinkEntries(
 	harness: Harness,
 	root: string,
 	entries: HarnessEntry[],
@@ -662,7 +684,7 @@ async function inspectCommandEntries(
 	signal: { value: boolean },
 ): Promise<void> {
 	for (const entry of entries) {
-		if (entry.kind === "command" || entry.kind === "plugin") {
+		if (entry.kind === "command" || entry.kind === "plugin" || entry.kind === "skill") {
 			await inspectSymlink(harness, root, entry, pkgRoot, satisfied, problems, signal);
 		}
 	}
@@ -1272,7 +1294,9 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 	}
 	if (harness === "claude") await planClaudeMcp(options, install, cliSteps, skipped);
 	for (const entry of entries) {
-		if (entry.kind === "command" || entry.kind === "plugin") await planSymlink(root, entry, options.pkgRoot, install, changes, skipped);
+		if (entry.kind === "command" || entry.kind === "plugin" || entry.kind === "skill") {
+			await planSymlink(root, entry, options.pkgRoot, install, changes, skipped);
+		}
 	}
 	await planLegacyLinks(root, options.pkgRoot, install, changes, skipped);
 	await updateStampPlan(harness, options, install, changes, skipped);

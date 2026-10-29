@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "../manifest.ts";
-import { applyPlan, classifyPackageRoot, inspectHarness, planInstall, planUninstall, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
+import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PACKAGE_SKILL_NAMES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "../manifest.ts";
+import { applyPlan, classifyPackageRoot, inspectHarness, planInstall, planUninstall, PLAYWRIGHT_CLI_ADVISORY, playwrightCliAdvisory, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
 import type { Harness, ProblemKind, SetupProblem } from "../setup.ts";
 
 async function main(): Promise<void> {
@@ -23,12 +23,17 @@ const backupTimestamp = (iso: string): string => process.platform === "win32" ? 
 const setupRoot = async (root: string, harness: Harness, pkgRoot: string): Promise<void> => {
 	const entries = HARNESS_MANIFEST[harness];
 	for (const entry of entries) {
-		if (entry.kind === "command" || entry.kind === "plugin") {
+		if (entry.kind === "command" || entry.kind === "plugin" || entry.kind === "skill") {
 			const target = path.join(pkgRoot, entry.script);
 			const destination = path.join(root, entry.dest);
-			await mkdir(path.dirname(target), { recursive: true });
+			if (entry.kind === "skill") {
+				await mkdir(target, { recursive: true });
+				await writeFile(path.join(target, "SKILL.md"), "fixture skill\n");
+			} else {
+				await mkdir(path.dirname(target), { recursive: true });
+				await writeFile(target, "fixture asset\n");
+			}
 			await mkdir(path.dirname(destination), { recursive: true });
-			await writeFile(target, "fixture asset\n");
 			await symlink(target, destination);
 		}
 	}
@@ -40,8 +45,13 @@ const createPackage = async (root: string): Promise<string> => {
 	for (const harness of ["claude", "cursor", "opencode"] as const) {
 		for (const entry of HARNESS_MANIFEST[harness]) {
 			const asset = path.join(pkgRoot, entry.script);
-			await mkdir(path.dirname(asset), { recursive: true });
-			await writeFile(asset, "fixture asset\n");
+			if (entry.kind === "skill") {
+				await mkdir(asset, { recursive: true });
+				await writeFile(path.join(asset, "SKILL.md"), "fixture skill\n");
+			} else {
+				await mkdir(path.dirname(asset), { recursive: true });
+				await writeFile(asset, "fixture asset\n");
+			}
 		}
 	}
 	return pkgRoot;
@@ -101,7 +111,7 @@ try {
 	for (const [harness, entries] of Object.entries(HARNESS_MANIFEST)) {
 		assert.ok(entries.length > 0, `${harness} manifest is populated`);
 		for (const entry of entries) {
-			assert.ok(["hook", "statusline", "mcp", "command", "plugin"].includes(entry.kind));
+			assert.ok(["hook", "statusline", "mcp", "command", "plugin", "skill"].includes(entry.kind));
 			assert.ok(!path.posix.isAbsolute(entry.script) && !entry.script.startsWith("../"));
 			assert.ok(entry.dest.length > 0 && entry.ownerExtension.length > 0);
 			assert.deepEqual(Object.keys(entry).sort(), (entry.event ? ["dest", "event", "kind", "ownerExtension", "script"] : ["dest", "kind", "ownerExtension", "script"]).sort());
@@ -130,6 +140,12 @@ try {
 		["agent/opencode-bridge-client/pi-opencode-plugin.js", "plugins/pi-opencode-build-lease.js"],
 	]);
 	assert.equal(HARNESS_MANIFEST.opencode.find(({ kind }) => kind === "mcp")?.dest, "opencode.json#mcp.pi-claude-bridge");
+	assert.equal(PACKAGE_SKILL_NAMES.length, 23);
+	assert.equal(new Set(PACKAGE_SKILL_NAMES).size, PACKAGE_SKILL_NAMES.length);
+	for (const harness of ["claude", "cursor", "opencode"] as const) {
+		assert.deepEqual(HARNESS_MANIFEST[harness].filter(({ kind }) => kind === "skill").map(({ script, dest }) => [script, dest]), PACKAGE_SKILL_NAMES.map((name) => [`agent/skills/${name}`, `skills/${name}`]));
+	}
+	record("manifest skill inventory across three harnesses");
 	record("manifest shape and required harness entries");
 
 	const emptyRoot = path.join(temp, "empty");
@@ -169,6 +185,19 @@ try {
 		opencode: "/users/tester/.config/opencode",
 	});
 	record("harness roots and overrides");
+
+	const cliPathRoot = path.join(temp, "playwright-cli-path");
+	const cliBin = path.join(cliPathRoot, "bin");
+	await mkdir(cliBin, { recursive: true });
+	assert.equal(await playwrightCliAdvisory({ PATH: path.join(cliPathRoot, "missing") }), PLAYWRIGHT_CLI_ADVISORY);
+	const cliMarker = path.join(cliPathRoot, "executed");
+	const cliFile = path.join(cliBin, process.platform === "win32" ? "playwright-cli.CMD" : "playwright-cli");
+	const cliBody = process.platform === "win32" ? `@echo off\necho touched > ${cliMarker}\n` : `#!/bin/sh\nprintf touched > '${cliMarker}'\n`;
+	await writeFile(cliFile, cliBody);
+	await chmod(cliFile, 0o755);
+	assert.equal(await playwrightCliAdvisory({ PATH: cliBin, PATHEXT: ".CMD" }), undefined);
+	await assert.rejects(access(cliMarker), "PATH advisory must not execute playwright-cli");
+	record("filesystem-only playwright-cli PATH advisory");
 
 	const agentDir = path.join(temp, ".pi", "agent");
 	const npmPackage = path.join(agentDir, "npm/node_modules/@scope/pkg");
@@ -356,12 +385,29 @@ try {
 		const options = { pkgRoot: installPkg, roots: rootsForHarness, agentDir: agent, platform: "darwin" };
 		const plan = await planInstall(harness, options);
 		assert.ok(plan.changes.length > 0, `${harness} fresh install plan has work`);
+		const skillEntries = HARNESS_MANIFEST[harness].filter(({ kind }) => kind === "skill");
+		assert.equal(skillEntries.length, PACKAGE_SKILL_NAMES.length);
+		for (const entry of skillEntries) {
+			const destination = path.join(rootsForHarness[harness], entry.dest);
+			assert.deepEqual(plan.changes.find(({ path: file }) => file === destination), {
+				path: destination,
+				kind: "symlink",
+				before: null,
+				after: path.join(installPkg, entry.script),
+			});
+		}
 		assert.ok(!plan.changes.some(({ path: file }) => file === rootsForHarness.claudeMcp), "Claude MCP config is never planned as a direct write");
 		if (harness === "claude") {
 			assert.deepEqual(plan.cliSteps, [{ executable: "claude", args: ["mcp", "add", "-s", "user", PI_BRIDGE_MCP_KEY, "--", "node", path.join(installPkg, "agent/claude-bridge-client/pi-bridge-mcp.js")] }]);
 		} else assert.deepEqual(plan.cliSteps, []);
 		const applied = await applyPlan(plan, { now: new Date("2024-01-02T03:04:05.000Z") });
 		assert.ok(applied.every(({ applied: ok }) => ok), `${harness} apply: ${JSON.stringify(applied)}`);
+		for (const entry of skillEntries) {
+			const destination = path.join(rootsForHarness[harness], entry.dest);
+			assert.ok((await lstat(destination)).isSymbolicLink(), `${harness} skill destination is a directory symlink`);
+			assert.equal(await realpath(destination), await realpath(path.join(installPkg, entry.script)));
+			assert.ok((await lstat(path.join(destination, "SKILL.md"))).isFile());
+		}
 		if (harness === "claude") {
 			await writeJson(rootsForHarness.claudeMcp, { mcpServers: { [PI_BRIDGE_MCP_KEY]: { command: "node", args: [path.join(installPkg, "agent/claude-bridge-client/pi-bridge-mcp.js")] } } });
 		}
@@ -572,8 +618,8 @@ try {
 	const rootSwitchRoots = await installFixture(path.join(rootSwitchBase, "fixture"), rootSwitchPkgA);
 	const rootSwitchAgent = path.join(rootSwitchBase, "agent-dir");
 	const rootSwitchPlan = await planInstall("claude", { pkgRoot: rootSwitchPkgB, roots: rootSwitchRoots, agentDir: rootSwitchAgent });
-	const rootSwitchEntries = HARNESS_MANIFEST.claude.filter(({ kind }) => kind === "command");
-	assert.equal(rootSwitchEntries.length, 3);
+	const rootSwitchEntries = HARNESS_MANIFEST.claude.filter(({ kind }) => kind === "command" || kind === "skill");
+	assert.equal(rootSwitchEntries.length, 3 + PACKAGE_SKILL_NAMES.length);
 	for (const entry of rootSwitchEntries) {
 		const file = path.join(rootSwitchRoots.claude, entry.dest);
 		const change = rootSwitchPlan.changes.find(({ path: changePath }) => changePath === file);
@@ -636,16 +682,23 @@ try {
 	const uninstallOwnedRoots = makeRoots(path.join(uninstallOwnedBase, "fixture"));
 	await setupRoot(uninstallOwnedRoots.cursor, "cursor", uninstallOwnedPkgA);
 	const uninstallOwnedPlan = await planUninstall("cursor", { pkgRoot: uninstallOwnedPkgB, roots: uninstallOwnedRoots, agentDir: path.join(uninstallOwnedBase, "agent-dir") });
-	const uninstallOwnedEntries = HARNESS_MANIFEST.cursor.filter(({ kind }) => kind === "command");
+	const uninstallOwnedEntries = HARNESS_MANIFEST.cursor.filter(({ kind }) => kind === "command" || kind === "skill");
 	for (const entry of uninstallOwnedEntries) {
 		const file = path.join(uninstallOwnedRoots.cursor, entry.dest);
 		const change = uninstallOwnedPlan.changes.find(({ path: changePath }) => changePath === file);
 		assert.ok(change, `uninstall plan includes ${entry.dest}`);
 		assert.deepEqual(change, { path: file, kind: "delete", before: path.join(uninstallOwnedPkgA, entry.script), after: null });
 	}
-	const uninstallOwnedResults = await applyPlan(uninstallOwnedPlan);
+	const uninstallOwnedIso = "2024-07-08T09:10:11.000Z";
+	const uninstallOwnedResults = await applyPlan(uninstallOwnedPlan, { now: new Date(uninstallOwnedIso) });
 	assert.ok(uninstallOwnedResults.every(({ applied: ok }) => ok), JSON.stringify(uninstallOwnedResults));
-	for (const entry of uninstallOwnedEntries) await assert.rejects(lstat(path.join(uninstallOwnedRoots.cursor, entry.dest)));
+	for (const entry of uninstallOwnedEntries) {
+		const file = path.join(uninstallOwnedRoots.cursor, entry.dest);
+		await assert.rejects(lstat(file));
+		const backup = `${file}.harness-bak-${backupTimestamp(uninstallOwnedIso)}`;
+		assert.ok((await lstat(backup)).isSymbolicLink(), `backup exists for ${entry.dest}`);
+		assert.equal(await readlink(backup), path.join(uninstallOwnedPkgA, entry.script));
+	}
 	const uninstalledOwnedInspect = await inspectHarness("cursor", { pkgRoot: uninstallOwnedPkgB, roots: uninstallOwnedRoots, agentDir: path.join(uninstallOwnedBase, "agent-dir") });
 	assert.equal(uninstalledOwnedInspect.state, "not-installed", JSON.stringify(uninstalledOwnedInspect.problems));
 	record("uninstall deletes owned links from another package root");
@@ -670,6 +723,44 @@ try {
 	assert.ok((await applyPlan(foreignUninstallPlan)).every(({ applied: ok }) => ok));
 	assert.equal(await readlink(foreignLinkPath), foreignLinkTarget);
 	record("foreign non-owned symlink preserved on install and uninstall");
+
+	const foreignSkillBase = path.join(temp, "planner-foreign-skills");
+	const foreignSkillPkg = await createPackage(foreignSkillBase);
+	const foreignSkillRoots = makeRoots(path.join(foreignSkillBase, "fixture"));
+	const [fileSkill, directorySkill, linkedSkill] = PACKAGE_SKILL_NAMES;
+	const foreignSkillRoot = path.join(foreignSkillRoots.cursor, "skills");
+	const foreignSkillFile = path.join(foreignSkillRoot, fileSkill);
+	const foreignSkillDirectory = path.join(foreignSkillRoot, directorySkill);
+	const foreignSkillLink = path.join(foreignSkillRoot, linkedSkill);
+	const foreignSkillTarget = path.join(foreignSkillBase, "foreign", "SKILL.md");
+	await mkdir(foreignSkillRoot, { recursive: true });
+	await writeFile(foreignSkillFile, "user skill file\n");
+	await mkdir(foreignSkillDirectory, { recursive: true });
+	await writeFile(path.join(foreignSkillDirectory, "keep.md"), "user skill directory\n");
+	await mkdir(path.dirname(foreignSkillTarget), { recursive: true });
+	await writeFile(foreignSkillTarget, "foreign linked skill\n");
+	await symlink(path.dirname(foreignSkillTarget), foreignSkillLink);
+	const foreignSkillOptions = { pkgRoot: foreignSkillPkg, roots: foreignSkillRoots, agentDir: path.join(foreignSkillBase, "agent-dir") };
+	const foreignSkillInstall = await planInstall("cursor", foreignSkillOptions);
+	for (const destination of [foreignSkillFile, foreignSkillDirectory]) {
+		assert.ok(foreignSkillInstall.skipped.some(({ path: skippedPath, reason }) => skippedPath === destination && reason === "Destination is not a symlink; preserve it."));
+		assert.ok(!foreignSkillInstall.changes.some(({ path: changedPath }) => changedPath === destination));
+	}
+	assert.ok(foreignSkillInstall.skipped.some(({ path: skippedPath, reason }) => skippedPath === foreignSkillLink && reason === "Symlink target is outside selected package; preserve it."));
+	assert.ok(!foreignSkillInstall.changes.some(({ path: changedPath }) => changedPath === foreignSkillLink));
+	assert.ok((await applyPlan(foreignSkillInstall)).every(({ applied: ok }) => ok));
+	assert.equal(await readFile(foreignSkillFile, "utf8"), "user skill file\n");
+	assert.equal(await readFile(path.join(foreignSkillDirectory, "keep.md"), "utf8"), "user skill directory\n");
+	assert.equal(await readlink(foreignSkillLink), path.dirname(foreignSkillTarget));
+	const foreignSkillUninstall = await planUninstall("cursor", foreignSkillOptions);
+	for (const destination of [foreignSkillFile, foreignSkillDirectory, foreignSkillLink]) {
+		assert.ok(!foreignSkillUninstall.changes.some(({ path: changedPath }) => changedPath === destination));
+	}
+	assert.ok((await applyPlan(foreignSkillUninstall)).every(({ applied: ok }) => ok));
+	assert.equal(await readFile(foreignSkillFile, "utf8"), "user skill file\n");
+	assert.equal(await readFile(path.join(foreignSkillDirectory, "keep.md"), "utf8"), "user skill directory\n");
+	assert.equal(await readlink(foreignSkillLink), path.dirname(foreignSkillTarget));
+	record("foreign skill files, directories, and symlinks preserved on install/uninstall");
 
 	const invalidPlanBase = path.join(temp, "planner-unparseable");
 	const invalidPlanPkg = await createPackage(invalidPlanBase);

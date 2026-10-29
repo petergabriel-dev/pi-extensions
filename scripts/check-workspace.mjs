@@ -19,31 +19,14 @@ const extensions = [
   "agent/extensions/subagents/index.ts",
   "agent/extensions/workflow-modes/index.ts",
 ];
-const skills = [
-  "agent/skills/animate",
-  "agent/skills/animate-expo",
-  "agent/skills/animation-performance",
-  "agent/skills/animation-vocabulary",
-  "agent/skills/apple-design",
-  "agent/skills/ask-sonner",
-  "agent/skills/break-ui",
-  "agent/skills/emil-design-eng",
-  "agent/skills/find-animation-opportunities",
-  "agent/skills/grill",
-  "agent/skills/grill-with-docs",
-  "agent/skills/impeccable",
-  "agent/skills/improve-animations",
-  "agent/skills/mobile-native",
-  "agent/skills/pick-ui-library",
-  "agent/skills/playwright-cli",
-  "agent/skills/prototype",
-  "agent/skills/remove-animations",
-  "agent/skills/review-animations",
-  "agent/skills/web-debug",
-  "agent/skills/web-design-guidelines",
-  "agent/skills/worker-orchestration",
-  "agent/skills/write-swift",
-];
+const harnessManifestSource = await readFile(relative("agent/extensions/harness-setup/manifest.ts"), "utf8");
+const skillNamesMatch = harnessManifestSource.match(/export const PACKAGE_SKILL_NAMES = \[([\s\S]*?)\] as const;/);
+assert.ok(skillNamesMatch, "package skill-name list missing from harness manifest");
+const skillNames = [...skillNamesMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+assert.equal(skillNames.length, 23, "harness manifest must export all 23 package skills");
+assert.equal(new Set(skillNames).size, skillNames.length, "package skill-name list contains duplicates");
+assert.ok(skillNames.every((name) => /^[a-z0-9][a-z0-9-]*$/.test(name)), "invalid package skill name");
+const skills = skillNames.map((name) => `agent/skills/${name}`);
 
 const HOST_PACKAGE_LITERAL = /["'`](?:@earendil-works\/pi-|@mariozechner\/pi-)[^"'`]*["'`]/;
 const VARIABLE_NAME = /[A-Za-z_$][\w$]*/;
@@ -120,7 +103,7 @@ assert.equal(manifest.scripts?.install, undefined);
 assert.equal(manifest.scripts?.postinstall, undefined);
 assert.equal(manifest.scripts?.prepublishOnly, "npm test");
 assert.deepEqual(manifest.pi?.extensions, extensions.map((entry) => `./${entry}`));
-assert.deepEqual(manifest.pi?.skills, skills.map((entry) => `./${entry}`));
+assert.deepEqual(manifest.pi?.skills, skillNames.map((name) => `./agent/skills/${name}`), "package.json pi.skills must match harness manifest skill names");
 for (const resource of [...extensions, ...skills, ...agents]) await access(relative(resource));
 
 const extensionSources = await Promise.all(
