@@ -11,7 +11,7 @@ export function getWorkflowState(): WorkflowState {
 	return currentWorkflowState;
 }
 
-export function getMode(): WorkflowMode {
+export function getMode(): WorkflowMode | undefined {
 	return currentWorkflowState.mode;
 }
 
@@ -20,47 +20,46 @@ export function isWriteAllowed(mode: WorkflowMode | undefined = hasReceivedState
 }
 
 export function isDesignWriteAllowed(mode: WorkflowMode | undefined = hasReceivedState ? currentWorkflowState.mode : undefined): boolean {
-	return mode === "design" || mode === "build" || mode === "off";
+	return isWriteAllowed(mode);
 }
 
 export function getModeLabel(): string {
-	if (!hasReceivedState) return "Unknown";
+	if (!hasReceivedState || currentWorkflowState.mode === undefined) return "Unknown";
 	const labels: Record<WorkflowMode, string> = {
 		off: "OFF",
 		discuss: "Discuss",
 		plan: "Plan",
 		build: "Build",
 		review: "Review",
-		design: "Design",
 	};
 	return labels[currentWorkflowState.mode] ?? "Unknown";
 }
 
+function isWorkflowMode(value: unknown): value is WorkflowMode {
+	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review";
+}
+
+function applyWorkflowState(data: unknown): void {
+	const state = data && typeof data === "object" ? data as { mode?: unknown; hasPlan?: boolean; plan?: string } : {};
+	if (!isWorkflowMode(state.mode)) {
+		hasReceivedState = false;
+		currentWorkflowState = { mode: undefined, hasPlan: false };
+		return;
+	}
+	hasReceivedState = true;
+	currentWorkflowState = {
+		mode: state.mode,
+		hasPlan: state.hasPlan ?? false,
+		plan: state.plan,
+	};
+}
+
 export function registerModeListeners(pi: ExtensionAPI): void {
 	// Listen for mode changes
-	pi.events.on("workflow-modes:changed", (data: unknown) => {
-		const state = data as { mode?: WorkflowMode; hasPlan?: boolean };
-		if (state?.mode) {
-			hasReceivedState = true;
-			currentWorkflowState = {
-				mode: state.mode,
-				hasPlan: state.hasPlan ?? false,
-			};
-		}
-	});
+	pi.events.on("workflow-modes:changed", applyWorkflowState);
 
 	// Query initial state
-	pi.events.on("workflow-modes:state", (data: unknown) => {
-		const state = data as { mode?: WorkflowMode; hasPlan?: boolean; plan?: string };
-		if (state?.mode) {
-			hasReceivedState = true;
-			currentWorkflowState = {
-				mode: state.mode,
-				hasPlan: state.hasPlan ?? false,
-				plan: state.plan,
-			};
-		}
-	});
+	pi.events.on("workflow-modes:state", applyWorkflowState);
 
 	// Request state from workflow-modes
 	try {

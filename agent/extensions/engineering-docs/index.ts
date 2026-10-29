@@ -216,7 +216,7 @@ async function handleInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, flags:
 	}
 
 	if (!writeOk) {
-		ctx.ui.notify(`Cannot init ${flags.design ? "design docs" : "docs"} in ${getModeLabel()} mode. Switch to ${flags.design ? "/mode design, /mode build, or /mode off" : "/mode build or /mode off"}.`, "warning");
+		ctx.ui.notify(`Cannot init ${flags.design ? "design docs" : "docs"} in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
 		return;
 	}
 
@@ -358,7 +358,7 @@ async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
 
 async function handleUpdateTokens(ctx: ExtensionCommandContext): Promise<void> {
 	if (!isDesignWriteAllowed()) {
-		ctx.ui.notify(`Cannot update tokens in ${getModeLabel()} mode. Switch to /mode design, /mode build, or /mode off.`, "warning");
+		ctx.ui.notify(`Cannot update tokens in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
 		return;
 	}
 	try {
@@ -391,7 +391,7 @@ async function handlePullDesign(ctx: ExtensionCommandContext): Promise<void> {
 	}
 
 	if (!isDesignWriteAllowed()) {
-		ctx.ui.notify(`Cannot pull design references in ${getModeLabel()} mode. Switch to /mode design, /mode build, or /mode off.`, "warning");
+		ctx.ui.notify(`Cannot pull design references in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
 		return;
 	}
 
@@ -504,8 +504,7 @@ export default function (pi: ExtensionAPI) {
 		return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
 	});
 
-	// Gate managed docs roots independently: engineering docs require Build/Off;
-	// design docs also allow Design mode.
+	// Both managed docs roots require Build/Off.
 	pi.on("tool_call", async (event) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
 		const path = String((event.input as { path?: unknown })?.path ?? "").replaceAll("\\", "/");
@@ -519,7 +518,7 @@ export default function (pi: ExtensionAPI) {
 		if (inRoot(DESIGN_DIR) && !isDesignWriteAllowed()) {
 			return {
 				block: true,
-				reason: `Write to ${DESIGN_DIR} is blocked in ${getModeLabel()} mode. Use /mode design, /mode build, or /mode off to enable design docs writes.`,
+				reason: `Write to ${DESIGN_DIR} is blocked in ${getModeLabel()} mode. Use /mode build or /mode off to enable design docs writes.`,
 			};
 		}
 	});

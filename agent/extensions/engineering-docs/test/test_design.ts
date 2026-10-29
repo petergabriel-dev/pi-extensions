@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDesignWriteAllowed } from "../mode.ts";
 import { checkDesignDocs, initDesignDocs, updateDesignTokens } from "../filesystem.ts";
 import {
 	DESIGN_DIR,
@@ -32,6 +33,14 @@ const manifest = await loadDesignManifest(cwd);
 assert.ok(manifest);
 assert.equal(await isDesignSurfacePath(cwd, "docs/design/components/button.md", manifest), true);
 assert.equal(await isDesignSurfacePath(cwd, "src/tokens.css", manifest), true);
+for (const mode of ["build", "off"] as const) {
+	assert.equal(isDesignWriteAllowed(mode) && await isDesignSurfacePath(cwd, "docs/design/components/button.md", manifest), true, `${mode} permits design docs`);
+	assert.equal(isDesignWriteAllowed(mode) && await isDesignSurfacePath(cwd, "src/tokens.css", manifest), true, `${mode} permits declared token files`);
+}
+for (const mode of ["discuss", "plan", "review"] as const) {
+	assert.equal(isDesignWriteAllowed(mode) && await isDesignSurfacePath(cwd, "docs/design/components/button.md", manifest), false, `${mode} blocks design docs`);
+	assert.equal(isDesignWriteAllowed(mode) && await isDesignSurfacePath(cwd, "src/tokens.css", manifest), false, `${mode} blocks declared token files`);
+}
 assert.equal(await isDesignSurfacePath(cwd, "src/app.ts", manifest), false);
 assert.equal(await isDesignSurfacePath(cwd, "../outside.md", manifest), false);
 assert.equal(await isDesignSurfacePath(cwd, "src/tokens.css", null), false);

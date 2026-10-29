@@ -130,7 +130,6 @@ await writeFile(join(failedFolder, "sentinel.txt"), "keep");
 await assert.rejects(copyProjectSnapshot(projectRoot, missingProject, join(projectsDir, "does-not-exist")));
 assert.equal(await readFile(join(failedFolder, "sentinel.txt"), "utf8"), "keep", "a failed copy keeps the previous snapshot");
 
-assert.equal(isDesignWriteAllowed("design"), true);
 assert.equal(isDesignWriteAllowed("build"), true);
 assert.equal(isDesignWriteAllowed("off"), true);
 for (const mode of ["discuss", "plan", "review"] as const) assert.equal(isDesignWriteAllowed(mode), false, `${mode} blocks the pull`);
