@@ -674,12 +674,12 @@ async function main() {
 			const workspace = path.join(home, "od-ws");
 			fs.mkdirSync(workspace);
 			const env = { ...process.env, HOME: home };
-			const allowed = parseReadonlyHook(await runScript("pi-readonly-hook.js", workspace, { session_id: HARNESS.id, cwd: workspace, tool_name: "Write", tool_input: {} }, workspace, env));
+			const allowed = parseReadonlyHook(await runScript("pi-readonly-hook.js", workspace, { session_id: HARNESS.id, cwd: workspace, tool_name: "Write", tool_input: { file_path: path.join(workspace, "note.txt") } }, workspace, env));
 			assert.deepEqual(allowed, {}, "Write outside a Pi project must pass");
 
 			const project = path.join(home, "proj");
 			fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
-			const denied = parseReadonlyHook(await runScript("pi-readonly-hook.js", project, { session_id: HARNESS.id, cwd: project, tool_name: "Write", tool_input: {} }, project, env));
+			const denied = parseReadonlyHook(await runScript("pi-readonly-hook.js", project, { session_id: HARNESS.id, cwd: project, tool_name: "Write", tool_input: { file_path: path.join(project, "note.txt") } }, project, env));
 			assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
 			assert.ok(denied.systemMessage.includes(`Write is blocked in Pi project ${project}`), denied.systemMessage);
 
@@ -691,6 +691,71 @@ async function main() {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 			fs.rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	await test("edit target in a foreign Pi project is denied without its lease", async () => {
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-outside-"));
+		const target = fs.mkdtempSync(path.join(os.tmpdir(), "pi-target-"));
+		fs.mkdirSync(path.join(target, ".pi"), { recursive: true });
+		const run = (tool_name, tool_input) => runScript("pi-readonly-hook.js", outside, {
+			cwd: outside, session_id: HARNESS.id, tool_name, tool_input,
+		}, outside);
+		try {
+			for (const [tool_name, tool_input] of [
+				["Write", { file_path: path.join(target, "note.txt") }],
+				["Edit", { file_path: path.join(target, "note.txt") }],
+				["MultiEdit", { file_path: path.join(target, "note.txt"), edits: [] }],
+				["NotebookEdit", { notebook_path: path.join(target, "note.ipynb") }],
+				["Write", { file_path: path.relative(outside, path.join(target, "note.txt")) }],
+			]) {
+				const denied = parseReadonlyHook(await run(tool_name, tool_input));
+				assert.equal(denied.hookSpecificOutput.permissionDecision, "deny", tool_name);
+				assert.ok(denied.systemMessage.includes(`target is in Pi project ${fs.realpathSync(target)}`), denied.systemMessage);
+				assert.match(denied.systemMessage, /\/build-lease approve/);
+			}
+			const link = path.join(outside, "link");
+			fs.symlinkSync(target, link);
+			const symlinked = parseReadonlyHook(await run("Write", { file_path: path.join(link, "note.txt") }));
+			assert.equal(symlinked.hookSpecificOutput.permissionDecision, "deny");
+
+			const allowed = parseReadonlyHook(await runScript("pi-readonly-hook.js", outside, {
+				cwd: outside, session_id: HARNESS.id, tool_name: "Write", tool_input: { file_path: path.join(outside, "note.txt") },
+			}, outside));
+			assert.deepEqual(allowed, {}, "target outside every Pi project must pass");
+			const missing = parseReadonlyHook(await run("Write", {}));
+			assert.equal(missing.hookSpecificOutput.permissionDecision, "deny", "missing file_path fails closed outside a Pi project");
+		} finally {
+			fs.rmSync(outside, { recursive: true, force: true });
+			fs.rmSync(target, { recursive: true, force: true });
+		}
+	});
+
+	await test("edit target with its lease is allowed and a foreign project lease is not", async (cwd) => {
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-outside-"));
+		const target = fs.mkdtempSync(path.join(os.tmpdir(), "pi-target-"));
+		const other = fs.mkdtempSync(path.join(os.tmpdir(), "pi-other-"));
+		fs.mkdirSync(path.join(target, ".pi"), { recursive: true });
+		fs.mkdirSync(path.join(other, ".pi"), { recursive: true });
+		const paths = addSession(target, "pi-target", [HARNESS]);
+		setBuildLease(paths, leaseFixture(HARNESS));
+		try {
+			const allowed = parseReadonlyHook(await runScript("pi-readonly-hook.js", outside, {
+				cwd: outside, session_id: HARNESS.id, tool_name: "Write", tool_input: { file_path: path.join(target, "note.txt") },
+			}, outside));
+			assert.deepEqual(allowed, {}, "lease on the target root must allow the write");
+
+			const leasePaths = addSession(cwd, "pi-cwd-lease", [HARNESS]);
+			setBuildLease(leasePaths, leaseFixture(HARNESS));
+			const foreign = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, {
+				cwd, session_id: HARNESS.id, tool_name: "Write", tool_input: { file_path: path.join(other, "note.txt") },
+			}, cwd));
+			assert.equal(foreign.hookSpecificOutput.permissionDecision, "deny", "cwd lease must not authorize another Pi project");
+			assert.ok(foreign.systemMessage.includes(fs.realpathSync(other)), foreign.systemMessage);
+		} finally {
+			fs.rmSync(outside, { recursive: true, force: true });
+			fs.rmSync(target, { recursive: true, force: true });
+			fs.rmSync(other, { recursive: true, force: true });
 		}
 	});
 

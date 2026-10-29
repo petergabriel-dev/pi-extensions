@@ -156,6 +156,28 @@ function bashCommand(input) {
 	return String(toolInput.command || "").trim();
 }
 
+function leaseHint(projectRoot) {
+	return `Request a Build lease with /pi-build in ${projectRoot}, then approve it in Pi with /build-lease approve.`;
+}
+
+const EDIT_TARGET_FIELDS = { Edit: "file_path", MultiEdit: "file_path", Write: "file_path", NotebookEdit: "notebook_path" };
+
+function editTargetDecision(input, toolName, cwdRoot) {
+	const field = EDIT_TARGET_FIELDS[toolName];
+	if (!field) return null;
+	const toolInput = input.tool_input || input.toolInput || input.input;
+	const target = isPlainObject(toolInput) ? toolInput[field] : undefined;
+	if (typeof target !== "string" || target.trim() === "") {
+		// Inside a Pi project, existing lease/deny behavior still decides (no loosening).
+		return cwdRoot ? null : deny(`${toolName} is blocked: its ${field} is missing or invalid.`);
+	}
+	const targetRoot = bridgeClient.targetPiProjectRoot(target, hookCwd(input));
+	if (!targetRoot) return null;
+	if (cwdRoot && bridgeClient.realpathDeepest(cwdRoot) === targetRoot) return null;
+	if (bridgeClient.holdsBuildLease(targetRoot, { harness: "claude", id: input.session_id })) return {};
+	return deny(`${toolName} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${leaseHint(targetRoot)}`);
+}
+
 function main() {
 	let input;
 	try {
@@ -166,12 +188,19 @@ function main() {
 	}
 
 	const projectRoot = findPiProjectRoot(hookCwd(input));
+	const toolName = String(input.tool_name || input.toolName || "");
+
+	const target = editTargetDecision(input, toolName, projectRoot);
+	if (target) {
+		console.log(JSON.stringify(target));
+		return;
+	}
+
 	if (!projectRoot) {
 		console.log(JSON.stringify(allow()));
 		return;
 	}
 
-	const toolName = String(input.tool_name || input.toolName || "");
 	if (toolName.startsWith(BRIDGE_MCP_PREFIX)) {
 		console.log(JSON.stringify(bridgeMcpDecision(input)));
 		return;

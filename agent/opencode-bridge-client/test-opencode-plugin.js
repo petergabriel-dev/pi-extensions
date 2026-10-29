@@ -76,11 +76,14 @@ async function main() {
 	plugin = (await import(pluginUrl)).default;
 	assert.equal(plugin.id, "pi-opencode-build-lease");
 
-	await test("non-Pi project registers no hook", async () => {
-		await withProject({ pi: false }, (root) => {
+	await test("non-Pi project registers the target-check hook only", async () => {
+		await withProject({ pi: false }, async (root) => {
 			let registrations = 0;
-			plugin.setup({ location: { directory: root }, tool: { hook() { registrations++; } } });
-			assert.equal(registrations, 0);
+			let handler;
+			plugin.setup({ location: { directory: root }, tool: { hook(name, callback) { registrations++; handler = callback; } } });
+			assert.equal(registrations, 1);
+			await handler({ tool: "read", sessionID: OPENCODE.id, input: {} });
+			await handler({ tool: "shell", sessionID: OPENCODE.id, input: { command: "echo hi" } });
 		});
 	});
 
@@ -256,12 +259,68 @@ async function main() {
 			process.env.HOME = home;
 			assert.equal(bridgeClient.findPiProjectRoot(workspace), null);
 			let registrations = 0;
-			plugin.setup({ location: { directory: workspace }, tool: { hook() { registrations++; } } });
-			assert.equal(registrations, 0);
+			let handler;
+			plugin.setup({ location: { directory: workspace }, tool: { hook(name, callback) { registrations++; handler = callback; } } });
+			assert.equal(registrations, 1, "target check registers the hook outside a Pi project");
+			await handler({ tool: "read", sessionID: OPENCODE.id, input: {} });
 		} finally {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 			fs.rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	await test("edit target without that project's lease throws", async () => {
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-opencode-outside-"));
+		const target = makeProject({});
+		const leased = makeProject({ lease: true, leaseIdentity: OPENCODE });
+		try {
+			const { handler } = setup(outside);
+			await assert.rejects(
+				handler({ tool: "edit", sessionID: OPENCODE.id, input: { filePath: path.join(target, "note.txt") } }),
+				/target is in Pi project .*no Build lease/,
+			);
+			await assert.rejects(
+				handler({ tool: "write", sessionID: OPENCODE.id, input: { filePath: path.join(target, "note.txt") } }),
+				/target is in Pi project/,
+			);
+			const link = path.join(outside, "link");
+			fs.symlinkSync(target, link);
+			await assert.rejects(
+				handler({ tool: "edit", sessionID: OPENCODE.id, input: { filePath: path.join(link, "note.txt") } }),
+				/target is in Pi project/,
+			);
+			await handler({ tool: "edit", sessionID: OPENCODE.id, input: { filePath: path.relative(outside, path.join(target, "note.txt")) } }).then(
+				() => { throw new Error("relative path into a Pi project must throw"); },
+				(error) => assert.match(error.message, /target is in Pi project/),
+			);
+			await handler({ tool: "write", sessionID: OPENCODE.id, input: { filePath: path.join(outside, "note.txt") } });
+			await handler({ tool: "read", sessionID: OPENCODE.id, input: { filePath: path.join(target, "note.txt") } });
+			await handler({ tool: "shell", sessionID: OPENCODE.id, input: { command: "echo hi" } });
+			await handler({ tool: "write", sessionID: OPENCODE.id, input: { filePath: path.join(leased, "note.txt") } });
+			await assert.rejects(
+				handler({ tool: "write", sessionID: OPENCODE.id, input: {} }),
+				/filePath is missing or invalid/,
+			);
+		} finally {
+			fs.rmSync(outside, { recursive: true, force: true });
+			fs.rmSync(target, { recursive: true, force: true });
+			fs.rmSync(leased, { recursive: true, force: true });
+		}
+	});
+
+	await test("lease for cwd project does not authorize another Pi project", async () => {
+		const other = makeProject({});
+		try {
+			await withProject({ lease: true }, async (root) => {
+				const { handler } = setup(root);
+				await assert.rejects(
+					handler({ tool: "edit", sessionID: OPENCODE.id, input: { filePath: path.join(other, "note.txt") } }),
+					/target is in Pi project .*no Build lease/,
+				);
+			});
+		} finally {
+			fs.rmSync(other, { recursive: true, force: true });
 		}
 	});
 }

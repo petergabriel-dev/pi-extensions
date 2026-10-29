@@ -70,6 +70,28 @@ function findPiProjectRoot(start = process.cwd()) {
 	}
 }
 
+function targetPiProjectRoot(target, cwd = process.cwd()) {
+	if (typeof target !== "string" || target.length === 0) return null;
+	return findPiProjectRoot(realpathDeepest(target, cwd));
+}
+
+/** Resolve symlinks in the deepest existing ancestor so a symlink cannot redirect the walk. */
+function realpathDeepest(target, cwd = process.cwd()) {
+	let current = path.resolve(cwd, target);
+	const missing = [];
+	while (true) {
+		try {
+			const real = fs.realpathSync(current);
+			return missing.length ? path.join(real, ...missing.reverse()) : real;
+		} catch {
+			const parent = path.dirname(current);
+			if (parent === current) return current;
+			missing.push(path.basename(current));
+			current = parent;
+		}
+	}
+}
+
 function bridgePaths(projectRoot, piSessionId) {
 	if (!isSafeId(piSessionId)) throw new Error("Invalid Pi session id.");
 	const root = path.join(fs.realpathSync(projectRoot), ".pi", "memory", "bridge");
@@ -568,10 +590,12 @@ module.exports = {
 	liveSessions,
 	pairSession,
 	parsePresence,
+	realpathDeepest,
 	resolveHarnessIdentity,
 	resolveProjectRoot,
 	resolveTarget,
 	sendRequestToSession,
+	targetPiProjectRoot,
 	tools,
 };
 

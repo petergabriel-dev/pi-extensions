@@ -306,4 +306,46 @@ test("home .pi does not mark a project", () => {
 	}
 });
 
+test("edit target in a foreign Pi project is denied without its lease", () => {
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-outside-"));
+	const target = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-target-"));
+	fs.mkdirSync(path.join(target, ".pi"), { recursive: true });
+	try {
+		const denied = run({ event: "preToolUse", cwd: outside, conversation_id: CURSOR.id, tool_name: "Edit", tool_input: { path: path.join(target, "note.txt") } });
+		assertPermission(denied, "deny");
+		assert.ok(denied.user_message.includes(`target is in Pi project ${fs.realpathSync(target)}`), denied.user_message);
+		assert.match(denied.user_message, /\/build-lease approve/);
+
+		const relative = run({ event: "preToolUse", cwd: outside, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: path.relative(outside, path.join(target, "note.txt")) } });
+		assertPermission(relative, "deny");
+
+		fs.symlinkSync(target, path.join(outside, "link"));
+		const symlinked = run({ event: "preToolUse", cwd: outside, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { file_path: path.join(outside, "link", "note.txt") } });
+		assertPermission(symlinked, "deny");
+
+		assertPermission(run({ event: "preToolUse", cwd: outside, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: path.join(outside, "note.txt") } }), "allow");
+		assertPermission(run({ event: "preToolUse", cwd: outside, conversation_id: CURSOR.id, tool_name: "Read", tool_input: { path: path.join(target, "note.txt") } }), "allow");
+	} finally {
+		fs.rmSync(outside, { recursive: true, force: true });
+		fs.rmSync(target, { recursive: true, force: true });
+	}
+});
+
+test("target lease allows but a cwd lease does not cross projects", () => {
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-outside-"));
+	const leasedTarget = tempPiProject();
+	addLeasePresence(leasedTarget);
+	const other = tempPiProject();
+	const cwdProject = tempPiProject();
+	addLeasePresence(cwdProject);
+	try {
+		assertPermission(run({ event: "preToolUse", cwd: outside, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: path.join(leasedTarget, "note.txt") } }), "allow");
+		const denied = run({ event: "preToolUse", cwd: cwdProject, conversation_id: CURSOR.id, tool_name: "Write", tool_input: { path: path.join(other, "note.txt") } });
+		assertPermission(denied, "deny");
+		assert.match(denied.user_message, /target is in Pi project/);
+	} finally {
+		for (const dir of [outside, leasedTarget, other, cwdProject]) fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 if (process.exitCode) process.exit(process.exitCode);
