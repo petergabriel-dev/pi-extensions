@@ -20,12 +20,20 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
+import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_FRONTEND_VERIFICATION_PROMPT, BUILD_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
 import { promptContextForMode } from "../claude-bridge/index.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 if (PLAN_FRONTEND_PROMPT.length > 2000 || PLAN_REFERENCE_PROMPT.length > 2000) throw new Error("Added Plan prompt text exceeds 2,000 characters");
+if (BUILD_FRONTEND_VERIFICATION_PROMPT.length > 2000 || !BUILD_PROMPT.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("Build frontend verification clause exceeds 2,000 characters or is not composed into BUILD_PROMPT");
+for (const part of ["saved plan", "docs/design/components/", "authoritative", "no unplanned taste", "wrong or contradictory", "through Plan", "required spec is missing"]) {
+	if (!BUILD_DESIGN_AWARE_PROMPT.toLowerCase().includes(part.toLowerCase())) throw new Error("Build spec authority omitted " + part);
+}
+for (const part of ["render every spec viewport and required state", "capture a screenshot for each", "web-design-guidelines", "at most 3 passes", "Claim verified only after reviewing all required screenshots", "browser_*", "/browser on", "playwright-cli", 'note: "unverified: <reason>; setup: npx playwright install chromium / npm i -g @playwright/cli@latest"', "replace <reason> with the actual cause", "unverified in the post-task report"]) {
+	if (!BUILD_FRONTEND_VERIFICATION_PROMPT.includes(part)) throw new Error("Build visual gate omitted " + part);
+}
+if (BUILD_DESIGN_AWARE_PROMPT.includes("/mode design") || BUILD_PROMPT.includes("/mode design")) throw new Error("Build prompt retained removed Design mode");
 for (const part of ["docs/design/", "tokenFiles", "before component tasks", "existing design system or base library", "/* @primitive */", "/* @semantic */", "semantic light/dark", "hard-coded values", "Accessibility is non-negotiable", "mobile-first", "single-column previews", "file path", "base component", "props/types", "variants", "states (default, hover, focus-visible, active, disabled, loading, empty, error)", "tokens by name", "layout per breakpoint", "motion token, trigger", "prefers-reduced-motion", "accessibility role, keyboard, aria", "verification viewports (default 375/768/1280 px)", "no code skeletons"]) {
 	if (!PLAN_FRONTEND_PROMPT.includes(part)) throw new Error("Plan frontend clause omitted " + part);
 }
@@ -45,10 +53,12 @@ for (const skillPath of planSkillPaths) {
 }
 const absentBuild = composeWorkflowPrompt("build", true, undefined, cwd);
 if (absentBuild?.includes(BUILD_REFERENCE_PROMPT) || absentBuild?.includes(PLAN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
-if (absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("missing manifest injected design block");
+if (!absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT) || !absentBuild.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("Build authority or verification rule missing without manifest");
+const absentBridgeBuild = String(promptContextForMode("build", true, cwd).buildPrompt);
+if (!absentBridgeBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || !absentBridgeBuild.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("bridge buildPrompt omitted spec authority or visual gate");
 mkdirSync(join(cwd, "docs/design/reference"), { recursive: true });
 const referenceBuild = composeWorkflowPrompt("build", true, undefined, cwd);
-if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || referenceBuild.includes(PLAN_REFERENCE_PROMPT)) throw new Error("reference failed to inject only the Build prompt independently of manifest");
+if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || !referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || referenceBuild.includes(PLAN_REFERENCE_PROMPT)) throw new Error("reference failed to inject Build authority and reference guidance only");
 const referencePlan = composeWorkflowPrompt("plan", true, undefined, cwd);
 const referenceBridgePlan = String(promptContextForMode("plan", true, cwd).planPrompt);
 if (!referencePlan?.includes(PLAN_REFERENCE_PROMPT) || !referenceBridgePlan.includes(PLAN_REFERENCE_PROMPT) || referencePlan.includes(BUILD_REFERENCE_PROMPT)) throw new Error("reference snapshots were not conditionally routed only to Plan");
