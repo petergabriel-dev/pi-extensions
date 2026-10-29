@@ -245,6 +245,25 @@ async function main() {
 			bridgeClient.holdsBuildLease = original;
 		}
 	});
+
+	await test("home .pi does not mark a project", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-opencode-home-"));
+		const previousHome = process.env.HOME;
+		try {
+			fs.mkdirSync(path.join(home, ".pi"), { recursive: true });
+			const workspace = path.join(home, "od-ws");
+			fs.mkdirSync(workspace);
+			process.env.HOME = home;
+			assert.equal(bridgeClient.findPiProjectRoot(workspace), null);
+			let registrations = 0;
+			plugin.setup({ location: { directory: workspace }, tool: { hook() { registrations++; } } });
+			assert.equal(registrations, 0);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			fs.rmSync(home, { recursive: true, force: true });
+		}
+	});
 }
 
 main().catch((error) => {

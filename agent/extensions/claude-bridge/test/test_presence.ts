@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt, type PresencePeer } from "../presence.js";
+import { findProjectRoot } from "../project-root.js";
 
 const now = Date.parse("2025-01-02T03:04:05.000Z");
 const stoppedAt = Date.parse(stoppedHeartbeatAt(now));
@@ -49,6 +50,22 @@ try {
 	assert.doesNotThrow(() => clearRequestCache([path.join(namespace, "missing")]));
 } finally {
 	fs.rmSync(namespace, { recursive: true, force: true });
+}
+
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-bridge-home-"));
+const previousHome = process.env.HOME;
+try {
+	fs.mkdirSync(path.join(fakeHome, ".pi"), { recursive: true });
+	process.env.HOME = fakeHome;
+	assert.equal(findProjectRoot(path.join(fakeHome, "od-ws")), null);
+	const project = path.join(fakeHome, "proj");
+	fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+	assert.equal(findProjectRoot(project), fs.realpathSync(project));
+	assert.equal(findProjectRoot(path.join(project, "nested", "dir")), fs.realpathSync(project));
+} finally {
+	if (previousHome === undefined) delete process.env.HOME;
+	else process.env.HOME = previousHome;
+	fs.rmSync(fakeHome, { recursive: true, force: true });
 }
 
 console.log("claude bridge presence tests passed");

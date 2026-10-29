@@ -2,7 +2,7 @@
 
 ## Pi-project branch (preferred)
 
-First, detect whether cwd or any ancestor contains `.pi/`.
+First, detect whether cwd or any ancestor contains `.pi/`; Pi's global agent dir `~/.pi` does not mark a project.
 
 If this is a Pi project:
 

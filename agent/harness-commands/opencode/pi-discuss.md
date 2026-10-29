@@ -4,7 +4,7 @@ Use this command to discuss ideas with Pi context when the project is a Pi proje
 
 ## Detect project
 
-Check whether the current working directory or any ancestor contains `.pi/`.
+Check whether the current working directory or any ancestor contains `.pi/`. Pi's global agent dir `~/.pi` does not mark a project.
 
 - Outside a Pi project: use the non-Pi fallback below; do not call Pi bridge tools.
 - Inside a Pi project: use the bridge workflow below.

@@ -8,6 +8,7 @@ import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
+import { findProjectRoot } from "./project-root.js";
 import { BUILD_LEASE_TTL_MS, approveBuildLease, buildLeaseHolderLabel, canTickPlanTask, isBuildLeaseActive, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
@@ -509,18 +510,6 @@ function validateRequest(fileId: string, raw: unknown): BridgeRequest {
 
 function existsSync(filePath: string): boolean {
 	try { fs.accessSync(filePath); return true; } catch { return false; }
-}
-
-function findProjectRoot(cwd: string): string | null {
-	let dir = path.resolve(cwd);
-	while (true) {
-		if (existsSync(path.join(dir, ".pi"))) {
-			try { return fs.realpathSync(dir); } catch { return null; }
-		}
-		const parent = path.dirname(dir);
-		if (parent === dir) return null;
-		dir = parent;
-	}
 }
 
 function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: string }> {

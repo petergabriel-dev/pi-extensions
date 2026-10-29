@@ -6,6 +6,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 
 const PI_BRIDGE_SERVERS = new Set(["pi-claude-bridge", "pi-bridge", "pi"]);
 // Cursor routes shell and MCP through dedicated events; allow those types here so the dedicated classifier decides.
@@ -30,10 +31,17 @@ function isDir(p) {
 	try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 
+function isHomeDir(dir, homeReal) {
+	if (!homeReal) return false;
+	try { return fs.realpathSync(dir) === homeReal; } catch { return false; }
+}
+
 function findPiProjectRoot(start) {
 	let dir = path.resolve(start || process.cwd());
+	let homeReal = null;
+	try { homeReal = fs.realpathSync(os.homedir()); } catch { /* no home exclusion */ }
 	while (true) {
-		if (isDir(path.join(dir, ".pi"))) return dir;
+		if (isDir(path.join(dir, ".pi")) && !isHomeDir(dir, homeReal)) return dir;
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;
 		dir = parent;

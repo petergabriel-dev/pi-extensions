@@ -6,6 +6,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const bridgeClient = require("./pi-bridge-mcp.js");
 
 const MUTATION_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -15,10 +16,17 @@ function isDir(p) {
 	try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 
+function isHomeDir(dir, homeReal) {
+	if (!homeReal) return false;
+	try { return fs.realpathSync(dir) === homeReal; } catch { return false; }
+}
+
 function findPiProjectRoot(start) {
 	let dir = path.resolve(start || process.cwd());
+	let homeReal = null;
+	try { homeReal = fs.realpathSync(os.homedir()); } catch { /* no home exclusion */ }
 	while (true) {
-		if (isDir(path.join(dir, ".pi"))) return dir;
+		if (isDir(path.join(dir, ".pi")) && !isHomeDir(dir, homeReal)) return dir;
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;
 		dir = parent;

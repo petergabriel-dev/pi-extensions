@@ -666,6 +666,34 @@ async function main() {
 		assert.equal(responder.requests.length, 0);
 	});
 
+	await test("home .pi does not mark a project", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-home-marker-"));
+		const previousHome = process.env.HOME;
+		try {
+			fs.mkdirSync(path.join(home, ".pi"), { recursive: true });
+			const workspace = path.join(home, "od-ws");
+			fs.mkdirSync(workspace);
+			const env = { ...process.env, HOME: home };
+			const allowed = parseReadonlyHook(await runScript("pi-readonly-hook.js", workspace, { session_id: HARNESS.id, cwd: workspace, tool_name: "Write", tool_input: {} }, workspace, env));
+			assert.deepEqual(allowed, {}, "Write outside a Pi project must pass");
+
+			const project = path.join(home, "proj");
+			fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+			const denied = parseReadonlyHook(await runScript("pi-readonly-hook.js", project, { session_id: HARNESS.id, cwd: project, tool_name: "Write", tool_input: {} }, project, env));
+			assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
+			assert.ok(denied.systemMessage.includes(`Write is blocked in Pi project ${project}`), denied.systemMessage);
+
+			process.env.HOME = home;
+			assert.equal(client.findPiProjectRoot(workspace), null);
+			assert.equal(client.findPiProjectRoot(project), fs.realpathSync(project));
+			assert.equal(client.findPiProjectRoot(path.join(project, "nested", "dir")), fs.realpathSync(project));
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			fs.rmSync(home, { recursive: true, force: true });
+		}
+	});
+
 	console.log("bridge session tests passed");
 }
 

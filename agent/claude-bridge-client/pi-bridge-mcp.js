@@ -6,6 +6,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const crypto = require("node:crypto");
 const readline = require("node:readline");
 
@@ -48,13 +49,20 @@ function isPrivateFile(p) {
 	} catch { return false; }
 }
 
+function homeRealPath() {
+	try { return fs.realpathSync(os.homedir()); } catch { return null; }
+}
+
 function findPiProjectRoot(start = process.cwd()) {
 	let dir = path.resolve(start);
+	const homeReal = homeRealPath();
 	while (true) {
 		const marker = path.join(dir, ".pi");
 		if (fs.existsSync(marker)) {
 			if (!isDir(marker)) return null;
-			try { return fs.realpathSync(dir); } catch { return null; }
+			let real;
+			try { real = fs.realpathSync(dir); } catch { return null; }
+			if (real !== homeReal) return real;
 		}
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;

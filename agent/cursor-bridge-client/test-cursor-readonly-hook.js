@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const hook = path.resolve(__dirname, "cursor-readonly-hook.js");
-const { classifyShell, classifyMcp, classifyTool } = require(hook);
+const { classifyShell, classifyMcp, classifyTool, findPiProjectRoot } = require(hook);
 const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
 const CURSOR = { harness: "cursor", id: "cursor-conversation-1" };
 const LEASE_TTL_MS = 4 * 60 * 60 * 1000;
@@ -44,8 +44,8 @@ function addLeasePresence(root, { paired = true, heartbeatAt = new Date().toISOS
 	return paths;
 }
 
-function run(input, raw) {
-	const out = cp.spawnSync("node", [hook], { input: raw ?? JSON.stringify(input), encoding: "utf8" });
+function run(input, raw, env = process.env) {
+	const out = cp.spawnSync("node", [hook], { input: raw ?? JSON.stringify(input), encoding: "utf8", env });
 	assert.equal(out.status, 0, out.stderr);
 	return JSON.parse(out.stdout || "{}");
 }
@@ -280,6 +280,30 @@ test("malformed hook input fails closed", () => {
 	const result = run({}, "{");
 	assertPermission(result, "deny");
 	assert.match(result.user_message, /failed closed/);
+});
+
+test("home .pi does not mark a project", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-home-"));
+	const previousHome = process.env.HOME;
+	try {
+		fs.mkdirSync(path.join(home, ".pi"), { recursive: true });
+		const workspace = path.join(home, "od-ws");
+		fs.mkdirSync(workspace);
+		process.env.HOME = home;
+		const env = { ...process.env, HOME: home };
+		assert.equal(findPiProjectRoot(workspace), null);
+		assertPermission(run({ event: "preToolUse", cwd: workspace, tool_name: "Read" }, undefined, env), "allow");
+		assertPermission(run({ event: "preToolUse", cwd: workspace, tool_name: "Write" }, undefined, env), "allow");
+
+		const project = path.join(home, "proj");
+		fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+		assert.equal(findPiProjectRoot(project), project);
+		assertPermission(run({ event: "preToolUse", cwd: project, tool_name: "Write" }, undefined, env), "deny");
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		fs.rmSync(home, { recursive: true, force: true });
+	}
 });
 
 if (process.exitCode) process.exit(process.exitCode);
