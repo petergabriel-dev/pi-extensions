@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This workspace prepares `@lopezpetergabriel/pi-extensions@0.9.2`, a Pi package and source workspace containing twelve extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+This workspace prepares `@lopezpetergabriel/pi-extensions@0.10.0`, a Pi package and source workspace containing twelve extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -15,13 +15,13 @@ This workspace prepares `@lopezpetergabriel/pi-extensions@0.9.2`, a Pi package a
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.9.2
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.9.2   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.9.2           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.10.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.10.0   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.10.0           # temporary try
 pi list
 ```
 
-These install commands pin `@0.9.2`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.10.0`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
@@ -32,7 +32,7 @@ Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi upda
 ### Install from Git
 
 ```bash
-pi install git:github.com/petergabriel-dev/pi-extensions@v0.9.2
+pi install git:github.com/petergabriel-dev/pi-extensions@v0.10.0
 ```
 
 After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, or OpenCode, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config and `pi-*` commands; consumers do not hand-merge settings or create symlinks. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.
@@ -125,6 +125,19 @@ The launcher reuses the current Pi user state; it does not create a separate Pi 
 Never add credentials, trust/settings/model files, sessions, plans, personal memory, caches, databases, logs, dependency trees, bridge IPC, CCC indexes, or external symlinks to the repository. The only tracked `.pi/` resource is the internal `.pi/agents` symlink.
 
 Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` harness command templates across Claude, Cursor, and OpenCode. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=1 MiB` unpacked limits.
+
+### Enforcement limits
+
+- Hooks and mode policies are workflow guardrails against a prompt-injected or misaligned agent, not security-grade isolation.
+- OS sandboxing covers shell commands only: Seatbelt on macOS; bwrap for Pi on Linux when available. Seatbelt uses an allow-default profile plus denials, not a strict allowlist (F8, accepted limit).
+- In `.pi` projects, Claude no-lease Bash is denied off macOS; it does not fall back to unsandboxed approval.
+- `~/.pi` is Pi's global agent dir and never marks a project. Dedicated edit tools are checked against the nearest Pi root of their target, so a write into another Pi project needs that project's own Build lease.
+- Bash and patch-style tools with no path field can still write into a Pi project from a session outside it; the target check covers dedicated edit tools only and this gap is not fixed (F11).
+- Host handling of Cursor `failClosed`, Claude exit-2 guards, and OpenCode plugin-load failure remains unverified; config and runner checks are not host-enforcement proof.
+- Pi Off is unguarded. Pi Review posting requires fresh human Pi approval for each command; decline, no UI/headless execution, or confirmation error blocks posting.
+- Open gaps: Pi Plan fallback without a sandbox can admit unsafe command expansion (F9); leases are per Pi session, not project-wide single-writer locks (F10). Plan acceptance #1/#3 remain unmet pending follow-up.
+- Out of scope: root/kernel/hypervisor attackers, supply-chain compromise, a human editing config, and cross-user attacks.
+- Use a container or VM for real isolation. See [ADR-0045: threat model and evidence limits](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md) and [ADR-0048: regression coverage limits](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/decisions/ADR-0048-security-regression-corpus.md).
 
 ## Documentation
 

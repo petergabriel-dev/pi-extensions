@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-29
+
+### Added
+
+- `/docs pull-design` snapshots linked Open Design projects into `docs/design/reference/open-design/<slug>-<id8>/`: read-only discovery, an interactive one/all picker with replace confirmation, bounded HTML/Markdown/artifact copies, and a headless listing mode.
+
+### Changed
+
+- Review-mode `gh pr review` and `gh pr comment` commands require per-command Pi confirmation; headless Pi, declined confirmation, or confirmation failure blocks posting.
+- Pi read-only Bash deny list blocks `$(…)`, backticks, `xargs`, `find -exec` variants, `git apply`/`git am`/`git config`, `git diff --output`, and `awk system()`.
+- Seatbelt profiles deny `appleevent-send`.
+
+### Fixed
+
+- Home `~/.pi` (Pi's global agent dir) no longer marks a project, so harnesses started under `$HOME` without a nearer marker are not treated as read-only Pi projects.
+- Dedicated edit tools now resolve their target's nearest Pi root: writing into another Pi project requires that project's own Build lease, and relative or symlinked targets cannot bypass the check.
+
+### Upgrade
+
+- Restart Pi and harness sessions after `pi update`; no `/harness` rerun is needed.
+- Pi started outside a project under `$HOME` no longer loads the bridge.
+- Edit tools in sessions started outside a Pi project cannot write into Pi repos without that repo's Build lease.
+
 ## [0.9.2] - 2026-10-21
 
 ### Changed

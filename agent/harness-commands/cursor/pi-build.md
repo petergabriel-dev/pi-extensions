@@ -4,7 +4,7 @@ Use this command to run an approved Pi saved plan through Cursor's Pi build leas
 
 ## Detect project
 
-Check whether the current working directory or any ancestor contains `.pi/`.
+Check whether the current working directory or any ancestor contains `.pi/`. Pi's global agent dir `~/.pi` does not mark a project.
 
 - Outside a Pi project: do not call Pi bridge tools. Use the generic build loop below.
 - Inside a Pi project: require Cursor `conversation_id` before any bridge call. If unavailable, stop and say exactly:

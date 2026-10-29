@@ -4,7 +4,7 @@ Use this command to run an approved Pi saved plan through Claude Code's Pi build
 
 ## Detect project
 
-Check whether the current working directory or any ancestor contains `.pi/`.
+Check whether the current working directory or any ancestor contains `.pi/`. Pi's global agent dir `~/.pi` does not mark a project.
 
 - Outside a Pi project: do not call Pi bridge tools. Use the generic build loop below.
 - Inside a Pi project: use the Pi branch only.

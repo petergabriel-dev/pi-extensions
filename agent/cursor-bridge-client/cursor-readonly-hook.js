@@ -6,6 +6,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 
 const PI_BRIDGE_SERVERS = new Set(["pi-claude-bridge", "pi-bridge", "pi"]);
 // Cursor routes shell and MCP through dedicated events; allow those types here so the dedicated classifier decides.
@@ -30,10 +31,17 @@ function isDir(p) {
 	try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 
+function isHomeDir(dir, homeReal) {
+	if (!homeReal) return false;
+	try { return fs.realpathSync(dir) === homeReal; } catch { return false; }
+}
+
 function findPiProjectRoot(start) {
 	let dir = path.resolve(start || process.cwd());
+	let homeReal = null;
+	try { homeReal = fs.realpathSync(os.homedir()); } catch { /* no home exclusion */ }
 	while (true) {
-		if (isDir(path.join(dir, ".pi"))) return dir;
+		if (isDir(path.join(dir, ".pi")) && !isHomeDir(dir, homeReal)) return dir;
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;
 		dir = parent;
@@ -257,10 +265,42 @@ function classifyTool(input) {
 	return { permission: "deny", reason: `${tool} tool is not allowlisted as read-only.` };
 }
 
+const TOOL_TARGET_FIELDS = ["path", "file_path", "target_file"];
+
+function toolTargetPath(input) {
+	for (const source of [input.tool_input || input.toolInput, input]) {
+		if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+		for (const field of TOOL_TARGET_FIELDS) {
+			const value = source[field];
+			if (typeof value === "string" && value.trim() !== "") return value;
+		}
+	}
+	return null;
+}
+
+function preToolUseTargetDecision(input, cwdRoot) {
+	const tool = toolType(input).toLowerCase();
+	if (!tool || PRE_TOOL_READ_TOOLS.has(tool) || PRE_TOOL_PASSTHROUGH_TOOLS.has(tool)) return null;
+	const target = toolTargetPath(input);
+	if (!target) return null;
+	const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
+	const targetRoot = bridgeClient.targetPiProjectRoot(target, hookCwd(input));
+	if (!targetRoot) return null;
+	if (cwdRoot && bridgeClient.realpathDeepest(cwdRoot) === targetRoot) return null;
+	const conversationId = input.conversation_id;
+	if (bridgeClient.isSafeId(conversationId)
+		&& bridgeClient.holdsBuildLease(targetRoot, { harness: "cursor", id: conversationId })) return allow();
+	return deny(`${toolType(input)} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. Request a Build lease with /pi-build in ${targetRoot}, then approve it in Pi with /build-lease approve.`);
+}
+
 function handle(input) {
 	const projectRoot = findPiProjectRoot(hookCwd(input));
-	if (!projectRoot) return allow();
 	const event = eventName(input);
+	if (event === "preToolUse") {
+		const target = preToolUseTargetDecision(input, projectRoot);
+		if (target) return target;
+	}
+	if (!projectRoot) return allow();
 	if (event === "beforeShellExecution" || event === "preToolUse") {
 		try {
 			const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");

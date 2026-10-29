@@ -14,6 +14,24 @@ const MUTATION_TOOLS = new Set([
 	"opencode_worktree_create",
 	"opencode_worktree_remove",
 ]);
+const TARGET_TOOLS = new Set(["edit", "write"]);
+
+function targetLeaseHint(projectRoot) {
+	return `Request a Build lease with /pi-build in ${projectRoot}, then approve it in Pi with /build-lease approve.`;
+}
+
+function assertEditTargetAllowed(input, toolName, projectRoot, directory, sessionId) {
+	const target = input.filePath ?? input.file_path ?? input.path;
+	if (typeof target !== "string" || target.trim() === "") {
+		// Inside a Pi project, existing lease/deny behavior still decides (no loosening).
+		if (projectRoot) return;
+		throw new Error(`OpenCode ${toolName} is blocked: its filePath is missing or invalid.`);
+	}
+	const targetRoot = bridgeClient.targetPiProjectRoot(target, directory);
+	if (!targetRoot || targetRoot === projectRoot) return;
+	if (bridgeClient.holdsBuildLease(targetRoot, { harness: "opencode", id: sessionId })) return;
+	throw new Error(`OpenCode ${toolName} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${targetLeaseHint(targetRoot)}`);
+}
 
 function leaseNextStep(projectRoot) {
 	const now = Date.now();
@@ -32,7 +50,6 @@ export default {
 			throw new Error("OpenCode build-lease plugin cannot determine the project directory; reopen the project and retry.");
 		}
 		const projectRoot = bridgeClient.findPiProjectRoot(directory);
-		if (!projectRoot) return;
 		if (typeof ctx.tool?.hook !== "function") {
 			throw new Error("OpenCode build-lease plugin requires tool.hook support; update OpenCode and retry.");
 		}
@@ -59,10 +76,16 @@ export default {
 				delete input.claudeSessionId;
 			}
 
+			if (TARGET_TOOLS.has(toolName)) {
+				assertEditTargetAllowed(input && typeof input === "object" && !Array.isArray(input) ? input : {}, toolName, projectRoot, directory, event.sessionID);
+			}
+
 			// Code Mode dispatches nested tools through this hook; keep it available for bridge recall.
-			if (bridgeClient.holdsBuildLease(projectRoot, { harness: "opencode", id: event.sessionID })) return;
+			if (projectRoot && bridgeClient.holdsBuildLease(projectRoot, { harness: "opencode", id: event.sessionID })) return;
 
 			if (toolName.startsWith(BRIDGE_TOOL_PREFIX)) return;
+
+			if (!projectRoot) return;
 
 			if (MUTATION_TOOLS.has(toolName)) {
 				throw new Error(`OpenCode ${toolName} is blocked in Pi project ${projectRoot}. ${leaseNextStep(projectRoot)}`);

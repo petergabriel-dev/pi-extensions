@@ -6,6 +6,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const crypto = require("node:crypto");
 const readline = require("node:readline");
 
@@ -48,17 +49,46 @@ function isPrivateFile(p) {
 	} catch { return false; }
 }
 
+function homeRealPath() {
+	try { return fs.realpathSync(os.homedir()); } catch { return null; }
+}
+
 function findPiProjectRoot(start = process.cwd()) {
 	let dir = path.resolve(start);
+	const homeReal = homeRealPath();
 	while (true) {
 		const marker = path.join(dir, ".pi");
 		if (fs.existsSync(marker)) {
 			if (!isDir(marker)) return null;
-			try { return fs.realpathSync(dir); } catch { return null; }
+			let real;
+			try { real = fs.realpathSync(dir); } catch { return null; }
+			if (real !== homeReal) return real;
 		}
 		const parent = path.dirname(dir);
 		if (parent === dir) return null;
 		dir = parent;
+	}
+}
+
+function targetPiProjectRoot(target, cwd = process.cwd()) {
+	if (typeof target !== "string" || target.length === 0) return null;
+	return findPiProjectRoot(realpathDeepest(target, cwd));
+}
+
+/** Resolve symlinks in the deepest existing ancestor so a symlink cannot redirect the walk. */
+function realpathDeepest(target, cwd = process.cwd()) {
+	let current = path.resolve(cwd, target);
+	const missing = [];
+	while (true) {
+		try {
+			const real = fs.realpathSync(current);
+			return missing.length ? path.join(real, ...missing.reverse()) : real;
+		} catch {
+			const parent = path.dirname(current);
+			if (parent === current) return current;
+			missing.push(path.basename(current));
+			current = parent;
+		}
 	}
 }
 
@@ -560,10 +590,12 @@ module.exports = {
 	liveSessions,
 	pairSession,
 	parsePresence,
+	realpathDeepest,
 	resolveHarnessIdentity,
 	resolveProjectRoot,
 	resolveTarget,
 	sendRequestToSession,
+	targetPiProjectRoot,
 	tools,
 };
 
