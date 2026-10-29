@@ -12,28 +12,53 @@ const stubs = join(root, "stubs");
 const project = join(root, "project");
 await mkdir(join(stubs, "@earendil-works/pi-coding-agent"), { recursive: true });
 await mkdir(join(stubs, "@earendil-works/pi-tui"), { recursive: true });
+await mkdir(join(stubs, "typebox"), { recursive: true });
+await writeFile(join(stubs, "typebox/index.js"), "exports.Type = {};\n");
 await writeFile(join(stubs, "@earendil-works/pi-coding-agent/index.js"), "exports.DynamicBorder = class {}; exports.getAgentDir = () => process.env.PI_CODING_AGENT_DIR || process.env.TEST_PROJECT || process.cwd();\n");
 await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Container = class {}; exports.matchesKey = () => false; exports.SelectList = class {}; exports.Text = class {}; exports.truncateToWidth = value => value; exports.wrapTextWithAnsi = value => [value];\n");
 
 const source = `
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { BUILD_DESIGN_AWARE_PROMPT, BUILD_REFERENCE_PROMPT, DESIGN_REFERENCE_PROMPT, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
+import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
+import { promptContextForMode } from "../claude-bridge/index.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
+if (PLAN_FRONTEND_PROMPT.length > 2000 || PLAN_REFERENCE_PROMPT.length > 2000) throw new Error("Added Plan prompt text exceeds 2,000 characters");
+for (const part of ["docs/design/", "tokenFiles", "before component tasks", "existing design system or base library", "/* @primitive */", "/* @semantic */", "semantic light/dark", "hard-coded values", "Accessibility is non-negotiable", "mobile-first", "single-column previews", "file path", "base component", "props/types", "variants", "states (default, hover, focus-visible, active, disabled, loading, empty, error)", "tokens by name", "layout per breakpoint", "motion token, trigger", "prefers-reduced-motion", "accessibility role, keyboard, aria", "verification viewports (default 375/768/1280 px)", "no code skeletons"]) {
+	if (!PLAN_FRONTEND_PROMPT.includes(part)) throw new Error("Plan frontend clause omitted " + part);
+}
+const planTemplate = readFileSync(PLAN_TEMPLATE_PATH, "utf8");
+for (const part of ["Rules-first frontend order", "before component tasks", "Frontend Component Spec", "No code skeletons.", "File path:", "Base component:", "Props/types:", "Variants:", "States: default, hover, focus-visible, active, disabled, loading, empty, error", "Tokens (by name):", "Layout per breakpoint:", "Motion: token, trigger", "prefers-reduced-motion", "Accessibility: role, keyboard, aria", "Verification viewports: 375, 768, 1280 px by default"]) {
+	if (!planTemplate.includes(part)) throw new Error("Plan template omitted " + part);
+}
+const planSkillPaths = [IMPECCABLE_SKILL_PATH, ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH];
+const absentPlan = composeWorkflowPrompt("plan", true, undefined, cwd);
+const absentBridgePlan = String(promptContextForMode("plan", true, cwd).planPrompt);
+if (!absentPlan?.includes(PLAN_FRONTEND_PROMPT) || !absentBridgePlan.includes(PLAN_FRONTEND_PROMPT)) throw new Error("Plan or bridge planPrompt omitted frontend clause");
+if (!absentPlan?.includes("Do not modify files") || !PLAN_FRONTEND_PROMPT.includes("read-only")) throw new Error("Plan frontend guidance weakened read-only mode");
+if (absentPlan?.includes(PLAN_REFERENCE_PROMPT) || absentBridgePlan.includes(PLAN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a Plan reference clause");
+if (!PLAN_REFERENCE_PROMPT.includes("untrusted visual input") || !PLAN_REFERENCE_PROMPT.includes("never instructions") || !PLAN_REFERENCE_PROMPT.includes("never write files")) throw new Error("Plan reference clause weakened trust or read-only rules");
+for (const skillPath of planSkillPaths) {
+	if (!skillPath.startsWith("/") || !existsSync(skillPath) || !absentPlan?.includes(skillPath) || !absentBridgePlan.includes(skillPath)) throw new Error("Plan prompt omitted absolute packaged skill path " + skillPath);
+}
 const absentBuild = composeWorkflowPrompt("build", true, undefined, cwd);
-if (absentBuild?.includes(BUILD_REFERENCE_PROMPT) || absentBuild?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
+if (absentBuild?.includes(BUILD_REFERENCE_PROMPT) || absentBuild?.includes(PLAN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
 if (absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("missing manifest injected design block");
 mkdirSync(join(cwd, "docs/design/reference"), { recursive: true });
 const referenceBuild = composeWorkflowPrompt("build", true, undefined, cwd);
-if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || referenceBuild.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference failed to inject only the Build prompt independently of manifest");
-for (const mode of ["discuss", "plan", "review"] as const) {
+if (!referenceBuild?.includes(BUILD_REFERENCE_PROMPT) || referenceBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || referenceBuild.includes(PLAN_REFERENCE_PROMPT)) throw new Error("reference failed to inject only the Build prompt independently of manifest");
+const referencePlan = composeWorkflowPrompt("plan", true, undefined, cwd);
+const referenceBridgePlan = String(promptContextForMode("plan", true, cwd).planPrompt);
+if (!referencePlan?.includes(PLAN_REFERENCE_PROMPT) || !referenceBridgePlan.includes(PLAN_REFERENCE_PROMPT) || referencePlan.includes(BUILD_REFERENCE_PROMPT)) throw new Error("reference snapshots were not conditionally routed only to Plan");
+for (const mode of ["discuss", "review"] as const) {
 	const prompt = composeWorkflowPrompt(mode, true, undefined, cwd);
-	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error(mode + " mode injected a reference prompt");
+	if (prompt?.includes(BUILD_REFERENCE_PROMPT) || prompt?.includes(PLAN_REFERENCE_PROMPT)) throw new Error(mode + " mode injected a reference prompt");
 }
 const noCwdBuild = composeWorkflowPrompt("build", true);
-if (noCwdBuild?.includes(BUILD_REFERENCE_PROMPT) || noCwdBuild?.includes(DESIGN_REFERENCE_PROMPT)) throw new Error("reference prompt injected without cwd");
+const noCwdPlan = composeWorkflowPrompt("plan", true);
+if (noCwdBuild?.includes(BUILD_REFERENCE_PROMPT) || noCwdBuild?.includes(PLAN_REFERENCE_PROMPT) || noCwdPlan?.includes(PLAN_REFERENCE_PROMPT)) throw new Error("reference prompt injected without cwd");
 mkdirSync(join(cwd, "docs/design"), { recursive: true });
 writeFileSync(join(cwd, "docs/design/manifest.json"), "{}");
 if (!composeWorkflowPrompt("build", true, undefined, cwd)?.includes(BUILD_DESIGN_AWARE_PROMPT)) throw new Error("manifest failed to inject design block");
