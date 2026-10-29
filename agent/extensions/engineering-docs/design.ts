@@ -56,12 +56,12 @@ export async function loadDesignManifest(cwd: string): Promise<DesignManifest | 
 	}
 }
 
-function isInside(root: string, path: string): boolean {
+export function isInside(root: string, path: string): boolean {
 	const rel = relative(root, path);
 	return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
-async function resolveForWrite(path: string): Promise<string | null> {
+export async function resolveForWrite(path: string): Promise<string | null> {
 	const missing: string[] = [];
 	for (let current = path;; current = dirname(current)) {
 		try {

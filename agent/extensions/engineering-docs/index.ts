@@ -1,3 +1,6 @@
+import { lstat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
@@ -10,6 +13,7 @@ import {
 } from "./constants.js";
 import { getMode, isDesignWriteAllowed, isWriteAllowed, getModeLabel, registerModeListeners } from "./mode.js";
 import { DESIGN_DIR } from "./design.js";
+import { OPEN_DESIGN_REFERENCE_DIR, copyProjectSnapshot, projectsForRoot, readOpenDesignProjects, snapshotFolderName, snapshotSourceDir, type OpenDesignProject } from "./open-design.js";
 import { checkDesignDocs, designManifestExists, initDesignDocs, initDocs, checkDocs, updateDecisionIndex, updateDesignTokens, enhancedCheckDocs, validateAllADRs, formatPlanDocsTagValidation, manifestExists, type SpokeCheckResult } from "./filesystem.js";
 import { registerTrackingHooks, reconstructTrackingState, shouldShowReminder, getChangedFilesSummary, snoozeReminder } from "./tracking.js";
 import { handlePatch } from "./patch.js";
@@ -365,6 +369,71 @@ async function handleUpdateTokens(ctx: ExtensionCommandContext): Promise<void> {
 	}
 }
 
+async function handlePullDesign(ctx: ExtensionCommandContext): Promise<void> {
+	let read;
+	try {
+		read = await readOpenDesignProjects(homedir());
+	} catch (error) {
+		ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+		return;
+	}
+
+	const matches = await projectsForRoot(read.projects, ctx.cwd);
+	if (matches.length === 0) {
+		ctx.ui.notify(`No Open Design projects are linked to ${ctx.cwd}. Link this folder in Open Design first.`, "info");
+		return;
+	}
+
+	if (!ctx.hasUI) {
+		const list = matches.map((project) => `- ${project.name} (${project.id})`).join("\n");
+		ctx.ui.notify(`Linked Open Design projects:\n${list}\nRun /docs pull-design in interactive Pi to copy them into ${OPEN_DESIGN_REFERENCE_DIR}/.`, "info");
+		return;
+	}
+
+	if (!isDesignWriteAllowed()) {
+		ctx.ui.notify(`Cannot pull design references in ${getModeLabel()} mode. Switch to /mode design, /mode build, or /mode off.`, "warning");
+		return;
+	}
+
+	const labels = matches.map((project) => `${project.name} (${snapshotFolderName(project)})`);
+	const allLabel = `All ${matches.length} projects`;
+	const choice = await ctx.ui.select("Pull Open Design projects", matches.length > 1 ? [...labels, allLabel] : labels);
+	if (!choice) return;
+	const chosen: OpenDesignProject[] = choice === allLabel ? matches : [matches[labels.indexOf(choice)]].filter((project): project is OpenDesignProject => Boolean(project));
+	if (chosen.length === 0) return;
+
+	const existing: string[] = [];
+	for (const project of chosen) {
+		const folder = snapshotFolderName(project);
+		try {
+			await lstat(join(ctx.cwd, OPEN_DESIGN_REFERENCE_DIR, folder));
+			existing.push(folder);
+		} catch {
+			// Snapshot does not exist yet.
+		}
+	}
+	if (existing.length > 0) {
+		const ok = await ctx.ui.confirm("Replace existing snapshot?", `${existing.join(", ")} already exist and will be replaced. Continue?`);
+		if (!ok) return;
+	}
+
+	const lines: string[] = [];
+	let failed = false;
+	for (const project of chosen) {
+		try {
+			const result = await copyProjectSnapshot(ctx.cwd, project, snapshotSourceDir(read.dbPath, project.id));
+			const skipped = result.skipped.length === 0
+				? ""
+				: `; skipped ${result.skipped.map((file) => `${file.name} (${file.reason})`).join(", ")}`;
+			lines.push(`${result.folder}: ${result.copied.length} copied${skipped}`);
+		} catch (error) {
+			failed = true;
+			lines.push(`${snapshotFolderName(project)}: failed (${error instanceof Error ? error.message : String(error)})`);
+		}
+	}
+	ctx.ui.notify(`Open Design snapshot in ${OPEN_DESIGN_REFERENCE_DIR}/:\n${lines.join("\n")}`, failed ? "warning" : "success");
+}
+
 async function handleUpdateIndex(ctx: ExtensionCommandContext): Promise<void> {
 	if (!isWriteAllowed()) {
 		ctx.ui.notify(`Cannot update index in ${getModeLabel()} mode. Switch to /mode build or /mode off.`, "warning");
@@ -458,7 +527,7 @@ export default function (pi: ExtensionAPI) {
 	// ── /docs command ──
 
 	pi.registerCommand("docs", {
-		description: "Engineering docs dashboard: init, check, status, index",
+		description: "Engineering docs dashboard: init, check, status, index, pull-design",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (!arg) {
@@ -482,8 +551,10 @@ export default function (pi: ExtensionAPI) {
 				await handleUpdateTokens(ctx);
 			} else if (arg === "update-index" || arg.startsWith("update-decision-index")) {
 				await handleUpdateIndex(ctx);
+			} else if (arg === "pull-design") {
+				await handlePullDesign(ctx);
 			} else {
-				ctx.ui.notify(`Unknown docs command: ${arg}. Use: init, check, status, update-index, validate-tags, patch`, "warning");
+				ctx.ui.notify(`Unknown docs command: ${arg}. Use: init, check, status, update-index, validate-tags, patch, pull-design`, "warning");
 			}
 		},
 	});
