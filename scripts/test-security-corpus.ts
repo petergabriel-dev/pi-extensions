@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
-	copyFileSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	realpathSync,
@@ -1083,7 +1083,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 function copyPackageAsset(sourceRoot: string, targetRoot: string, relative: string): void {
 	const target = path.join(targetRoot, ...relative.split("/"));
 	mkdirSync(path.dirname(target), { recursive: true });
-	copyFileSync(path.join(sourceRoot, ...relative.split("/")), target);
+	cpSync(path.join(sourceRoot, ...relative.split("/")), target, { recursive: true });
 }
 
 function copyPackageForHarness(pkgRoot: string, harness: Harness): void {
