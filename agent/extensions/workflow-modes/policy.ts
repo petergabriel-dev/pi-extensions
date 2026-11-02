@@ -124,12 +124,16 @@ export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | 
 	return allowed && !denied;
 }
 
+export const BUILD_GUARD_FAILED_BLOCKER = "an unverified writer (Build guard check failed)";
+
+// Fails closed: a listener error blocks with any blocker it already set, or a
+// generic one. No listener (bridge not installed) means no blocker.
 export function getBuildGuardBlocker(emit: (payload: { blockedBy?: string }) => void): string | undefined {
 	const payload: { blockedBy?: string } = {};
 	try {
 		emit(payload);
 	} catch {
-		return undefined;
+		return typeof payload.blockedBy === "string" && payload.blockedBy.length > 0 ? payload.blockedBy : BUILD_GUARD_FAILED_BLOCKER;
 	}
 	return typeof payload.blockedBy === "string" && payload.blockedBy.length > 0 ? payload.blockedBy : undefined;
 }

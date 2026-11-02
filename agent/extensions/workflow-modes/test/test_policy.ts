@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, planFallbackDecision, sanitizeReviewCommand } from "../policy.js";
+import { BUILD_GUARD_FAILED_BLOCKER, confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, planFallbackDecision, sanitizeReviewCommand } from "../policy.js";
 
 console.log("Running test_policy...");
 
@@ -8,7 +8,8 @@ assert.strictEqual(getBuildGuardBlocker(() => {}), undefined);
 assert.strictEqual(getBuildGuardBlocker((payload) => {
 	payload.blockedBy = "cursor:holder";
 	throw new Error("listener failed");
-}), undefined);
+}), "cursor:holder", "a throwing listener keeps the blocker it set");
+assert.strictEqual(getBuildGuardBlocker(() => { throw new Error("listener failed"); }), BUILD_GUARD_FAILED_BLOCKER, "a throwing listener fails closed");
 
 assert.strictEqual(isBashAllowedInMode("rg write", "discuss"), true);
 assert.strictEqual(isBashAllowedInMode("grep -R 'format' docs", "discuss"), true);

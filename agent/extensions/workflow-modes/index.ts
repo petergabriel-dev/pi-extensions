@@ -27,6 +27,15 @@ export const MODE_MESSAGE_TYPE = "workflow-mode-current";
 export const MODE_TRANSITION_MESSAGE_TYPE = "workflow-mode-transition";
 export const BROWSER_MUTATION_TOOLS: ReadonlySet<string> = new Set(["browser_goto", "browser_eval", "browser_click", "browser_fill", "browser_close", "browser_kill"]);
 export const MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit", ...BROWSER_MUTATION_TOOLS]);
+// Tools that never write. In Build they skip the writer guard; every other tool
+// (including subagent, subagent_message, unknown, and future tools) asks it and
+// is blocked while another session holds the project writer.
+export const BUILD_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+	"read", "grep", "find", "ls",
+	"browser_console", "browser_network", "browser_screenshot",
+	"ask_question", "ask_user_question",
+	"ccc_search", "docs_validate_tags", "recall_memory_entry", "workflow_plan_tasks", "subagents_list",
+]);
 
 export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
 export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_ALLOW, REVIEW_BASH_DENY } from "./policy.js";
@@ -919,9 +928,10 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (currentMode === "build") {
-			// Project-wide single writer: every Build write re-asks the guard, so a
-			// writer claimed by another session (or a lost race) blocks here. Pi Off stays unguarded.
-			if (!MUTATION_TOOLS.has(event.toolName) && event.toolName !== "bash") return;
+			// Project-wide single writer, deny-unknown: every tool outside the read-only
+			// set re-asks the guard, so a writer claimed by another session (or a lost
+			// race) blocks writes, subagents, and unknown tools here. Pi Off stays unguarded.
+			if (BUILD_READ_ONLY_TOOLS.has(event.toolName)) return;
 			const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
 			if (!blockedBy) return;
 			return {

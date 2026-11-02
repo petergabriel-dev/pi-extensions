@@ -314,8 +314,9 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	operations.length = 0;
 	notifications.length = 0;
 	changedEvents.length = 0;
+	warnings.length = 0;
 	await commands.get("mode")?.handler("build", context);
-	if (operations[0]?.action !== "append" || changedEvents.length !== 1 || notifications.some((message) => message.includes("cursor:holder"))) throw new Error("throwing guard listener did not fail open");
+	if (operations.length !== 0 || changedEvents.length !== 0 || !warnings.some((message) => message.includes("cursor:holder"))) throw new Error("throwing guard listener did not fail closed with its blocker");
 	guardMode = "unblocked";
 	operations.length = 0;
 	await commands.get("mode")?.handler("off", context);
@@ -369,15 +370,26 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");
 	}
-	if (await toolCall?.({ toolName: "bash", input: { command: "echo build" } }) !== undefined) throw new Error("unblocked Build bash was blocked");
+	const guardedBuildTools = ["write", "edit", "bash", "subagent", "subagent_message", "workflow_plan_tick", "remember", "some_future_tool", ...browserMutationTools];
+	for (const toolName of guardedBuildTools) {
+		if (await toolCall?.({ toolName, input: { command: "echo build" } }) !== undefined) throw new Error("unblocked Build " + toolName + " was blocked");
+	}
 	guardMode = "blocked";
-	for (const toolName of ["write", "edit", "bash", ...browserMutationTools]) {
+	for (const toolName of guardedBuildTools) {
 		const blocked = await toolCall?.({ toolName, input: { command: "echo build" } }) as { block?: boolean; reason?: string } | undefined;
 		if (blocked?.block !== true || !blocked.reason?.startsWith(toolName + " was blocked") || !blocked.reason.includes("cursor:holder") || !blocked.reason.includes("/build-lease release")) throw new Error("Build " + toolName + " ignored another writer claim");
 	}
-	for (const toolName of ["read", ...browserReadTools]) {
+	guardCalls = 0;
+	for (const toolName of ["read", "grep", "find", "ls", "ask_user_question", "ccc_search", "workflow_plan_tasks", "subagents_list", ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build read tool " + toolName + " was blocked by a writer claim");
 	}
+	if (guardCalls !== 0) throw new Error("Build read-only tools asked the writer guard");
+	guardMode = "throwing";
+	for (const toolName of ["write", "subagent"]) {
+		const blocked = await toolCall?.({ toolName, input: {} }) as { block?: boolean; reason?: string } | undefined;
+		if (blocked?.block !== true || !blocked.reason?.includes("cursor:holder")) throw new Error("throwing guard listener let Build " + toolName + " through");
+	}
+	guardMode = "blocked";
 	handlers.get("session_start")?.({}, modeContext("off"));
 	for (const toolName of ["write", "edit", "bash"]) {
 		if (await toolCall?.({ toolName, input: { command: "echo off" } }) !== undefined) throw new Error("Off " + toolName + " was guarded");

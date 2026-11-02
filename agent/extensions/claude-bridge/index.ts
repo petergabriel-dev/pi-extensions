@@ -1469,15 +1469,26 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	pi.events.on("workflow-modes:build-guard", (data: unknown) => {
 		if (!data || typeof data !== "object") return;
 		const payload = data as Record<string, unknown>;
+		// Fail closed: Pi's event bus swallows listener errors, so block first and
+		// lift the provisional blocker only after the check completes.
+		const prior = payload.blockedBy;
+		payload.blockedBy = "an unverified writer (Build guard check did not complete)";
+		const settle = (blocker: unknown) => {
+			if (typeof blocker === "string" && blocker.length > 0) payload.blockedBy = blocker;
+			else if (prior === undefined) delete payload.blockedBy;
+			else payload.blockedBy = prior;
+		};
 		if (buildLease && isBuildLeaseActive(buildLease, Date.now())) {
-			payload.blockedBy = buildLeaseHolderLabel(buildLease) ?? undefined;
+			settle(buildLeaseHolderLabel(buildLease));
 			return;
 		}
 		// ponytail: a session whose bridge is inactive publishes no presence, so the
 		// project-wide check cannot apply here; recorded as a trap, not enforced.
-		if (!activeProjectRoot || !activePiSessionId) return;
-		const writerBlocker = projectWriterBlocker();
-		if (writerBlocker) payload.blockedBy = writerBlocker;
+		if (!activeProjectRoot || !activePiSessionId) {
+			settle(undefined);
+			return;
+		}
+		settle(projectWriterBlocker());
 	});
 
 	pi.events.on("workflow-modes:save-plan-result", (data: unknown) => {
