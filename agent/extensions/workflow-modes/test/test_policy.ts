@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { BUILD_GUARD_FAILED_BLOCKER, confirmCommand, confirmReviewPost, formatCommandForConfirm, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, planFallbackDecision, sanitizeReviewCommand } from "../policy.js";
+import { BUILD_GUARD_FAILED_BLOCKER, confirmCommand, confirmReviewPost, formatCommandForConfirm, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, noSandboxDecision, planFallbackDecision, sanitizeReviewCommand } from "../policy.js";
 
 console.log("Running test_policy...");
 
@@ -126,6 +126,20 @@ assert.strictEqual(await confirmCommand(planTitle, "make test", true, undefined)
 assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => { throw new Error("dismissed"); } }), false, "dialog error blocks");
 assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => undefined as unknown as boolean }), false, "subagent cancel (cancelled: true) blocks");
 assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => "yes" as unknown as boolean }), false, "only literal true approves");
+
+// One no-sandbox rule shared by the handler and the security corpus; it has no
+// "allow". Round-4 review probes: allow-listed Review reads that write or execute
+// through flags, operands, or globs now need approval instead of auto-running.
+for (const command of ["rg --pre sh x .", "uniq seed.txt out.txt", "sort -o out seed.txt", "git log --output=x", "find . -fprint x", "tree -o x", "sed -n -i s/a/b/ f", "uniq *.txt"]) {
+	assert.strictEqual(isBashAllowedInMode(command, "review"), true, `${command} is on the Review allow-list`);
+	assert.strictEqual(noSandboxDecision("review", command), "confirm", `${command} needs approval in unsandboxed Review`);
+	assert.strictEqual(noSandboxDecision("discuss", command), "deny", `${command} never runs in unsandboxed Discuss`);
+	assert.strictEqual(noSandboxDecision("plan", command), planFallbackDecision(command), `${command} uses the Plan rule`);
+}
+for (const command of ["curl example.com", "gh pr merge 1", "echo x > f", "gh pr diff 1\ncurl example.com", "cat <>f", ""]) {
+	assert.strictEqual(noSandboxDecision("review", command), "deny", `${JSON.stringify(command)} is denied in unsandboxed Review`);
+}
+assert.strictEqual(noSandboxDecision("review", "gh pr review 1 --body ok"), "confirm", "posting still needs approval");
 
 // A long space run cannot push the real command out of the dialog: it shows as a
 // visible marker, while the command itself is left unchanged.

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
-import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, planFallbackDecision } from "./policy.js";
+import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, noSandboxDecision } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
@@ -42,14 +42,14 @@ export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, REVIEW_BASH_ALLOW, REVIEW_BASH
 
 export interface WorkflowPolicySnapshot {
 	mutationTools: string[];
-	// Without a sandbox launcher: Discuss denies bash; Plan asks a human per command.
-	unsandboxedBash: { discuss: "deny"; plan: "confirm" };
+	// Without a sandbox launcher: Discuss denies bash; Plan and Review ask a human per command.
+	unsandboxedBash: { discuss: "deny"; plan: "confirm"; review: "confirm" };
 }
 
 export function getWorkflowPolicySnapshot(): WorkflowPolicySnapshot {
 	return {
 		mutationTools: Array.from(MUTATION_TOOLS),
-		unsandboxedBash: { discuss: "deny", plan: "confirm" },
+		unsandboxedBash: { discuss: "deny", plan: "confirm", review: "confirm" },
 	};
 }
 
@@ -625,7 +625,7 @@ export const PLAN_PROMPT = `${PLAN_BASE_PROMPT}
 
 ${PLAN_FRONTEND_PROMPT}`;
 
-export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
+export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Without a sandbox, every bash command needs the user's approval and headless runs cannot approve. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
 export const UNKNOWN_MODE_PROMPT = `Workflow mode state is unknown or legacy. Treat the workspace as read-only: do not use mutation tools or Bash. Select a supported workflow mode before continuing.`;
 
@@ -1005,24 +1005,23 @@ export default function (pi: ExtensionAPI) {
 			// Fall through to the conservative regex gate below. Read-only mode must never fail open or hard-crash.
 		}
 
-		// No sandbox: Discuss and Plan never auto-run bash.
-		if (currentMode === "plan") {
-			const decision = planFallbackDecision(command);
-			if (decision === "confirm" && await confirmCommand("Run without sandbox?", originalCommand, ctx.hasUI, ctx.ui)) return;
+		// No sandbox: Pi never auto-runs bash. One decision, shared with the security corpus.
+		const decision = noSandboxDecision(currentMode, command);
+		if (decision === "confirm") {
+			// A Review posting command was already approved for this exact command above.
+			if (currentMode === "review" && isReviewPostingCommand(command)) return;
+			if (await confirmCommand("Run without sandbox?", originalCommand, ctx.hasUI, ctx.ui)) return;
 			return {
 				block: true,
-				reason: formatModeBlockReason(currentMode, decision === "confirm"
-					? "unsandboxed bash command was declined or approval was unavailable; stop and do not retry."
-					: "bash command was blocked; without a sandbox, Plan runs only single-line commands a human approves, never deny-listed ones."),
+				reason: formatModeBlockReason(currentMode, "unsandboxed bash command was declined or approval was unavailable; stop and do not retry."),
 			};
 		}
-		if (currentMode === "discuss") {
-			return {
-				block: true,
-				reason: formatModeBlockReason(currentMode, "bash command was blocked; without a sandbox, Discuss does not run bash. Use the read, grep, find, and ls tools instead."),
-			};
-		}
-		// Review: its allow-list and posting approval already ran on the original command above.
+		return {
+			block: true,
+			reason: formatModeBlockReason(currentMode, currentMode === "discuss"
+				? "bash command was blocked; without a sandbox, Discuss does not run bash. Use the read, grep, find, and ls tools instead."
+				: `bash command was blocked; without a sandbox, ${MODE_LABELS[currentMode]} runs only single-line commands a human approves, never deny-listed ones.`),
+		};
 	});
 
 	pi.registerCommand("caveman", {

@@ -68,14 +68,24 @@ export function planFallbackDecision(command: string): PlanFallbackDecision {
 	return "confirm";
 }
 
-// No-sandbox fallback: true only when the command may run without approval.
-// Discuss and Plan never auto-run; only Review keeps its explicit allow-list.
+// Review allow-list: true when Review may run the command at all (sandboxed, or
+// after approval without a sandbox). Discuss and Plan have no allow-list.
 export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review"): boolean {
 	if (mode !== "review") return false;
 	const normalized = command.trim().replace(/\s+/g, " ");
 	const allowed = REVIEW_BASH_ALLOW.test(command.trim());
 	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || REVIEW_BASH_DENY.test(command);
 	return allowed && !denied;
+}
+
+// The one no-sandbox rule (no launcher, or wrapping failed), shared by the
+// tool_call handler and the security corpus. There is no "allow": without a
+// sandbox Pi never auto-runs bash. Discuss denies; Plan and Review (within its
+// allow-list) ask a human for each single-line command no deny list catches.
+export function noSandboxDecision(mode: "discuss" | "plan" | "review", command: string): PlanFallbackDecision {
+	if (mode === "discuss") return "deny";
+	if (mode === "review" && !isBashAllowedInMode(command, "review")) return "deny";
+	return planFallbackDecision(command);
 }
 
 export const BUILD_GUARD_FAILED_BLOCKER = "an unverified writer (Build guard check failed); retry, or restart this Pi session if it persists";

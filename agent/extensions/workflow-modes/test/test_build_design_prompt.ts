@@ -18,7 +18,8 @@ await writeFile(join(stubs, "@earendil-works/pi-coding-agent/index.js"), "export
 await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Container = class {}; exports.matchesKey = () => false; exports.SelectList = class {}; exports.Text = class {}; exports.truncateToWidth = value => value; exports.wrapTextWithAnsi = value => [value];\n");
 
 const source = `
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_FRONTEND_VERIFICATION_PROMPT, BUILD_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, DISCUSS_PROMPT, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
@@ -454,6 +455,45 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	handlers.get("session_start")?.({}, modeContext("review"));
 	const reviewBlock = await toolCall?.({ toolName: "bash", input: { command: "curl example.com" } }) as { reason?: string };
 	if (!reviewBlock.reason?.startsWith("bash command was blocked;")) throw new Error("Review block reason was not past-tense");
+	// No sandbox: a removed cwd makes wrapping fail for real, so the handler's
+	// no-sandbox branch runs without any test-only override.
+	const confirms: string[] = [];
+	let approve = true;
+	const confirmUI = { setStatus: context.ui.setStatus, notify: context.ui.notify, confirm: async (title: string, message?: string) => { confirms.push(title + " | " + message); return approve; } };
+	const askContext = { hasUI: true, ui: confirmUI };
+	const startDir = process.cwd();
+	const withoutSandbox = async (run: () => Promise<void>) => {
+		const goneDir = mkdtempSync(join(tmpdir(), "wm-no-sandbox-"));
+		process.chdir(goneDir);
+		rmdirSync(goneDir);
+		try { await run(); } finally { process.chdir(startDir); }
+	};
+	await withoutSandbox(async () => {
+		const reviewRead = await toolCall?.({ toolName: "bash", input: { command: "rg --pre sh x ." } }, askContext);
+		if (reviewRead !== undefined || confirms.length !== 1 || !confirms[0]?.startsWith("Run without sandbox? | rg --pre sh x .")) throw new Error("unsandboxed Review auto-ran or skipped approval");
+		approve = false;
+		const reviewDeclined = await toolCall?.({ toolName: "bash", input: { command: "sort -o out seed.txt" } }, askContext) as { block?: boolean; reason?: string } | undefined;
+		if (reviewDeclined?.block !== true || !reviewDeclined.reason?.includes("declined or approval was unavailable")) throw new Error("declined unsandboxed Review command ran");
+		const reviewHeadless = await toolCall?.({ toolName: "bash", input: { command: "git status" } }, { hasUI: false, ui: confirmUI }) as { block?: boolean } | undefined;
+		if (reviewHeadless?.block !== true) throw new Error("headless unsandboxed Review ran bash");
+		approve = true;
+		confirms.length = 0;
+		const posting = await toolCall?.({ toolName: "bash", input: { command: "gh pr review 1 --body ok" } }, askContext);
+		if (posting !== undefined || confirms.length !== 1 || !confirms[0]?.startsWith("Post this GitHub review?")) throw new Error("unsandboxed Review posting was not confirmed exactly once");
+	});
+	await handlers.get("session_start")?.({}, modeContext("plan"));
+	confirms.length = 0;
+	await withoutSandbox(async () => {
+		if (await toolCall?.({ toolName: "bash", input: { command: "make test" } }, askContext) !== undefined || !confirms[0]?.startsWith("Run without sandbox? | make test")) throw new Error("unsandboxed Plan did not ask before running");
+		const planDenied = await toolCall?.({ toolName: "bash", input: { command: "ls\\nrm x" } }, askContext) as { block?: boolean; reason?: string } | undefined;
+		if (planDenied?.block !== true || !planDenied.reason?.includes("Plan runs only single-line commands") || confirms.length !== 1) throw new Error("unsandboxed Plan did not deny a multi-line command");
+	});
+	await handlers.get("session_start")?.({}, modeContext("discuss"));
+	confirms.length = 0;
+	await withoutSandbox(async () => {
+		const discussDenied = await toolCall?.({ toolName: "bash", input: { command: "ls" } }, askContext) as { block?: boolean; reason?: string } | undefined;
+		if (discussDenied?.block !== true || !discussDenied.reason?.includes("Discuss does not run bash") || confirms.length !== 0) throw new Error("unsandboxed Discuss ran or asked about bash");
+	});
 	handlers.get("session_start")?.({}, modeContext("design", "build"));
 	const legacyTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string }; systemPrompt?: string };
 	if (!legacyTurn.message?.content?.includes("UNKNOWN (read-only") || !legacyTurn.systemPrompt?.includes("unknown or legacy")) throw new Error("legacy mode was not announced as read-only");
