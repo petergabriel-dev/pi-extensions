@@ -1,16 +1,5 @@
-import { createRequire } from "node:module";
-
 export const READ_COMMANDS = String.raw`pwd|ls|find|rg|grep|cat|head|tail|wc|jq|tree|diff|stat|file|sort|uniq|column`;
 export const READ_GIT_COMMANDS = String.raw`diff|log|show|status|blame`;
-export const READ_SED_AWK = String.raw`sed\s+-n|awk`;
-
-export const DISCUSS_BASH_ALLOW = new RegExp(
-	String.raw`^((` + READ_COMMANDS + String.raw`)(\s|$)|git\s+(` + READ_GIT_COMMANDS + String.raw`)(\s|$)|` + READ_SED_AWK + String.raw`(\s|$)|ccc\s+search(\s|$))`,
-);
-
-export const PLAN_BASH_ALLOW = new RegExp(
-	String.raw`^((` + READ_COMMANDS + String.raw`)(\s|$)|git\s+(` + READ_GIT_COMMANDS + String.raw`)(\s|$)|` + READ_SED_AWK + String.raw`(\s|$)|ccc\s+(search|index)(\s|$)|.*\b(test|tests|check|checks|lint|typecheck|tsc|build|compile|gradle|mvn|pytest|cargo test|go test|swift test)\b)`,
-);
 
 const REVIEW_ARG = String.raw`(?:'[^']*'|"[^"$\x60\\]*(?:\\.[^"$\x60\\]*)*"|[^\s;&|()<>\x60$]+)`;
 
@@ -58,66 +47,24 @@ export async function confirmReviewPost(command: string, hasUI: boolean, ui?: Re
 	return confirmCommand("Post this GitHub review?", command, hasUI, ui);
 }
 
-export type PlanFallbackDecision = "allow" | "confirm" | "deny";
+export type PlanFallbackDecision = "confirm" | "deny";
 
-// No-sandbox fallback normalization. Newlines separate commands in bash, so map
-// them to ";" before collapsing whitespace; otherwise deny lists miss later lines.
-function normalizeFallbackCommand(command: string): string {
-	return command.trim().replace(/[\r\n]+/g, "; ").replace(/\s+/g, " ");
-}
-
-function isFallbackDenied(normalized: string): boolean {
-	return BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized);
-}
-
-type ShellPermission = "allow" | "ask" | "deny";
-type ShellClassifier = (command: string) => { permission?: unknown } | undefined;
-
-// Reuse the shipped Cursor hook's segment classifier, which carries per-command
-// flag checks (rg --pre, sort -o, find -fprint, git --output, ...), instead of a
-// second Pi copy. A missing or throwing classifier denies.
-const requireShipped = createRequire(import.meta.url);
-const cursorClassifyShell: ShellClassifier | undefined = (() => {
-	try {
-		const hook = requireShipped("../../cursor-bridge-client/cursor-readonly-hook.js") as { classifyShell?: unknown };
-		return typeof hook.classifyShell === "function" ? hook.classifyShell as ShellClassifier : undefined;
-	} catch {
-		return undefined;
-	}
-})();
-
-function classifyFallbackShell(command: string): ShellPermission {
-	if (!cursorClassifyShell) return "deny";
-	try {
-		const permission = cursorClassifyShell(command)?.permission;
-		return permission === "allow" || permission === "ask" ? permission : "deny";
-	} catch {
-		return "deny";
-	}
-}
-
-// F9/F12: without a structural sandbox, Pi deny lists run first, then the Cursor
-// classifier decides. Allowlisted reads (and pipes of them) run; other read- or
-// test/build-shaped commands need fresh human approval; everything else denies.
-// Multi-line commands deny so a confirm prompt can never hide a later line.
+// F9/F12: without a structural sandbox Pi never auto-runs bash. Classifying a
+// command as a safe read kept leaking writing flags, so Plan denies multi-line
+// commands (a confirm prompt could hide a line) and deny-list matches, and asks a
+// human for every other single-line command. Approval never overrides a deny.
 export function planFallbackDecision(command: string): PlanFallbackDecision {
 	const trimmed = command.trim();
-	if (/[\r\n]/.test(trimmed)) return "deny";
-	const normalized = normalizeFallbackCommand(trimmed);
-	if (isFallbackDenied(normalized)) return "deny";
-	const permission = classifyFallbackShell(trimmed);
-	if (permission === "allow") return "allow";
-	if (permission === "deny") return "deny";
-	return DISCUSS_BASH_ALLOW.test(normalized) || PLAN_BASH_ALLOW.test(normalized) ? "confirm" : "deny";
+	if (trimmed.length === 0 || /[\r\n]/.test(trimmed)) return "deny";
+	const normalized = trimmed.replace(/\s+/g, " ");
+	if (BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized)) return "deny";
+	return "confirm";
 }
 
 // No-sandbox fallback: true only when the command may run without approval.
+// Discuss and Plan never auto-run; only Review keeps its explicit allow-list.
 export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review"): boolean {
-	if (mode === "plan") return planFallbackDecision(command) === "allow";
-	if (mode === "discuss") {
-		const trimmed = command.trim();
-		return !isFallbackDenied(normalizeFallbackCommand(trimmed)) && classifyFallbackShell(trimmed) === "allow";
-	}
+	if (mode !== "review") return false;
 	const normalized = command.trim().replace(/\s+/g, " ");
 	const allowed = REVIEW_BASH_ALLOW.test(command.trim());
 	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || REVIEW_BASH_DENY.test(command);

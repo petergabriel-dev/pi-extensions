@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
-import { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, REVIEW_BASH_DENY, confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, planFallbackDecision } from "./policy.js";
+import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, planFallbackDecision } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
@@ -38,17 +38,18 @@ export const BUILD_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export { CAVEMAN_ENTRY, CAVEMAN_PROMPT, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled } from "./caveman.js";
-export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, DISCUSS_BASH_ALLOW, PLAN_BASH_ALLOW, REVIEW_BASH_ALLOW, REVIEW_BASH_DENY } from "./policy.js";
+export { BASH_MUTATION_DENY, BASH_WRITE_REDIRECT, REVIEW_BASH_ALLOW, REVIEW_BASH_DENY } from "./policy.js";
 
 export interface WorkflowPolicySnapshot {
 	mutationTools: string[];
-	discussBashAllow: string;
+	// Without a sandbox launcher: Discuss denies bash; Plan asks a human per command.
+	unsandboxedBash: { discuss: "deny"; plan: "confirm" };
 }
 
 export function getWorkflowPolicySnapshot(): WorkflowPolicySnapshot {
 	return {
 		mutationTools: Array.from(MUTATION_TOOLS),
-		discussBashAllow: DISCUSS_BASH_ALLOW.source,
+		unsandboxedBash: { discuss: "deny", plan: "confirm" },
 	};
 }
 
@@ -618,7 +619,7 @@ Decide taste in Plan using \`impeccable\` (${IMPECCABLE_SKILL_PATH}) and Emil mo
 
 export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless grilling session for the idea or feature. Ask one main question at a time and provide your recommended answer. If a question can be answered by lightly inspecting the codebase, inspect it instead. Prefer ccc_search for semantic discovery; use read plus light read-only Bash discovery (pwd, ls, find, rg, grep) for exact lookup or fallback. When \`subagent\` is available, use it sparingly with \`agent: "explorer"\` for genuine multi-file or multi-symbol sweeps; keep quick lookups inline. The main agent remains synthesizer and decision-maker. Do not run tests/builds unless the user explicitly asks. Focus on user value, feature boundaries, terminology, edge cases, and how the idea fits existing behavior. Capture durable requirements, decisions, constraints, open questions, and lessons learned from failures with discussion_notes automatically. A lesson must pair a failure with its resolution. Do not implement or produce detailed code-level plans. Do not claim facts are confirmed unless backed by tool evidence or user-provided evidence. Use recall_memory when prior cross-session memory may be relevant. When the idea is shaped enough, softly suggest switching to Plan mode with /mode plan. Ponytail lazy-senior-dev reflex: favor minimalism. Question whether the request itself matches the actual need (YAGNI), separate required behavior from nice-to-haves, and prefer the smallest approach: deletion over addition, boring over clever, fewest files possible. Never trade away input validation at trust boundaries, error handling that prevents data loss, security, accessibility, or explicitly requested features.`;
 
-const PLAN_BASE_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When \`subagent\` is available, default to it with \`agent: "explorer"\` for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal. Keep input validation, error handling that prevents data loss, security, accessibility, and explicitly requested features non-negotiable.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
+const PLAN_BASE_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When \`subagent\` is available, default to it with \`agent: "explorer"\` for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Without a sandbox, every bash command needs the user's approval and headless runs cannot approve, so prefer read tools there. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal. Keep input validation, error handling that prevents data loss, security, accessibility, and explicitly requested features non-negotiable.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
 
 export const PLAN_PROMPT = `${PLAN_BASE_PROMPT}
 
@@ -978,35 +979,24 @@ export default function (pi: ExtensionAPI) {
 			// Fall through to the conservative regex gate below. Read-only mode must never fail open or hard-crash.
 		}
 
+		// No sandbox: Discuss and Plan never auto-run bash.
 		if (currentMode === "plan") {
 			const decision = planFallbackDecision(command);
-			if (decision === "allow") return;
 			if (decision === "confirm" && await confirmCommand("Run without sandbox?", originalCommand, ctx.hasUI, ctx.ui)) return;
 			return {
 				block: true,
 				reason: formatModeBlockReason(currentMode, decision === "confirm"
-					? "unsandboxed test/build command was declined or approval was unavailable; stop and do not retry."
-					: "bash command was blocked; without a sandbox, allowed commands were single-line discovery plus human-approved tests/builds/checks."),
+					? "unsandboxed bash command was declined or approval was unavailable; stop and do not retry."
+					: "bash command was blocked; without a sandbox, Plan runs only single-line commands a human approves, never deny-listed ones."),
 			};
 		}
-
 		if (currentMode === "discuss") {
-			if (isBashAllowedInMode(command, "discuss")) return;
 			return {
 				block: true,
-				reason: formatModeBlockReason(currentMode, "bash command was blocked; without a sandbox, allowed commands were allowlisted read commands and pipes of them."),
+				reason: formatModeBlockReason(currentMode, "bash command was blocked; without a sandbox, Discuss does not run bash. Use the read, grep, find, and ls tools instead."),
 			};
 		}
-
-		const normalized = command.replace(/\s+/g, " ");
-		const allowed = isBashAllowedInMode(normalized, "review");
-		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || REVIEW_BASH_DENY.test(normalized);
-		if (!allowed || denied) {
-			return {
-				block: true,
-				reason: formatModeBlockReason(currentMode, "bash command was blocked; allowed commands were read commands plus approved gh PR commands."),
-			};
-		}
+		// Review: its allow-list and posting approval already ran on the original command above.
 	});
 
 	pi.registerCommand("caveman", {

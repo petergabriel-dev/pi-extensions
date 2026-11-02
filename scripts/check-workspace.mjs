@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, lstat, readFile, realpath } from "node:fs/promises";
+import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -112,6 +112,13 @@ const extensionSources = await Promise.all(
 for (const { file, source } of extensionSources) {
   assert.ok(!/\bcreateRequire\b/.test(source), `forbidden createRequire in ${file}`);
   assert.ok(!hasVariableHostImport(source), `forbidden variable-specifier Pi host import in ${file}`);
+}
+// invariants.md forbids createRequire in all extension source, not only entry files.
+const extensionTsFiles = (await readdir(relative("agent/extensions"), { recursive: true }))
+  .map((entry) => path.join("agent/extensions", entry))
+  .filter((file) => file.endsWith(".ts") && !file.split(path.sep).some((part) => part === "node_modules" || part === "test"));
+for (const file of extensionTsFiles) {
+  assert.ok(!/\bcreateRequire\b/.test(await readFile(relative(file), "utf8")), `forbidden createRequire in ${file}`);
 }
 
 const modeSites = [["agent/extensions/workflow-modes/index.ts", /export type Mode = ([^;]+);/],

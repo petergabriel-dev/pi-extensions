@@ -5,8 +5,8 @@
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": "allow",
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
-      "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "allow"], "sandbox-disabled": "allow" },
-      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "allow"], "sandbox-disabled": "allow" }
+      "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
+      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
     },
     "write": {
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
