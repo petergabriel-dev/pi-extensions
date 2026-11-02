@@ -95,6 +95,54 @@ export function isBuildLeaseActive(lease: BuildLease | null | undefined, now: nu
 	return lease.expiresAt > lease.grantedAt && now < lease.expiresAt;
 }
 
+export interface WriterClaim {
+	piSessionId: string;
+	kind: "build" | "lease";
+	holder: string | null;
+}
+
+export interface WriterClaimSession {
+	id: string;
+	presence: { mode: string | null; buildLease?: BuildLease | null };
+}
+
+// Mirrors parseBuildLease in agent/claude-bridge-client/pi-bridge-mcp.js.
+export function parseBuildLease(value: unknown): BuildLease | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	if (!LEASE_HARNESSES.has(record.harness as BuildLeaseHarness) || !isSafeId(record.id)) return null;
+	if (typeof record.planId !== "string" || record.planId.trim().length === 0) return null;
+	const { grantedAt, expiresAt } = record;
+	if (typeof grantedAt !== "number" || typeof expiresAt !== "number") return null;
+	if (!Number.isFinite(grantedAt) || !Number.isFinite(expiresAt) || expiresAt <= grantedAt) return null;
+	return { harness: record.harness as BuildLeaseHarness, id: record.id, planId: record.planId, grantedAt, expiresAt };
+}
+
+// Project-wide single writer; mirrors hasOtherWriterClaim in
+// agent/claude-bridge-client/pi-bridge-mcp.js. Callers pass only live
+// (fresh-presence) sessions. Conflicting claims deny every claimant.
+export function otherWriterClaims(sessions: readonly WriterClaimSession[], selfId: string, now: number): WriterClaim[] {
+	const claims: WriterClaim[] = [];
+	for (const { id, presence } of sessions) {
+		if (id === selfId) continue;
+		if (presence.mode === "build") claims.push({ piSessionId: id, kind: "build", holder: null });
+		if (isBuildLeaseActive(presence.buildLease, now)) {
+			claims.push({ piSessionId: id, kind: "lease", holder: buildLeaseHolderLabel(presence.buildLease) });
+		}
+	}
+	return claims;
+}
+
+export function describeWriterClaims(claims: readonly WriterClaim[]): string {
+	return claims
+		.map((claim) => `Pi session ${claim.piSessionId.slice(0, 8)} (${claim.kind === "build" ? "Build mode" : `lease ${claim.holder}`})`)
+		.join(", ");
+}
+
+export function projectWriterHeldMessage(blocker: string): string {
+	return `Project writer held by ${blocker}; release it in that Pi session with /build-lease release or leave Build, then retry.`;
+}
+
 function holdsActiveLease(
 	lease: BuildLease | null,
 	peer: BuildLeasePeer,

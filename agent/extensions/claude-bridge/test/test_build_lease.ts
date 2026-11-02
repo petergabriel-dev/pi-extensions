@@ -5,7 +5,11 @@ import {
 	approveBuildLease,
 	buildLeaseHolderLabel,
 	canTickPlanTask,
+	describeWriterClaims,
 	isBuildLeaseActive,
+	otherWriterClaims,
+	parseBuildLease,
+	projectWriterHeldMessage,
 	pruneBuildLeaseRequests,
 	releaseBuildLeaseOnRecall,
 	releaseBuildLeaseOnWorkflowChange,
@@ -211,5 +215,53 @@ assert.equal(releaseBuildLeaseOnWorkflowChange(activeLease, { ...workflow, planI
 assert.equal(releaseBuildLeaseOnWorkflowChange(activeLease, { ...workflow, mode: "build" }, now), null);
 assert.equal(releaseBuildLeaseOnWorkflowChange(activeLease, { ...workflow, progress: { done: 2, total: 2 } }, now), null);
 assert.equal(releaseBuildLeaseOnWorkflowChange(null, workflow, now), null);
+
+// Presence lease parsing mirrors the harness client: malformed leases are ignored.
+assert.deepEqual(parseBuildLease(activeLease), activeLease);
+assert.deepEqual(parseBuildLease({ ...activeLease, extra: true }), activeLease);
+for (const malformed of [
+	null,
+	"lease",
+	[activeLease],
+	{ ...activeLease, harness: "pi" },
+	{ ...activeLease, id: "../bad" },
+	{ ...activeLease, planId: " " },
+	{ ...activeLease, expiresAt: undefined },
+	{ ...activeLease, grantedAt: "now" },
+	{ ...activeLease, expiresAt: activeLease.grantedAt },
+	{ ...activeLease, expiresAt: Number.POSITIVE_INFINITY },
+]) {
+	assert.equal(parseBuildLease(malformed), null, JSON.stringify(malformed));
+}
+
+// Project-wide writer claims mirror the harness client fixtures (stale
+// sessions are filtered by the live scan before this pure check).
+const live = (id: string, mode: string | null, lease: BuildLease | null = null) => ({ id, presence: { mode, buildLease: lease } });
+const otherLease = makeLease(opencode);
+assert.deepEqual(otherWriterClaims([live("pi-self", "plan", activeLease)], "pi-self", now), [], "self only");
+assert.deepEqual(otherWriterClaims([live("pi-self", "build")], "pi-self", now), [], "self excluded");
+assert.deepEqual(otherWriterClaims([live("pi-self", "plan", activeLease), live("pi-other", "plan")], "pi-self", now), [], "other without claim");
+assert.deepEqual(
+	otherWriterClaims([live("pi-self", "plan", activeLease), live("pi-other", "plan", otherLease)], "pi-self", now),
+	[{ piSessionId: "pi-other", kind: "lease", holder: "opencode:opencode-session" }],
+	"other lease",
+);
+assert.deepEqual(otherWriterClaims([live("pi-other", "plan", otherLease)], "pi-self", otherLease.expiresAt), [], "other expired lease");
+assert.deepEqual(otherWriterClaims([live("pi-other", "plan", legacyLease)], "pi-self", now), [], "other lease without expiry");
+assert.deepEqual(
+	otherWriterClaims([live("pi-other", "build")], "pi-self", now),
+	[{ piSessionId: "pi-other", kind: "build", holder: null }],
+	"other Pi Build",
+);
+const conflicting = otherWriterClaims([live("aaaa1111-session", "build"), live("bbbb2222-session", "plan", otherLease)], "pi-self", now);
+assert.equal(conflicting.length, 2);
+assert.equal(
+	describeWriterClaims(conflicting),
+	"Pi session aaaa1111 (Build mode), Pi session bbbb2222 (lease opencode:opencode-session)",
+);
+assert.equal(
+	projectWriterHeldMessage("Pi session abcd1234 (Build mode)"),
+	"Project writer held by Pi session abcd1234 (Build mode); release it in that Pi session with /build-lease release or leave Build, then retry.",
+);
 
 console.log("claude bridge build lease tests passed");
