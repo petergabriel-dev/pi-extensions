@@ -21,9 +21,11 @@ export const REVIEW_BASH_DENY = /(^|[;&|()]\s*)(curl|wget|nc|ssh|scp)(\s|$)|(^|[
 export const BASH_MUTATION_DENY = /(^|[;&|()]\s*)(rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|tee|cat\s*>|python|python3|node|perl|ruby|sh|bash|zsh|fish|npm\s+(i|install|add|update|audit\s+fix)|pnpm\s+(i|install|add|update)|yarn\s+(add|install|upgrade)|bun\s+(add|install)|pip\s+install|cargo\s+(add|update|install)|go\s+get|git\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash|apply|am|config)|git\s+diff\b[^;&|]*--output|find\s+.*-delete|find\s+.*-(?:exec|execdir|ok|okdir)\b|xargs|awk\s+.*system\s*\(|(?:format|fmt|fix|write|migrate|migration)(\s|$))|\$\(|`/;
 export const BASH_WRITE_REDIRECT = />>|(^|[^<])>/;
 
-export interface ReviewPostConfirmationUI {
+export interface CommandConfirmationUI {
 	confirm(title: string, message?: string): Promise<boolean>;
 }
+
+export type ReviewPostConfirmationUI = CommandConfirmationUI;
 
 export function isReviewPostingCommand(command: string): boolean {
 	return /^gh[ \t]+pr[ \t]+(?:review|comment)(?=[ \t]|$)/.test(command.trim());
@@ -37,20 +39,60 @@ export function sanitizeReviewCommand(command: string): string {
 	});
 }
 
-export async function confirmReviewPost(command: string, hasUI: boolean, ui?: ReviewPostConfirmationUI): Promise<boolean> {
-	if (!isReviewPostingCommand(command)) return true;
+// Fresh human approval for one exact command: only literal true from an
+// awaited confirm with live UI approves. Never cached; decline, headless,
+// cancel, or dialog error all return false.
+export async function confirmCommand(title: string, command: string, hasUI: boolean, ui?: CommandConfirmationUI): Promise<boolean> {
 	if (hasUI !== true || !ui) return false;
 	try {
-		return (await ui.confirm("Post this GitHub review?", sanitizeReviewCommand(command))) === true;
+		return (await ui.confirm(title, sanitizeReviewCommand(command))) === true;
 	} catch {
 		return false;
 	}
 }
 
+export async function confirmReviewPost(command: string, hasUI: boolean, ui?: ReviewPostConfirmationUI): Promise<boolean> {
+	if (!isReviewPostingCommand(command)) return true;
+	return confirmCommand("Post this GitHub review?", command, hasUI, ui);
+}
+
+export type PlanFallbackDecision = "allow" | "confirm" | "deny";
+
+// No-sandbox fallback normalization. Newlines separate commands in bash, so map
+// them to ";" before collapsing whitespace; otherwise deny lists miss later lines.
+function normalizeFallbackCommand(command: string): string {
+	return command.trim().replace(/[\r\n]+/g, "; ").replace(/\s+/g, " ");
+}
+
+function isFallbackDenied(normalized: string): boolean {
+	return BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized);
+}
+
+// A read prefix proves nothing about chained, piped, or substituted commands.
+function isPlainRead(normalized: string): boolean {
+	return DISCUSS_BASH_ALLOW.test(normalized) && !/[;&|<]/.test(normalized);
+}
+
+// F9: without a structural sandbox, Plan runs only a single plain read without
+// approval; test/build-classified or compound read commands need fresh human
+// approval. Deny lists run first; approval never overrides them.
+export function planFallbackDecision(command: string): PlanFallbackDecision {
+	const normalized = normalizeFallbackCommand(command);
+	if (isFallbackDenied(normalized)) return "deny";
+	if (isPlainRead(normalized)) return "allow";
+	return DISCUSS_BASH_ALLOW.test(normalized) || PLAN_BASH_ALLOW.test(normalized) ? "confirm" : "deny";
+}
+
+// No-sandbox fallback: true only when the command may run without approval.
 export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review"): boolean {
+	if (mode === "plan") return planFallbackDecision(command) === "allow";
+	if (mode === "discuss") {
+		const normalized = normalizeFallbackCommand(command);
+		return !isFallbackDenied(normalized) && isPlainRead(normalized);
+	}
 	const normalized = command.trim().replace(/\s+/g, " ");
-	const allowed = mode === "discuss" ? DISCUSS_BASH_ALLOW.test(normalized) : mode === "review" ? REVIEW_BASH_ALLOW.test(command.trim()) : PLAN_BASH_ALLOW.test(normalized);
-	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (mode === "review" && REVIEW_BASH_DENY.test(command));
+	const allowed = REVIEW_BASH_ALLOW.test(command.trim());
+	const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || REVIEW_BASH_DENY.test(command);
 	return allowed && !denied;
 }
 

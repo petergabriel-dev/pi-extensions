@@ -94,19 +94,31 @@
       "id": "read-pipeline-cat-head",
       "class": "read",
       "kind": "shell",
-      "command": "cat seed.txt | head -n 1"
+      "command": "cat seed.txt | head -n 1",
+      "expect": {
+        "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
+        "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
+      }
     },
     {
       "id": "read-pipeline-cat-wc",
       "class": "read",
       "kind": "shell",
-      "command": "cat seed.txt | wc -l"
+      "command": "cat seed.txt | wc -l",
+      "expect": {
+        "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
+        "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
+      }
     },
     {
       "id": "read-compound",
       "class": "read",
       "kind": "shell",
-      "command": "ls && cat seed.txt"
+      "command": "ls && cat seed.txt",
+      "expect": {
+        "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
+        "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
+      }
     },
     {
       "id": "seed-write-shell",
@@ -1177,7 +1189,6 @@
       "kind": "shell",
       "command": "make test",
       "columns": ["pi-plan"],
-      "knownGap": "F9",
       "piLauncher": "none",
       "expect": { "pi-plan": "deny" }
     }

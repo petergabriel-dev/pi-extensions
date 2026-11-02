@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, sanitizeReviewCommand } from "../policy.js";
+import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, planFallbackDecision, sanitizeReviewCommand } from "../policy.js";
 
 console.log("Running test_policy...");
 
@@ -112,5 +112,40 @@ assert.strictEqual(sanitizeReviewCommand(`gh pr review ${"x".repeat(10_000)}`).l
 for (const tool of ["curl", "wget", "nc", "ssh", "scp"]) {
 	assert.strictEqual(isBashAllowedInMode(`${tool} example.com`, "review"), false);
 }
+
+// No-sandbox fallback: newlines separate commands, and a read prefix does not
+// cover chained, piped, or substituted commands.
+for (const command of ["ls\nrm -rf x", "ls && make test", "cat <(make test)", "rg plan | head", "ls; cat x", "git status\r\ngit reset --hard"]) {
+	assert.strictEqual(isBashAllowedInMode(command, "discuss"), false, `${JSON.stringify(command)} is not a plain Discuss read`);
+	assert.strictEqual(isBashAllowedInMode(command, "plan"), false, `${JSON.stringify(command)} is not auto-allowed in Plan`);
+}
+assert.strictEqual(isBashAllowedInMode("make test", "plan"), false, "Plan test commands need approval, not auto-allow");
+assert.strictEqual(isBashAllowedInMode("rg plan", "plan"), true, "Plan plain reads stay allowed");
+
+// F9: unsandboxed Plan fallback keeps the Discuss read allowlist and needs
+// fresh human approval for test/build-classified commands.
+for (const command of ["ls", "rg plan", "git status --short", "  cat   package.json  ", "ccc search plan"]) {
+	assert.strictEqual(planFallbackDecision(command), "allow", `${command} reads without approval`);
+}
+for (const command of ["make test", "npm test", "npx tsc --noEmit", "cargo test", "ls; make test", "ls && make test", "ls\nmake test", "cat <(make test)", "rg plan | head"]) {
+	assert.strictEqual(planFallbackDecision(command), "confirm", `${JSON.stringify(command)} needs approval`);
+}
+for (const command of ["make test > out.txt", "npm test && rm -rf dist", "python -c 'print(1)' test", "ls $(make test)", "echo deploy", "git commit -m test", "ls\nrm -rf x", "make test\r\ntouch x"]) {
+	assert.strictEqual(planFallbackDecision(command), "deny", `${JSON.stringify(command)} is denied before approval`);
+}
+
+const planTitle = "Run without sandbox?";
+const planCalls: Array<[string, string | undefined]> = [];
+const planApprovingUI = { confirm: async (title: string, message?: string) => { planCalls.push([title, message]); return true; } };
+assert.strictEqual(await confirmCommand(planTitle, "make test‮", true, planApprovingUI), true, "literal approval runs command");
+assert.deepStrictEqual(planCalls, [[planTitle, "make test\\u202E"]], "approval shows the sanitized exact command");
+assert.strictEqual(await confirmCommand(planTitle, "make test", true, planApprovingUI), true);
+assert.strictEqual(planCalls.length, 2, "each command requires fresh approval");
+assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => false }), false, "decline blocks");
+assert.strictEqual(await confirmCommand(planTitle, "make test", false, planApprovingUI), false, "headless blocks");
+assert.strictEqual(await confirmCommand(planTitle, "make test", true, undefined), false, "missing UI blocks");
+assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => { throw new Error("dismissed"); } }), false, "dialog error blocks");
+assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => undefined as unknown as boolean }), false, "subagent cancel (cancelled: true) blocks");
+assert.strictEqual(await confirmCommand(planTitle, "make test", true, { confirm: async () => "yes" as unknown as boolean }), false, "only literal true approves");
 
 console.log("test_policy passed!");
