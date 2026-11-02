@@ -369,6 +369,20 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");
 	}
+	if (await toolCall?.({ toolName: "bash", input: { command: "echo build" } }) !== undefined) throw new Error("unblocked Build bash was blocked");
+	guardMode = "blocked";
+	for (const toolName of ["write", "edit", "bash", ...browserMutationTools]) {
+		const blocked = await toolCall?.({ toolName, input: { command: "echo build" } }) as { block?: boolean; reason?: string } | undefined;
+		if (blocked?.block !== true || !blocked.reason?.startsWith(toolName + " was blocked") || !blocked.reason.includes("cursor:holder") || !blocked.reason.includes("/build-lease release")) throw new Error("Build " + toolName + " ignored another writer claim");
+	}
+	for (const toolName of ["read", ...browserReadTools]) {
+		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build read tool " + toolName + " was blocked by a writer claim");
+	}
+	handlers.get("session_start")?.({}, modeContext("off"));
+	for (const toolName of ["write", "edit", "bash"]) {
+		if (await toolCall?.({ toolName, input: { command: "echo off" } }) !== undefined) throw new Error("Off " + toolName + " was guarded");
+	}
+	guardMode = "unblocked";
 	handlers.get("session_start")?.({}, modeContext("discuss"));
 	const readEvent = { toolName: "bash", input: { command: "rg workflow-mode-no-match" } };
 	if (await toolCall?.(readEvent) !== undefined) throw new Error("Discuss read command was blocked");

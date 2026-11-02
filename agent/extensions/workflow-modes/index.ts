@@ -203,7 +203,7 @@ async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Pro
 	if (mode === "build") {
 		const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
 		if (blockedBy) {
-			ctx.ui.notify(`Build mode blocked by ${blockedBy}; ask holder to run /build-lease release.`, "warning");
+			ctx.ui.notify(`Build mode blocked by ${blockedBy}; release it in that Pi session with /build-lease release or leave Build.`, "warning");
 			return;
 		}
 	}
@@ -917,6 +917,17 @@ export default function (pi: ExtensionAPI) {
 				return { block: true, reason: `Unknown workflow mode was restored; ${event.toolName} was blocked. Select a supported mode before continuing.` };
 			}
 			return;
+		}
+		if (currentMode === "build") {
+			// Project-wide single writer: every Build write re-asks the guard, so a
+			// writer claimed by another session (or a lost race) blocks here. Pi Off stays unguarded.
+			if (!MUTATION_TOOLS.has(event.toolName) && event.toolName !== "bash") return;
+			const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
+			if (!blockedBy) return;
+			return {
+				block: true,
+				reason: `${event.toolName} was blocked: project writer held by ${blockedBy}. Release it in that Pi session with /build-lease release or leave Build there; do not retry until then.`,
+			};
 		}
 		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review") return;
 
