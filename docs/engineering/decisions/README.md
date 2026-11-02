@@ -52,3 +52,4 @@
 | ADR-0048 | Active | Shared adversarial security regression corpus | Changing corpus schema or loader, installed hook/plugin execution, mutation oracle, known-gap convention, or security CI lanes. |
 | ADR-0049 | Active | Plan-owned frontend specifications without Design mode | changing workflow modes, frontend plan specs, design-doc write gates, tick notes, visual verification, or Open Design references |
 | ADR-0050 | Active | Bundled design skills and cross-harness export | changing bundled skill content, provenance or licenses, package skill inventory, `/harness` skill links, or cross-harness visual verification |
+| ADR-0051 | Active | Presence-derived project-wide single writer | changing Build lease scope, presence schema or liveness, the workflow-modes build-guard, Pi Build tool gating, holdsBuildLease, or adding a lock or tie-break between Pi sessions |
