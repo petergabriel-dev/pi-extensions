@@ -124,7 +124,7 @@ export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | 
 	return allowed && !denied;
 }
 
-export const BUILD_GUARD_FAILED_BLOCKER = "an unverified writer (Build guard check failed)";
+export const BUILD_GUARD_FAILED_BLOCKER = "an unverified writer (Build guard check failed); retry, or restart this Pi session if it persists";
 
 // Fails closed: a listener error blocks with any blocker it already set, or a
 // generic one. No listener (bridge not installed) means no blocker.

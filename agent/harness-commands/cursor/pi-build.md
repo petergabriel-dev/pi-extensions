@@ -37,6 +37,7 @@ On any refusal below, stop before editing or running shell commands. Never retry
 - `build_lease_pending`: quote the exact message, including its short id, then tell the user to approve that id in Pi with `/build-lease approve` and rerun `/pi-build`.
 - `build_lease_no_approval`: stop and explain that a Build lease can only be approved in interactive Pi; headless Pi cannot approve.
 - `build_lease_required` from `tick_plan_task`: stop and ask the user to re-approve the Build lease in interactive Pi with `/build-lease approve`, then rerun `/pi-build`.
+- `build_lease_held`: another holder or Pi session holds the project writer, or this Pi session's bridge presence is stale. Quote the exact message, stop, and ask the user to resolve what it names, then rerun `/pi-build`.
 
 ## Build lease refusals
 
@@ -45,6 +46,7 @@ On any refusal below, stop before editing or running shell commands. Never retry
 - `build_lease_pending`: quote the exact message, including its short id, then tell the user to approve that id in Pi with `/build-lease approve` and rerun `/pi-build`.
 - `build_lease_no_approval`: stop and explain that a Build lease can only be approved in interactive Pi; headless Pi cannot approve.
 - `build_lease_required` from `tick_plan_task`: stop and ask the user to re-approve the Build lease in interactive Pi with `/build-lease approve`, then rerun `/pi-build`.
+- `build_lease_held`: another holder or Pi session holds the project writer, or this Pi session's bridge presence is stale. Quote the exact message, stop, and ask the user to resolve what it names, then rerun `/pi-build`.
 
 ## Generic build loop outside Pi
 

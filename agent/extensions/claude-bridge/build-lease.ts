@@ -110,12 +110,13 @@ export interface WriterClaimSession {
 export function parseBuildLease(value: unknown): BuildLease | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	const record = value as Record<string, unknown>;
-	if (!LEASE_HARNESSES.has(record.harness as BuildLeaseHarness) || !isSafeId(record.id)) return null;
+	const peer = { harness: record.harness as HarnessKind, id: record.id as string };
+	if (!isLeasePeer(peer)) return null;
 	if (typeof record.planId !== "string" || record.planId.trim().length === 0) return null;
 	const { grantedAt, expiresAt } = record;
 	if (typeof grantedAt !== "number" || typeof expiresAt !== "number") return null;
 	if (!Number.isFinite(grantedAt) || !Number.isFinite(expiresAt) || expiresAt <= grantedAt) return null;
-	return { harness: record.harness as BuildLeaseHarness, id: record.id, planId: record.planId, grantedAt, expiresAt };
+	return { harness: peer.harness, id: peer.id, planId: record.planId, grantedAt, expiresAt };
 }
 
 // Project-wide single writer; mirrors hasOtherWriterClaim in
@@ -139,8 +140,26 @@ export function describeWriterClaims(claims: readonly WriterClaim[]): string {
 		.join(", ");
 }
 
-export function projectWriterHeldMessage(blocker: string): string {
-	return `Project writer held by ${blocker}; release it in that Pi session with /build-lease release or leave Build, then retry.`;
+// Blocker phrases carry their own remediation, so bridge refusals and
+// workflow-modes block reasons show the same text and a self-stale session is
+// never told to release another session.
+export const WRITER_RELEASE_HINT = "release it in that Pi session with /build-lease release or by leaving Build";
+export const SELF_PRESENCE_STALE_BLOCKER = "this Pi session's stale bridge presence; fix .pi/memory/bridge permissions (0700 directories, 0600 files) or restart this Pi session";
+
+export function describeWriterBlocker(claims: readonly WriterClaim[]): string {
+	return `${describeWriterClaims(claims)}; ${WRITER_RELEASE_HINT}`;
+}
+
+export function ownLeaseBlocker(lease: BuildLease): string {
+	return `${buildLeaseHolderLabel(lease)} (this session's harness lease); run /build-lease release here`;
+}
+
+export function unverifiedWriterBlocker(reason: string): string {
+	return `an unverified writer (${reason}); retry, or restart this Pi session if it persists`;
+}
+
+export function projectWriterHeldMessage(blockedBy: string): string {
+	return `Project writer blocked by ${blockedBy}.`;
 }
 
 function holdsActiveLease(

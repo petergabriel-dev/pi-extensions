@@ -9,7 +9,7 @@ import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryInd
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
-import { BUILD_LEASE_TTL_MS, approveBuildLease, buildLeaseHolderLabel, canTickPlanTask, describeWriterClaims, isBuildLeaseActive, otherWriterClaims, parseBuildLease, projectWriterHeldMessage, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
+import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -328,10 +328,12 @@ function parsePresence(value: unknown, expectedSessionId?: string): BridgePresen
 	};
 }
 
-function readPresence(filePath: string, expectedSessionId?: string): BridgePresence | null {
+// requirePrivate (default) gates ownership decisions on a 0600 presence file. The
+// live writer-claim scan passes false, matching the JS client's liberal claim rule.
+function readPresence(filePath: string, expectedSessionId?: string, { requirePrivate = true }: { requirePrivate?: boolean } = {}): BridgePresence | null {
 	try {
 		const stat = fs.lstatSync(filePath);
-		if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) return null;
+		if (!stat.isFile() || stat.isSymbolicLink() || (requirePrivate && (stat.mode & 0o777) !== 0o600)) return null;
 	} catch { return null; }
 	return parsePresence(readJson(filePath), expectedSessionId);
 }
@@ -451,7 +453,7 @@ function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: 
 			const stat = fs.lstatSync(namespace);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
 		} catch { continue; }
-		const presence = readPresence(path.join(namespace, "presence.json"), id);
+		const presence = readPresence(path.join(namespace, "presence.json"), id, { requirePrivate: false });
 		const heartbeat = parseTime(presence?.heartbeatAt);
 		if (presence && heartbeat > 0 && now - heartbeat <= LIVE_TTL_MS && heartbeat <= now + LIVE_TTL_MS) live.push({ id, presence });
 	}
@@ -794,7 +796,7 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 		);
 	}
 	const writerBlocker = projectWriterBlocker();
-	if (writerBlocker) return errorResponse(request.id, "build_lease_required", projectWriterHeldMessage(writerBlocker));
+	if (writerBlocker) return errorResponse(request.id, "build_lease_held", projectWriterHeldMessage(writerBlocker));
 	try {
 		const payload = normalizeTickPlanTaskPayload(request.payload);
 		const result = await requestWorkflowPlanTaskTick(pi, request.id, payload);
@@ -998,20 +1000,23 @@ function setBuildLease(next: BuildLease | null, ctx: ExtensionContext | undefine
 	return true;
 }
 
+class OwnPresenceMissingError extends Error {}
+
 // Fails closed: a scan that cannot see this session's own live presence is not trusted.
 function otherLiveWriterClaims(now = Date.now()): WriterClaim[] {
 	if (!activeProjectRoot || !activePiSessionId) throw new Error("Claude bridge is not active in this Pi session");
 	const live = listLiveNamespaces(activeProjectRoot, now);
-	if (!live.some(({ id }) => id === activePiSessionId)) throw new Error("this Pi session's live presence is missing from the project scan");
+	if (!live.some(({ id }) => id === activePiSessionId)) throw new OwnPresenceMissingError();
 	return otherWriterClaims(live, activePiSessionId, now);
 }
 
 function projectWriterBlocker(now = Date.now()): string | null {
 	try {
 		const claims = otherLiveWriterClaims(now);
-		return claims.length > 0 ? describeWriterClaims(claims) : null;
+		return claims.length > 0 ? describeWriterBlocker(claims) : null;
 	} catch (error) {
-		return `an unverified writer (check failed closed: ${error instanceof Error ? error.message : String(error)})`;
+		if (error instanceof OwnPresenceMissingError) return SELF_PRESENCE_STALE_BLOCKER;
+		return unverifiedWriterBlocker(`check failed closed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
 
@@ -1472,14 +1477,14 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		// Fail closed: Pi's event bus swallows listener errors, so block first and
 		// lift the provisional blocker only after the check completes.
 		const prior = payload.blockedBy;
-		payload.blockedBy = "an unverified writer (Build guard check did not complete)";
+		payload.blockedBy = unverifiedWriterBlocker("Build guard check did not complete");
 		const settle = (blocker: unknown) => {
 			if (typeof blocker === "string" && blocker.length > 0) payload.blockedBy = blocker;
 			else if (prior === undefined) delete payload.blockedBy;
 			else payload.blockedBy = prior;
 		};
 		if (buildLease && isBuildLeaseActive(buildLease, Date.now())) {
-			settle(buildLeaseHolderLabel(buildLease));
+			settle(ownLeaseBlocker(buildLease));
 			return;
 		}
 		// ponytail: a session whose bridge is inactive publishes no presence, so the
@@ -1634,7 +1639,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 				lines.push("No active Build lease.");
 			}
 			const writerBlocker = activeProjectRoot && activePiSessionId ? projectWriterBlocker(now) : null;
-			if (writerBlocker) lines.push(`Project writer conflict: ${writerBlocker}. Release it in that Pi session with /build-lease release or leave Build.`);
+			if (writerBlocker) lines.push(`Project writer conflict: ${projectWriterHeldMessage(writerBlocker)}`);
 			if (buildLeaseRequests.size > 0) {
 				lines.push("Pending requests:");
 				for (const entry of buildLeaseRequests.values()) {

@@ -212,7 +212,8 @@ async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Pro
 	if (mode === "build") {
 		const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
 		if (blockedBy) {
-			ctx.ui.notify(`Build mode blocked by ${blockedBy}; release it in that Pi session with /build-lease release or leave Build.`, "warning");
+			// The blocker phrase carries its own remediation (claude-bridge build-lease.ts).
+			ctx.ui.notify(`Build mode blocked by ${blockedBy}.`, "warning");
 			return;
 		}
 	}
@@ -936,7 +937,7 @@ export default function (pi: ExtensionAPI) {
 			if (!blockedBy) return;
 			return {
 				block: true,
-				reason: `${event.toolName} was blocked: project writer held by ${blockedBy}. Release it in that Pi session with /build-lease release or leave Build there; do not retry until then.`,
+				reason: `${event.toolName} was blocked: project writer blocked by ${blockedBy}. Do not retry until that is resolved.`,
 			};
 		}
 		if (currentMode !== "discuss" && currentMode !== "plan" && currentMode !== "review") return;

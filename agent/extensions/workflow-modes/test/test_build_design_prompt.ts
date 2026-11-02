@@ -281,11 +281,13 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 	let guardMode = "blocked";
 	let guardCalls = 0;
 	const changedEvents: unknown[] = [];
+	// Mirrors claude-bridge: the blocker phrase carries its own remediation.
+	const holderBlocker = "cursor:holder; release it in that Pi session with /build-lease release or by leaving Build";
 	events.on("workflow-modes:build-guard", (payload: { blockedBy?: string }) => {
 		guardCalls++;
-		if (guardMode === "blocked") payload.blockedBy = "cursor:holder";
+		if (guardMode === "blocked") payload.blockedBy = holderBlocker;
 		if (guardMode === "throwing") {
-			payload.blockedBy = "cursor:holder";
+			payload.blockedBy = holderBlocker;
 			throw new Error("listener failed");
 		}
 	});

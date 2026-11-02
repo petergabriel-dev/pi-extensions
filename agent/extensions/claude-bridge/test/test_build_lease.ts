@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 
 import {
 	BUILD_LEASE_TTL_MS,
+	SELF_PRESENCE_STALE_BLOCKER,
+	WRITER_RELEASE_HINT,
 	approveBuildLease,
 	buildLeaseHolderLabel,
 	canTickPlanTask,
+	describeWriterBlocker,
 	describeWriterClaims,
 	isBuildLeaseActive,
 	otherWriterClaims,
+	ownLeaseBlocker,
 	parseBuildLease,
 	projectWriterHeldMessage,
+	unverifiedWriterBlocker,
 	pruneBuildLeaseRequests,
 	releaseBuildLeaseOnRecall,
 	releaseBuildLeaseOnWorkflowChange,
@@ -259,9 +264,20 @@ assert.equal(
 	describeWriterClaims(conflicting),
 	"Pi session aaaa1111 (Build mode), Pi session bbbb2222 (lease opencode:opencode-session)",
 );
+// Blocker phrases carry their own remediation; one release hint is shared.
 assert.equal(
-	projectWriterHeldMessage("Pi session abcd1234 (Build mode)"),
-	"Project writer held by Pi session abcd1234 (Build mode); release it in that Pi session with /build-lease release or leave Build, then retry.",
+	describeWriterBlocker(conflicting),
+	`Pi session aaaa1111 (Build mode), Pi session bbbb2222 (lease opencode:opencode-session); ${WRITER_RELEASE_HINT}`,
 );
+assert.match(WRITER_RELEASE_HINT, /\/build-lease release/);
+assert.equal(
+	projectWriterHeldMessage(describeWriterBlocker(conflicting)),
+	`Project writer blocked by Pi session aaaa1111 (Build mode), Pi session bbbb2222 (lease opencode:opencode-session); ${WRITER_RELEASE_HINT}.`,
+);
+assert.equal(ownLeaseBlocker(activeLease), "claude:claude-session (this session's harness lease); run /build-lease release here");
+// A self-stale session is pointed at its own bridge, never at releasing another session.
+assert.match(SELF_PRESENCE_STALE_BLOCKER, /\.pi\/memory\/bridge permissions/);
+assert.doesNotMatch(SELF_PRESENCE_STALE_BLOCKER, /\/build-lease release/);
+assert.match(unverifiedWriterBlocker("check failed closed: boom"), /^an unverified writer \(check failed closed: boom\); retry/);
 
 console.log("claude bridge build lease tests passed");
