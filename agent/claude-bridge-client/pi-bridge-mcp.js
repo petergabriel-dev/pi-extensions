@@ -42,6 +42,13 @@ function isPrivateDir(p) {
 	} catch { return false; }
 }
 
+function isRegularFile(p) {
+	try {
+		const stat = fs.lstatSync(p);
+		return stat.isFile() && !stat.isSymbolicLink();
+	} catch { return false; }
+}
+
 function isPrivateFile(p) {
 	try {
 		const stat = fs.lstatSync(p);
@@ -151,7 +158,10 @@ function resolveProjectRoot(cwd = process.cwd()) {
 	return projectRoot;
 }
 
-function liveSessions(projectRoot, now = Date.now()) {
+// strict (default) gates pairing and holder identity on private bridge dirs and
+// presence file. Writer-claim counting passes strict: false so a session with
+// drifted permissions but fresh presence still counts (fail closed).
+function liveSessions(projectRoot, now = Date.now(), { strict = true } = {}) {
 	const piDir = path.join(projectRoot, ".pi");
 	const memoryDir = path.join(piDir, "memory");
 	const paths = bridgePathsRoot(projectRoot);
@@ -162,7 +172,10 @@ function liveSessions(projectRoot, now = Date.now()) {
 	for (const id of ids) {
 		if (!isSafeId(id)) continue;
 		const namespace = bridgePaths(projectRoot, id);
-		if (![namespace.namespace, namespace.requests, namespace.responses, namespace.processed].every(isPrivateDir) || !isPrivateFile(namespace.presence)) continue;
+		const valid = strict
+			? [namespace.namespace, namespace.requests, namespace.responses, namespace.processed].every(isPrivateDir) && isPrivateFile(namespace.presence)
+			: isDir(namespace.namespace) && isRegularFile(namespace.presence);
+		if (!valid) continue;
 		const presence = parsePresence(readJson(namespace.presence), id);
 		if (!presence) continue;
 		const heartbeat = Date.parse(presence.heartbeatAt);
@@ -223,10 +236,9 @@ function holdsBuildLease(projectRoot, identity, now = Date.now()) {
 	try {
 		if (!identity || typeof identity !== "object" || Array.isArray(identity)
 			|| !BUILD_LEASE_HARNESSES.has(identity.harness) || !isSafeId(identity.id)) return false;
-		const sessions = liveSessions(projectRoot, now);
-		const paired = sessions.filter(({ presence }) => presence.peers.some((peer) => peerMatches(peer, identity)));
+		const paired = findPairedLiveSessions(projectRoot, identity, now);
 		if (paired.length !== 1) return false;
-		if (hasOtherWriterClaim(sessions, paired[0].id, now)) return false;
+		if (hasOtherWriterClaim(liveSessions(projectRoot, now, { strict: false }), paired[0].id, now)) return false;
 		const lease = paired[0].presence.buildLease;
 		return Boolean(lease
 			&& lease.harness === identity.harness

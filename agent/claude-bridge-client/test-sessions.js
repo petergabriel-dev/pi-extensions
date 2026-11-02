@@ -57,6 +57,11 @@ function patchPresence(paths, patch) {
 	writeJson(paths.presence, { ...current, ...patch });
 }
 
+// Keeps a fixture live across slow steps; stale fixtures never call this.
+function touchPresence(...paths) {
+	for (const entry of paths) patchPresence(entry, { heartbeatAt: new Date().toISOString() });
+}
+
 const LEASE_TTL_MS = 4 * 60 * 60 * 1000;
 function leaseFixture(peer = HARNESS, overrides = {}) {
 	const grantedAt = Date.now();
@@ -425,6 +430,9 @@ async function main() {
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), false, "other lease");
 		assert.equal(client.holdsBuildLease(cwd, OPENCODE), false, "conflict denies every claimant");
 		await assertReadOnlyFallback(cwd);
+		// The hook runs above can take seconds; refresh both fixtures so later
+		// checks never depend on wall-clock timing.
+		touchPresence(holder, other);
 
 		const now = Date.now();
 		setBuildLease(other, leaseFixture(OPENCODE, { grantedAt: now - LEASE_TTL_MS - 10, expiresAt: now - 10 }));
@@ -432,7 +440,15 @@ async function main() {
 
 		setBuildLease(other, null);
 		patchPresence(other, { mode: "build" });
+		touchPresence(holder, other);
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), false, "other Pi Build");
+
+		// Claims count liberally: drifted subdirectory permissions do not hide a
+		// fresh Build claim, while pairing stays strict.
+		fs.chmodSync(client.bridgePaths(cwd, "pi-claim-other").requests, 0o755);
+		touchPresence(holder, other);
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false, "other Pi Build with non-private dirs");
+		fs.chmodSync(client.bridgePaths(cwd, "pi-claim-other").requests, 0o700);
 		patchPresence(other, { heartbeatAt: new Date(Date.now() - 6_000).toISOString() });
 		assert.equal(client.holdsBuildLease(cwd, HARNESS), true, "other stale Build");
 
