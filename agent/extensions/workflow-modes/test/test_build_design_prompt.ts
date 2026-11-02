@@ -486,6 +486,14 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 		confirms.length = 0;
 		const posting = await toolCall?.({ toolName: "bash", input: { command: "gh pr review 1 --body ok" } }, askContext);
 		if (posting !== undefined || confirms.length !== 1 || !confirms[0]?.startsWith("Post this GitHub review?")) throw new Error("unsandboxed Review posting was not confirmed exactly once");
+		// A multi-line body is refused before any prompt, never approved and then blocked.
+		confirms.length = 0;
+		const multiLinePost = await toolCall?.({ toolName: "bash", input: { command: "gh pr review 1 --comment --body 'a\\nb'" } }, askContext) as { block?: boolean; reason?: string } | undefined;
+		if (multiLinePost?.block !== true || confirms.length !== 0 || !multiLinePost.reason?.includes("keep a review body on one line") || !multiLinePost.reason.includes("Do not retry")) throw new Error("unsandboxed multi-line post was not refused before approval");
+		// A mode change while approval is pending blocks the command.
+		const switchingUI = { ...confirmUI, confirm: async () => { await handlers.get("session_tree")?.({}, modeContext("off")); return true; } };
+		const switched = await toolCall?.({ toolName: "bash", input: { command: "git status" } }, { hasUI: true, ui: switchingUI }) as { block?: boolean; reason?: string } | undefined;
+		if (switched?.block !== true || !switched.reason?.includes("mode changed while approval was pending")) throw new Error("mode change during approval did not block");
 	});
 	await handlers.get("session_start")?.({}, modeContext("plan"));
 	confirms.length = 0;

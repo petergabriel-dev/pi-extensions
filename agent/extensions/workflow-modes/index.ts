@@ -626,7 +626,7 @@ export const PLAN_PROMPT = `${PLAN_BASE_PROMPT}
 
 ${PLAN_FRONTEND_PROMPT}`;
 
-export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Without a sandbox, every bash command needs the user's approval and headless runs cannot approve. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
+export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Without a sandbox, every bash command needs the user's approval, multi-line commands (including a multi-line review body) are refused, and headless runs cannot approve. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
 export const UNKNOWN_MODE_PROMPT = `Workflow mode state is unknown or legacy. Treat the workspace as read-only: do not use mutation tools or Bash. Select a supported workflow mode before continuing.`;
 
@@ -979,51 +979,61 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (event.toolName !== "bash") return;
+		// Decide with the mode seen now; approval dialogs below are awaited.
+		const mode = currentMode;
 		const originalCommand = String((event.input as { command?: unknown }).command ?? "");
 		const command = originalCommand.trim();
 
-		// Review allow-list and posting approval both run before sandboxing so
-		// missing or failing launchers cannot bypass either policy.
-		if (currentMode === "review" && !isBashAllowedInMode(command, "review")) {
+		// The Review allow-list runs before sandboxing so a missing or failing
+		// launcher cannot bypass it.
+		if (mode === "review" && !isBashAllowedInMode(command, "review")) {
 			return {
 				block: true,
-				reason: formatModeBlockReason(currentMode, "bash command was blocked; only read commands and approved gh PR commands were allowed."),
-			};
-		}
-		if (currentMode === "review" && !await confirmReviewPost(originalCommand, ctx.hasUI, ctx.ui)) {
-			return {
-				block: true,
-				reason: formatModeBlockReason(currentMode, "GitHub posting was declined or unavailable; stop and do not retry."),
+				reason: formatModeBlockReason(mode, "bash command was blocked; only read commands and approved gh PR commands were allowed."),
 			};
 		}
 
+		let wrappedCommand: string | undefined;
 		try {
-			const wrapped = wrapCommand(currentMode === "review" ? originalCommand : command, { cwd: process.cwd(), ...(currentMode === "review" ? { allowNetwork: true } : {}) });
-			if (wrapped.wrapped) {
-				(event.input as { command?: string }).command = wrapped.command;
-				return;
-			}
+			const wrapped = wrapCommand(mode === "review" ? originalCommand : command, { cwd: process.cwd(), ...(mode === "review" ? { allowNetwork: true } : {}) });
+			if (wrapped.wrapped) wrappedCommand = wrapped.command;
 		} catch {
-			// Fall through to the conservative regex gate below. Read-only mode must never fail open or hard-crash.
+			// Fall through to the no-sandbox rule. Read-only mode must never fail open or hard-crash.
 		}
 
-		// No sandbox: Pi never auto-runs bash. One decision, shared with the security corpus.
-		const decision = noSandboxDecision(currentMode, command);
-		if (decision === "confirm") {
-			// A Review posting command was already approved for this exact command above.
-			if (currentMode === "review" && isReviewPostingCommand(command)) return;
-			if (await confirmCommand("Run without sandbox?", originalCommand, ctx.hasUI, ctx.ui)) return;
+		// No sandbox: Pi never auto-runs bash. One decision, shared with the security
+		// corpus, runs before any approval so nothing is approved and then refused.
+		if (wrappedCommand === undefined && noSandboxDecision(mode, command) === "deny") {
 			return {
 				block: true,
-				reason: formatModeBlockReason(currentMode, "unsandboxed bash command was declined or approval was unavailable; stop and do not retry."),
+				reason: formatModeBlockReason(mode, mode === "discuss"
+					? "bash command was blocked; without a sandbox, Discuss does not run bash. Use the read tool or another active search tool instead."
+					: `bash command was blocked; without a sandbox, ${MODE_LABELS[mode]} runs only single-line commands a human approves, never multi-line or deny-listed ones${mode === "review" ? " (keep a review body on one line)" : ""}. Do not retry this command unchanged.`),
 			};
 		}
-		return {
-			block: true,
-			reason: formatModeBlockReason(currentMode, currentMode === "discuss"
-				? "bash command was blocked; without a sandbox, Discuss does not run bash. Use the read tool or another active search tool instead."
-				: `bash command was blocked; without a sandbox, ${MODE_LABELS[currentMode]} runs only single-line commands a human approves, never deny-listed ones.`),
-		};
+
+		// One approval per command: a Review post gets its posting confirm (which also
+		// covers running it without a sandbox); any other unsandboxed command gets one.
+		if (mode === "review" && isReviewPostingCommand(command)) {
+			if (!await confirmReviewPost(originalCommand, ctx.hasUI, ctx.ui)) {
+				return {
+					block: true,
+					reason: formatModeBlockReason(mode, "GitHub posting was declined or unavailable; stop and do not retry."),
+				};
+			}
+		} else if (wrappedCommand === undefined && !await confirmCommand("Run without sandbox?", originalCommand, ctx.hasUI, ctx.ui)) {
+			return {
+				block: true,
+				reason: formatModeBlockReason(mode, "unsandboxed bash command was declined or approval was unavailable; stop and do not retry."),
+			};
+		}
+		if (currentMode !== mode) {
+			return {
+				block: true,
+				reason: formatModeBlockReason(mode, "bash command was blocked because the workflow mode changed while approval was pending; stop and do not retry."),
+			};
+		}
+		if (wrappedCommand !== undefined) (event.input as { command?: string }).command = wrappedCommand;
 	});
 
 	pi.registerCommand("caveman", {
