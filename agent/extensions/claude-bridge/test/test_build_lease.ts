@@ -98,6 +98,9 @@ assert.deepEqual(held, { ok: true, status: "held", lease: activeLease });
 const heldByOther = requestBuildLease(activeLease, null, cursor, workflow, now + 100);
 expectRefusal(heldByOther, "build_lease_held");
 assert.match(heldByOther.message, /claude:claude-session/);
+// A harness holder cannot run Pi commands, so the refusal points at Pi itself.
+assert.match(heldByOther.message, /run \/build-lease release in Pi to revoke it, then retry\./);
+assert.doesNotMatch(heldByOther.message, /ask that holder/);
 
 // A same-peer lease for another plan does not block a fresh request.
 const samePeerOtherPlan = requestBuildLease(activeLease, null, claude, { ...workflow, planId: "plan-2" }, now + 100);

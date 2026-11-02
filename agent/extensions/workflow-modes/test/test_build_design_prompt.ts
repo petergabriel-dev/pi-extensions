@@ -28,7 +28,8 @@ const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 if (PLAN_FRONTEND_PROMPT.length > 2000 || PLAN_REFERENCE_PROMPT.length > 2000) throw new Error("Added Plan prompt text exceeds 2,000 characters");
 if (BUILD_FRONTEND_VERIFICATION_PROMPT.length > 2000 || !BUILD_PROMPT.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("Build frontend verification clause exceeds 2,000 characters or is not composed into BUILD_PROMPT");
-if (!DISCUSS_PROMPT.includes("Without a sandbox, Discuss runs no bash; use the read, grep, find, and ls tools instead.")) throw new Error("Discuss prompt omitted the no-sandbox bash rule");
+// Pi activates only read/bash/edit/write by default, so guidance must not name inactive grep/find/ls tools.
+if (!DISCUSS_PROMPT.includes("Without a sandbox, Discuss runs no bash; use the read tool and any active search tool instead.") || DISCUSS_PROMPT.includes("grep, find, and ls tools")) throw new Error("Discuss prompt omitted the no-sandbox bash rule or named inactive tools");
 for (const part of ["saved plan", "docs/design/components/", "authoritative", "no unplanned taste", "wrong or contradictory", "through Plan", "required spec is missing"]) {
 	if (!BUILD_DESIGN_AWARE_PROMPT.toLowerCase().includes(part.toLowerCase())) throw new Error("Build spec authority omitted " + part);
 }
@@ -498,6 +499,7 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	await withoutSandbox(async () => {
 		const discussDenied = await toolCall?.({ toolName: "bash", input: { command: "ls" } }, askContext) as { block?: boolean; reason?: string } | undefined;
 		if (discussDenied?.block !== true || !discussDenied.reason?.includes("Discuss does not run bash") || confirms.length !== 0) throw new Error("unsandboxed Discuss ran or asked about bash");
+		if (!discussDenied.reason.includes("Use the read tool or another active search tool") || discussDenied.reason.includes("grep")) throw new Error("Discuss block reason named inactive tools");
 	});
 	handlers.get("session_start")?.({}, modeContext("design", "build"));
 	const legacyTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { message?: { content?: string }; systemPrompt?: string };

@@ -22,11 +22,17 @@ export function isReviewPostingCommand(command: string): boolean {
 	return /^gh[ \t]+pr[ \t]+(?:review|comment)(?=[ \t]|$)/.test(command.trim());
 }
 
+// Characters a dialog can hide or reorder: C0 controls except newline, DEL/C1,
+// format characters (zero-width, bidi, BOM, soft hyphen), non-ASCII spaces,
+// line/paragraph separators, and fillers that render blank (Hangul, braille).
+const HIDDEN_CHARACTER = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\u115f\u1160\u2800\u3164\uffa0]|(?! )\p{Zs}/gu;
+
 export function sanitizeReviewCommand(command: string): string {
-	return command.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (character) => {
+	return command.replace(HIDDEN_CHARACTER, (character) => {
 		const codePoint = character.codePointAt(0)!;
-		const prefix = codePoint <= 0xff ? "\\x" : "\\u";
-		return `${prefix}${codePoint.toString(16).padStart(prefix === "\\x" ? 2 : 4, "0").toUpperCase()}`;
+		const hex = codePoint.toString(16).toUpperCase();
+		if (codePoint <= 0x9f) return `\\x${hex.padStart(2, "0")}`;
+		return codePoint <= 0xffff ? `\\u${hex.padStart(4, "0")}` : `\\u{${hex}}`;
 	});
 }
 
