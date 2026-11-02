@@ -211,12 +211,22 @@ function findPairedLiveSessions(projectRoot, identity, now = Date.now()) {
 	return liveSessions(projectRoot, now).filter(({ presence }) => presence.peers.some((peer) => peerMatches(peer, identity)));
 }
 
+// Project-wide single writer: a live session other than selfId claims the
+// writer while Pi is in Build or holds an active harness lease. Conflicting
+// claims deny every claimant; there is no tie-break.
+function hasOtherWriterClaim(sessions, selfId, now = Date.now()) {
+	return sessions.some(({ id, presence }) => id !== selfId
+		&& (presence.mode === "build" || Boolean(presence.buildLease && now < presence.buildLease.expiresAt)));
+}
+
 function holdsBuildLease(projectRoot, identity, now = Date.now()) {
 	try {
 		if (!identity || typeof identity !== "object" || Array.isArray(identity)
 			|| !BUILD_LEASE_HARNESSES.has(identity.harness) || !isSafeId(identity.id)) return false;
-		const paired = findPairedLiveSessions(projectRoot, identity, now);
+		const sessions = liveSessions(projectRoot, now);
+		const paired = sessions.filter(({ presence }) => presence.peers.some((peer) => peerMatches(peer, identity)));
 		if (paired.length !== 1) return false;
+		if (hasOtherWriterClaim(sessions, paired[0].id, now)) return false;
 		const lease = paired[0].presence.buildLease;
 		return Boolean(lease
 			&& lease.harness === identity.harness
@@ -585,6 +595,7 @@ module.exports = {
 	findPairedLiveSessions,
 	findPiProjectRoot,
 	formatPeerBlock,
+	hasOtherWriterClaim,
 	holdsBuildLease,
 	isSafeId,
 	listSessions,

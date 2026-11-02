@@ -49,9 +49,12 @@ function addSession(cwd, id, peers = [], heartbeatAt) {
 }
 
 function setBuildLease(paths, buildLease) {
+	patchPresence(paths, { buildLease });
+}
+
+function patchPresence(paths, patch) {
 	const current = JSON.parse(fs.readFileSync(paths.presence, "utf8"));
-	current.buildLease = buildLease;
-	writeJson(paths.presence, current);
+	writeJson(paths.presence, { ...current, ...patch });
 }
 
 const LEASE_TTL_MS = 4 * 60 * 60 * 1000;
@@ -409,6 +412,35 @@ async function main() {
 		await assertReadOnlyFallback(cwd);
 		assert.deepEqual(fs.readdirSync(first.requests), []);
 		assert.deepEqual(fs.readdirSync(second.requests), []);
+	}, noResponder);
+
+	await test("another live session's writer claim denies the lease holder", async (cwd) => {
+		const holder = addSession(cwd, "pi-claim-holder", [HARNESS]);
+		setBuildLease(holder, leaseFixture(HARNESS));
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true, "self only");
+
+		const other = addSession(cwd, "pi-claim-other", [OPENCODE]);
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true, "other session without a claim");
+		setBuildLease(other, leaseFixture(OPENCODE));
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false, "other lease");
+		assert.equal(client.holdsBuildLease(cwd, OPENCODE), false, "conflict denies every claimant");
+		await assertReadOnlyFallback(cwd);
+
+		const now = Date.now();
+		setBuildLease(other, leaseFixture(OPENCODE, { grantedAt: now - LEASE_TTL_MS - 10, expiresAt: now - 10 }));
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true, "other expired lease");
+
+		setBuildLease(other, null);
+		patchPresence(other, { mode: "build" });
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), false, "other Pi Build");
+		patchPresence(other, { heartbeatAt: new Date(Date.now() - 6_000).toISOString() });
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true, "other stale Build");
+
+		const stale = addSession(cwd, "pi-claim-stale", [], new Date(Date.now() - 6_000).toISOString());
+		setBuildLease(stale, leaseFixture(OPENCODE));
+		assert.equal(client.holdsBuildLease(cwd, HARNESS), true, "other stale lease");
+
+		assert.equal(client.hasOtherWriterClaim([{ id: "self", presence: { mode: "build", buildLease: null } }], "self"), false, "self excluded");
 	}, noResponder);
 
 	await test("build lease lookup across ten live sessions stays under 50ms", async (cwd) => {

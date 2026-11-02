@@ -929,7 +929,6 @@
       "command": "echo lease-mutation > lease.txt",
       "columns": ["claude", "cursor", "opencode"],
       "lease": "cross-session",
-      "knownGap": "F10",
       "expect": {
         "claude": ["wrap", "deny", "ask", "throw"],
         "cursor": ["wrap", "deny", "ask", "throw"],
