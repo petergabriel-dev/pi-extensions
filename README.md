@@ -42,6 +42,21 @@ Cursor setup installs global `pi-*` commands. If Cursor does not discover them, 
 
 Install `ccc` separately before using `ccc_search`; verify it with `ccc --version`. Raw or global copies of these extensions can load twice alongside the package. Use `pi list` and `pi config` to inspect registrations, then remove or disable duplicates.
 
+## Build leases
+
+Claude Code, Cursor, and OpenCode stay read-only in a `.pi` project until you approve a Build lease in Pi:
+
+1. Save a plan in Pi and keep Pi out of Build mode.
+2. In the harness, run `/pi-build`. The first request stops with `build_lease_pending` and a short id such as `claude:1a2b3c4d`.
+3. In interactive Pi, run `/build-lease approve`, check the short id, plan, and four-hour expiry, then confirm. Rerun `/pi-build`.
+
+- `/build-lease` shows the holder, remaining time, pending requests, and any project writer conflict. `/build-lease release` revokes the lease.
+- A lease expires four hours after approval; rerunning `/pi-build` does not extend it. After expiry the next write or task tick is denied until you approve again. Headless Pi cannot approve.
+- The lease also ends when the holder switches to `/pi-discuss` or `/pi-plan`, unpairs, or Pi enters Build, and when the plan is cleared, switched, or completed. Commit before the final task tick, because completing the plan releases the lease.
+- One writer per project: while another live Pi session in the same project is in Build or holds a lease, new requests, approvals, task ticks, `/mode build`, and Pi Build writes are refused with a message naming that session. Release it there with `/build-lease release` or by leaving Build; a session that quits stops counting within about five seconds.
+- Pi Off is not guarded and never takes the writer.
+- After upgrading the package, rerun `/harness` → **Install / repair** so harness hooks use the current checks.
+
 ## Develop from source
 
 From the repository root:
@@ -142,7 +157,8 @@ Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpe
 - Bash and patch-style tools with no path field can still write into a Pi project from a session outside it; the target check covers dedicated edit tools only and this gap is not fixed (F11).
 - Host handling of Cursor `failClosed`, Claude exit-2 guards, and OpenCode plugin-load failure remains unverified; config and runner checks are not host-enforcement proof.
 - Pi Off is unguarded. Pi Review posting requires fresh human Pi approval for each command; decline, no UI/headless execution, or confirmation error blocks posting.
-- Open gaps: Pi Plan fallback without a sandbox can admit unsafe command expansion (F9); leases are per Pi session, not project-wide single-writer locks (F10). Plan acceptance #1/#3 remain unmet pending follow-up.
+- Without a sandbox launcher (for example Linux without bwrap), Pi Discuss runs only single plain read commands, and Pi Plan asks for fresh approval before each test/build or chained read command; decline or headless execution blocks it.
+- One writer per project is derived from live Pi session presence, not a lock. A Pi session whose bridge is inactive is invisible to the check, and if two sessions ever both claim the writer, both are refused until one releases.
 - Out of scope: root/kernel/hypervisor attackers, supply-chain compromise, a human editing config, and cross-user attacks.
 - Use a container or VM for real isolation. See [ADR-0045: threat model and evidence limits](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md) and [ADR-0048: regression coverage limits](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/decisions/ADR-0048-security-regression-corpus.md).
 
