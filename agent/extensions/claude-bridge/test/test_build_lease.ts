@@ -13,6 +13,7 @@ import {
 	otherWriterClaims,
 	ownLeaseBlocker,
 	parseBuildLease,
+	passiveBridgeBlocker,
 	projectWriterHeldMessage,
 	unverifiedWriterBlocker,
 	pruneBuildLeaseRequests,
@@ -279,5 +280,10 @@ assert.equal(ownLeaseBlocker(activeLease), "claude:claude-session (this session'
 assert.match(SELF_PRESENCE_STALE_BLOCKER, /\.pi\/memory\/bridge permissions/);
 assert.doesNotMatch(SELF_PRESENCE_STALE_BLOCKER, /\/build-lease release/);
 assert.match(unverifiedWriterBlocker("check failed closed: boom"), /^an unverified writer \(check failed closed: boom\); retry/);
+// A passive bridge names its reason and points at this session, not at releasing another.
+const passive = passiveBridgeBlocker("Pi session abc already has live bridge owner pid 42.");
+assert.match(passive, /^this Pi session's passive bridge \(Pi session abc already has live bridge owner pid 42\.\); /);
+assert.match(passive, /restart this Pi session/);
+assert.doesNotMatch(passive, /\/build-lease release/);
 
 console.log("claude bridge build lease tests passed");

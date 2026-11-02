@@ -9,7 +9,7 @@ import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryInd
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
-import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
+import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -435,7 +435,10 @@ function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString(
 	presenceInitialized = true;
 }
 
-function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: string; presence: BridgePresence }> {
+// forClaims: writer-claim counting reads presence liberally (drifted permissions
+// still claim, fail closed). Peer restore and listings keep the strict read so they
+// agree with what harness clients can pair with.
+function listLiveNamespaces(projectRoot: string, now = Date.now(), { forClaims = false }: { forClaims?: boolean } = {}): Array<{ id: string; presence: BridgePresence }> {
 	let resolvedProjectRoot: string;
 	try { resolvedProjectRoot = fs.realpathSync(projectRoot); } catch { return []; }
 	const piDir = path.join(resolvedProjectRoot, ".pi");
@@ -453,7 +456,7 @@ function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: 
 			const stat = fs.lstatSync(namespace);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
 		} catch { continue; }
-		const presence = readPresence(path.join(namespace, "presence.json"), id, { requirePrivate: false });
+		const presence = readPresence(path.join(namespace, "presence.json"), id, { requirePrivate: !forClaims });
 		const heartbeat = parseTime(presence?.heartbeatAt);
 		if (presence && heartbeat > 0 && now - heartbeat <= LIVE_TTL_MS && heartbeat <= now + LIVE_TTL_MS) live.push({ id, presence });
 	}
@@ -1005,7 +1008,7 @@ class OwnPresenceMissingError extends Error {}
 // Fails closed: a scan that cannot see this session's own live presence is not trusted.
 function otherLiveWriterClaims(now = Date.now()): WriterClaim[] {
 	if (!activeProjectRoot || !activePiSessionId) throw new Error("Claude bridge is not active in this Pi session");
-	const live = listLiveNamespaces(activeProjectRoot, now);
+	const live = listLiveNamespaces(activeProjectRoot, now, { forClaims: true });
 	if (!live.some(({ id }) => id === activePiSessionId)) throw new OwnPresenceMissingError();
 	return otherWriterClaims(live, activePiSessionId, now);
 }
@@ -1487,10 +1490,11 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			settle(ownLeaseBlocker(buildLease));
 			return;
 		}
-		// ponytail: a session whose bridge is inactive publishes no presence, so the
-		// project-wide check cannot apply here; recorded as a trap, not enforced.
+		// No active bridge: outside a Pi project there is no writer to check. In a Pi
+		// project a passive bridge publishes no presence, so this session would write
+		// while invisible to others; block until it is active again (fail closed).
 		if (!activeProjectRoot || !activePiSessionId) {
-			settle(undefined);
+			settle(passiveReason ? passiveBridgeBlocker(passiveReason) : undefined);
 			return;
 		}
 		settle(projectWriterBlocker());

@@ -154,6 +154,10 @@ export function ownLeaseBlocker(lease: BuildLease): string {
 	return `${buildLeaseHolderLabel(lease)} (this session's harness lease); run /build-lease release here`;
 }
 
+export function passiveBridgeBlocker(reason: string): string {
+	return `this Pi session's passive bridge (${reason}); close the other Pi process that owns this session or restart this Pi session`;
+}
+
 export function unverifiedWriterBlocker(reason: string): string {
 	return `an unverified writer (${reason}); retry, or restart this Pi session if it persists`;
 }
