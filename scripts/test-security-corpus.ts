@@ -41,6 +41,8 @@ const LEASE_STATES = new Set([
 	"stale-heartbeat",
 	"double-paired",
 	"cross-session",
+	"cross-session-pi-build",
+	"cross-session-stale",
 ] as const);
 const STDIN_KINDS = new Set(["empty", "non-json", "array", "oversized"] as const);
 const CRASH_VARIANTS = ["missing", "syntax", "throws"] as const;
@@ -49,7 +51,7 @@ type Column = (typeof COLUMNS)[number];
 type HarnessColumn = "claude" | "cursor" | "opencode";
 type Outcome = "allow" | "wrap" | "ask" | "deny" | "throw";
 type CaseClass = "read" | "write" | "ambiguous";
-type LeaseState = "none" | "holder-self" | "holder-other" | "expired" | "missing-expiry" | "stale-heartbeat" | "double-paired" | "cross-session";
+type LeaseState = "none" | "holder-self" | "holder-other" | "expired" | "missing-expiry" | "stale-heartbeat" | "double-paired" | "cross-session" | "cross-session-pi-build" | "cross-session-stale";
 type StdinKind = "empty" | "non-json" | "array" | "oversized";
 type CrashVariant = (typeof CRASH_VARIANTS)[number];
 type SandboxEvidence = "P11";
@@ -833,6 +835,7 @@ function writePresence(
 	peers: Array<{ harness: HarnessColumn; id: string }>,
 	buildLease?: Record<string, unknown>,
 	heartbeatAt = new Date().toISOString(),
+	mode = "plan",
 ): void {
 	const memory = path.join(ctx.repo, ".pi", "memory");
 	const bridgeRoot = path.join(memory, "bridge");
@@ -855,7 +858,7 @@ function writePresence(
 		schemaVersion: 2,
 		piSessionId,
 		name: `security ${piSessionId}`,
-		mode: "plan",
+		mode,
 		pid: process.pid,
 		startedAt: new Date(Date.now() - 60_000).toISOString(),
 		heartbeatAt,
@@ -900,6 +903,14 @@ function setupLease(testCase: SecurityCase, column: HarnessColumn, ctx: RunnerCo
 		case "cross-session":
 			writePresence(ctx, "pi-security-a", [self], makeLease(self));
 			writePresence(ctx, "pi-security-b", [other], makeLease(other));
+			return;
+		case "cross-session-pi-build":
+			writePresence(ctx, "pi-security-a", [self], makeLease(self));
+			writePresence(ctx, "pi-security-b", [], undefined, new Date().toISOString(), "build");
+			return;
+		case "cross-session-stale":
+			writePresence(ctx, "pi-security-a", [self], makeLease(self));
+			writePresence(ctx, "pi-security-b", [other], makeLease(other), new Date(Date.now() - 6_000).toISOString());
 			return;
 		default:
 			fail(`case ${testCase.id}: unimplemented lease state ${JSON.stringify(state)}`);

@@ -948,6 +948,29 @@
       }
     },
     {
+      "id": "lease-cross-session-pi-build-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "cross-session-pi-build",
+      "expect": {
+        "claude": ["wrap", "deny", "ask", "throw"],
+        "cursor": ["wrap", "deny", "ask", "throw"],
+        "opencode": ["wrap", "deny", "ask", "throw"]
+      }
+    },
+    {
+      "id": "lease-cross-session-stale-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "echo lease-mutation > lease.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "lease": "cross-session-stale",
+      "mutation": "allowed",
+      "expect": { "claude": "allow", "cursor": "allow", "opencode": "allow" }
+    },
+    {
       "id": "claude-mcp-lease-forged-session",
       "class": "ambiguous",
       "kind": "mcp",
@@ -1191,6 +1214,33 @@
       "columns": ["pi-plan"],
       "piLauncher": "none",
       "expect": { "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-newline-write",
+      "class": "write",
+      "kind": "shell",
+      "command": "ls\nprintf blocked > pi-fallback-newline.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-read-chain",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "ls && make test",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-process-substitution",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "cat <(make test)",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
     }
   ]
 }
