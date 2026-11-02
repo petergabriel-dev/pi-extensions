@@ -975,20 +975,25 @@ export default function (pi: ExtensionAPI) {
 				block: true,
 				reason: formatModeBlockReason(currentMode, decision === "confirm"
 					? "unsandboxed test/build command was declined or approval was unavailable; stop and do not retry."
-					: "bash command was blocked; allowed commands were discovery plus human-approved tests/builds/checks."),
+					: "bash command was blocked; without a sandbox, allowed commands were single-line discovery plus human-approved tests/builds/checks."),
+			};
+		}
+
+		if (currentMode === "discuss") {
+			if (isBashAllowedInMode(command, "discuss")) return;
+			return {
+				block: true,
+				reason: formatModeBlockReason(currentMode, "bash command was blocked; without a sandbox, allowed commands were allowlisted read commands and pipes of them."),
 			};
 		}
 
 		const normalized = command.replace(/\s+/g, " ");
-		const allowed = currentMode === "review"
-			? isBashAllowedInMode(normalized, "review")
-			: isBashAllowedInMode(command, "discuss");
-		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || (currentMode === "review" && REVIEW_BASH_DENY.test(normalized));
+		const allowed = isBashAllowedInMode(normalized, "review");
+		const denied = BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized) || REVIEW_BASH_DENY.test(normalized);
 		if (!allowed || denied) {
-			const allowedThen = currentMode === "review" ? "read commands plus approved gh PR commands" : "single read commands (pwd, ls, find, rg, grep, ccc search) without chaining or pipes";
 			return {
 				block: true,
-				reason: formatModeBlockReason(currentMode, `bash command was blocked; allowed commands were ${allowedThen}.`),
+				reason: formatModeBlockReason(currentMode, "bash command was blocked; allowed commands were read commands plus approved gh PR commands."),
 			};
 		}
 	});

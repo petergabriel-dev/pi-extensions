@@ -94,31 +94,19 @@
       "id": "read-pipeline-cat-head",
       "class": "read",
       "kind": "shell",
-      "command": "cat seed.txt | head -n 1",
-      "expect": {
-        "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
-        "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
-      }
+      "command": "cat seed.txt | head -n 1"
     },
     {
       "id": "read-pipeline-cat-wc",
       "class": "read",
       "kind": "shell",
-      "command": "cat seed.txt | wc -l",
-      "expect": {
-        "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
-        "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
-      }
+      "command": "cat seed.txt | wc -l"
     },
     {
       "id": "read-compound",
       "class": "read",
       "kind": "shell",
-      "command": "ls && cat seed.txt",
-      "expect": {
-        "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
-        "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
-      }
+      "command": "ls && cat seed.txt"
     },
     {
       "id": "seed-write-shell",
@@ -1241,6 +1229,105 @@
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
       "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-rg-pre",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "rg --pre cat -l seed .",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-sed-in-place",
+      "class": "write",
+      "kind": "shell",
+      "command": "sed -n -i s/seed/edited/p seed.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-sed-write-command",
+      "class": "write",
+      "kind": "shell",
+      "command": "sed -n 1w pi-fallback-sed.txt seed.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-awk-inplace",
+      "class": "write",
+      "kind": "shell",
+      "command": "awk -i inplace '{print}' seed.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-sort-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "sort -o pi-fallback-sort.txt seed.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-uniq-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "uniq seed.txt pi-fallback-uniq.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-find-fprint",
+      "class": "write",
+      "kind": "shell",
+      "command": "find . -fprint pi-fallback-find.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-git-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "git log --output=pi-fallback-git.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-tree-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "tree -o pi-fallback-tree.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-read-write-redirect",
+      "class": "write",
+      "kind": "shell",
+      "command": "cat <>pi-fallback-rw.txt",
+      "columns": ["pi-discuss", "pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+    },
+    {
+      "id": "pi-fallback-multiline-plan",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "make test\n\n\n\nls",
+      "columns": ["pi-plan"],
+      "piLauncher": "none",
+      "expect": { "pi-plan": "deny" }
     }
   ]
 }

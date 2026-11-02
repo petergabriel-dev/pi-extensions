@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 export const READ_COMMANDS = String.raw`pwd|ls|find|rg|grep|cat|head|tail|wc|jq|tree|diff|stat|file|sort|uniq|column`;
 export const READ_GIT_COMMANDS = String.raw`diff|log|show|status|blame`;
 export const READ_SED_AWK = String.raw`sed\s+-n|awk`;
@@ -19,7 +21,7 @@ export const REVIEW_BASH_ALLOW = new RegExp(
 export const REVIEW_BASH_DENY = /(^|[;&|()]\s*)(curl|wget|nc|ssh|scp)(\s|$)|(^|[;&|()]\s*)gh\s+(pr\s+(merge|close)|repo)(\s|$)/;
 
 export const BASH_MUTATION_DENY = /(^|[;&|()]\s*)(rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|tee|cat\s*>|python|python3|node|perl|ruby|sh|bash|zsh|fish|npm\s+(i|install|add|update|audit\s+fix)|pnpm\s+(i|install|add|update)|yarn\s+(add|install|upgrade)|bun\s+(add|install)|pip\s+install|cargo\s+(add|update|install)|go\s+get|git\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash|apply|am|config)|git\s+diff\b[^;&|]*--output|find\s+.*-delete|find\s+.*-(?:exec|execdir|ok|okdir)\b|xargs|awk\s+.*system\s*\(|(?:format|fmt|fix|write|migrate|migration)(\s|$))|\$\(|`/;
-export const BASH_WRITE_REDIRECT = />>|(^|[^<])>/;
+export const BASH_WRITE_REDIRECT = />>|<>|(^|[^<])>/;
 
 export interface CommandConfirmationUI {
 	confirm(title: string, message?: string): Promise<boolean>;
@@ -68,18 +70,44 @@ function isFallbackDenied(normalized: string): boolean {
 	return BASH_MUTATION_DENY.test(normalized) || BASH_WRITE_REDIRECT.test(normalized);
 }
 
-// A read prefix proves nothing about chained, piped, or substituted commands.
-function isPlainRead(normalized: string): boolean {
-	return DISCUSS_BASH_ALLOW.test(normalized) && !/[;&|<]/.test(normalized);
+type ShellPermission = "allow" | "ask" | "deny";
+type ShellClassifier = (command: string) => { permission?: unknown } | undefined;
+
+// Reuse the shipped Cursor hook's segment classifier, which carries per-command
+// flag checks (rg --pre, sort -o, find -fprint, git --output, ...), instead of a
+// second Pi copy. A missing or throwing classifier denies.
+const requireShipped = createRequire(import.meta.url);
+const cursorClassifyShell: ShellClassifier | undefined = (() => {
+	try {
+		const hook = requireShipped("../../cursor-bridge-client/cursor-readonly-hook.js") as { classifyShell?: unknown };
+		return typeof hook.classifyShell === "function" ? hook.classifyShell as ShellClassifier : undefined;
+	} catch {
+		return undefined;
+	}
+})();
+
+function classifyFallbackShell(command: string): ShellPermission {
+	if (!cursorClassifyShell) return "deny";
+	try {
+		const permission = cursorClassifyShell(command)?.permission;
+		return permission === "allow" || permission === "ask" ? permission : "deny";
+	} catch {
+		return "deny";
+	}
 }
 
-// F9: without a structural sandbox, Plan runs only a single plain read without
-// approval; test/build-classified or compound read commands need fresh human
-// approval. Deny lists run first; approval never overrides them.
+// F9/F12: without a structural sandbox, Pi deny lists run first, then the Cursor
+// classifier decides. Allowlisted reads (and pipes of them) run; other read- or
+// test/build-shaped commands need fresh human approval; everything else denies.
+// Multi-line commands deny so a confirm prompt can never hide a later line.
 export function planFallbackDecision(command: string): PlanFallbackDecision {
-	const normalized = normalizeFallbackCommand(command);
+	const trimmed = command.trim();
+	if (/[\r\n]/.test(trimmed)) return "deny";
+	const normalized = normalizeFallbackCommand(trimmed);
 	if (isFallbackDenied(normalized)) return "deny";
-	if (isPlainRead(normalized)) return "allow";
+	const permission = classifyFallbackShell(trimmed);
+	if (permission === "allow") return "allow";
+	if (permission === "deny") return "deny";
 	return DISCUSS_BASH_ALLOW.test(normalized) || PLAN_BASH_ALLOW.test(normalized) ? "confirm" : "deny";
 }
 
@@ -87,8 +115,8 @@ export function planFallbackDecision(command: string): PlanFallbackDecision {
 export function isBashAllowedInMode(command: string, mode: "discuss" | "plan" | "review"): boolean {
 	if (mode === "plan") return planFallbackDecision(command) === "allow";
 	if (mode === "discuss") {
-		const normalized = normalizeFallbackCommand(command);
-		return !isFallbackDenied(normalized) && isPlainRead(normalized);
+		const trimmed = command.trim();
+		return !isFallbackDenied(normalizeFallbackCommand(trimmed)) && classifyFallbackShell(trimmed) === "allow";
 	}
 	const normalized = command.trim().replace(/\s+/g, " ");
 	const allowed = REVIEW_BASH_ALLOW.test(command.trim());
