@@ -28,7 +28,7 @@ ADR-0043 introduced a Pi-owned Build lease, but lease requests could grant thems
 
 ### Lease bounds and authority
 
-- One peer holds one in-memory lease per Pi session. `expiresAt` is exactly `grantedAt + BUILD_LEASE_TTL_MS` (four hours); the TTL is fixed, not configurable. Presence publishes the expiry. Pi and Claude, Cursor, and OpenCode clients fail closed for expired leases or leases missing valid expiry.
+- One peer holds one in-memory lease per Pi session, and ADR-0051 makes the writer exclusive across sessions: another live session in Pi Build or holding a lease blocks request, approval (re-checked after the confirm), tick, and writes. `expiresAt` is exactly `grantedAt + BUILD_LEASE_TTL_MS` (four hours); the TTL is fixed, not configurable. Presence publishes the expiry. Pi and Claude, Cursor, and OpenCode clients fail closed for expired leases or leases missing valid expiry.
 - Only the active lease holder may tick a saved-plan task through the bridge. Non-holder ticks return `build_lease_required`. Pi's own `workflow_plan_tick` behavior is unchanged.
 - Expiry, holder unpair, holder Discuss/Plan recall, plan clear/change/completion, Pi entering Build, `/build-lease release`, and bridge/session shutdown revoke the lease. Pending requests are pruned on plan/workflow changes and removed on unpair or decline.
 
@@ -108,11 +108,13 @@ Code and harness surfaces:
 - Good: no bridge request self-grants; Pi owns approval, lease state, and task progress; identity is bound at each harness boundary; expired authority fails closed.
 - Bad/risk: approval adds a round trip, four hours may expire mid-build, and requesters must stop and ask for re-approval. Human intent depends on the TUI trust assumption; P11 verified it for the probed read-only states only.
 - Bad/risk: if a harness disappears without unpairing, the lease remains until another lifecycle event or expiry; `/build-lease release` remains the operator escape hatch.
+- Follow-up: per-session leases alone did not ensure one writer per project (ADR-0045 F10); ADR-0051 adds the cross-session check without changing this approval flow.
 
 ## Read when
 
 - changing the human approval UI, Build request protocol, four-hour expiry, lease release, bridge task ticks, or harness identity stamping
 - updating ADR-0043's lease lifecycle or ADR-0045's F1/F2 evidence
+- changing lease exclusivity across Pi sessions (see ADR-0051)
 
 ## Supersedes
 

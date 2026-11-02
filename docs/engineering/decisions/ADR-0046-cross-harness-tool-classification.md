@@ -3,11 +3,11 @@ id: ADR-0046
 title: Cross-harness tool classification and deny-unknown policy
 status: Active
 date: 2026-10-21
-decision: Apply one parity rule to Claude, Cursor, and OpenCode. Known read tools and Pi bridge MCP tools allow, sandboxed shell keeps its existing policy, and every unknown or foreign tool asks or denies instead of passing silently; Cursor classifies shell by allowlisted segments, Claude fails closed on hook errors and installs an exit-2 guard, and OpenCode throws on unlisted tools.
+decision: Apply one parity rule to Claude, Cursor, and OpenCode. Known read tools and Pi bridge MCP tools allow, sandboxed shell keeps its existing policy, and every unknown or foreign tool asks or denies instead of passing silently; Cursor classifies shell by allowlisted segments, Claude fails closed on hook errors and installs an exit-2 guard, and OpenCode throws on unlisted tools. Follow-up: Pi's no-sandbox Discuss/Plan fallback auto-runs only a single plain read, treats newlines as separators, and Plan needs fresh per-command human confirmation for test/build or compound reads (F9, F12).
 why: ADR-0045 proved each harness passed unknown tool names, foreign MCP servers, and chained shell shapes differently. Silent pass-through makes an injected tool name equivalent to an allowlisted read, so the harnesses need one rule with evidence-labeled behavior.
-affects: agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/README.md
-consequences: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance. Read-only is still not enforced because Phase 3 has not closed F1/F2 self-escalation. Deny-unknown can temporarily block an unlisted read tool; the live allowlists matched observed names and need maintenance as harness tools change.
-readWhen: changing harness read allowlists, Cursor shell classification, Claude PreToolUse registration or fail-closed behavior, foreign MCP gating, or OpenCode execute-hook policy
+affects: agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_policy.ts, scripts/security-corpus.json, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/README.md
+consequences: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance. Follow-up closes F9 and F12 in Pi's no-sandbox fallback. Read-only is still not enforced because Phase 3 has not closed F1/F2 self-escalation. Deny-unknown can temporarily block an unlisted read tool; the live allowlists matched observed names and need maintenance as harness tools change.
+readWhen: changing harness read allowlists, Cursor shell classification, Claude PreToolUse registration or fail-closed behavior, foreign MCP gating, OpenCode execute-hook policy, or Pi's no-sandbox Discuss/Plan fallback
 supersedes: None
 extends: ADR-0045
 ---
@@ -100,6 +100,18 @@ Still `not-verified`:
 - Whether Cursor also fires `preToolUse` for shell/MCP tool types; the dedicated events were used.
 - Seatbelt `(allow default)` escape through LaunchServices; not tested destructively.
 
+## Follow-up: Pi no-sandbox fallback (F9, F12)
+
+Applies only when Pi Discuss or Plan has no structural sandbox launcher or wrapping fails; sandboxed paths are unchanged.
+
+- Normalization maps newlines to `;` before collapsing whitespace, so deny lists see every line (F12).
+- Only a single plain read (Discuss allowlist, no `;`, `&`, `|`, or `<`) runs without approval. Discuss denies everything else (F12).
+- Plan sends test/build-classified or compound read commands to `confirmCommand` ("Run without sandbox?"), the same gate as Review posting: sanitized exact command, literal `true` only, no cache; decline, headless, a subagent's cancelled confirm, or a dialog error blocks. Deny lists run first and approval never overrides them (F9).
+- `isBashAllowedInMode` now means "runs without approval" for Discuss and Plan, which the corpus uses to model a no-UI decline.
+- Why approval, not a better parser: ADR-0045 requires deny or human approval where shell safety cannot be established; parsing alone does not establish it.
+- Cost: on hosts without a launcher, piped or chained reads are denied in Discuss and need approval in Plan.
+- Evidence: `test_policy.ts` allow/confirm/deny, newline, chain, substitution, decline, headless, throw, cancel, and non-literal cases **E**; corpus `pi-plan-wildcard-test` and `pi-fallback-*` deny in both lanes **E**; live Plan prompt **N** because macOS always wraps with Seatbelt.
+
 ## Consequences
 
 - Good: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance.
@@ -127,6 +139,10 @@ Code and tests:
 - `agent/opencode-bridge-client/test-opencode-plugin.js`
 - `agent/extensions/harness-setup/setup.ts`
 - `agent/extensions/harness-setup/test/test_setup.ts`
+- `agent/extensions/workflow-modes/policy.ts`
+- `agent/extensions/workflow-modes/index.ts`
+- `agent/extensions/workflow-modes/test/test_policy.ts`
+- `scripts/security-corpus.json`
 
 ## Read when
 
@@ -135,6 +151,7 @@ Code and tests:
 - changing Claude PreToolUse registration, fail-closed behavior, or hook command shape
 - changing foreign MCP or unknown-tool decisions
 - updating the ADR-0045 matrix or Phase 3 lease/identity work
+- changing Pi's no-sandbox Discuss/Plan fallback or its confirmation gate
 
 ## Extends
 
