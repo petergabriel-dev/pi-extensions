@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPlan, planInstall } from "../agent/extensions/harness-setup/setup.ts";
 import { HARNESS_MANIFEST } from "../agent/extensions/harness-setup/manifest.ts";
 import type { Harness } from "../agent/extensions/harness-setup/manifest.ts";
-import { isBashAllowedInMode } from "../agent/extensions/workflow-modes/policy.ts";
+import { planFallbackDecision } from "../agent/extensions/workflow-modes/policy.ts";
 import { detectLauncher, wrapCommand } from "../agent/extensions/workflow-modes/sandbox.ts";
 
 const PACKAGE_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -562,7 +562,10 @@ function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx
 	} catch {
 		// Match workflow-modes: wrapping failure falls back to conservative policy.
 	}
-	return isBashAllowedInMode(command, mode) ? { outcome: "allow", command } : { outcome: "deny" };
+	// Match workflow-modes without a sandbox: Discuss runs no bash; Plan asks a
+	// human for each "confirm" command (never auto-runs) and denies the rest.
+	if (mode === "discuss") return { outcome: "deny" };
+	return planFallbackDecision(command) === "confirm" ? { outcome: "ask" } : { outcome: "deny" };
 }
 
 async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerContext): Promise<RunResult> {

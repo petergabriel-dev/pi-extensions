@@ -6,7 +6,7 @@
       "cursor": "allow",
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
       "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
-      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
+      "pi-plan": { "darwin": "wrap", "linux": ["wrap", "ask"], "sandbox-disabled": "ask" }
     },
     "write": {
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
@@ -256,13 +256,15 @@
       "id": "write-sed-inplace",
       "class": "write",
       "kind": "shell",
-      "command": "sed -i 's/original/mutated/' seed.txt"
+      "command": "sed -i 's/original/mutated/' seed.txt",
+      "expect": { "pi-plan": { "darwin": "wrap", "linux": ["wrap", "ask"], "sandbox-disabled": "ask" } }
     },
     {
       "id": "write-dd",
       "class": "write",
       "kind": "shell",
-      "command": "dd if=seed.txt of=dd.txt"
+      "command": "dd if=seed.txt of=dd.txt",
+      "expect": { "pi-plan": { "darwin": "wrap", "linux": ["wrap", "ask"], "sandbox-disabled": "ask" } }
     },
     {
       "id": "write-xargs",
@@ -286,7 +288,8 @@
       "id": "ambiguous-env",
       "class": "ambiguous",
       "kind": "shell",
-      "command": "env ls"
+      "command": "env ls",
+      "expect": { "pi-plan": { "darwin": "wrap", "linux": ["wrap", "ask"], "sandbox-disabled": "ask" } }
     },
     {
       "id": "claude-tool-edit",
@@ -1242,7 +1245,7 @@
       "command": "make test",
       "columns": ["pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-plan": "deny" }
+      "expect": { "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-newline-write",
@@ -1260,7 +1263,7 @@
       "command": "ls && make test",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-process-substitution",
@@ -1269,7 +1272,7 @@
       "command": "cat <(make test)",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-rg-pre",
@@ -1278,7 +1281,7 @@
       "command": "rg --pre cat -l seed .",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-sed-in-place",
@@ -1287,7 +1290,7 @@
       "command": "sed -n -i s/seed/edited/p seed.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-sed-write-command",
@@ -1296,7 +1299,7 @@
       "command": "sed -n 1w pi-fallback-sed.txt seed.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-awk-inplace",
@@ -1305,7 +1308,7 @@
       "command": "awk -i inplace '{print}' seed.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-sort-output",
@@ -1314,7 +1317,7 @@
       "command": "sort -o pi-fallback-sort.txt seed.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-uniq-output",
@@ -1323,7 +1326,7 @@
       "command": "uniq seed.txt pi-fallback-uniq.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-find-fprint",
@@ -1332,7 +1335,7 @@
       "command": "find . -fprint pi-fallback-find.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-git-output",
@@ -1341,7 +1344,7 @@
       "command": "git log --output=pi-fallback-git.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-tree-output",
@@ -1350,7 +1353,7 @@
       "command": "tree -o pi-fallback-tree.txt",
       "columns": ["pi-discuss", "pi-plan"],
       "piLauncher": "none",
-      "expect": { "pi-discuss": "deny", "pi-plan": "deny" }
+      "expect": { "pi-discuss": "deny", "pi-plan": "ask" }
     },
     {
       "id": "pi-fallback-read-write-redirect",
