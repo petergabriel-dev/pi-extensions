@@ -398,12 +398,17 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	const statusLanding = handlers.get("session_tree")?.({}, modeContext("build"));
 	if (!statuses.at(-1)?.includes("Mode: Plan")) throw new Error("restore landing did not refresh the status bar at once");
 	await statusLanding;
-	// /reload is not a restore: this process already entered Build through the guard.
+	// /reload lands too: after a failed save the branch still ends in Build.
 	operations.length = 0;
 	notifications.length = 0;
 	await handlers.get("session_start")?.({ reason: "reload" }, modeContext("build"));
-	if (operations.some((operation) => operation.action === "append" && operation.type === MODE_ENTRY) || notifications.some((message) => message.includes("Build mode"))) throw new Error("reload landed Build in Plan");
-	if (await toolCall?.({ toolName: "write", input: {} }) !== undefined) throw new Error("reload left Build without its guarded writes");
+	const reloadLanding = operations.filter((operation) => operation.action === "append" && operation.type === MODE_ENTRY);
+	if (reloadLanding.length !== 1 || (reloadLanding[0]?.data as { mode?: string }).mode !== "plan" || !notifications.some((message) => message.includes("Build mode is not restored"))) throw new Error("reload kept a restored Build");
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("reload left Build writable");
+	// A throwing status update during reconstruction must not stop the landing.
+	const throwingStatusUI = { setStatus() { throw new Error("status gone"); }, notify: context.ui.notify };
+	await handlers.get("session_tree")?.({}, { ...modeContext("build"), ui: throwingStatusUI });
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("throwing setStatus left a restored Build writable");
 	// A UI failure after a successful save is not reported as a save failure, and never rejects.
 	const notifyCalls: string[] = [];
 	const throwingUI = { setStatus: context.ui.setStatus, notify(message: string) { notifyCalls.push(message); throw new Error("ui gone"); } };

@@ -138,7 +138,8 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 	currentPlanProgress = taskState?.progress ?? { done: 0, total: 0 };
 	currentPlanNextTask = taskState?.nextTask;
 	planReadNoticeKey = undefined;
-	updateStatus(ctx);
+	// Status is cosmetic: a throwing UI must not stop a restored Build from landing in Plan.
+	try { updateStatus(ctx); } catch { /* best-effort */ }
 }
 
 async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanMarker | undefined> {
@@ -888,11 +889,12 @@ export default function (pi: ExtensionAPI) {
 	// Build guard, so restoring Build lands in Plan synchronously (no hook sees the
 	// restored Build); /mode build re-enters Build through the guard. If the durable
 	// Plan entry cannot be saved, the session still stays in Plan (fail closed).
-	// `/reload` is not a restore: this process entered Build through the guard, and
-	// the per-write guard still applies. This never rejects, so a UI failure cannot
-	// misreport the save or surface as an unhandled rejection.
-	async function landRestoredBuildInPlan(ctx: ExtensionContext, reason?: unknown): Promise<void> {
-		if (currentMode !== "build" || reason === "reload") return;
+	// Every restore lands, `/reload` included: after a failed save the branch still
+	// ends in Build, and a reloaded Build would re-claim the writer unguarded. This
+	// never rejects, so a UI failure cannot misreport the save or surface as an
+	// unhandled rejection.
+	async function landRestoredBuildInPlan(ctx: ExtensionContext): Promise<void> {
+		if (currentMode !== "build") return;
 		currentMode = "plan";
 		try { updateStatus(ctx); } catch { /* status is cosmetic; the mode is already Plan */ }
 		let saved = true;
@@ -907,12 +909,12 @@ export default function (pi: ExtensionAPI) {
 		} catch { /* notification is best-effort */ }
 	}
 
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
-		const landing = landRestoredBuildInPlan(ctx, (event as { reason?: unknown } | undefined)?.reason);
+		const landing = landRestoredBuildInPlan(ctx);
 		await gcSessionPlans(ctx);
 		await landing;
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
