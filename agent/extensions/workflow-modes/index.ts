@@ -617,7 +617,7 @@ Every component task is contract-only (no code skeletons): file path; base compo
 
 Decide taste in Plan using \`impeccable\` (${IMPECCABLE_SKILL_PATH}) and Emil motion skills \`animate\` (${ANIMATE_SKILL_PATH}), \`animation-vocabulary\` (${ANIMATION_VOCABULARY_SKILL_PATH}), and \`find-animation-opportunities\` (${FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH}). Visual input: relevant \`docs/design/reference/\` snapshots only.`;
 
-export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless grilling session for the idea or feature. Ask one main question at a time and provide your recommended answer. If a question can be answered by lightly inspecting the codebase, inspect it instead. Prefer ccc_search for semantic discovery; use read plus light read-only Bash discovery (pwd, ls, find, rg, grep) for exact lookup or fallback. When \`subagent\` is available, use it sparingly with \`agent: "explorer"\` for genuine multi-file or multi-symbol sweeps; keep quick lookups inline. The main agent remains synthesizer and decision-maker. Do not run tests/builds unless the user explicitly asks. Focus on user value, feature boundaries, terminology, edge cases, and how the idea fits existing behavior. Capture durable requirements, decisions, constraints, open questions, and lessons learned from failures with discussion_notes automatically. A lesson must pair a failure with its resolution. Do not implement or produce detailed code-level plans. Do not claim facts are confirmed unless backed by tool evidence or user-provided evidence. Use recall_memory when prior cross-session memory may be relevant. When the idea is shaped enough, softly suggest switching to Plan mode with /mode plan. Ponytail lazy-senior-dev reflex: favor minimalism. Question whether the request itself matches the actual need (YAGNI), separate required behavior from nice-to-haves, and prefer the smallest approach: deletion over addition, boring over clever, fewest files possible. Never trade away input validation at trust boundaries, error handling that prevents data loss, security, accessibility, or explicitly requested features.`;
+export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless grilling session for the idea or feature. Ask one main question at a time and provide your recommended answer. If a question can be answered by lightly inspecting the codebase, inspect it instead. Prefer ccc_search for semantic discovery; use read plus light read-only Bash discovery (pwd, ls, find, rg, grep) for exact lookup or fallback. Without a sandbox, Discuss runs no bash; use the read, grep, find, and ls tools instead. When \`subagent\` is available, use it sparingly with \`agent: "explorer"\` for genuine multi-file or multi-symbol sweeps; keep quick lookups inline. The main agent remains synthesizer and decision-maker. Do not run tests/builds unless the user explicitly asks. Focus on user value, feature boundaries, terminology, edge cases, and how the idea fits existing behavior. Capture durable requirements, decisions, constraints, open questions, and lessons learned from failures with discussion_notes automatically. A lesson must pair a failure with its resolution. Do not implement or produce detailed code-level plans. Do not claim facts are confirmed unless backed by tool evidence or user-provided evidence. Use recall_memory when prior cross-session memory may be relevant. When the idea is shaped enough, softly suggest switching to Plan mode with /mode plan. Ponytail lazy-senior-dev reflex: favor minimalism. Question whether the request itself matches the actual need (YAGNI), separate required behavior from nice-to-haves, and prefer the smallest approach: deletion over addition, boring over clever, fewest files possible. Never trade away input validation at trust boundaries, error handling that prevents data loss, security, accessibility, or explicitly requested features.`;
 
 const PLAN_BASE_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When \`subagent\` is available, default to it with \`agent: "explorer"\` for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Without a sandbox, every bash command needs the user's approval and headless runs cannot approve, so prefer read tools there. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal. Keep input validation, error handling that prevents data loss, security, accessibility, and explicitly requested features non-negotiable.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
 
@@ -888,23 +888,31 @@ export default function (pi: ExtensionAPI) {
 	// Build guard, so restoring Build lands in Plan synchronously (no hook sees the
 	// restored Build); /mode build re-enters Build through the guard. If the durable
 	// Plan entry cannot be saved, the session still stays in Plan (fail closed).
-	async function landRestoredBuildInPlan(ctx: ExtensionContext): Promise<void> {
-		if (currentMode !== "build") return;
+	// `/reload` is not a restore: this process entered Build through the guard, and
+	// the per-write guard still applies. This never rejects, so a UI failure cannot
+	// misreport the save or surface as an unhandled rejection.
+	async function landRestoredBuildInPlan(ctx: ExtensionContext, reason?: unknown): Promise<void> {
+		if (currentMode !== "build" || reason === "reload") return;
 		currentMode = "plan";
+		try { updateStatus(ctx); } catch { /* status is cosmetic; the mode is already Plan */ }
+		let saved = true;
 		try {
 			await Promise.resolve(pi.appendEntry(MODE_ENTRY, { mode: "plan", at: Date.now(), restoredFrom: "build" }));
-			ctx.ui.notify("Build mode is not restored automatically; this session is in Plan. Run /mode build to re-enter Build.", "info");
 		} catch {
-			ctx.ui.notify("Build mode was not restored, and saving the switch to Plan failed; this session stays in Plan. Run /mode build to re-enter Build.", "warning");
+			saved = false;
 		}
+		try {
+			if (saved) ctx.ui.notify("Build mode is not restored automatically; this session is in Plan. Run /mode build to re-enter Build.", "info");
+			else ctx.ui.notify("Build mode was not restored, and saving the switch to Plan failed; this session stays in Plan. Run /mode build to re-enter Build.", "warning");
+		} catch { /* notification is best-effort */ }
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		latestContext = ctx;
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
-		const landing = landRestoredBuildInPlan(ctx);
+		const landing = landRestoredBuildInPlan(ctx, (event as { reason?: unknown } | undefined)?.reason);
 		await gcSessionPlans(ctx);
 		await landing;
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });

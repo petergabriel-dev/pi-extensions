@@ -30,13 +30,20 @@ export function sanitizeReviewCommand(command: string): string {
 	});
 }
 
+// Shows the command exactly as it will run, with control characters escaped and
+// runs of 4+ spaces marked, so padding cannot push part of it out of the dialog.
+// Display only: the original command still runs unchanged.
+export function formatCommandForConfirm(command: string): string {
+	return sanitizeReviewCommand(command).replace(/ {4,}/g, (run) => ` [${run.length} spaces] `);
+}
+
 // Fresh human approval for one exact command: only literal true from an
 // awaited confirm with live UI approves. Never cached; decline, headless,
 // cancel, or dialog error all return false.
 export async function confirmCommand(title: string, command: string, hasUI: boolean, ui?: CommandConfirmationUI): Promise<boolean> {
 	if (hasUI !== true || !ui) return false;
 	try {
-		return (await ui.confirm(title, sanitizeReviewCommand(command))) === true;
+		return (await ui.confirm(title, formatCommandForConfirm(command))) === true;
 	} catch {
 		return false;
 	}

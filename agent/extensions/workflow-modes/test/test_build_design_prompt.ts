@@ -20,13 +20,14 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_FRONTEND_VERIFICATION_PROMPT, BUILD_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
+import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_FRONTEND_VERIFICATION_PROMPT, BUILD_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, DISCUSS_PROMPT, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
 import { promptContextForMode } from "../claude-bridge/index.ts";
 const cwd = process.env.TEST_PROJECT;
 if (!cwd) throw new Error("TEST_PROJECT missing");
 if (PLAN_FRONTEND_PROMPT.length > 2000 || PLAN_REFERENCE_PROMPT.length > 2000) throw new Error("Added Plan prompt text exceeds 2,000 characters");
 if (BUILD_FRONTEND_VERIFICATION_PROMPT.length > 2000 || !BUILD_PROMPT.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("Build frontend verification clause exceeds 2,000 characters or is not composed into BUILD_PROMPT");
+if (!DISCUSS_PROMPT.includes("Without a sandbox, Discuss runs no bash; use the read, grep, find, and ls tools instead.")) throw new Error("Discuss prompt omitted the no-sandbox bash rule");
 for (const part of ["saved plan", "docs/design/components/", "authoritative", "no unplanned taste", "wrong or contradictory", "through Plan", "required spec is missing"]) {
 	if (!BUILD_DESIGN_AWARE_PROMPT.toLowerCase().includes(part.toLowerCase())) throw new Error("Build spec authority omitted " + part);
 }
@@ -108,12 +109,14 @@ const events = {
 };
 let branchEntries: any[] = [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }];
 let failSend = false;
+let failModeAppend = false;
 workflowModesExtension({
 	events,
 	on(name: string, handler: Function) { handlers.set(name, handler); },
 	registerCommand(name: string, command: { handler: Function }) { commands.set(name, command); },
 	registerTool(tool: any) { tools.set(tool.name, tool); },
 	appendEntry(type: string, data: unknown) {
+		if (failModeAppend && type === MODE_ENTRY) throw new Error("append failed");
 		operations.push({ action: "append", type, data });
 		if (type === PLAN_ENTRY) branchEntries.push({ type: "custom", customType: type, data });
 	},
@@ -389,6 +392,30 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	await handlers.get("session_start")?.({}, modeContext("plan"));
 	await handlers.get("session_start")?.({}, modeContext("off"));
 	if (operations.some((operation) => operation.action === "append" && operation.type === MODE_ENTRY) || notifications.some((message) => message.includes("Build mode is not restored"))) throw new Error("restoring Plan or Off changed mode");
+	// The landing refreshes the status bar before it awaits the save.
+	statuses.length = 0;
+	const statusLanding = handlers.get("session_tree")?.({}, modeContext("build"));
+	if (!statuses.at(-1)?.includes("Mode: Plan")) throw new Error("restore landing did not refresh the status bar at once");
+	await statusLanding;
+	// /reload is not a restore: this process already entered Build through the guard.
+	operations.length = 0;
+	notifications.length = 0;
+	await handlers.get("session_start")?.({ reason: "reload" }, modeContext("build"));
+	if (operations.some((operation) => operation.action === "append" && operation.type === MODE_ENTRY) || notifications.some((message) => message.includes("Build mode"))) throw new Error("reload landed Build in Plan");
+	if (await toolCall?.({ toolName: "write", input: {} }) !== undefined) throw new Error("reload left Build without its guarded writes");
+	// A UI failure after a successful save is not reported as a save failure, and never rejects.
+	const notifyCalls: string[] = [];
+	const throwingUI = { setStatus: context.ui.setStatus, notify(message: string) { notifyCalls.push(message); throw new Error("ui gone"); } };
+	await handlers.get("session_tree")?.({}, { ...modeContext("build"), ui: throwingUI });
+	if (notifyCalls.length !== 1 || !notifyCalls[0]?.includes("Build mode is not restored automatically")) throw new Error("notify failure was misreported as a save failure");
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("landing with a throwing notify left Build writable");
+	// A failed save still lands in Plan and says so.
+	failModeAppend = true;
+	warnings.length = 0;
+	await handlers.get("session_tree")?.({}, modeContext("build"));
+	failModeAppend = false;
+	if (!warnings.some((message) => message.includes("saving the switch to Plan failed"))) throw new Error("failed landing save was not reported");
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("failed landing save left Build writable");
 	await commands.get("mode")?.handler("build", context);
 	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");
