@@ -884,12 +884,29 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Re-emit state on session restore so late-loaded extensions can sync
+	// A restored session must never claim the project writer without passing the
+	// Build guard, so restoring Build lands in Plan synchronously (no hook sees the
+	// restored Build); /mode build re-enters Build through the guard. If the durable
+	// Plan entry cannot be saved, the session still stays in Plan (fail closed).
+	async function landRestoredBuildInPlan(ctx: ExtensionContext): Promise<void> {
+		if (currentMode !== "build") return;
+		currentMode = "plan";
+		try {
+			await Promise.resolve(pi.appendEntry(MODE_ENTRY, { mode: "plan", at: Date.now(), restoredFrom: "build" }));
+			ctx.ui.notify("Build mode is not restored automatically; this session is in Plan. Run /mode build to re-enter Build.", "info");
+		} catch {
+			ctx.ui.notify("Build mode was not restored, and saving the switch to Plan failed; this session stays in Plan. Run /mode build to re-enter Build.", "warning");
+		}
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
+		const landing = landRestoredBuildInPlan(ctx);
 		await gcSessionPlans(ctx);
+		await landing;
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 	pi.on("session_tree", async (_event, ctx) => {
@@ -897,6 +914,7 @@ export default function (pi: ExtensionAPI) {
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
+		await landRestoredBuildInPlan(ctx);
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
 

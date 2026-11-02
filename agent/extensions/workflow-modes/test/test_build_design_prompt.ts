@@ -127,8 +127,16 @@ const context = {
 	sessionManager: { getBranch: () => branchEntries, getSessionId: () => "session-test" },
 	ui: { setStatus(key: string, message: string) { statuses.push(key + ":" + message); }, notify(message: string, level?: string) { notifications.push(message); if (level === "warning") warnings.push(message); } },
 };
-handlers.get("session_start")?.({}, context);
-handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (result: unknown) => {
+Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
+	// Restoring a Build branch lands in Plan durably, so it never claims the writer unguarded.
+	const landed = operations.find((operation) => operation.action === "append" && operation.type === MODE_ENTRY)?.data as { mode?: string; restoredFrom?: string } | undefined;
+	if (landed?.mode !== "plan" || landed.restoredFrom !== "build") throw new Error("restored Build did not durably land in Plan");
+	if (notifications.filter((message) => message.includes("Build mode is not restored")).length !== 1) throw new Error("restored Build did not notify exactly once");
+	operations.length = 0;
+	notifications.length = 0;
+	await commands.get("mode")?.handler("build", context);
+	return handlers.get("before_agent_start")?.({ systemPrompt: "BASE" });
+}).then(async (result: unknown) => {
 	const value = result as { message?: ReturnType<typeof composeModeMessage>; systemPrompt?: string };
 	if (value.message?.content !== "[workflow-modes] Active workflow mode: Build.") throw new Error("before_agent_start omitted active mode message");
 	if (!value.systemPrompt?.startsWith("BASE")) throw new Error("before_agent_start omitted system prompt");
@@ -368,7 +376,20 @@ handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }).then(async (resul
 			if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error(mode + " " + toolName + " was blocked");
 		}
 	}
-	handlers.get("session_start")?.({}, modeContext("build"));
+	// Restoring a Build branch lands in Plan; Build is entered only through the guarded /mode build.
+	await handlers.get("session_start")?.({}, modeContext("build"));
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("restored Build session allowed a write");
+	operations.length = 0;
+	notifications.length = 0;
+	await handlers.get("session_tree")?.({}, modeContext("build"));
+	const treeLanding = operations.filter((operation) => operation.action === "append" && operation.type === MODE_ENTRY);
+	if (treeLanding.length !== 1 || (treeLanding[0]?.data as { mode?: string }).mode !== "plan") throw new Error("tree navigation into Build did not land in Plan");
+	operations.length = 0;
+	notifications.length = 0;
+	await handlers.get("session_start")?.({}, modeContext("plan"));
+	await handlers.get("session_start")?.({}, modeContext("off"));
+	if (operations.some((operation) => operation.action === "append" && operation.type === MODE_ENTRY) || notifications.some((message) => message.includes("Build mode is not restored"))) throw new Error("restoring Plan or Off changed mode");
+	await commands.get("mode")?.handler("build", context);
 	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");
 	}
