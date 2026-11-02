@@ -232,7 +232,7 @@ The runner does not launch Claude Code, Cursor, OpenCode, or Pi CLIs; it does no
 
 Add cases by editing only `scripts/security-corpus.json`: assign a unique id, class, kind, expected outcomes, and columns where needed. For executable shell cases, loader lexical lint rejects recognized absolute-path forms except `/dev/null`, plus `~`, `$HOME`, and `..` references; this is not shell-level containment. Mark uncontained or UI-injection cases `execute: false`. Keep runnable adversarial text in corpus JSON; refer to cases by ID only in docs and ADRs.
 
-Use `knownGap: "F<n>"` only for reproduced, documented findings. Every targeted column on a known-gap case must carry an explicit `expect`; class defaults do not count. Current F9 `pi-plan-wildcard-test` pins `piLauncher: "none"` and explicit `deny`; F10 `lease-cross-session-write` records explicit safe outcomes for each target column. A case counts as known gap only while actual behavior differs from expected safe outcome. If it starts matching, runner fails with `gap closed: remove knownGap marker`; remove marker and keep safe expectation as regression check. Keep markers synchronized with ADR-0045 findings; do not add a gap without a finding.
+Use `knownGap: "F<n>"` only for reproduced, documented findings. Every targeted column on a known-gap case must carry an explicit `expect`; class defaults do not count. No known gaps remain: F9 `pi-plan-wildcard-test` and F10 `lease-cross-session-write` now pass as regression checks. A case counts as known gap only while actual behavior differs from expected safe outcome. If it starts matching, runner fails with `gap closed: remove knownGap marker`; remove marker and keep safe expectation as regression check. Keep markers synchronized with ADR-0045 findings; do not add a gap without a finding.
 
 Useful focused commands:
 
@@ -292,6 +292,8 @@ done
 
 External `/pi-build` needs an active saved plan, paired harness peer, and Pi outside Build. First request returns `build_lease_pending` with no writes; only interactive Pi `/build-lease approve` can grant after confirmation and fresh plan/pairing/mode/holder checks. Approve the exact short id shown, then rerun `/pi-build`; headless Pi returns `build_lease_no_approval` without recording a request. A grant expires at `expiresAt = grantedAt + 4 hours`; hooks require fresh presence, unexpired lease, and matching host identity. Only the active holder may tick tasks; a non-holder or expired lease returns `build_lease_required`. `/build-lease` shows holder, remaining time, and pending requests; `/build-lease release` clears the lease. Holder Discuss/Plan recall or unpair, plan clear/switch/completion, Pi Build mode, expiry, and bridge/session lifecycle revoke it. Expiry mid-build denies the next write or tick; stop and ask for re-approval. Pi `/mode build` is blocked while leased; Pi Off is intentionally unguarded. Commit before the final task tick because completion releases the lease.
 
+One writer per project: while another live Pi session in the same project is in Build or holds a lease, lease requests return `build_lease_held`, `/build-lease approve` refuses with a `Project writer held by …` warning (checked before and after the confirm), ticks return `build_lease_required`, `/mode build` is blocked, and Pi Build writes are refused, each naming the other session's short id. `/build-lease` lists the conflict as `Project writer conflict`. Release it in that session with `/build-lease release` or by leaving Build; a quit or crashed session stops counting once its presence is stale (five seconds). If two claims ever coexist, every claimant is denied until one releases. After upgrading the package, run `/harness` → Install / repair so harness hooks use the current check.
+
 ## Isolated live bridge protocol test
 
 Core protocol test writes discussion notes, saved-plan state, and personal memory. Never point it at normal user state or the current project bridge. `PI_CODING_AGENT_DIR` is honored by workflow plan storage and personal memory, so use a disposable agent root. Use two terminals and a disposable project marker.
@@ -340,6 +342,10 @@ ps -ax -o pid=,command= | grep -F "/path/to/PI_PROJECT_DIR" | grep '[p]i ' || tr
 ```
 
 Both commands should print nothing. Do not signal the current Pi, delete its bridge state, or leave temporary Pi, tmux, or bridge processes running after tests.
+
+Run each core protocol pass against a fresh Pi session: a rerun in the same session inherits the previous saved plan and fails the no-plan precondition. Run the `node` command from the repository root. Its two non-Pi `Edit` checks currently fail because the test predates the hook's missing-`file_path` denial (see traps).
+
+Cross-session acceptance uses the same disposable directories but two Pi sessions. Create the directories and copied credentials without an exit trap, launch Pi from source in both terminals with the same `PI_CODING_AGENT_DIR` and project, and remove both directories only after both Pi processes exit. Check that Build in one session blocks `/mode build` in the other and names it, that `/build-lease` shows the conflict, and that leaving Build or quitting frees the other session.
 
 ## Installed-package harness setup
 
@@ -423,7 +429,7 @@ Repository `.cursor/mcp.json`, `.cursor/hooks.json`, and bridge command template
 4. If real Cursor does not discover global commands, use project-local copies of packaged `agent/harness-commands/cursor/pi-*.md` in `.cursor/commands/`. Real global-command discovery remains unverified.
 5. Verify recall/capture/save plus `read_plan_tasks`/`tick_plan_task` through `pi-claude-bridge`.
 6. Before approval, verify shell/MCP policy and `Write` denial; pending approval must not authorize writes. After approving the exact short id in Pi, verify only the matching holder is allowed. Forged identity and expired/missing-expiry lease stay denied; only the holder may tick.
-7. Pi `/build-lease` shows holder, remaining time, and pending requests; use `/build-lease release` when needed. Pi `/mode build` is blocked while leased.
+7. Pi `/build-lease` shows holder, remaining time, pending requests, and any project writer conflict; use `/build-lease release` when needed. Pi `/mode build` is blocked while leased or while another live session holds the project writer.
 
 Focused hook gates:
 
@@ -440,7 +446,7 @@ Use `/harness` to install/repair the user-global plugin, MCP config, and `pi-*` 
 2. In Pi, run `/harness`, choose OpenCode → **Install / repair**, inspect the preview, and confirm.
 3. Open the same project root in OpenCode.
 4. Use `/pi-discuss` or `/pi-plan` for read-only work, then `/pi-build` to request a lease. On `build_lease_pending`, stop before edits or shell and ask the user to approve the exact short id in interactive Pi; rerun `/pi-build` only after approval. Headless Pi cannot approve. Build templates search Code Mode before each bridge MCP call; do not call the exposed MCP tool directly or supply a model-invented session identity.
-5. Pi `/build-lease` shows holder, remaining time, and pending requests; use `/build-lease release` to revoke a stale holder. Leases expire after four hours; expiry mid-build denies the next write or tick and requires re-approval. Pi `/mode build` is refused while a lease is held.
+5. Pi `/build-lease` shows holder, remaining time, pending requests, and any project writer conflict; use `/build-lease release` to revoke a stale holder. Leases expire after four hours; expiry mid-build denies the next write or tick and requires re-approval. Pi `/mode build` is refused while a lease is held or another live session holds the project writer.
 6. Phase 3 approval/write flow passed in operator-reported isolated acceptance (ADR-0047). OpenCode subagent `sessionID` inheritance remains not-verified; unit tests do not establish it.
 
 ## Cursor-neutral workflow
@@ -505,7 +511,7 @@ command -v gh
 gh auth status
 ```
 
-Review mode keeps filesystem read-only, allows only scoped read/approved `gh` commands, and drafts verdict first. Each admitted `gh pr review` or `gh pr comment` command requires a fresh confirmation showing the sanitized original command; only literal `true` from `ctx.ui.confirm` with `ctx.hasUI === true` authorizes that invocation. Approval is never cached. Decline, missing UI/headless execution, or dialog error blocks posting (`agent/extensions/workflow-modes/policy.ts:42-49`; `agent/extensions/workflow-modes/index.ts:888-904`). Subagent `confirm` requests are cancelled, while `select`/`subagent_message` answers are not posting approval (`agent/extensions/subagents/launch.ts:424-435, 990-1001`; `agent/extensions/subagents/index.ts:1122-1130`). After any block, stop; do not retry or rephrase the command to bypass the gate.
+Review mode keeps filesystem read-only, allows only scoped read/approved `gh` commands, and drafts verdict first. Each admitted `gh pr review` or `gh pr comment` command requires a fresh confirmation showing the sanitized original command; only literal `true` from `ctx.ui.confirm` with `ctx.hasUI === true` authorizes that invocation. Approval is never cached. Decline, missing UI/headless execution, or dialog error blocks posting (`confirmCommand`/`confirmReviewPost` in `agent/extensions/workflow-modes/policy.ts`; Review branch of the `tool_call` handler in `agent/extensions/workflow-modes/index.ts`). Plan without a sandbox launcher uses the same `confirmCommand` gate, titled "Run without sandbox?", for test/build-classified or compound read commands; Discuss without a launcher allows only a single plain read. Subagent `confirm` requests are cancelled, while `select`/`subagent_message` answers are not posting approval (`agent/extensions/subagents/launch.ts:424-435, 990-1001`; `agent/extensions/subagents/index.ts:1122-1130`). After any block, stop; do not retry or rephrase the command to bypass the gate.
 
 Automated policy tests use stub UIs to check sanitizer and fail-closed outcomes (`agent/extensions/workflow-modes/test/test_policy.ts:59-114`); they do not prove the interactive dialog or an actual user's decline. Manual interactive decline verification remains explicitly deferred; do not claim manual or CI proof. Unit/typecheck success also does not prove live GitHub access.
 
