@@ -22,7 +22,7 @@ Five surfaces can act on a Pi project: Pi main in a workflow mode, Pi subagents,
 - Pi subagents receive an explicit toolset validated by `agent/extensions/subagents/policy.ts`.
 - Harness clients get a read-only default and a Build lease from ADR-0043.
 
-This ADR records what each surface decides, labels the evidence, and sets target policy states. Findings close in ADR-0046 (F3-F6, F9, F12, F13), ADR-0047 (F1/F2), and ADR-0051 (F10); Phase 5 closes F7 and accepts F8.
+This ADR records what each surface decides, labels the evidence, and sets target policy states; Findings says where each closes.
 
 ## Adversary and out of scope
 
@@ -67,7 +67,7 @@ Discovery and authorization use two separate roots. Both are required for a cohe
 - Project discovery ignores `~/.pi`: a marker counts only when its parent realpath differs from `realpath(os.homedir())`. Without the exclusion, every harness started under `$HOME` without a nearer marker (an Open Design workspace, for example) inherited Pi read-only enforcement.
 - A dedicated edit tool (Claude `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, Cursor `preToolUse` tools carrying `path`/`file_path`/`target_file`, OpenCode `edit`/`write`) resolves its target against the hook cwd, realpaths the deepest existing ancestor, and finds the nearest non-home Pi root. A target root equal to the cwd root keeps that harness row's existing behavior; a different target root requires that root's own lease and denies otherwise. Relative and symlinked targets therefore cannot smuggle a foreign Pi write.
 - Missing target paths fail closed where the previous behavior was an allow. Inside a Pi project the existing lease/deny path still decides, so in-project behavior is unchanged.
-- The check covers dedicated edit tools only. Bash and patch-style tools with no path field can still write into a Pi project from a session outside it; F11 records this as an accepted limit, not fixed behavior.
+- The check covers dedicated edit tools only. Bash and patch-style tools with no path field can still write into a Pi project from a session outside it, and Pi Build edits are not target-checked; F11 records both as an accepted limit, not fixed behavior.
 
 ## Policy states
 
@@ -139,15 +139,15 @@ Rows reflect current code and live acceptance after ADR-0046, ADR-0047, ADR-0051
 | F6 | Foreign MCP gating diverges: Claude passes all, Cursor checks names, OpenCode gates four tool names | Medium | `pi-readonly-hook.js:159` **E**, `cursor-readonly-hook.js:72-78` **E**, `pi-opencode-plugin.js:8-13` **E** | 2 |
 | F7 | Review posting commands are in the shell allow-list and require per-command Pi confirmation before wrapping | Medium | `agent/extensions/workflow-modes/test/test_policy.ts` helper cases executed **E**; hook integration in `agent/extensions/workflow-modes/index.ts` confirmed by source inspection **C**; live interactive decline **N** (manual check deferred) | 5 — closed |
 | F8 | Seatbelt profile is `(allow default)` plus denies; LaunchServices escape is a hypothesis, not demonstrated | Low | profile text **E**; P11 cases `ui-apple-events-keystroke`, `ui-cmux-send-keys`, `ui-tiocsti`: Claude/OpenCode blocked, Cursor asked, sink empty **E**; LaunchServices escape **N** | 5 — accepted limit |
-| F9 | Pi Plan regex fallback admits test/build-classified commands without a structural sandbox (closed by ADR-0046 follow-up) | Medium | `planFallbackDecision` confirm gate; `pi-plan-wildcard-test` denies without UI **E**; live prompt **N** (macOS always wraps) | follow-up — closed |
+| F9 | Pi Plan regex fallback admits test/build-classified commands without a structural sandbox (closed by ADR-0046 follow-up) | Medium | `planFallbackDecision` confirm gate; corpus `pi-plan-wildcard-test` asks **E**; live prompt **N** (macOS always wraps) | follow-up — closed |
 | F10 | Independent Pi-session Build leases do not ensure project-wide single-writer behavior (closed by ADR-0051) | Medium | cross-session lease and Pi Build corpus cases deny on all three harnesses **E**; operator-reported two-session live checks **E** | follow-up — closed |
-| F11 | Bash and patch-style tools with no path field can write into a Pi project from a non-Pi session; target checks cover dedicated edit tools only | Medium | foreign-target, relative, and symlink edit cases deny **E**; path-less tools keep their previous behavior **C** | accepted limit |
-| F12 | No-sandbox Discuss/Plan fallback trusted read-command prefixes: newlines, chains, substitutions, `<>`, and writing flags on allowlisted reads passed, and the Plan prompt could hide lines (closed by ADR-0046 follow-up) | Medium | policy probes allowed these shapes before the fix **E**; approval-only fallback (Discuss no bash, Plan confirms), `pi-fallback-*` and Pi read defaults deny without UI in both lanes **E** | follow-up — closed |
-| F13 | Cursor shell classifier's bad-flag checks let allowlisted reads write or execute (`rg --hostname-bin`, `sort` long-option abbreviations and `--compress-program`, `uniq -` output) (closed by ADR-0046 follow-up) | High | `classifyShell` returned allow before the fix **E**; per-command safe-flag lists ask; hook tests and `shell-*` corpus cases **E** | follow-up — closed |
+| F11 | Bash and patch-style tools with no path field can write into a Pi project from a non-Pi session; target checks cover dedicated edit tools only. Pi Build in one Pi project can edit files in another whose writer is held | Medium | foreign-target, relative, and symlink edit cases deny **E**; path-less tools keep their previous behavior **C**; the Pi Build guard checks only its own project **C** | accepted limit |
+| F12 | No-sandbox Discuss/Plan fallback trusted read-command prefixes: newlines, chains, substitutions, `<>`, and writing flags on allowlisted reads passed, and the Plan prompt could hide lines (closed by ADR-0046 follow-up) | Medium | policy probes allowed these shapes before the fix **E**; approval-only fallback (Discuss no bash, Plan confirms) **E**; corpus models Plan with `planFallbackDecision`: multi-line, `<>`, and deny-listed deny, others ask, both lanes **E** | follow-up — closed |
+| F13 | Cursor shell classifier's bad-flag checks let allowlisted reads write or execute (`rg --hostname-bin`, `sort` long-option abbreviations and `--compress-program`, `uniq -` output), and unquoted globs expanded after classification (closed by ADR-0046 follow-up) | High | `classifyShell` returned allow before the fix **E**; per-command safe-flag lists and unquoted `*`/`?`/`[` ask; hook tests and `shell-*` corpus cases **E** | follow-up — closed |
 
-F3-F6 close in Phase 2 (ADR-0046); F1/F2 in Phase 3 (ADR-0047); Phase 4 hardening under ADR-0048; F7 closes and F8 is accepted in Phase 5. Follow-up closes F9, F12, F13 (ADR-0046) and F10 (ADR-0051); two code reviews of that follow-up found flag-writing reads, a subagent bypass, and the F13 gaps, all now fixed and pinned. Plan acceptance #1 and #3 are met, with F11 as a recorded accepted scope limit: dedicated edit targets are checked, path-less Bash and patch tools are not. Acceptance #4 stays partial: host handling of Cursor `failClosed`, Claude hook timeout, and OpenCode plugin-load failure is **N**. F7 evidence is bounded: helper cases **E**, hook integration **C**, live interactive decline **N**.
+F3-F6 close in Phase 2 (ADR-0046); F1/F2 in Phase 3 (ADR-0047); Phase 4 hardening under ADR-0048; F7 closes and F8 is accepted in Phase 5. Follow-up closes F9, F12, F13 (ADR-0046) and F10 (ADR-0051); three code reviews of that follow-up found flag-writing reads, a subagent bypass, the F13 gaps, and glob expansion, all now fixed and pinned. Plan acceptance #1 and #3 are met, with F11 as a recorded accepted scope limit: dedicated harness edit targets are checked; path-less Bash and patch tools, and Pi Build edits into another Pi project, are not. Acceptance #4 stays partial: host handling of Cursor `failClosed`, Claude hook timeout, and OpenCode plugin-load failure is **N**.
 
-The P11 UI cases `ui-apple-events-keystroke`, `ui-cmux-send-keys`, and `ui-tiocsti` remain `execute: false` with `sandboxEvidence: "P11"`; they are not known gaps. Claude/OpenCode blocked the probes, Cursor asked, and the sink stayed empty.
+The F8 P11 UI cases stay `execute: false` with `sandboxEvidence: "P11"`; they are not known gaps.
 
 ## Consequences
 
@@ -155,7 +155,7 @@ The P11 UI cases `ui-apple-events-keystroke`, `ui-cmux-send-keys`, and `ui-tiocs
 - Good: the matrix separates decision evidence from target policy, so a known defect cannot be mistaken for intended behavior.
 - Good: trust boundaries are explicit, so later identity fixes have one reference.
 - Bad/risk: remaining `not-verified` cells stay open; none may be reported as fixed.
-- Bad/risk: F11 is an accepted limit. A non-Pi session can still write into a Pi project through Bash or a patch tool that carries no path field; only dedicated edit tools are scoped by target.
+- Bad/risk: F11 is an accepted limit. A non-Pi session can still write into a Pi project through Bash or a patch tool that carries no path field; only dedicated edit tools are scoped by target, and Pi Build is not target-checked at all.
 - Bad/risk: live interactive decline, CI, and full-plan acceptance evidence remain incomplete; helper tests and source inspection do not establish them.
 - Bad/risk: every bridge recall ships this ADR into harness context, so bypass descriptions stay structural and non-runnable.
 
