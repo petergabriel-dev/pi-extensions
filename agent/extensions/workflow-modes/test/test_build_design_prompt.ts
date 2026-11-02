@@ -454,10 +454,16 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	guardMode = "unblocked";
 	handlers.get("session_start")?.({}, modeContext("discuss"));
 	const readEvent = { toolName: "bash", input: { command: "rg workflow-mode-no-match" } };
-	if (await toolCall?.(readEvent) !== undefined) throw new Error("Discuss read command was blocked");
+	const readResult = await toolCall?.(readEvent) as { block?: boolean; reason?: string } | undefined;
 	const expectedWrap = wrapCommand("rg workflow-mode-no-match", { cwd: process.cwd() });
-	if (readEvent.input.command !== expectedWrap.command) throw new Error("wrapped command was not passed through unchanged");
-	if (readEvent.input.command.includes("Hint: editing requires") || readEvent.input.command.includes("status=$?")) throw new Error("wrapped command retained bash hint suffix");
+	if (expectedWrap.wrapped) {
+		if (readResult !== undefined) throw new Error("Discuss read command was blocked");
+		if (readEvent.input.command !== expectedWrap.command) throw new Error("wrapped command was not passed through unchanged");
+		if (readEvent.input.command.includes("Hint: editing requires") || readEvent.input.command.includes("status=$?")) throw new Error("wrapped command retained bash hint suffix");
+	} else if (readResult?.block !== true || !readResult.reason?.includes("Discuss does not run bash") || readEvent.input.command !== "rg workflow-mode-no-match") {
+		// Hosts without a launcher (Linux CI without bwrap): unsandboxed Discuss runs no bash.
+		throw new Error("unsandboxed Discuss read command was not blocked unchanged");
+	}
 	handlers.get("session_start")?.({}, modeContext("review"));
 	const reviewBlock = await toolCall?.({ toolName: "bash", input: { command: "curl example.com" } }) as { reason?: string };
 	if (!reviewBlock.reason?.startsWith("bash command was blocked;")) throw new Error("Review block reason was not past-tense");

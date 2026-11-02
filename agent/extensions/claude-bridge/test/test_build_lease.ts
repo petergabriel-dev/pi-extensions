@@ -99,7 +99,8 @@ const heldByOther = requestBuildLease(activeLease, null, cursor, workflow, now +
 expectRefusal(heldByOther, "build_lease_held");
 assert.match(heldByOther.message, /claude:claude-session/);
 // A harness holder cannot run Pi commands, so the refusal points at Pi itself.
-assert.match(heldByOther.message, /run \/build-lease release in Pi to revoke it, then retry\./);
+// It warns that release ends the holder's writes and that the retry needs a fresh approval.
+assert.match(heldByOther.message, /If that session is done, run \/build-lease release in Pi \(this ends its writes\), then request again and approve the new request with \/build-lease approve\./);
 assert.doesNotMatch(heldByOther.message, /ask that holder/);
 
 // A same-peer lease for another plan does not block a fresh request.

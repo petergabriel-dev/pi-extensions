@@ -81,7 +81,7 @@ function piBuildingRefusal(): BuildLeaseRefusal {
 function heldRefusal(lease: BuildLease): BuildLeaseRefusal {
 	return refusal(
 		"build_lease_held",
-		`Build lease held by ${buildLeaseHolderLabel(lease)}; run /build-lease release in Pi to revoke it, then retry.`,
+		`Build lease held by ${buildLeaseHolderLabel(lease)}. If that session is done, run /build-lease release in Pi (this ends its writes), then request again and approve the new request with /build-lease approve.`,
 	);
 }
 
