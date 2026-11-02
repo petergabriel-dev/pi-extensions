@@ -865,6 +865,38 @@
       "expect": { "opencode": "throw" }
     },
     {
+      "id": "shell-rg-hostname-bin",
+      "class": "write",
+      "kind": "shell",
+      "command": "rg --hostname-bin=true seed .",
+      "columns": ["claude", "cursor", "opencode"],
+      "mutation": "none"
+    },
+    {
+      "id": "shell-sort-abbreviated-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "sort --o pi-shell-sort.txt seed.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "mutation": "none"
+    },
+    {
+      "id": "shell-sort-compress-program",
+      "class": "write",
+      "kind": "shell",
+      "command": "sort --compress-program=true seed.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "mutation": "none"
+    },
+    {
+      "id": "shell-uniq-stdin-output",
+      "class": "write",
+      "kind": "shell",
+      "command": "uniq - pi-shell-uniq.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "mutation": "none"
+    },
+    {
       "id": "lease-none-write",
       "class": "write",
       "kind": "shell",

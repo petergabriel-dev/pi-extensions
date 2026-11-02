@@ -129,6 +129,56 @@ test("hidden writer flags ask", () => {
 	]) assert.equal(classifyShell(command).permission, "ask", command);
 });
 
+test("only safe-listed flags pass for rg, sort, uniq, find, tree, and git", () => {
+	// Review findings: writers and executors missed by bad-flag lists.
+	for (const command of [
+		"rg --hostname-bin=make x .",
+		"rg --hostname-bin make x .",
+		"rg -z pattern .",
+		"rg --pre-glob '*.gz' x .",
+		"sort --o README.md seed.txt",
+		"sort --outp=x y",
+		"sort -S 1K --compress-program=make f",
+		"sort -T /tmp f",
+		"sort -ro out f",
+		"uniq - out.txt",
+		"uniq -- - out.txt",
+		"uniq -c a b",
+		"find . -fprint0 out",
+		"find . -fprintf out %p",
+		"find . -okdir echo +",
+		"tree -R",
+		"tree -H . -o out.html",
+		"git log -c",
+		"git log --textconv",
+		"git show --show-signature",
+		"git diff --no-index a b",
+		"git log --format",
+		"rg -e --pre x .",
+	]) assert.equal(classifyShell(command).permission, "ask", command);
+	// Common safe forms stay allowed.
+	for (const command of [
+		"rg -n --hidden -g '*.ts' pattern agent",
+		"rg -iC2 --type js pattern",
+		"rg --files",
+		"sort -rn -k2,2 data.txt",
+		"sort -t, -k1 file",
+		"uniq -c",
+		"uniq input.txt",
+		"uniq -",
+		"find . -name '*.ts' -type f -maxdepth 2",
+		"find . -path ./node_modules -prune -o -print",
+		"tree -L 2 -I node_modules",
+		"tree -aL 2 --dirsfirst",
+		"git log --oneline -5",
+		"git log -n 10 --stat --format=%H",
+		"git diff --cached --name-only",
+		"git show -s HEAD~1",
+		"git status --short -b",
+		"git blame -w -L 10,20 file.ts",
+	]) assert.equal(classifyShell(command).permission, "allow", command);
+});
+
 test("dynamic and nested shell syntax asks", () => {
 	for (const command of [
 		"rg $(cat list) .",
