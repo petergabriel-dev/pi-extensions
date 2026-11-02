@@ -160,6 +160,12 @@ function leaseHint(projectRoot) {
 	return `Request a Build lease with /pi-build in ${projectRoot}, then approve it in Pi with /build-lease approve.`;
 }
 
+// Another session's writer claim wins over the generic next step: a lease request
+// or /mode build would be refused until that claim is released.
+function nextStep(projectRoot, sessionId, fallback) {
+	return bridgeClient.writerConflictHint(projectRoot, bridgeClient.isSafeId(sessionId) ? { harness: "claude", id: sessionId } : null) ?? fallback;
+}
+
 const EDIT_TARGET_FIELDS = { Edit: "file_path", MultiEdit: "file_path", Write: "file_path", NotebookEdit: "notebook_path" };
 
 function editTargetDecision(input, toolName, cwdRoot) {
@@ -175,7 +181,7 @@ function editTargetDecision(input, toolName, cwdRoot) {
 	if (!targetRoot) return null;
 	if (cwdRoot && bridgeClient.realpathDeepest(cwdRoot) === targetRoot) return null;
 	if (bridgeClient.holdsBuildLease(targetRoot, { harness: "claude", id: input.session_id })) return {};
-	return deny(`${toolName} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${leaseHint(targetRoot)}`);
+	return deny(`${toolName} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${nextStep(targetRoot, input.session_id, leaseHint(targetRoot))}`);
 }
 
 function main() {
@@ -214,7 +220,7 @@ function main() {
 	} catch {}
 
 	if (MUTATION_TOOLS.has(toolName)) {
-		console.log(JSON.stringify(deny(`${toolName} is blocked in Pi project ${projectRoot}. Switch to Pi /mode build for mutations.`)));
+		console.log(JSON.stringify(deny(`${toolName} is blocked in Pi project ${projectRoot}. ${nextStep(projectRoot, input.session_id, "Switch to Pi /mode build for mutations.")}`)));
 		return;
 	}
 
@@ -241,7 +247,7 @@ function main() {
 		return;
 	}
 
-	console.log(JSON.stringify(ask(`${toolName || "Unknown tool"} is not an allowlisted read-only tool in Pi project. Switch to Pi /mode build for mutations.`)));
+	console.log(JSON.stringify(ask(`${toolName || "Unknown tool"} is not an allowlisted read-only tool in Pi project. ${nextStep(projectRoot, input.session_id, "Switch to Pi /mode build for mutations.")}`)));
 }
 
 module.exports = { wrapBashForSandbox };

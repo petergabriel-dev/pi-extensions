@@ -158,10 +158,11 @@ function resolveProjectRoot(cwd = process.cwd()) {
 	return projectRoot;
 }
 
-// strict (default) gates pairing and holder identity on private bridge dirs and
-// presence file. Writer-claim counting passes strict: false so a session with
-// drifted permissions but fresh presence still counts (fail closed).
-function liveSessions(projectRoot, now = Date.now(), { strict = true } = {}) {
+// One directory pass over live sessions. Each entry records `strict`: private
+// bridge dirs and a 0600 presence file. Pairing and holder identity use strict
+// entries only; writer-claim counting uses every entry so a session with drifted
+// permissions but fresh presence still counts (fail closed).
+function scanSessions(projectRoot, now = Date.now()) {
 	const piDir = path.join(projectRoot, ".pi");
 	const memoryDir = path.join(piDir, "memory");
 	const paths = bridgePathsRoot(projectRoot);
@@ -172,16 +173,21 @@ function liveSessions(projectRoot, now = Date.now(), { strict = true } = {}) {
 	for (const id of ids) {
 		if (!isSafeId(id)) continue;
 		const namespace = bridgePaths(projectRoot, id);
-		const valid = strict
-			? [namespace.namespace, namespace.requests, namespace.responses, namespace.processed].every(isPrivateDir) && isPrivateFile(namespace.presence)
-			: isDir(namespace.namespace) && isRegularFile(namespace.presence);
-		if (!valid) continue;
+		if (!isDir(namespace.namespace) || !isRegularFile(namespace.presence)) continue;
 		const presence = parsePresence(readJson(namespace.presence), id);
 		if (!presence) continue;
 		const heartbeat = Date.parse(presence.heartbeatAt);
-		if (now - heartbeat <= LIVE_TTL_MS && heartbeat <= now + LIVE_TTL_MS) result.push({ id, presence, paths: namespace });
+		if (now - heartbeat > LIVE_TTL_MS || heartbeat > now + LIVE_TTL_MS) continue;
+		const strict = [namespace.namespace, namespace.requests, namespace.responses, namespace.processed].every(isPrivateDir) && isPrivateFile(namespace.presence);
+		result.push({ id, presence, paths: namespace, strict });
 	}
 	return result;
+}
+
+function liveSessions(projectRoot, now = Date.now(), { strict = true } = {}) {
+	return scanSessions(projectRoot, now)
+		.filter((session) => !strict || session.strict)
+		.map(({ id, presence, paths }) => ({ id, presence, paths }));
 }
 
 function bridgePathsRoot(projectRoot) {
@@ -220,25 +226,50 @@ function peerMatches(peer, identity) {
 	return peer.harness === identity.harness && peer.id === identity.id;
 }
 
+// Pairing uses strict entries only (see scanSessions).
+function pairedWith(sessions, identity) {
+	return sessions.filter(({ strict, presence }) => strict !== false && presence.peers.some((peer) => peerMatches(peer, identity)));
+}
+
 function findPairedLiveSessions(projectRoot, identity, now = Date.now()) {
-	return liveSessions(projectRoot, now).filter(({ presence }) => presence.peers.some((peer) => peerMatches(peer, identity)));
+	return pairedWith(scanSessions(projectRoot, now), identity).map(({ id, presence, paths }) => ({ id, presence, paths }));
+}
+
+function isWriterClaim(presence, now) {
+	return presence.mode === "build" || Boolean(presence.buildLease && now < presence.buildLease.expiresAt);
 }
 
 // Project-wide single writer: a live session other than selfId claims the
 // writer while Pi is in Build or holds an active harness lease. Conflicting
 // claims deny every claimant; there is no tie-break.
 function hasOtherWriterClaim(sessions, selfId, now = Date.now()) {
-	return sessions.some(({ id, presence }) => id !== selfId
-		&& (presence.mode === "build" || Boolean(presence.buildLease && now < presence.buildLease.expiresAt)));
+	return sessions.some(({ id, presence }) => id !== selfId && isWriterClaim(presence, now));
+}
+
+// Names other sessions' writer claims so hook denials say how to release them,
+// instead of telling the user to request or approve a lease that would be refused.
+function writerConflictHint(projectRoot, identity, now = Date.now()) {
+	try {
+		const sessions = scanSessions(projectRoot, now);
+		const paired = identity ? pairedWith(sessions, identity) : [];
+		const selfId = paired.length === 1 ? paired[0].id : undefined;
+		const claims = sessions.filter(({ id, presence }) => id !== selfId && isWriterClaim(presence, now));
+		if (claims.length === 0) return null;
+		const names = claims.map(({ id, presence }) => `Pi session ${id.slice(0, 8)} (${presence.mode === "build" ? "Build mode" : `lease ${presence.buildLease.harness}:${presence.buildLease.id}`})`);
+		return `Project writer held by ${names.join(", ")}; release it in that Pi session with /build-lease release or by leaving Build.`;
+	} catch {
+		return null;
+	}
 }
 
 function holdsBuildLease(projectRoot, identity, now = Date.now()) {
 	try {
 		if (!identity || typeof identity !== "object" || Array.isArray(identity)
 			|| !BUILD_LEASE_HARNESSES.has(identity.harness) || !isSafeId(identity.id)) return false;
-		const paired = findPairedLiveSessions(projectRoot, identity, now);
+		const sessions = scanSessions(projectRoot, now);
+		const paired = pairedWith(sessions, identity);
 		if (paired.length !== 1) return false;
-		if (hasOtherWriterClaim(liveSessions(projectRoot, now, { strict: false }), paired[0].id, now)) return false;
+		if (hasOtherWriterClaim(sessions, paired[0].id, now)) return false;
 		const lease = paired[0].presence.buildLease;
 		return Boolean(lease
 			&& lease.harness === identity.harness
@@ -609,6 +640,7 @@ module.exports = {
 	formatPeerBlock,
 	hasOtherWriterClaim,
 	holdsBuildLease,
+	writerConflictHint,
 	isSafeId,
 	listSessions,
 	liveSessions,

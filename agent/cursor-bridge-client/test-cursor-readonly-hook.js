@@ -254,6 +254,28 @@ test("live lease allows Cursor shell and tools while leaving MCP policy unchange
 	assert.deepEqual(fs.readdirSync(paths.requests), []);
 });
 
+test("lease holder blocked by another session's Build is told to release it there", () => {
+	const root = tempPiProject();
+	addLeasePresence(root);
+	const other = bridgeClient.bridgePaths(root, "pi-other-build");
+	for (const dir of [other.namespace, other.requests, other.responses, other.processed]) {
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		fs.chmodSync(dir, 0o700);
+	}
+	const now = new Date().toISOString();
+	fs.writeFileSync(other.presence, JSON.stringify({ schemaVersion: 2, piSessionId: "pi-other-build", name: "other", mode: "build", pid: process.pid, startedAt: now, heartbeatAt: now, peers: [] }), { mode: 0o600 });
+	fs.chmodSync(other.presence, 0o600);
+	for (const input of [
+		{ event: "beforeShellExecution", cwd: root, conversation_id: CURSOR.id, command: "echo changed > note.txt" },
+		{ event: "preToolUse", cwd: root, conversation_id: CURSOR.id, tool_name: "Edit" },
+	]) {
+		const result = run(input);
+		assertPermission(result, "deny");
+		assert.match(result.agent_message, /Project writer held by Pi session pi-other \(Build mode\); release it in that Pi session with \/build-lease release/);
+		assert.doesNotMatch(result.agent_message, /Use Pi \/mode build/);
+	}
+});
+
 test("non-holder lease does not bypass Cursor shell or tool denial", () => {
 	const root = tempPiProject();
 	addLeasePresence(root, { buildLease: leaseFixture({ id: "another-conversation" }) });

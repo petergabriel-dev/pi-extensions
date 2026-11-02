@@ -137,7 +137,7 @@ async function main() {
 			for (const tool of ["edit", "write", "opencode_worktree_create", "opencode_worktree_remove"]) {
 				await assert.rejects(
 					handler({ tool, sessionID: OPENCODE.id, input: {} }),
-					/No live build lease.*Run \/build/,
+					/No live Build lease.*\/pi-build/,
 				);
 			}
 			await handler({ tool: "execute", sessionID: OPENCODE.id, input: { code: "return 1" } });
@@ -149,7 +149,7 @@ async function main() {
 			const { handler } = setup(root);
 			await assert.rejects(
 				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
-				/No live build lease.*Run \/build/,
+				/No live Build lease.*\/pi-build/,
 			);
 		});
 	});
@@ -159,7 +159,7 @@ async function main() {
 			const { handler } = setup(root);
 			await assert.rejects(
 				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
-				/No live build lease.*Run \/build/,
+				/No live Build lease.*\/pi-build/,
 			);
 		});
 	});
@@ -191,7 +191,25 @@ async function main() {
 			const { handler } = setup(root);
 			await assert.rejects(
 				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
-				/Live build lease held by claude:claude-holder;.*\/build-lease release/,
+				/Project writer held by Pi session .*\(lease claude:claude-holder\);.*\/build-lease release/,
+			);
+		});
+	});
+
+	await test("holder blocked by another session's Build is told to release it there", async () => {
+		await withProject({ lease: true }, async (root) => {
+			const other = bridgeClient.bridgePaths(root, "pi-other-build");
+			for (const dir of [other.namespace, other.requests, other.responses, other.processed]) {
+				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+				fs.chmodSync(dir, 0o700);
+			}
+			const now = new Date().toISOString();
+			fs.writeFileSync(other.presence, JSON.stringify({ schemaVersion: 2, piSessionId: "pi-other-build", name: "other", mode: "build", pid: process.pid, startedAt: now, heartbeatAt: now, peers: [] }), { mode: 0o600 });
+			fs.chmodSync(other.presence, 0o600);
+			const { handler } = setup(root);
+			await assert.rejects(
+				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
+				/Project writer held by Pi session pi-other \(Build mode\); release it in that Pi session with \/build-lease release or by leaving Build\./,
 			);
 		});
 	});

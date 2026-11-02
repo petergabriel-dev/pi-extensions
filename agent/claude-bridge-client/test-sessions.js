@@ -419,6 +419,37 @@ async function main() {
 		assert.deepEqual(fs.readdirSync(second.requests), []);
 	}, noResponder);
 
+	await test("hook denial names another session's writer claim; lease check scans once", async (cwd) => {
+		const holder = addSession(cwd, "pi-hint-holder", [HARNESS]);
+		setBuildLease(holder, leaseFixture(HARNESS));
+		assert.equal(client.writerConflictHint(cwd, HARNESS), null, "no other claim, no hint");
+		const other = addSession(cwd, "pi-hint-other", []);
+		patchPresence(other, { mode: "build" });
+		touchPresence(holder, other);
+		assert.equal(
+			client.writerConflictHint(cwd, HARNESS),
+			"Project writer held by Pi session pi-hint- (Build mode); release it in that Pi session with /build-lease release or by leaving Build.",
+		);
+		const edit = parseReadonlyHook(await runScript("pi-readonly-hook.js", cwd, { cwd, session_id: HARNESS.id, tool_name: "Edit", tool_input: {} }));
+		assert.equal(edit.hookSpecificOutput.permissionDecision, "deny");
+		assert.match(edit.systemMessage, /Project writer held by Pi session pi-hint- \(Build mode\); release it in that Pi session/);
+		assert.doesNotMatch(edit.systemMessage, /Switch to Pi \/mode build/);
+
+		const sessionsDir = client.bridgePathsRoot(cwd).sessions;
+		const originalReaddir = fs.readdirSync;
+		let scans = 0;
+		fs.readdirSync = (dir, ...rest) => {
+			if (dir === sessionsDir) scans++;
+			return originalReaddir(dir, ...rest);
+		};
+		try {
+			client.holdsBuildLease(cwd, HARNESS);
+		} finally {
+			fs.readdirSync = originalReaddir;
+		}
+		assert.equal(scans, 1, "holdsBuildLease reads the sessions directory once");
+	}, noResponder);
+
 	await test("another live session's writer claim denies the lease holder", async (cwd) => {
 		const holder = addSession(cwd, "pi-claim-holder", [HARNESS]);
 		setBuildLease(holder, leaseFixture(HARNESS));

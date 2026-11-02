@@ -385,7 +385,18 @@ function preToolUseTargetDecision(input, cwdRoot) {
 	const conversationId = input.conversation_id;
 	if (bridgeClient.isSafeId(conversationId)
 		&& bridgeClient.holdsBuildLease(targetRoot, { harness: "cursor", id: conversationId })) return allow();
-	return deny(`${toolType(input)} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. Request a Build lease with /pi-build in ${targetRoot}, then approve it in Pi with /build-lease approve.`);
+	return deny(`${toolType(input)} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${nextStep(targetRoot, conversationId, `Request a Build lease with /pi-build in ${targetRoot}, then approve it in Pi with /build-lease approve.`)}`);
+}
+
+// Another session's writer claim wins over the generic next step: a lease request
+// or /mode build would be refused until that claim is released.
+function nextStep(projectRoot, conversationId, fallback) {
+	try {
+		const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
+		return bridgeClient.writerConflictHint(projectRoot, bridgeClient.isSafeId(conversationId) ? { harness: "cursor", id: conversationId } : null) ?? fallback;
+	} catch {
+		return fallback;
+	}
 }
 
 function handle(input) {
@@ -409,7 +420,7 @@ function handle(input) {
 	if (event === "beforeShellExecution") {
 		const classified = classifyShell(commandFromInput(input));
 		if (classified.permission === "allow") return allow();
-		if (classified.permission === "deny") return deny(`${classified.reason} Use Pi /mode build for mutations.`);
+		if (classified.permission === "deny") return deny(`${classified.reason} ${nextStep(projectRoot, input.conversation_id, "Use Pi /mode build for mutations.")}`);
 		return ask(`${classified.reason} Continue only if this is read-only.`);
 	}
 	if (event === "beforeMCPExecution") {
@@ -422,7 +433,7 @@ function handle(input) {
 	if (event === "preToolUse") {
 		const classified = classifyTool(input);
 		if (classified.permission === "allow") return allow();
-		return deny(`${classified.reason} Use Pi /mode build for mutations.`);
+		return deny(`${classified.reason} ${nextStep(projectRoot, input.conversation_id, "Use Pi /mode build for mutations.")}`);
 	}
 	return deny(`Unknown Cursor hook event ${event || "<missing>"} in Pi project.`);
 }
