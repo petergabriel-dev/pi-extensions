@@ -179,6 +179,15 @@ test("only safe-listed flags pass for rg, sort, uniq, find, tree, and git", () =
 	]) assert.equal(classifyShell(command).permission, "allow", command);
 });
 
+test("unquoted globs ask because expansion happens after classification", () => {
+	for (const command of ["uniq *.txt", "rg x *", "sort -- *", "cat src/*.ts", "ls [ab]*", "ls file?.md", "rg x | uniq *"]) {
+		assert.equal(classifyShell(command).permission, "ask", command);
+	}
+	for (const command of ['rg x "*"', "rg 'a[bc]'", "find . -name '*.ts'", "rg -g '*.md' x", "rg x \\*"]) {
+		assert.equal(classifyShell(command).permission, "allow", command);
+	}
+});
+
 test("dynamic and nested shell syntax asks", () => {
 	for (const command of [
 		"rg $(cat list) .",

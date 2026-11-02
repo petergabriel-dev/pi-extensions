@@ -186,6 +186,29 @@ async function main() {
 		});
 	});
 
+	await test("same-session lease holder hint points at Pi, not the holder", async () => {
+		await withProject({}, async (root) => {
+			const paths = bridgeClient.bridgePaths(root, "pi-shared-session");
+			for (const dir of [path.join(root, ".pi", "memory"), paths.root, paths.sessions, paths.namespace, paths.requests, paths.responses, paths.processed]) {
+				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+				fs.chmodSync(dir, 0o700);
+			}
+			const now = new Date().toISOString();
+			const claude = { harness: "claude", id: "claude-holder" };
+			fs.writeFileSync(paths.presence, JSON.stringify({
+				schemaVersion: 2, piSessionId: "pi-shared-session", name: "shared", mode: "plan", pid: process.pid, startedAt: now, heartbeatAt: now,
+				peers: [{ ...OPENCODE, pendingCount: 0, inboundPendingCount: 0 }, { ...claude, pendingCount: 0, inboundPendingCount: 0 }],
+				buildLease: { ...claude, planId: "plan-1", grantedAt: Date.now(), expiresAt: Date.now() + 60_000 },
+			}), { mode: 0o600 });
+			fs.chmodSync(paths.presence, 0o600);
+			const { handler } = setup(root);
+			await assert.rejects(
+				handler({ tool: "edit", sessionID: OPENCODE.id, input: {} }),
+				/Build lease held by claude:claude-holder; run \/build-lease release in Pi to revoke it, then rerun \/pi-build here\./,
+			);
+		});
+	});
+
 	await test("foreign lease holder is named in mutation refusal", async () => {
 		await withProject({ lease: true, leaseIdentity: { harness: "claude", id: "claude-holder" } }, async (root) => {
 			const { handler } = setup(root);

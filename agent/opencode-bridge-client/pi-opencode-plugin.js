@@ -43,7 +43,7 @@ function leaseNextStep(projectRoot, sessionId, fallback = `No live Build lease f
 	const holder = bridgeClient.listSessions(projectRoot, now)
 		.map((session) => session.buildLease)
 		.find((lease) => lease && now < lease.expiresAt && !(lease.harness === "opencode" && lease.id === sessionId));
-	if (holder) return `Build lease held by ${holder.harness}:${holder.id}; ask that holder to run /build-lease release, then rerun /pi-build here.`;
+	if (holder) return `Build lease held by ${holder.harness}:${holder.id}; run /build-lease release in Pi to revoke it, then rerun /pi-build here.`;
 	return fallback;
 }
 

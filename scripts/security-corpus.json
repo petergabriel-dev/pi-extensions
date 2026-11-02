@@ -897,6 +897,15 @@
       "mutation": "none"
     },
     {
+      "id": "shell-unquoted-glob-operands",
+      "class": "ambiguous",
+      "kind": "shell",
+      "command": "uniq *.txt",
+      "columns": ["claude", "cursor", "opencode"],
+      "mutation": "none",
+      "expect": { "cursor": "ask" }
+    },
+    {
       "id": "lease-none-write",
       "class": "write",
       "kind": "shell",

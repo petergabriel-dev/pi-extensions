@@ -66,7 +66,10 @@ const SAFE_FLAGS = {
 // find takes single-dash primaries; only these, never -exec/-delete/-fprint/-fls/...
 const FIND_SAFE_PRIMARIES = new Set(["-print", "-print0", "-prune", "-empty", "-depth", "-follow", "-xdev", "-mount", "-true", "-false", "-not", "-a", "-and", "-o", "-or", "-H", "-L", "-P", "-daystart", "-nowarn", "-ls", "-readable", "-writable", "-executable", "-noleaf"]);
 const FIND_SAFE_VALUED_PRIMARIES = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-regextype", "-type", "-xtype", "-maxdepth", "-mindepth", "-newer", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-size", "-perm", "-user", "-group", "-uid", "-gid", "-links", "-inum", "-samefile", "-printf"]);
-const DANGEROUS_SHELL_SYNTAX = new Set(["$", "`", "(", ")", "{", "}", "<", ">"]);
+// Unquoted, unescaped only (scanShell skips quoted and escaped characters). Glob
+// characters are here because expansion happens after classification and can add
+// operands (uniq *.txt) or flag-named files (a file called --pre=sh) to argv.
+const DANGEROUS_SHELL_SYNTAX = new Set(["$", "`", "(", ")", "{", "}", "<", ">", "*", "?", "["]);
 const SHELL_SEPARATORS = new Set([";", "|", "&"]);
 const MUTATING_COMMAND_RE = /(^|\s)(rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|truncate|git\s+(commit|add|reset|checkout|switch|merge|rebase|cherry-pick|apply|am|clean|stash|push)|npm\s+(install|i|ci|update|audit\s+fix)|pnpm\s+(install|i|update)|yarn\s+(add|install|upgrade)|pip\s+install|python\s+-m\s+pip\s+install)(\s|$)|(^|[^<])>>?|<<|\|\s*(tee|xargs\s+rm)\b/;
 const MUTATING_MCP_RE = /(^|_)(write|edit|delete|remove|create|update|insert|patch|mutate|apply|commit|save)(_|$)/i;
