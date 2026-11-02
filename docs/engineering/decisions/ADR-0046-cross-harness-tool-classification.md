@@ -3,7 +3,7 @@ id: ADR-0046
 title: Cross-harness tool classification and deny-unknown policy
 status: Active
 date: 2026-10-21
-decision: Apply one parity rule to Claude, Cursor, and OpenCode. Known read tools and Pi bridge MCP tools allow, sandboxed shell keeps its existing policy, and every unknown or foreign tool asks or denies instead of passing silently; Cursor classifies shell by allowlisted segments, Claude fails closed on hook errors and installs an exit-2 guard, and OpenCode throws on unlisted tools. Follow-up: Pi's no-sandbox Discuss/Plan fallback auto-runs only a single plain read, treats newlines as separators, and Plan needs fresh per-command human confirmation for test/build or compound reads (F9, F12).
+decision: Apply one parity rule to Claude, Cursor, and OpenCode. Known read tools and Pi bridge MCP tools allow, sandboxed shell keeps its existing policy, and every unknown or foreign tool asks or denies instead of passing silently; Cursor classifies shell by allowlisted segments, Claude fails closed on hook errors and installs an exit-2 guard, and OpenCode throws on unlisted tools. Follow-up: Pi's no-sandbox Discuss/Plan fallback runs Pi deny lists and then this Cursor classifier; Plan needs fresh per-command human confirmation for other single-line read or test/build commands and denies multi-line ones (F9, F12).
 why: ADR-0045 proved each harness passed unknown tool names, foreign MCP servers, and chained shell shapes differently. Silent pass-through makes an injected tool name equivalent to an allowlisted read, so the harnesses need one rule with evidence-labeled behavior.
 affects: agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_policy.ts, scripts/security-corpus.json, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/README.md
 consequences: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance. Follow-up closes F9 and F12 in Pi's no-sandbox fallback. Read-only is still not enforced because Phase 3 has not closed F1/F2 self-escalation. Deny-unknown can temporarily block an unlisted read tool; the live allowlists matched observed names and need maintenance as harness tools change.
@@ -104,13 +104,15 @@ Still `not-verified`:
 
 Applies only when Pi Discuss or Plan has no structural sandbox launcher or wrapping fails; sandboxed paths are unchanged.
 
-- Normalization maps newlines to `;` before collapsing whitespace, so deny lists see every line (F12).
-- Only a single plain read (Discuss allowlist, no `;`, `&`, `|`, or `<`) runs without approval. Discuss denies everything else (F12).
-- Plan sends test/build-classified or compound read commands to `confirmCommand` ("Run without sandbox?"), the same gate as Review posting: sanitized exact command, literal `true` only, no cache; decline, headless, a subagent's cancelled confirm, or a dialog error blocks. Deny lists run first and approval never overrides them (F9).
-- `isBashAllowedInMode` now means "runs without approval" for Discuss and Plan, which the corpus uses to model a no-UI decline.
+- Pi deny lists run first on the command with newlines mapped to `;` (so every line is checked) and now also deny the `<>` read-write redirect (F12).
+- Then the shipped Cursor `classifyShell` decides, reusing this ADR's per-segment allowlist and per-command flag checks (`rg --pre`, `sort -o`, `uniq` with an output file, `find -fprint`/`-delete`/`-exec`, `git -c`/`--output`, `tree -o`); newlines and `$ ( ) < > { }` make it ask. `allow` (allowlisted reads and pipes of them) runs. `ask` denies in Discuss (F12).
+- In Plan, `ask` goes to `confirmCommand` ("Run without sandbox?") only for single-line read- or test/build-shaped commands, the same gate as Review posting: sanitized exact command, literal `true` only, no cache; decline, headless, a subagent's cancelled confirm, or a dialog error blocks. Other commands deny, and multi-line commands deny before classification so a prompt cannot hide a line (F9, F12).
+- A missing or throwing classifier denies. Deny lists run first and approval never overrides them.
+- `isBashAllowedInMode` means "runs without approval" for Discuss and Plan, which the corpus uses to model a no-UI decline.
+- Why reuse, not a Pi copy: one classifier keeps Cursor and Pi in step; a first-pass Pi prefix rule missed writing flags on allowlisted reads, found in code review.
 - Why approval, not a better parser: ADR-0045 requires deny or human approval where shell safety cannot be established; parsing alone does not establish it.
-- Cost: on hosts without a launcher, piped or chained reads are denied in Discuss and need approval in Plan.
-- Evidence: `test_policy.ts` allow/confirm/deny, newline, chain, substitution, decline, headless, throw, cancel, and non-literal cases **E**; corpus `pi-plan-wildcard-test` and `pi-fallback-*` deny in both lanes **E**; live Plan prompt **N** because macOS always wraps with Seatbelt.
+- Cost: without a launcher, Discuss no longer runs `sed -n`, `awk`, or `ccc search` in bash, and Pi's fallback now changes whenever the Cursor classifier does.
+- Evidence: `test_policy.ts` covers every reviewed flag writer, `<>`, multi-line denial, pipes, decline, headless, throw, cancel, and non-literal cases **E**; corpus `pi-plan-wildcard-test` and 14 `pi-fallback-*` cases deny in both lanes **E**; live Plan prompt **N** because macOS always wraps with Seatbelt.
 
 ## Consequences
 
