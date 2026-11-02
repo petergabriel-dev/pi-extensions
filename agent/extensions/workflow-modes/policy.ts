@@ -23,24 +23,39 @@ export function isReviewPostingCommand(command: string): boolean {
 }
 
 // Characters a dialog can hide or reorder: C0 controls except newline, DEL/C1,
-// format characters (zero-width, bidi, BOM, soft hyphen), non-ASCII spaces,
-// line/paragraph separators, and fillers that render blank (Hangul, braille).
-const HIDDEN_CHARACTER = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\u115f\u1160\u2800\u3164\uffa0]|(?! )\p{Zs}/gu;
+// format characters (zero-width, bidi, BOM, soft hyphen, tags), non-ASCII spaces,
+// line/paragraph separators, fillers that render blank (Hangul, braille), and
+// invisible marks (combining grapheme joiner, Khmer inherent vowels, Mongolian
+// and Unicode variation selectors).
+const HIDDEN_CHARACTER_SOURCE = String.raw`[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\u{e0100}-\u{e01ef}]|(?! )\p{Zs}`;
+const HIDDEN_CHARACTER = new RegExp(HIDDEN_CHARACTER_SOURCE, "gu");
+// Four or more blank characters in a row (ASCII spaces, newlines, or hidden
+// characters, mixed or not).
+const BLANK_RUN = new RegExp(String.raw`(?:[ \n]|${HIDDEN_CHARACTER_SOURCE}){4,}`, "gu");
 
-export function sanitizeReviewCommand(command: string): string {
-	return command.replace(HIDDEN_CHARACTER, (character) => {
-		const codePoint = character.codePointAt(0)!;
-		const hex = codePoint.toString(16).toUpperCase();
-		if (codePoint <= 0x9f) return `\\x${hex.padStart(2, "0")}`;
-		return codePoint <= 0xffff ? `\\u${hex.padStart(4, "0")}` : `\\u{${hex}}`;
-	});
+function escapeHiddenCharacter(character: string): string {
+	const codePoint = character.codePointAt(0)!;
+	const hex = codePoint.toString(16).toUpperCase();
+	if (codePoint <= 0x9f) return `\\x${hex.padStart(2, "0")}`;
+	return codePoint <= 0xffff ? `\\u${hex.padStart(4, "0")}` : `\\u{${hex}}`;
 }
 
-// Shows the command exactly as it will run, with control characters escaped and
-// runs of 4+ spaces marked, so padding cannot push part of it out of the dialog.
-// Display only: the original command still runs unchanged.
+export function sanitizeReviewCommand(command: string): string {
+	return command.replace(HIDDEN_CHARACTER, escapeHiddenCharacter);
+}
+
+// Shows the command as it will run, with hidden characters escaped and every run
+// of 4+ blank characters collapsed to one visible marker (`[N spaces]`, or
+// `[N blank: newline \u00a0 ...]` naming up to four kinds), so padding of any kind
+// cannot push part of the command out of the dialog. Display only: the original
+// command still runs unchanged.
 export function formatCommandForConfirm(command: string): string {
-	return sanitizeReviewCommand(command).replace(/ {4,}/g, (run) => ` [${run.length} spaces] `);
+	return sanitizeReviewCommand(command.replace(BLANK_RUN, (run) => {
+		const characters = [...run];
+		if (characters.every((character) => character === " ")) return ` [${characters.length} spaces] `;
+		const kinds = [...new Set(characters)].map((character) => character === " " ? "space" : character === "\n" ? "newline" : escapeHiddenCharacter(character));
+		return ` [${characters.length} blank: ${kinds.slice(0, 4).join(" ")}${kinds.length > 4 ? " ..." : ""}] `;
+	}));
 }
 
 // Fresh human approval for one exact command: only literal true from an
