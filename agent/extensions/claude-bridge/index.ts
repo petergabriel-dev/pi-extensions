@@ -1558,57 +1558,72 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			return;
 		}
 
-		const paths = bridgePaths(projectRoot, piSessionId);
-		const claim = claimSessionNamespace(paths, piSessionId);
-		if (!claim.active) {
-			passiveReason = claim.reason;
-			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
-			ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
-			return;
-		}
-
-		const restored = restorablePeers(
-			Array.from(pairedPeers.values()),
-			listLiveNamespaces(projectRoot).filter(({ id }) => id !== piSessionId).map(({ presence }) => presence),
-		);
-		const restoredCount = restored.length;
-		pairedPeers = new Map(restored.map((peer) => [peerKey(peer), peer] as const));
-		activePaths = paths;
-		presenceInitialized = false;
-		activeProjectRoot = projectRoot;
-		activePiSessionId = piSessionId;
-		activeSessionName = sessionName(pi);
-		mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
-		for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
-		writePresence(paths);
-		startWatcher(pi, paths, ctx);
-		heartbeatTimer = setInterval(() => {
-			if (!activePaths || !activePiSessionId) return;
-			const current = readPresence(activePaths.presence, activePiSessionId);
-			if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
-				passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
-				watcher?.close();
-				watcher = null;
-				clearInterval(heartbeatTimer!);
-				heartbeatTimer = null;
-				dropPendingMessages(ctx, "bridge ownership change");
-				setBuildLease(null, ctx, "revoked");
-				buildLeaseRequests = new Map();
-				activePaths = null;
-				activeProjectRoot = null;
-				activePiSessionId = null;
-				presenceInitialized = false;
-				pairedPeers = new Map();
+		let paths: BridgePaths;
+		let restoredCount: number;
+		// Fail closed: inside a Pi project, a startup error must leave a passive reason so
+		// the Build guard blocks instead of treating this session as outside any project.
+		try {
+			paths = bridgePaths(projectRoot, piSessionId);
+			const claim = claimSessionNamespace(paths, piSessionId);
+			if (!claim.active) {
+				passiveReason = claim.reason;
 				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
-				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+				ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
 				return;
 			}
-			if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
-				setBuildLease(null, ctx, "revoked");
-			}
-			writePresence(activePaths);
-		}, HEARTBEAT_MS);
-		heartbeatTimer.unref?.();
+
+			const restored = restorablePeers(
+				Array.from(pairedPeers.values()),
+				listLiveNamespaces(projectRoot).filter(({ id }) => id !== piSessionId).map(({ presence }) => presence),
+			);
+			restoredCount = restored.length;
+			pairedPeers = new Map(restored.map((peer) => [peerKey(peer), peer] as const));
+			activePaths = paths;
+			presenceInitialized = false;
+			activeProjectRoot = projectRoot;
+			activePiSessionId = piSessionId;
+			activeSessionName = sessionName(pi);
+			mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
+			for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
+			writePresence(paths);
+			startWatcher(pi, paths, ctx);
+			heartbeatTimer = setInterval(() => {
+				if (!activePaths || !activePiSessionId) return;
+				const current = readPresence(activePaths.presence, activePiSessionId);
+				if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
+					passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
+					watcher?.close();
+					watcher = null;
+					clearInterval(heartbeatTimer!);
+					heartbeatTimer = null;
+					dropPendingMessages(ctx, "bridge ownership change");
+					setBuildLease(null, ctx, "revoked");
+					buildLeaseRequests = new Map();
+					activePaths = null;
+					activeProjectRoot = null;
+					activePiSessionId = null;
+					presenceInitialized = false;
+					pairedPeers = new Map();
+					ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+					ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+					return;
+				}
+				if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
+					setBuildLease(null, ctx, "revoked");
+				}
+				writePresence(activePaths);
+			}, HEARTBEAT_MS);
+			heartbeatTimer.unref?.();
+		} catch (error) {
+			try { stopActiveBridge(ctx, "startup failure"); } catch { /* cleanup is best-effort; state is reset below */ }
+			activePaths = null;
+			activeProjectRoot = null;
+			activePiSessionId = null;
+			passiveReason = `bridge startup failed: ${error instanceof Error ? error.message : String(error)}`;
+			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+			ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+			return;
+		}
 		ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: active");
 		const restoredNotice = restoredCount > 0 ? ` (restored ${restoredCount} ${restoredCount === 1 ? "peer" : "peers"})` : "";
 		ctx.ui.notify(`claude-bridge active: ${paths.namespace}${restoredNotice}`, "info");
