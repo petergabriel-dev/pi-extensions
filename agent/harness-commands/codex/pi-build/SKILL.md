@@ -9,7 +9,7 @@ Use this skill to run an approved Pi saved plan through Codex's Pi Build lease.
 
 ## Detect project
 
-Check whether the current working directory or any ancestor contains `.pi/`. Pi's global agent dir `~/.pi` does not mark a project.
+Check whether the current working directory or any ancestor contains `.pi/`. Pi's global agent dir `~/.pi` does not mark a project. Detect it with plain commands only (`ls -a`, `ls -a ..`, `ls -a ../..`, and so on); never use `$(...)`, backticks, or loops, because the Pi hook blocks dynamic shell in a Pi project until you hold a Build lease.
 
 - Outside a Pi project: do not call Pi bridge tools. Use the generic build loop below.
 - Inside a Pi project: use the Pi branch only.
@@ -17,6 +17,8 @@ Check whether the current working directory or any ancestor contains `.pi/`. Pi'
 ## Codex bridge calls
 
 Pi bridge tools are on the `pi-claude-bridge` MCP server. The Pi Codex hook injects `sessionId` and `harness` from Codex's host session, and the lease is bound to that session; never supply a session ID or `claudeSessionId`, and never try another identity. Pass `harness: "codex"` or omit it.
+
+Codex reads files through shell. Without a Build lease the Pi hook allows only provably read-only commands (`rg`, `cat`, `head`, `tail`, `ls`, `find`, `wc`, `git status|log|show|diff|blame`, simple pipes). Avoid `$(...)`, backticks, redirects, and unquoted globs; quote patterns instead. With the lease, shell and `apply_patch` are unrestricted.
 
 ## Pi branch
 
