@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt, type PresencePeer } from "../presence.js";
+import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt, type PresencePeer } from "../presence.js";
 import { findProjectRoot } from "../project-root.js";
 
 const now = Date.parse("2025-01-02T03:04:05.000Z");
@@ -67,5 +67,28 @@ try {
 	else process.env.HOME = previousHome;
 	fs.rmSync(fakeHome, { recursive: true, force: true });
 }
+
+// A namespace with no readable presence is abandoned only after its directory has
+// been unchanged for over a minute; live owners refresh it every heartbeat.
+assert.equal(ABANDONED_NAMESPACE_MS, 60_000);
+assert.equal(isAbandonedNamespace(false, now - ABANDONED_NAMESPACE_MS - 1, now), true, "old namespace without presence is abandoned");
+assert.equal(isAbandonedNamespace(false, now - ABANDONED_NAMESPACE_MS, now), false, "exactly the threshold is not abandoned");
+assert.equal(isAbandonedNamespace(false, now - 2_000, now), false, "a fresh namespace is still initializing");
+assert.equal(isAbandonedNamespace(true, now - 10 * ABANDONED_NAMESPACE_MS, now), false, "readable presence is never abandoned");
+assert.equal(isAbandonedNamespace(false, now + 30_000, now), false, "a future mtime is not abandoned");
+assert.equal(isAbandonedNamespace(false, Number.NaN, now), false, "an unknown mtime is not abandoned");
+
+// Heartbeat failures warn once per streak, and again after a success.
+const reported: unknown[] = [];
+const streak = failureStreakReporter((error) => reported.push(error));
+streak.failed(new Error("ENOSPC 1"));
+streak.failed(new Error("ENOSPC 2"));
+streak.failed(new Error("ENOSPC 3"));
+assert.equal(reported.length, 1, "a failure streak warns once");
+streak.succeeded();
+streak.succeeded();
+streak.failed(new Error("EACCES"));
+assert.equal(reported.length, 2, "a new streak after a success warns again");
+assert.equal((reported[1] as Error).message, "EACCES");
 
 console.log("claude bridge presence tests passed");

@@ -7,7 +7,7 @@ import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/ind
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
-import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
+import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
@@ -349,13 +349,18 @@ function gcStaleNamespaces(sessionsDir: string, now = Date.now()): void {
 	for (const id of entries) {
 		if (!isSafeId(id)) continue;
 		const namespace = path.join(sessionsDir, id);
+		let dirMtimeMs: number;
 		try {
 			const stat = fs.lstatSync(namespace);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+			dirMtimeMs = stat.mtimeMs;
 		} catch { continue; }
 		const presence = readPresence(path.join(namespace, "presence.json"), id);
 		const heartbeat = parseTime(presence?.heartbeatAt);
-		if (heartbeat > 0 && now - heartbeat > NAMESPACE_GC_TTL_MS) {
+		// Stale heartbeat, or abandoned before its first presence write (for example a
+		// startup that threw after creating the directory). claimSessionNamespace runs
+		// this first, so an abandoned namespace is reclaimed on the next start.
+		if ((heartbeat > 0 && now - heartbeat > NAMESPACE_GC_TTL_MS) || isAbandonedNamespace(!!presence, dirMtimeMs, now)) {
 			try { fs.rmSync(namespace, { recursive: true, force: true }); } catch { /* best-effort stale namespace GC */ }
 		}
 	}
@@ -380,7 +385,7 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 		return { active: false, reason: `Pi session ${piSessionId} already has live bridge owner pid ${existing.pid}.` };
 	}
 	if (namespaceExists && !existing) {
-		return { active: false, reason: `Pi session ${piSessionId} bridge namespace is initializing or invalid; retry session start.` };
+		return { active: false, reason: `Pi session ${piSessionId} bridge namespace has no presence yet (still initializing, or abandoned and reclaimed ${ABANDONED_NAMESPACE_MS / 1000}s after its last change); retry session start.` };
 	}
 	if (existing && Date.now() - parseTime(existing.heartbeatAt) > NAMESPACE_GC_TTL_MS) {
 		try { fs.rmSync(paths.namespace, { recursive: true, force: true }); } catch { /* retry claim will fail closed */ }
@@ -1587,31 +1592,45 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
 			writePresence(paths);
 			startWatcher(pi, paths, ctx);
+			// A timer error would be an uncaught exception that ends Pi. Instead, warn once
+			// per failure streak and keep retrying: while presence cannot be written it goes
+			// stale within LIVE_TTL_MS, so the Build guard (SELF_PRESENCE_STALE_BLOCKER) and
+			// harness hooks keep writes blocked, and the next successful write recovers.
+			const heartbeatFailure = failureStreakReporter((error) => {
+				try {
+					ctx.ui.notify(`claude-bridge heartbeat failed (${error instanceof Error ? error.message : String(error)}); writes stay blocked until presence can be saved again. Retrying.`, "warning");
+				} catch { /* notification is best-effort */ }
+			});
 			heartbeatTimer = setInterval(() => {
-				if (!activePaths || !activePiSessionId) return;
-				const current = readPresence(activePaths.presence, activePiSessionId);
-				if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
-					passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
-					watcher?.close();
-					watcher = null;
-					clearInterval(heartbeatTimer!);
-					heartbeatTimer = null;
-					dropPendingMessages(ctx, "bridge ownership change");
-					setBuildLease(null, ctx, "revoked");
-					buildLeaseRequests = new Map();
-					activePaths = null;
-					activeProjectRoot = null;
-					activePiSessionId = null;
-					presenceInitialized = false;
-					pairedPeers = new Map();
-					ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
-					ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
-					return;
+				try {
+					if (!activePaths || !activePiSessionId) return;
+					const current = readPresence(activePaths.presence, activePiSessionId);
+					if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
+						passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
+						watcher?.close();
+						watcher = null;
+						clearInterval(heartbeatTimer!);
+						heartbeatTimer = null;
+						dropPendingMessages(ctx, "bridge ownership change");
+						setBuildLease(null, ctx, "revoked");
+						buildLeaseRequests = new Map();
+						activePaths = null;
+						activeProjectRoot = null;
+						activePiSessionId = null;
+						presenceInitialized = false;
+						pairedPeers = new Map();
+						ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+						ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+						return;
+					}
+					if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
+						setBuildLease(null, ctx, "revoked");
+					}
+					writePresence(activePaths);
+					heartbeatFailure.succeeded();
+				} catch (error) {
+					heartbeatFailure.failed(error);
 				}
-				if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
-					setBuildLease(null, ctx, "revoked");
-				}
-				writePresence(activePaths);
 			}, HEARTBEAT_MS);
 			heartbeatTimer.unref?.();
 		} catch (error) {
