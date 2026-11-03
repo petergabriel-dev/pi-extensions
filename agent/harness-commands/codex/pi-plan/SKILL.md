@@ -28,7 +28,7 @@ Codex reads files through shell. Without a Build lease the Pi hook allows only p
 2. If the bridge call fails or returns `ok: false`, stop and quote the exact refusal. If unavailable, say exactly:
    > Pi bridge not responding; start/focus Pi in this project.
 3. Read and investigate using read-only tools. Do not create or edit files. Adopt returned `prompts.planPrompt` as authoritative planning behavior, including its ponytail reflex; ignore tools it names that you do not have.
-4. Ask product questions with `request_user_input` when available; otherwise say no question tool exists, then ask in prose.
+4. Ask product questions with Codex's question tool (`request_user_input`, or `request_user_input_async` in the desktop app) when available; otherwise say no question tool exists, then ask in prose.
 5. Use Pi's plan structure:
    - Section 1 — Non-Functional Requirements
    - Section 2 — Success Metrics

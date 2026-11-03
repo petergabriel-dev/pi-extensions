@@ -19,7 +19,8 @@ const BRIDGE_MCP_PREFIX = "mcp__pi_claude_bridge__";
 const SHELL_TOOLS = new Set(["Bash"]);
 const PATCH_TOOLS = new Set(["apply_patch"]);
 // Local function tools that cannot write files or start processes. Everything else in a Pi project is denied.
-const READ_TOOLS = new Set(["view_image", "update_plan", "request_user_input", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+// The question tool is request_user_input in the CLI and request_user_input_async in the desktop app.
+const READ_TOOLS = new Set(["view_image", "update_plan", "request_user_input", "request_user_input_async", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
 
 function deny(reason) {
 	return {

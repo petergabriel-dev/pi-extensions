@@ -1468,6 +1468,15 @@
       "expect": { "codex": "allow" }
     },
     {
+      "id": "codex-tool-request-user-input-async",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "request_user_input_async",
+      "input": { "questions": [] },
+      "expect": { "codex": "allow" }
+    },
+    {
       "id": "codex-lease-holder-self-apply-patch",
       "class": "write",
       "kind": "tool",

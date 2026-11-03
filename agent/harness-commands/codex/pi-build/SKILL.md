@@ -24,7 +24,7 @@ Pi bridge tools are on the `pi-claude-bridge` MCP server. The Pi Codex hook inje
    - `query`: the user's goal plus known feature/module words
    - `mode`: `build`
 2. If recall fails, returns `ok: false`, or omits `prompts.buildPrompt`, stop before editing or running shell commands. Quote the exact refusal; do not retry with another identity or bypass the lease.
-3. Treat returned `prompts.buildPrompt` as authoritative Build behavior. Use returned `savedPlan` and the active tracker; never edit the saved plan file or its checkboxes. Ask confirmations with `request_user_input` when available; otherwise ask in prose.
+3. Treat returned `prompts.buildPrompt` as authoritative Build behavior. Use returned `savedPlan` and the active tracker; never edit the saved plan file or its checkboxes. Ask confirmations with Codex's question tool (`request_user_input`, or `request_user_input_async` in the desktop app) when available; otherwise ask in prose.
 4. Map Pi-only workflow tools to bridge tools:
    - `workflow_plan_tasks` → `read_plan_tasks`
    - `workflow_plan_tick` → `tick_plan_task`
