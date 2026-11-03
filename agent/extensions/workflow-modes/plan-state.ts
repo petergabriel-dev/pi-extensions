@@ -9,11 +9,6 @@ export interface SavedPlan {
 export interface SavedPlanState {
 	plans: SavedPlan[];
 	activePlanId: string | undefined;
-
-	// Transitional fields for callers replaced by file-backed prompt composition in later tasks.
-	plan?: string;
-	planId?: string;
-	savedAt?: string;
 }
 
 interface BranchEntry {
