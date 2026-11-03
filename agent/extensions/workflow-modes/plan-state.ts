@@ -9,11 +9,6 @@ export interface SavedPlan {
 export interface SavedPlanState {
 	plans: SavedPlan[];
 	activePlanId: string | undefined;
-
-	// Transitional fields for callers replaced by file-backed prompt composition in later tasks.
-	plan?: string;
-	planId?: string;
-	savedAt?: string;
 }
 
 interface BranchEntry {
@@ -30,6 +25,7 @@ interface PlanEventData {
 	savedAt?: unknown;
 	tasks?: unknown;
 	taskId?: unknown;
+	note?: unknown;
 }
 
 interface VersionedPlan extends SavedPlan {
@@ -44,15 +40,19 @@ interface PlanVersion {
 export interface SavedPlanTaskState {
 	tasks: PlanTask[];
 	completedTaskIds: string[];
+	tickNotes: ReadonlyMap<string, string>;
 	progress: { done: number; total: number };
 	nextTask?: { id: string; title: string };
 	seeded: boolean;
 }
 
+export const MAX_PLAN_TASK_NOTE_LENGTH = 500;
+
 export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planId: string, fallbackTasks: readonly PlanTask[] = [], customType = "workflow-plan"): SavedPlanTaskState {
 	let tasks: PlanTask[] | undefined;
 	let cleared = false;
 	const completed = new Set<string>();
+	const tickNotes = new Map<string, string>();
 
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== customType) continue;
@@ -64,17 +64,24 @@ export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planI
 			tasks = seed;
 			cleared = false;
 			completed.clear();
+			tickNotes.clear();
 			continue;
 		}
 		if (data.event === "clear") {
 			tasks = undefined;
 			cleared = true;
 			completed.clear();
+			tickNotes.clear();
 			continue;
 		}
 		if (data.event !== "tick" || !tasks) continue;
 		const taskId = nonEmptyText(data.taskId);
-		if (taskId && tasks.some((task) => task.id === taskId)) completed.add(taskId);
+		if (!taskId || !tasks.some((task) => task.id === taskId)) continue;
+		if (!completed.has(taskId)) {
+			const note = normalizeTickNote(data.note);
+			if (note) tickNotes.set(taskId, note);
+		}
+		completed.add(taskId);
 	}
 
 	const seeded = tasks !== undefined;
@@ -84,6 +91,7 @@ export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planI
 	return {
 		tasks: resolvedTasks,
 		completedTaskIds,
+		tickNotes,
 		progress: { done: completedTaskIds.length, total: resolvedTasks.length },
 		...(nextTask ? { nextTask: { id: nextTask.id, title: nextTask.title } } : {}),
 		seeded,
@@ -159,6 +167,12 @@ function lastCurrentPlan(history: readonly PlanVersion[], plans: ReadonlyMap<str
 		if (plans.get(candidate.planId)?.generation === candidate.generation) return candidate.planId;
 	}
 	return undefined;
+}
+
+function normalizeTickNote(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const note = value.trim();
+	return note.length > 0 && note.length <= MAX_PLAN_TASK_NOTE_LENGTH ? note : undefined;
 }
 
 function nonEmptyText(value: unknown): string | undefined {

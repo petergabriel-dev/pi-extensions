@@ -1,5 +1,5 @@
 export type Harness = "claude" | "cursor" | "opencode";
-export type EntryKind = "hook" | "statusline" | "mcp" | "command" | "plugin";
+export type EntryKind = "hook" | "statusline" | "mcp" | "command" | "plugin" | "skill";
 
 export interface HarnessEntry {
 	kind: EntryKind;
@@ -10,6 +10,42 @@ export interface HarnessEntry {
 }
 
 const bridgeOwner = "claude-bridge";
+const skillOwner = "package-skills";
+
+export const PACKAGE_SKILL_NAMES = [
+	"animate",
+	"animate-expo",
+	"animation-performance",
+	"animation-vocabulary",
+	"apple-design",
+	"ask-sonner",
+	"break-ui",
+	"emil-design-eng",
+	"find-animation-opportunities",
+	"grill",
+	"grill-with-docs",
+	"impeccable",
+	"improve-animations",
+	"mobile-native",
+	"pick-ui-library",
+	"playwright-cli",
+	"prototype",
+	"remove-animations",
+	"review-animations",
+	"web-debug",
+	"web-design-guidelines",
+	"worker-orchestration",
+	"write-swift",
+] as const;
+
+function skillEntries(): HarnessEntry[] {
+	return PACKAGE_SKILL_NAMES.map((name): HarnessEntry => ({
+		kind: "skill",
+		script: `agent/skills/${name}`,
+		dest: `skills/${name}`,
+		ownerExtension: skillOwner,
+	}));
+}
 
 export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 	claude: [
@@ -52,6 +88,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			dest: `commands/pi-${command}.md`,
 			ownerExtension: bridgeOwner,
 		})),
+		...skillEntries(),
 	],
 	cursor: [
 		...(["beforeShellExecution", "beforeMCPExecution", "preToolUse"] as const).map(
@@ -75,6 +112,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			dest: `commands/pi-${command}.md`,
 			ownerExtension: bridgeOwner,
 		})),
+		...skillEntries(),
 	],
 	opencode: [
 		{
@@ -95,6 +133,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			dest: "opencode.json#mcp.pi-claude-bridge",
 			ownerExtension: bridgeOwner,
 		},
+		...skillEntries(),
 	],
 };
 

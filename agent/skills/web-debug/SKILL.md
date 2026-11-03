@@ -5,13 +5,28 @@ description: Debug broken web pages, failed logins, blank screens, console error
 
 # Web Debug
 
+## Tool mapping
+
+Pi provides `browser_*`; other harnesses use matching commands from the [playwright-cli skill](../playwright-cli/SKILL.md):
+
+| Pi tool | Other harness |
+| --- | --- |
+| `browser_goto` | `playwright-cli open <url>` |
+| `browser_console` | `playwright-cli console` |
+| `browser_network` | `playwright-cli requests`, then `playwright-cli request <id>` |
+| `browser_eval` | `playwright-cli eval "<expression>" [ref]` or `playwright-cli snapshot` |
+| `browser_fill` / `browser_click` | `playwright-cli fill <ref> "<text>"` / `playwright-cli click <ref>` |
+| `browser_screenshot` / close | `playwright-cli screenshot --filename=<path>` / `playwright-cli close` |
+
+Pi `/mode`, `/browser`, `PI_BROWSER_PROFILE`, and setup steps below apply only in Pi. Other harnesses follow their own Build authorization and browser setup; if CLI or browser is unavailable, report verification as unverified.
+
 ## Preconditions
 
 1. Work from a reproducible symptom. Record URL, action, expected result, actual result, and timestamp.
-2. Browser navigation, eval, click, fill, and close require Build mode. If current `[workflow-modes]` line is not Build, stop. Run `/mode build`.
-3. If any browser tool reports `Browser gate is off. Run /browser on first.`, stop retrying. Run `/browser on`.
-4. If Chromium is unavailable, stop. Run `cd agent/extensions/browser && npx playwright install chromium`.
-5. Use a disposable profile for clean-state checks: `PI_BROWSER_PROFILE="$(mktemp -d)" pi`. Never paste credentials, tokens, or full cookie values into notes.
+2. In Pi only, navigation, eval, click, fill, and close require Build mode. If current `[workflow-modes]` line is not Build, stop. Run `/mode build`.
+3. In Pi only, if a browser tool reports `Browser gate is off. Run /browser on first.`, stop retrying. Run `/browser on`.
+4. In Pi only, if Chromium is unavailable, stop. Run `cd agent/extensions/browser && npx playwright install chromium`.
+5. In Pi, use a disposable profile for clean-state checks: `PI_BROWSER_PROFILE="$(mktemp -d)" pi`. Other harnesses should use an isolated browser session. Never paste credentials, tokens, or full cookie values into notes.
 
 ## Core loop
 
@@ -60,6 +75,8 @@ description: Debug broken web pages, failed logins, blank screens, console error
 
 ## Pitfalls
 
+These implementation details apply to Pi's browser extension; other harnesses should use the matching playwright-cli behavior.
+
 - `browser_goto` waits for `domcontentloaded`, not every async request (`agent/extensions/browser/index.ts:579-585`).
 - Eval serializes DOM nodes as exact placeholder `"ref: <Node>"`; `undefined`, functions, and symbols become `null`, cycles become `"[Circular]"` (`browser/index.ts:474-496`).
 - `browser_console` and `browser_network` drain buffers by default. Pass `clear:false` to peek (`browser/index.ts:629-650`).
@@ -71,4 +88,4 @@ description: Debug broken web pages, failed logins, blank screens, console error
 
 - Do not use for backend-only failures, API contract tests, or server logs when no browser symptom exists.
 - Do not use for destructive or credential-sensitive actions without explicit authorization.
-- Do not bypass `/browser` gate or workflow-mode blocks. In read-only modes, inspect existing console/network/screenshot data only; run `/mode build` before navigation or interaction.
+- In Pi, do not bypass `/browser` gate or workflow-mode blocks. In read-only modes, inspect existing console/network/screenshot data only; run `/mode build` before navigation or interaction. Outside Pi, follow the host's authorization rules; do not run Pi commands.

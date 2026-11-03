@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This workspace prepares `@lopezpetergabriel/pi-extensions@0.10.0`, a Pi package and source workspace containing twelve extensions, four skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+This workspace prepares `@lopezpetergabriel/pi-extensions@0.11.0`, a Pi package and source workspace containing twelve extensions, 23 skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -8,20 +8,21 @@ This workspace prepares `@lopezpetergabriel/pi-extensions@0.10.0`, a Pi package 
 - Node.js `>=22.19.0`
 - npm and network access for the first bootstrap and uncached `npx` test dependencies
 - Optional: `ccc` for `ccc_search`; `gh` for live Review-mode GitHub checks
-- For browser verification: Chromium, installed with `cd agent/extensions/browser && npx playwright install chromium`
+- For Pi browser verification: Chromium, installed with `cd agent/extensions/browser && npx playwright install chromium`
+- Optional, for cross-harness visual verification: manually install `@playwright/cli` with `npm install -g @playwright/cli@latest`; it is never installed automatically
 
 ## Install and try the package
 
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.10.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.10.0   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.10.0           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.11.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.11.0   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.11.0           # temporary try
 pi list
 ```
 
-These install commands pin `@0.10.0`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.11.0`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
@@ -32,14 +33,29 @@ Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi upda
 ### Install from Git
 
 ```bash
-pi install git:github.com/petergabriel-dev/pi-extensions@v0.10.0
+pi install git:github.com/petergabriel-dev/pi-extensions@v0.11.0
 ```
 
-After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, or OpenCode, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config and `pi-*` commands; consumers do not hand-merge settings or create symlinks. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.
+After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, or OpenCode, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config, `pi-*` commands, and all 23 package-skill directory links in harness-specific roots; consumers do not hand-merge settings or create symlinks. Foreign skill destinations are preserved; `/harness` does not export to `~/.agents/skills`. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.
 
-Cursor setup installs global `pi-*` commands. If Cursor does not discover them, use project-local commands: copy `pi-discuss.md`, `pi-plan.md`, and `pi-build.md` from the installed package's `agent/harness-commands/cursor/` into your project's `.cursor/commands/`. Real Cursor global-command discovery remains unverified. This repository's `.cursor/commands/pi-*` symlinks point to the packaged templates, but `.cursor/` is repository-only. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope.
+Cursor setup installs global `pi-*` commands. If Cursor does not discover them, use project-local commands: copy `pi-discuss.md`, `pi-plan.md`, and `pi-build.md` from the installed package's `agent/harness-commands/cursor/` into your project's `.cursor/commands/`. Real Cursor global-command discovery remains unverified. This repository's `.cursor/commands/pi-*` symlinks point to the packaged templates, but `.cursor/` is repository-only. Cursor and OpenCode global skill discovery also remain unverified pending live acceptance; OpenCode's possible discovery of `~/.claude/skills/` must be checked for duplicates. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope.
 
 Install `ccc` separately before using `ccc_search`; verify it with `ccc --version`. Raw or global copies of these extensions can load twice alongside the package. Use `pi list` and `pi config` to inspect registrations, then remove or disable duplicates.
+
+## Build leases
+
+Claude Code, Cursor, and OpenCode stay read-only in a `.pi` project until you approve a Build lease in Pi:
+
+1. Save a plan in Pi and keep Pi out of Build mode.
+2. In the harness, run `/pi-build`. The first request stops with `build_lease_pending` and a short id such as `claude:1a2b3c4d`.
+3. In interactive Pi, run `/build-lease approve`, check the short id, plan, and four-hour expiry, then confirm. Rerun `/pi-build`.
+
+- `/build-lease` shows the holder, remaining time, pending requests, and any project writer conflict. `/build-lease release` revokes the lease.
+- A lease expires four hours after approval; rerunning `/pi-build` does not extend it. After expiry the next write or task tick is denied until you approve again. Headless Pi cannot approve.
+- The lease also ends when the holder switches to `/pi-discuss` or `/pi-plan`, unpairs, or Pi enters Build, and when the plan is cleared, switched, or completed. Commit before the final task tick, because completing the plan releases the lease.
+- One writer per project: while another live Pi session in the same project is in Build or holds a lease, new requests, approvals, task ticks, `/mode build`, and Pi Build tools other than reads (including starting or steering subagents) are refused with a message naming that session. Release it there with `/build-lease release` or by leaving Build; a session that quits stops counting within about five seconds.
+- Pi Off is not guarded and never takes the writer.
+- After upgrading the package, rerun `/harness` → **Install / repair** so harness hooks use the current checks.
 
 ## Develop from source
 
@@ -74,6 +90,10 @@ npm run test:cursor-kit
 
 The focused commands are useful while iterating; `npm test` runs the complete configured gate after bootstrap.
 
+## Frontend work
+
+Use `/mode plan` to decide taste and freeze each component contract in the saved plan; Plan remains read-only and browser-blind. Schedule design-doc and token tasks before component implementation. Build writes `docs/design/` and declared token files only in Build/Off, then implements the spec literally. Verify every specified viewport and state with reviewed screenshots against the spec and `web-design-guidelines`, fixing for at most three passes. Pi uses native `browser_*` tools and respects `/browser on`; other harnesses use the manual `playwright-cli` prerequisite above. If browser verification is unavailable or declined, tick with `unverified: <reason>` and do not claim a pass.
+
 ## Subagent controls
 
 ```text
@@ -104,7 +124,9 @@ In a saved interactive TUI session, `/agents` lists child runs in tree order and
 
 ### Skills and agents
 
-- Skills: `grill`, `grill-with-docs`, `web-debug`, and `worker-orchestration`.
+- Existing workflow/debug skills: `grill`, `grill-with-docs`, `web-debug`, and `worker-orchestration`.
+- Design/verification skills: `impeccable`, `web-design-guidelines`, and `playwright-cli`.
+- Emil Kowalski skills (16): `emil-design-eng`, `animate`, `animate-expo`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `remove-animations`, `animation-performance`, `animation-vocabulary`, `apple-design`, `write-swift`, `pick-ui-library`, `prototype`, `mobile-native`, `break-ui`, and `ask-sonner`. Skill provenance and licenses: `agent/skills/THIRD_PARTY_NOTICES.md`.
 - Bundled agents: `explorer` for repository-read-only discovery and `worker` for Build-mode implementation.
 
 ### Repository map
@@ -124,7 +146,7 @@ The launcher reuses the current Pi user state; it does not create a separate Pi 
 
 Never add credentials, trust/settings/model files, sessions, plans, personal memory, caches, databases, logs, dependency trees, bridge IPC, CCC indexes, or external symlinks to the repository. The only tracked `.pi/` resource is the internal `.pi/agents` symlink.
 
-Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` harness command templates across Claude, Cursor, and OpenCode. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=1 MiB` unpacked limits.
+Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` harness command templates across Claude, Cursor, and OpenCode. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=2 MiB` unpacked limits.
 
 ### Enforcement limits
 
@@ -135,7 +157,10 @@ Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpe
 - Bash and patch-style tools with no path field can still write into a Pi project from a session outside it; the target check covers dedicated edit tools only and this gap is not fixed (F11).
 - Host handling of Cursor `failClosed`, Claude exit-2 guards, and OpenCode plugin-load failure remains unverified; config and runner checks are not host-enforcement proof.
 - Pi Off is unguarded. Pi Review posting requires fresh human Pi approval for each command; decline, no UI/headless execution, or confirmation error blocks posting.
-- Open gaps: Pi Plan fallback without a sandbox can admit unsafe command expansion (F9); leases are per Pi session, not project-wide single-writer locks (F10). Plan acceptance #1/#3 remain unmet pending follow-up.
+- Without a sandbox launcher (for example Linux without bwrap), Pi Discuss runs no bash (the read tool and any active search tool still work), and Pi Plan and Review ask for fresh approval before every single-line bash command and refuse multi-line or obviously mutating ones (Review also keeps its allow-list); decline or headless execution blocks them. Install bwrap to avoid this.
+- Cursor's shell hook allows `rg`, `sort`, `uniq`, `find`, `tree`, and `git` only with flags on per-command safe lists; any other flag prompts. Git can still run programs configured in a repository's `.git/config`.
+- Resuming a Pi session whose last mode was Build starts it in Plan; run `/mode build` to re-enter Build.
+- One writer per project is derived from live Pi session presence, not a lock. A Pi session whose bridge is inactive is invisible to the check, and if two sessions ever both claim the writer, both are refused until one releases. Worker subagents already running when that happens finish their current run.
 - Out of scope: root/kernel/hypervisor attackers, supply-chain compromise, a human editing config, and cross-user attacks.
 - Use a container or VM for real isolation. See [ADR-0045: threat model and evidence limits](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md) and [ADR-0048: regression coverage limits](https://github.com/petergabriel-dev/pi-extensions/blob/main/docs/engineering/decisions/ADR-0048-security-regression-corpus.md).
 

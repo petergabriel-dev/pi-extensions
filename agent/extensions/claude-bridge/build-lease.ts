@@ -81,7 +81,7 @@ function piBuildingRefusal(): BuildLeaseRefusal {
 function heldRefusal(lease: BuildLease): BuildLeaseRefusal {
 	return refusal(
 		"build_lease_held",
-		`Build lease held by ${buildLeaseHolderLabel(lease)}; ask that holder to run /build-lease release.`,
+		`Build lease held by ${buildLeaseHolderLabel(lease)}. If that session is done, run /build-lease release in Pi (this ends its writes), then request again and approve the new request with /build-lease approve.`,
 	);
 }
 
@@ -93,6 +93,77 @@ export function isBuildLeaseActive(lease: BuildLease | null | undefined, now: nu
 	if (!lease) return false;
 	if (!Number.isFinite(lease.grantedAt) || !Number.isFinite(lease.expiresAt)) return false;
 	return lease.expiresAt > lease.grantedAt && now < lease.expiresAt;
+}
+
+export interface WriterClaim {
+	piSessionId: string;
+	kind: "build" | "lease";
+	holder: string | null;
+}
+
+export interface WriterClaimSession {
+	id: string;
+	presence: { mode: string | null; buildLease?: BuildLease | null };
+}
+
+// Mirrors parseBuildLease in agent/claude-bridge-client/pi-bridge-mcp.js.
+export function parseBuildLease(value: unknown): BuildLease | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	const peer = { harness: record.harness as HarnessKind, id: record.id as string };
+	if (!isLeasePeer(peer)) return null;
+	if (typeof record.planId !== "string" || record.planId.trim().length === 0) return null;
+	const { grantedAt, expiresAt } = record;
+	if (typeof grantedAt !== "number" || typeof expiresAt !== "number") return null;
+	if (!Number.isFinite(grantedAt) || !Number.isFinite(expiresAt) || expiresAt <= grantedAt) return null;
+	return { harness: peer.harness, id: peer.id, planId: record.planId, grantedAt, expiresAt };
+}
+
+// Project-wide single writer; mirrors hasOtherWriterClaim in
+// agent/claude-bridge-client/pi-bridge-mcp.js. Callers pass only live
+// (fresh-presence) sessions. Conflicting claims deny every claimant.
+export function otherWriterClaims(sessions: readonly WriterClaimSession[], selfId: string, now: number): WriterClaim[] {
+	const claims: WriterClaim[] = [];
+	for (const { id, presence } of sessions) {
+		if (id === selfId) continue;
+		if (presence.mode === "build") claims.push({ piSessionId: id, kind: "build", holder: null });
+		if (isBuildLeaseActive(presence.buildLease, now)) {
+			claims.push({ piSessionId: id, kind: "lease", holder: buildLeaseHolderLabel(presence.buildLease) });
+		}
+	}
+	return claims;
+}
+
+export function describeWriterClaims(claims: readonly WriterClaim[]): string {
+	return claims
+		.map((claim) => `Pi session ${claim.piSessionId.slice(0, 8)} (${claim.kind === "build" ? "Build mode" : `lease ${claim.holder}`})`)
+		.join(", ");
+}
+
+// Blocker phrases carry their own remediation, so bridge refusals and
+// workflow-modes block reasons show the same text and a self-stale session is
+// never told to release another session.
+export const WRITER_RELEASE_HINT = "release it in that Pi session with /build-lease release or by leaving Build";
+export const SELF_PRESENCE_STALE_BLOCKER = "this Pi session's stale bridge presence; fix .pi/memory/bridge permissions (0700 directories, 0600 files) or restart this Pi session";
+
+export function describeWriterBlocker(claims: readonly WriterClaim[]): string {
+	return `${describeWriterClaims(claims)}; ${WRITER_RELEASE_HINT}`;
+}
+
+export function ownLeaseBlocker(lease: BuildLease): string {
+	return `${buildLeaseHolderLabel(lease)} (this session's harness lease); run /build-lease release here`;
+}
+
+export function passiveBridgeBlocker(reason: string): string {
+	return `this Pi session's passive bridge (${reason}); close the other Pi process that owns this session or restart this Pi session`;
+}
+
+export function unverifiedWriterBlocker(reason: string): string {
+	return `an unverified writer (${reason}); retry, or restart this Pi session if it persists`;
+}
+
+export function projectWriterHeldMessage(blockedBy: string): string {
+	return `Project writer blocked by ${blockedBy}.`;
 }
 
 function holdsActiveLease(

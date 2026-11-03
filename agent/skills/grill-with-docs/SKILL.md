@@ -10,6 +10,11 @@ Ask the questions one at a time, waiting for feedback on each question before co
 
 If a question can be answered by exploring the codebase, explore the codebase instead.
 
+## Tool mapping
+
+- **Pi:** use `discussion_notes` when available for high-confidence session facts.
+- **Claude, Cursor, OpenCode:** use the `pi-claude-bridge` `capture_note` MCP tool when available; otherwise keep a concise notes list in chat. Chat notes are not repository documentation.
+
 ## Domain awareness
 
 During codebase exploration, also look for existing documentation:
@@ -48,9 +53,9 @@ Create files lazily — only when you have something to write. If no `CONTEXT.md
 
 ## During the session
 
-### Use discussion notes for session memory
+### Capture session memory
 
-If the `discussion_notes` tool is available, use it to capture high-confidence session facts as they emerge:
+In Pi, use `discussion_notes` when available. In Claude, Cursor, or OpenCode, use `capture_note` when paired bridge MCP is available; otherwise keep a concise notes list in chat. Capture high-confidence session facts as they emerge:
 
 - `requirement`: requirements the user confirms
 - `decision`: decisions made during the grilling session

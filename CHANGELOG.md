@@ -4,6 +4,39 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-03
+
+### Breaking
+
+- Remove Design workflow mode. Plan now owns frozen frontend component specs; Build writes design docs/tokens in Build/Off and implements specs literally.
+
+### Added
+
+- Bundle 19 pinned Markdown-only design and verification skills with license notices; `/harness` manages all 23 package skills as harness-specific directory links.
+- Add optional trimmed 1–500 character notes to `workflow_plan_tick` and bridge `tick_plan_task`.
+
+### Changed
+
+- Build prompts require reviewed screenshots against frontend specs and `web-design-guidelines` before claiming visual verification; unavailable browsers use an honest `unverified:` tick note.
+- Raise the package unpacked-size limit to 2 MiB; packed-size limit remains 512 KiB.
+- Make existing package skills describe non-Pi tool fallbacks while preserving Pi behavior.
+
+### Fixed
+
+- Enforce one writer per project across Pi, Claude, Cursor, and OpenCode sessions: Build entry, lease requests, task ticks, and writes are refused while another live session claims the project; hook denials name the conflict.
+- Restore workflow state fail-closed: unreadable session state opens as read-only Unknown, restored Build sessions land in Plan, and active plans load before mode announcement.
+- Without a sandbox, Bash never auto-runs; Plan and Review ask approval per permitted command. Build's writer check also covers non-read tools, including unknown tools and subagents.
+- Command confirmation dialogs visibly escape invisible Unicode and mark runs of four or more blank characters.
+- Cursor read-only shell commands require explicitly safe-listed flags; unquoted globs trigger approval.
+- In Pi projects, bridge startup errors and passive bridges block Build; abandoned namespaces are reclaimed, and heartbeat write failures retry without ending the bridge.
+- Plan saves verify session state is readable before writing the plan file.
+
+### Upgrade
+
+- After `pi update`, restart Pi and harness sessions; rerun `/harness` → Install / repair.
+- Sessions saved in Design mode open read-only (Unknown) until a supported mode is selected.
+- Expect more Bash approval prompts when no sandbox is available.
+
 ## [0.10.0] - 2026-10-29
 
 ### Added

@@ -86,7 +86,7 @@ const SubagentMessageParams = Type.Object({
 });
 type SubagentMessageParams = Static<typeof SubagentMessageParams>;
 
-export type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review" | "design";
+export type WorkflowMode = "off" | "discuss" | "plan" | "build" | "review";
 
 interface WorkflowStateQueryResult {
 	ok: boolean;
@@ -161,7 +161,7 @@ interface QuestionRelay {
 }
 
 function isWorkflowMode(value: unknown): value is WorkflowMode {
-	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review" || value === "design";
+	return value === "off" || value === "discuss" || value === "plan" || value === "build" || value === "review";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

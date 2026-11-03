@@ -7,9 +7,9 @@ import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/ind
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
 import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
-import { clearRequestCache, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
+import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
-import { BUILD_LEASE_TTL_MS, approveBuildLease, buildLeaseHolderLabel, canTickPlanTask, isBuildLeaseActive, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState } from "./build-lease.js";
+import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
@@ -18,6 +18,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
 const NAMESPACE_GC_TTL_MS = 10 * 60_000;
+const MAX_TICK_PLAN_TASK_NOTE_LENGTH = 500;
 
 interface BridgePaths {
 	projectRoot: string;
@@ -72,7 +73,7 @@ interface BridgeResponse {
 
 interface RecallPayload {
 	query?: string;
-	mode?: "discuss" | "plan" | "build" | "design";
+	mode?: "discuss" | "plan" | "build";
 }
 
 type CaptureNoteType = "requirement" | "decision" | "constraint" | "action" | "question" | "preference" | "implementation" | "lesson";
@@ -117,8 +118,8 @@ interface ReadPlanTasksPayload {
 }
 
 type TickPlanTaskPayload =
-	| { taskId: string; planId?: string }
-	| { title: string; planId?: string };
+	| { taskId: string; planId?: string; note?: string }
+	| { title: string; planId?: string; note?: string };
 
 interface RecallEntryPayload {
 	slug: string;
@@ -313,6 +314,7 @@ function parsePresence(value: unknown, expectedSessionId?: string): BridgePresen
 			? Math.max(0, Math.floor(rawInboundPendingCount)) : 0;
 		peers.push({ ...peer, pendingCount, inboundPendingCount });
 	}
+	const buildLease = parseBuildLease(record.buildLease);
 	return {
 		schemaVersion: 2,
 		piSessionId: record.piSessionId,
@@ -322,13 +324,16 @@ function parsePresence(value: unknown, expectedSessionId?: string): BridgePresen
 		startedAt: record.startedAt,
 		heartbeatAt: record.heartbeatAt,
 		peers,
+		...(buildLease ? { buildLease } : {}),
 	};
 }
 
-function readPresence(filePath: string, expectedSessionId?: string): BridgePresence | null {
+// requirePrivate (default) gates ownership decisions on a 0600 presence file. The
+// live writer-claim scan passes false, matching the JS client's liberal claim rule.
+function readPresence(filePath: string, expectedSessionId?: string, { requirePrivate = true }: { requirePrivate?: boolean } = {}): BridgePresence | null {
 	try {
 		const stat = fs.lstatSync(filePath);
-		if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) return null;
+		if (!stat.isFile() || stat.isSymbolicLink() || (requirePrivate && (stat.mode & 0o777) !== 0o600)) return null;
 	} catch { return null; }
 	return parsePresence(readJson(filePath), expectedSessionId);
 }
@@ -350,7 +355,15 @@ function gcStaleNamespaces(sessionsDir: string, now = Date.now()): void {
 		} catch { continue; }
 		const presence = readPresence(path.join(namespace, "presence.json"), id);
 		const heartbeat = parseTime(presence?.heartbeatAt);
-		if (heartbeat > 0 && now - heartbeat > NAMESPACE_GC_TTL_MS) {
+		// The mtime is read after presence, so a namespace recreated in between looks fresh.
+		let dirMtimeMs = Number.NaN;
+		if (!presence) {
+			try { dirMtimeMs = fs.lstatSync(namespace).mtimeMs; } catch { continue; }
+		}
+		// Stale heartbeat, or abandoned before its first presence write (for example a
+		// startup that threw after creating the directory). claimSessionNamespace runs
+		// this first, so an abandoned namespace is reclaimed on the next start.
+		if ((heartbeat > 0 && now - heartbeat > NAMESPACE_GC_TTL_MS) || isAbandonedNamespace(!!presence, dirMtimeMs, now)) {
 			try { fs.rmSync(namespace, { recursive: true, force: true }); } catch { /* best-effort stale namespace GC */ }
 		}
 	}
@@ -375,7 +388,7 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 		return { active: false, reason: `Pi session ${piSessionId} already has live bridge owner pid ${existing.pid}.` };
 	}
 	if (namespaceExists && !existing) {
-		return { active: false, reason: `Pi session ${piSessionId} bridge namespace is initializing or invalid; retry session start.` };
+		return { active: false, reason: `Pi session ${piSessionId} bridge namespace has no presence yet (still initializing, or abandoned and reclaimed ${ABANDONED_NAMESPACE_MS / 1000}s after its last change); retry session start.` };
 	}
 	if (existing && Date.now() - parseTime(existing.heartbeatAt) > NAMESPACE_GC_TTL_MS) {
 		try { fs.rmSync(paths.namespace, { recursive: true, force: true }); } catch { /* retry claim will fail closed */ }
@@ -402,11 +415,13 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 	return { active: true };
 }
 
-function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString()): void {
-	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
+// Returns whether presence was written; a skipped write (bridge directories not
+// private, or ownership lost) returns false.
+function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString()): boolean {
+	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return false;
 	if (presenceInitialized) {
 		const owner = readPresence(paths.presence, activePiSessionId);
-		if (!owner || owner.pid !== process.pid || owner.startedAt !== startedAt) return;
+		if (!owner || owner.pid !== process.pid || owner.startedAt !== startedAt) return false;
 	}
 	const peers = Array.from(pairedPeers.values()).map((peer) => {
 		const identity: PeerIdentity = { kind: peer.harness, id: peer.id };
@@ -428,9 +443,13 @@ function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString(
 		...(buildLease ? { buildLease: { ...buildLease } } : {}),
 	} satisfies BridgePresence);
 	presenceInitialized = true;
+	return true;
 }
 
-function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: string; presence: BridgePresence }> {
+// forClaims: writer-claim counting reads presence liberally (drifted permissions
+// still claim, fail closed). Peer restore and listings keep the strict read so they
+// agree with what harness clients can pair with.
+function listLiveNamespaces(projectRoot: string, now = Date.now(), { forClaims = false }: { forClaims?: boolean } = {}): Array<{ id: string; presence: BridgePresence }> {
 	let resolvedProjectRoot: string;
 	try { resolvedProjectRoot = fs.realpathSync(projectRoot); } catch { return []; }
 	const piDir = path.join(resolvedProjectRoot, ".pi");
@@ -448,7 +467,7 @@ function listLiveNamespaces(projectRoot: string, now = Date.now()): Array<{ id: 
 			const stat = fs.lstatSync(namespace);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
 		} catch { continue; }
-		const presence = readPresence(path.join(namespace, "presence.json"), id);
+		const presence = readPresence(path.join(namespace, "presence.json"), id, { requirePrivate: !forClaims });
 		const heartbeat = parseTime(presence?.heartbeatAt);
 		if (presence && heartbeat > 0 && now - heartbeat <= LIVE_TTL_MS && heartbeat <= now + LIVE_TTL_MS) live.push({ id, presence });
 	}
@@ -539,9 +558,8 @@ export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled
 		mode: mode ?? "plan",
 		cavemanEnabled,
 		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
-		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled),
+		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled, undefined, cwd),
 		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled, undefined, cwd),
-		designPrompt: composeWorkflowPrompt("design", cavemanEnabled, undefined, cwd),
 		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
 		planTemplatePath: PLAN_TEMPLATE_PATH,
 		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
@@ -550,7 +568,7 @@ export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled
 
 function normalizeRecallPayload(payload: Record<string, unknown>): RecallPayload {
 	const query = typeof payload.query === "string" ? payload.query : "";
-	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" || payload.mode === "design" ? payload.mode : "plan";
+	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" ? payload.mode : "plan";
 	return { query, mode };
 }
 
@@ -601,19 +619,27 @@ function normalizeReadPlanTasksPayload(payload: Record<string, unknown>): ReadPl
 	return typeof payload.planId === "string" ? { planId: payload.planId.trim() } : {};
 }
 
+function normalizeTickPlanTaskNote(value: unknown): string {
+	if (typeof value !== "string") throw new Error(`tick_plan_task note must be a string of 1-${MAX_TICK_PLAN_TASK_NOTE_LENGTH} characters after trimming.`);
+	const note = value.trim();
+	if (note.length === 0 || note.length > MAX_TICK_PLAN_TASK_NOTE_LENGTH) throw new Error(`tick_plan_task note must be a string of 1-${MAX_TICK_PLAN_TASK_NOTE_LENGTH} characters after trimming.`);
+	return note;
+}
+
 function normalizeTickPlanTaskPayload(payload: Record<string, unknown>): TickPlanTaskPayload {
-	if (Object.keys(payload).some((key) => !["taskId", "title", "planId"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, and planId.");
+	if (Object.keys(payload).some((key) => !["taskId", "title", "planId", "note"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, planId, and note.");
 	const hasTaskId = Object.prototype.hasOwnProperty.call(payload, "taskId");
 	const hasTitle = Object.prototype.hasOwnProperty.call(payload, "title");
 	if (hasTaskId === hasTitle) throw new Error("tick_plan_task requires exactly one of taskId or title.");
 	if (payload.planId !== undefined && (typeof payload.planId !== "string" || payload.planId.trim().length === 0)) throw new Error("tick_plan_task planId must be a non-empty string when provided.");
 	const planId = typeof payload.planId === "string" ? payload.planId.trim() : undefined;
+	const note = payload.note === undefined ? undefined : normalizeTickPlanTaskNote(payload.note);
 	if (hasTaskId) {
 		if (typeof payload.taskId !== "string" || payload.taskId.trim().length === 0 || payload.taskId.length > 128) throw new Error("tick_plan_task requires taskId string of at most 128 characters.");
-		return { taskId: payload.taskId.trim(), ...(planId ? { planId } : {}) };
+		return { taskId: payload.taskId.trim(), ...(planId ? { planId } : {}), ...(note ? { note } : {}) };
 	}
 	if (typeof payload.title !== "string" || payload.title.trim().length === 0 || payload.title.length > 512) throw new Error("tick_plan_task requires title string of at most 512 characters.");
-	return { title: payload.title, ...(planId ? { planId } : {}) };
+	return { title: payload.title, ...(planId ? { planId } : {}), ...(note ? { note } : {}) };
 }
 
 function normalizeRecallEntryPayload(payload: Record<string, unknown>): RecallEntryPayload {
@@ -783,6 +809,8 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 			"A valid Build lease is required to tick plan tasks; approve the peer's request in Pi with /build-lease approve, then rerun /pi-build.",
 		);
 	}
+	const writerBlocker = projectWriterBlocker();
+	if (writerBlocker) return errorResponse(request.id, "build_lease_held", projectWriterHeldMessage(writerBlocker));
 	try {
 		const payload = normalizeTickPlanTaskPayload(request.payload);
 		const result = await requestWorkflowPlanTaskTick(pi, request.id, payload);
@@ -798,6 +826,7 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 				...(result.nextTask ? { nextTask: result.nextTask } : {}),
 				idempotent: result.idempotent === true,
 				outOfOrder: result.outOfOrder === true,
+				...(typeof result.note === "string" ? { note: result.note } : {}),
 			},
 		};
 	} catch (error) {
@@ -828,6 +857,8 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 			Date.now(),
 		);
 		if (!requested.ok) return errorResponse(request.id, requested.code, requested.message);
+		const writerBlocker = projectWriterBlocker();
+		if (writerBlocker) return errorResponse(request.id, "build_lease_held", projectWriterHeldMessage(writerBlocker));
 		if (requested.status === "pending") {
 			if (activeContext?.hasUI !== true) {
 				return errorResponse(
@@ -983,6 +1014,26 @@ function setBuildLease(next: BuildLease | null, ctx: ExtensionContext | undefine
 	return true;
 }
 
+class OwnPresenceMissingError extends Error {}
+
+// Fails closed: a scan that cannot see this session's own live presence is not trusted.
+function otherLiveWriterClaims(now = Date.now()): WriterClaim[] {
+	if (!activeProjectRoot || !activePiSessionId) throw new Error("Claude bridge is not active in this Pi session");
+	const live = listLiveNamespaces(activeProjectRoot, now, { forClaims: true });
+	if (!live.some(({ id }) => id === activePiSessionId)) throw new OwnPresenceMissingError();
+	return otherWriterClaims(live, activePiSessionId, now);
+}
+
+function projectWriterBlocker(now = Date.now()): string | null {
+	try {
+		const claims = otherLiveWriterClaims(now);
+		return claims.length > 0 ? describeWriterBlocker(claims) : null;
+	} catch (error) {
+		if (error instanceof OwnPresenceMissingError) return SELF_PRESENCE_STALE_BLOCKER;
+		return unverifiedWriterBlocker(`check failed closed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 function buildLeaseShortId(peer: HarnessPeer): string {
 	return `${peer.harness}:${peer.id.slice(0, 8)}`;
 }
@@ -1029,6 +1080,11 @@ async function approvePendingBuildLease(pi: ExtensionAPI, ctx: ExtensionContext)
 		selected = entries[index];
 	}
 	const [key, entry] = selected;
+	const blockedBefore = projectWriterBlocker();
+	if (blockedBefore) {
+		notifyBestEffort(ctx, projectWriterHeldMessage(blockedBefore), "warning");
+		return;
+	}
 	const preview = await requestWorkflowState(pi);
 	if (!preview) {
 		notifyBestEffort(ctx, "Build lease approval needs live workflow state; nothing granted.", "warning");
@@ -1049,6 +1105,12 @@ async function approvePendingBuildLease(pi: ExtensionAPI, ctx: ExtensionContext)
 	const fresh = await requestWorkflowState(pi);
 	if (!fresh) {
 		notifyBestEffort(ctx, "Build lease approval needs live workflow state; nothing granted.", "warning");
+		return;
+	}
+	// Re-check after the human confirm: another session may have claimed the writer meanwhile.
+	const blockedAfter = projectWriterBlocker();
+	if (blockedAfter) {
+		notifyBestEffort(ctx, projectWriterHeldMessage(blockedAfter), "warning");
 		return;
 	}
 	const result = approveBuildLease(buildLease, entry, fresh as BuildLeaseWorkflowState, pairedPeers.has(key), Date.now());
@@ -1281,8 +1343,16 @@ function scheduleScan(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePath
 	lastScanAt = now;
 	setTimeout(() => {
 		scanScheduled = false;
-		void scanRequests(pi, ctx, paths);
+		scanRequestsBestEffort(pi, ctx, paths);
 	}, SCAN_COALESCE_MS).unref?.();
+}
+
+// A rejected request scan (for example a presence or response write error) must not
+// become an unhandled rejection that ends Pi; the client's request times out instead.
+function scanRequestsBestEffort(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): void {
+	scanRequests(pi, ctx, paths).catch((error) => {
+		notifyBestEffort(ctx, `claude-bridge request handling failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+	});
 }
 
 function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContext): void {
@@ -1292,7 +1362,7 @@ function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContex
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.ui.notify(`claude-bridge watcher failed: ${message}`, "error");
 	});
-	void scanRequests(pi, ctx, paths);
+	scanRequestsBestEffort(pi, ctx, paths);
 	// No backup poll — fs.watch is sufficient on modern macOS/Node with O(1) in-flight requests.
 }
 
@@ -1401,7 +1471,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	pi.events.on("workflow-modes:changed", (data: unknown) => {
 		const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
 		cachedMode = typeof record.mode === "string" ? record.mode : null;
-		if (activePaths) writePresence(activePaths);
+		// Best-effort: a write error here must not skip the lease release below.
+		refreshPresenceBestEffort(activeContext ?? undefined);
 		void (async () => {
 			try {
 				const workflowState = await requestWorkflowState(pi);
@@ -1424,8 +1495,29 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	});
 
 	pi.events.on("workflow-modes:build-guard", (data: unknown) => {
-		if (!buildLease || !isBuildLeaseActive(buildLease, Date.now()) || !data || typeof data !== "object") return;
-		(data as Record<string, unknown>).blockedBy = buildLeaseHolderLabel(buildLease) ?? undefined;
+		if (!data || typeof data !== "object") return;
+		const payload = data as Record<string, unknown>;
+		// Fail closed: Pi's event bus swallows listener errors, so block first and
+		// lift the provisional blocker only after the check completes.
+		const prior = payload.blockedBy;
+		payload.blockedBy = unverifiedWriterBlocker("Build guard check did not complete");
+		const settle = (blocker: unknown) => {
+			if (typeof blocker === "string" && blocker.length > 0) payload.blockedBy = blocker;
+			else if (prior === undefined) delete payload.blockedBy;
+			else payload.blockedBy = prior;
+		};
+		if (buildLease && isBuildLeaseActive(buildLease, Date.now())) {
+			settle(ownLeaseBlocker(buildLease));
+			return;
+		}
+		// No active bridge: outside a Pi project there is no writer to check. In a Pi
+		// project a passive bridge publishes no presence, so this session would write
+		// while invisible to others; block until it is active again (fail closed).
+		if (!activeProjectRoot || !activePiSessionId) {
+			settle(passiveReason ? passiveBridgeBlocker(passiveReason) : undefined);
+			return;
+		}
+		settle(projectWriterBlocker());
 	});
 
 	pi.events.on("workflow-modes:save-plan-result", (data: unknown) => {
@@ -1486,57 +1578,91 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			return;
 		}
 
-		const paths = bridgePaths(projectRoot, piSessionId);
-		const claim = claimSessionNamespace(paths, piSessionId);
-		if (!claim.active) {
-			passiveReason = claim.reason;
-			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
-			ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
-			return;
-		}
-
-		const restored = restorablePeers(
-			Array.from(pairedPeers.values()),
-			listLiveNamespaces(projectRoot).filter(({ id }) => id !== piSessionId).map(({ presence }) => presence),
-		);
-		const restoredCount = restored.length;
-		pairedPeers = new Map(restored.map((peer) => [peerKey(peer), peer] as const));
-		activePaths = paths;
-		presenceInitialized = false;
-		activeProjectRoot = projectRoot;
-		activePiSessionId = piSessionId;
-		activeSessionName = sessionName(pi);
-		mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
-		for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
-		writePresence(paths);
-		startWatcher(pi, paths, ctx);
-		heartbeatTimer = setInterval(() => {
-			if (!activePaths || !activePiSessionId) return;
-			const current = readPresence(activePaths.presence, activePiSessionId);
-			if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
-				passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
-				watcher?.close();
-				watcher = null;
-				clearInterval(heartbeatTimer!);
-				heartbeatTimer = null;
-				dropPendingMessages(ctx, "bridge ownership change");
-				setBuildLease(null, ctx, "revoked");
-				buildLeaseRequests = new Map();
-				activePaths = null;
-				activeProjectRoot = null;
-				activePiSessionId = null;
-				presenceInitialized = false;
-				pairedPeers = new Map();
+		let paths: BridgePaths;
+		let restoredCount: number;
+		// Fail closed: inside a Pi project, a startup error must leave a passive reason so
+		// the Build guard blocks instead of treating this session as outside any project.
+		try {
+			paths = bridgePaths(projectRoot, piSessionId);
+			const claim = claimSessionNamespace(paths, piSessionId);
+			if (!claim.active) {
+				passiveReason = claim.reason;
 				ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
-				ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+				ctx.ui.notify(`claude-bridge passive: ${claim.reason}`, "warning");
 				return;
 			}
-			if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
-				setBuildLease(null, ctx, "revoked");
-			}
-			writePresence(activePaths);
-		}, HEARTBEAT_MS);
-		heartbeatTimer.unref?.();
+
+			const restored = restorablePeers(
+				Array.from(pairedPeers.values()),
+				listLiveNamespaces(projectRoot).filter(({ id }) => id !== piSessionId).map(({ presence }) => presence),
+			);
+			restoredCount = restored.length;
+			pairedPeers = new Map(restored.map((peer) => [peerKey(peer), peer] as const));
+			activePaths = paths;
+			presenceInitialized = false;
+			activeProjectRoot = projectRoot;
+			activePiSessionId = piSessionId;
+			activeSessionName = sessionName(pi);
+			mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
+			for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
+			writePresence(paths);
+			startWatcher(pi, paths, ctx);
+			// A timer error would be an uncaught exception that ends Pi. Instead, warn once
+			// per failure streak and keep retrying: while presence cannot be written it goes
+			// stale within LIVE_TTL_MS, so the Build guard (SELF_PRESENCE_STALE_BLOCKER) and
+			// harness hooks keep writes blocked, and the next successful write recovers.
+			const heartbeatFailure = failureStreakReporter((error) => {
+				try {
+					ctx.ui.notify(`claude-bridge heartbeat failed (${error instanceof Error ? error.message : String(error)}); writes stay blocked until presence can be saved again. Retrying.`, "warning");
+				} catch { /* notification is best-effort */ }
+			});
+			heartbeatTimer = setInterval(() => {
+				try {
+					if (!activePaths || !activePiSessionId) return;
+					const current = readPresence(activePaths.presence, activePiSessionId);
+					if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
+						passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
+						watcher?.close();
+						watcher = null;
+						clearInterval(heartbeatTimer!);
+						heartbeatTimer = null;
+						dropPendingMessages(ctx, "bridge ownership change");
+						setBuildLease(null, ctx, "revoked");
+						buildLeaseRequests = new Map();
+						activePaths = null;
+						activeProjectRoot = null;
+						activePiSessionId = null;
+						presenceInitialized = false;
+						pairedPeers = new Map();
+						ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+						ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+						return;
+					}
+					if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
+						setBuildLease(null, ctx, "revoked");
+					}
+					if (!writePresence(activePaths)) throw new Error("presence was not written (bridge directories are not private, or ownership changed)");
+					heartbeatFailure.succeeded();
+				} catch (error) {
+					// After an ownership-change teardown cleared the timer there is no retry.
+					if (heartbeatTimer === null) {
+						notifyBestEffort(ctx, `claude-bridge passive: ${passiveReason ?? "bridge stopped"} (${error instanceof Error ? error.message : String(error)})`, "warning");
+						return;
+					}
+					heartbeatFailure.failed(error);
+				}
+			}, HEARTBEAT_MS);
+			heartbeatTimer.unref?.();
+		} catch (error) {
+			try { stopActiveBridge(ctx, "startup failure"); } catch { /* cleanup is best-effort; state is reset below */ }
+			activePaths = null;
+			activeProjectRoot = null;
+			activePiSessionId = null;
+			passiveReason = `bridge startup failed: ${error instanceof Error ? error.message : String(error)}`;
+			ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
+			ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
+			return;
+		}
 		ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: active");
 		const restoredNotice = restoredCount > 0 ? ` (restored ${restoredCount} ${restoredCount === 1 ? "peer" : "peers"})` : "";
 		ctx.ui.notify(`claude-bridge active: ${paths.namespace}${restoredNotice}`, "info");
@@ -1570,6 +1696,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			} else {
 				lines.push("No active Build lease.");
 			}
+			const writerBlocker = activeProjectRoot && activePiSessionId ? projectWriterBlocker(now) : null;
+			if (writerBlocker) lines.push(`Project writer conflict: ${projectWriterHeldMessage(writerBlocker)}`);
 			if (buildLeaseRequests.size > 0) {
 				lines.push("Pending requests:");
 				for (const entry of buildLeaseRequests.values()) {

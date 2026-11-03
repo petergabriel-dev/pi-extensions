@@ -12,6 +12,7 @@ import {
 	inspectHarness,
 	planInstall,
 	planUninstall,
+	playwrightCliAdvisory,
 	readStamp,
 	resolveHarnessRoots,
 } from "./setup.ts";
@@ -331,7 +332,7 @@ async function handleInteractive(ctx: ExtensionCommandContext, agentDir: string,
 				ctx.ui.notify("Could not prepare harness setup plan; no changes applied.", "error");
 				continue;
 			}
-			const continueToConfirm = await showPreview(ctx, planPreview(selected, action, plan, inspection, currentRootWarning ?? rootWarning));
+			const continueToConfirm = await showPreview(ctx, planPreview(selected, action, plan, inspection, [currentRootWarning, rootWarning].filter((warning): warning is string => Boolean(warning)).join(" ") || undefined));
 			if (!continueToConfirm) continue;
 			const confirmed = await ctx.ui.confirm(
 				`${action === "install" ? "Apply" : "Remove"} ${HARNESS_NAMES[selected]} setup?`,
@@ -356,6 +357,8 @@ export default function registerHarnessSetup(pi: ExtensionAPI): void {
 			const roots = resolveHarnessRoots(process.env, homedir());
 			const classification = await classifyPackageRoot(PACKAGE_ROOT, agentDir);
 			const rootWarning = classification.state === "dev-checkout" ? classification.warning : undefined;
+			const cliAdvisory = await playwrightCliAdvisory();
+			const setupWarning = [rootWarning, cliAdvisory].filter((warning): warning is string => Boolean(warning)).join(" ") || undefined;
 			if (ctx.mode !== "tui") {
 				const inspections = await inspectAll(agentDir, roots);
 				for (const harness of HARNESSES) {
@@ -364,6 +367,7 @@ export default function registerHarnessSetup(pi: ExtensionAPI): void {
 				}
 				if (classification.state === "refused") console.log(`Harness setup refused: package root is unsafe or unsupported. ${classification.hint ?? "Reinstall package through Pi."}`);
 				else if (rootWarning) console.log(`Warning: ${rootWarning}`);
+				if (cliAdvisory) console.log(`Advisory: ${cliAdvisory}`);
 				console.log(APPLY_INSTRUCTION);
 				return;
 			}
@@ -372,7 +376,8 @@ export default function registerHarnessSetup(pi: ExtensionAPI): void {
 				return;
 			}
 			if (rootWarning) ctx.ui.notify(rootWarning, "warning");
-			await handleInteractive(ctx, agentDir, roots, rootWarning);
+			if (cliAdvisory) ctx.ui.notify(cliAdvisory, "warning");
+			await handleInteractive(ctx, agentDir, roots, setupWarning);
 		},
 	});
 
@@ -383,6 +388,7 @@ export default function registerHarnessSetup(pi: ExtensionAPI): void {
 			const stamped = HARNESSES.filter((harness) => Object.hasOwn(stamp.harnesses, harness));
 			if (!stamped.length) return;
 			const roots = resolveHarnessRoots(process.env, homedir());
+			const cliAdvisory = await playwrightCliAdvisory();
 			const broken: Harness[] = [];
 			for (const harness of stamped) {
 				try {
@@ -392,9 +398,11 @@ export default function registerHarnessSetup(pi: ExtensionAPI): void {
 					// Startup health is advisory; never block session startup.
 				}
 			}
-			if (broken.length) {
-				ctx.ui.notify(`${STARTUP_WARNING} for ${broken.map((harness) => HARNESS_NAMES[harness]).join(", ")}; open /harness.`, "warning");
-			}
+			const healthWarnings = [
+				broken.length ? `${STARTUP_WARNING} for ${broken.map((harness) => HARNESS_NAMES[harness]).join(", ")}; open /harness.` : undefined,
+				cliAdvisory,
+			].filter((warning): warning is string => Boolean(warning));
+			if (healthWarnings.length) ctx.ui.notify(healthWarnings.join(" "), "warning");
 		} catch {
 			// Startup health is advisory; never block session startup.
 		}

@@ -30,16 +30,21 @@ function assertEditTargetAllowed(input, toolName, projectRoot, directory, sessio
 	const targetRoot = bridgeClient.targetPiProjectRoot(target, directory);
 	if (!targetRoot || targetRoot === projectRoot) return;
 	if (bridgeClient.holdsBuildLease(targetRoot, { harness: "opencode", id: sessionId })) return;
-	throw new Error(`OpenCode ${toolName} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${targetLeaseHint(targetRoot)}`);
+	throw new Error(`OpenCode ${toolName} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${leaseNextStep(targetRoot, sessionId, targetLeaseHint(targetRoot))}`);
 }
 
-function leaseNextStep(projectRoot) {
+// Another session's writer claim wins: a lease request would be refused until it
+// is released. Otherwise name another holder in this Pi session (never this
+// session's own lease), or say how to request one.
+function leaseNextStep(projectRoot, sessionId, fallback = `No live Build lease for this session. ${targetLeaseHint(projectRoot)}`) {
+	const conflict = bridgeClient.writerConflictHint(projectRoot, bridgeClient.isSafeId(sessionId) ? { harness: "opencode", id: sessionId } : null);
+	if (conflict) return conflict;
 	const now = Date.now();
 	const holder = bridgeClient.listSessions(projectRoot, now)
 		.map((session) => session.buildLease)
-		.find((lease) => lease && now < lease.expiresAt);
-	if (holder) return `Live build lease held by ${holder.harness}:${holder.id}; ask that holder to run /build-lease release, then run /build here.`;
-	return "No live build lease for this session. Run /build after Pi has an active saved plan.";
+		.find((lease) => lease && now < lease.expiresAt && !(lease.harness === "opencode" && lease.id === sessionId));
+	if (holder) return `Build lease held by ${holder.harness}:${holder.id}; run /build-lease release in Pi to revoke it, then rerun /pi-build here.`;
+	return fallback;
 }
 
 export default {
@@ -88,7 +93,7 @@ export default {
 			if (!projectRoot) return;
 
 			if (MUTATION_TOOLS.has(toolName)) {
-				throw new Error(`OpenCode ${toolName} is blocked in Pi project ${projectRoot}. ${leaseNextStep(projectRoot)}`);
+				throw new Error(`OpenCode ${toolName} is blocked in Pi project ${projectRoot}. ${leaseNextStep(projectRoot, event.sessionID)}`);
 			}
 
 			if (toolName === "shell") {
@@ -97,7 +102,7 @@ export default {
 				}
 				const wrapped = readonlyHook.wrapBashForSandbox(input.command, projectRoot);
 				if (!wrapped) {
-					throw new Error(`OpenCode shell is blocked in Pi project ${projectRoot}: macOS Seatbelt sandbox is unavailable. ${leaseNextStep(projectRoot)} Use a supported macOS sandbox to run shell without a lease.`);
+					throw new Error(`OpenCode shell is blocked in Pi project ${projectRoot}: macOS Seatbelt sandbox is unavailable. ${leaseNextStep(projectRoot, event.sessionID)} Use a supported macOS sandbox to run shell without a lease.`);
 				}
 				input.command = wrapped;
 				return;
@@ -105,7 +110,7 @@ export default {
 
 			if (READ_TOOLS.has(toolName) || PASSTHROUGH_TOOLS.has(toolName)) return;
 
-			throw new Error(`OpenCode ${toolName} is not an allowlisted read-only tool in Pi project ${projectRoot}. ${leaseNextStep(projectRoot)}`);
+			throw new Error(`OpenCode ${toolName} is not an allowlisted read-only tool in Pi project ${projectRoot}. ${leaseNextStep(projectRoot, event.sessionID)}`);
 		});
 	},
 };

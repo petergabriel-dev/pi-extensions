@@ -70,6 +70,23 @@ Unchecked top-level task checkboxes seed workflow task tracker when plan is save
 
 The Files hint is advisory input for Build slicing, never ownership.
 
+### Rules-first frontend order
+When design rules, tokens, or docs change, schedule `docs/design/README.md` and manifest `tokenFiles` updates before component tasks. Plan only; do not write files.
+
+### Frontend Component Spec
+Include this contract in every frontend component task. No code skeletons.
+
+- File path:
+- Base component:
+- Props/types:
+- Variants:
+- States: default, hover, focus-visible, active, disabled, loading, empty, error
+- Tokens (by name):
+- Layout per breakpoint:
+- Motion: token, trigger, `prefers-reduced-motion`
+- Accessibility: role, keyboard, aria
+- Verification viewports: 375, 768, 1280 px by default (override when needed)
+
 ### Skill Tags
 
 Before writing tasks, discover available skills by searching the project for `SKILL.md` files and reading relevant ones. Tag each task with the applicable skill name if one exists. Omit the tag if no relevant skill is found.
