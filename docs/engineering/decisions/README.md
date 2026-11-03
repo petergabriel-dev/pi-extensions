@@ -53,3 +53,4 @@
 | ADR-0049 | Active | Plan-owned frontend specifications without Design mode | changing workflow modes, frontend plan specs, design-doc write gates, tick notes, visual verification, or Open Design references |
 | ADR-0050 | Active | Bundled design skills and cross-harness export | changing bundled skill content, provenance or licenses, package skill inventory, `/harness` skill links, or cross-harness visual verification |
 | ADR-0051 | Active | Presence-derived project-wide single writer | changing Build lease scope, presence schema or liveness, the workflow-modes build-guard, Pi Build tool gating, holdsBuildLease, or adding a lock or tie-break between Pi sessions |
+| ADR-0052 | Active | Codex harness peer for CLI and desktop app | changing the Codex hook, Codex tool allowlists or identity injection, Codex `/harness` setup (hooks.json, config.toml table, skills), Codex skills, or the Codex security-corpus column |
