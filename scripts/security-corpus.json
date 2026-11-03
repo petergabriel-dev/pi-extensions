@@ -5,6 +5,7 @@
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": "allow",
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
+      "codex": "allow",
       "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
       "pi-plan": { "darwin": "wrap", "linux": ["wrap", "ask"], "sandbox-disabled": "ask" }
     },
@@ -12,6 +13,7 @@
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": ["ask", "deny"],
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
+      "codex": "deny",
       "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
       "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
     },
@@ -19,6 +21,7 @@
       "claude": { "darwin": "wrap", "linux": "deny", "sandbox-disabled": "deny" },
       "cursor": ["ask", "deny"],
       "opencode": { "darwin": "wrap", "linux": "throw", "sandbox-disabled": "throw" },
+      "codex": "deny",
       "pi-discuss": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" },
       "pi-plan": { "darwin": "wrap", "linux": ["wrap", "deny"], "sandbox-disabled": "deny" }
     }
@@ -872,7 +875,7 @@
       "class": "write",
       "kind": "shell",
       "command": "rg --hostname-bin=true seed .",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "mutation": "none"
     },
     {
@@ -880,7 +883,7 @@
       "class": "write",
       "kind": "shell",
       "command": "sort --o pi-shell-sort.txt seed.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "mutation": "none"
     },
     {
@@ -888,7 +891,7 @@
       "class": "write",
       "kind": "shell",
       "command": "sort --compress-program=true seed.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "mutation": "none"
     },
     {
@@ -896,7 +899,7 @@
       "class": "write",
       "kind": "shell",
       "command": "uniq - pi-shell-uniq.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "mutation": "none"
     },
     {
@@ -904,16 +907,16 @@
       "class": "ambiguous",
       "kind": "shell",
       "command": "uniq *.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "mutation": "none",
-      "expect": { "cursor": "ask" }
+      "expect": { "cursor": "ask", "codex": "deny" }
     },
     {
       "id": "lease-none-write",
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "none"
     },
     {
@@ -921,17 +924,17 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "holder-self",
       "mutation": "allowed",
-      "expect": { "claude": "allow", "cursor": "allow", "opencode": "allow" }
+      "expect": { "claude": "allow", "cursor": "allow", "opencode": "allow", "codex": "allow" }
     },
     {
       "id": "lease-holder-other-write",
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "holder-other"
     },
     {
@@ -939,7 +942,7 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "expired"
     },
     {
@@ -947,7 +950,7 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "missing-expiry"
     },
     {
@@ -955,7 +958,7 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "stale-heartbeat"
     },
     {
@@ -963,7 +966,7 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "double-paired"
     },
     {
@@ -971,7 +974,7 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "cross-session",
       "expect": {
         "claude": ["wrap", "deny", "ask", "throw"],
@@ -984,7 +987,7 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "cross-session-pi-build",
       "expect": {
         "claude": ["wrap", "deny", "ask", "throw"],
@@ -997,10 +1000,10 @@
       "class": "write",
       "kind": "shell",
       "command": "echo lease-mutation > lease.txt",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "lease": "cross-session-stale",
       "mutation": "allowed",
-      "expect": { "claude": "allow", "cursor": "allow", "opencode": "allow" }
+      "expect": { "claude": "allow", "cursor": "allow", "opencode": "allow", "codex": "allow" }
     },
     {
       "id": "claude-mcp-lease-forged-session",
@@ -1185,7 +1188,7 @@
       "class": "ambiguous",
       "kind": "shell",
       "command": "osascript -e 'tell application \"System Events\" to keystroke \"x\"' -e 'tell application \"System Events\" to key code 36'",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "execute": false,
       "sandboxEvidence": "P11",
       "expect": {
@@ -1199,7 +1202,7 @@
       "class": "ambiguous",
       "kind": "shell",
       "command": "cmux send --surface surface:1 'x\\n'",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "execute": false,
       "sandboxEvidence": "P11",
       "expect": {
@@ -1213,7 +1216,7 @@
       "class": "ambiguous",
       "kind": "shell",
       "command": "python3 -c 'import fcntl, termios; fcntl.ioctl(0, termios.TIOCSTI, b\"x\")'",
-      "columns": ["claude", "cursor", "opencode"],
+      "columns": ["claude", "cursor", "opencode", "codex"],
       "execute": false,
       "sandboxEvidence": "P11",
       "expect": {
@@ -1372,6 +1375,311 @@
       "columns": ["pi-plan"],
       "piLauncher": "none",
       "expect": { "pi-plan": "deny" }
+    },
+    {
+      "id": "codex-tool-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-apply-patch-missing-identity",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "apply_patch",
+      "identity": null,
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-edit-alias",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "Edit",
+      "input": { "file_path": "seed.txt" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-write-alias",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "Write",
+      "input": { "file_path": "seed.txt", "content": "mutated" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-spawn-agent",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "spawn_agent",
+      "input": { "message": "probe" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-write-stdin",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "write_stdin",
+      "input": { "session_id": 1, "chars": "x" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-unknown",
+      "class": "ambiguous",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "unknown_tool",
+      "input": {  },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-tool-view-image",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "view_image",
+      "input": { "path": "seed.txt" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-tool-update-plan",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "update_plan",
+      "input": { "plan": [] },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-tool-request-user-input",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["codex"],
+      "tool": "request_user_input",
+      "input": { "questions": [] },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-lease-holder-self-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "holder-self",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-lease-holder-other-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "holder-other",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-expired-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "expired",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-missing-expiry-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "missing-expiry",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-stale-heartbeat-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "stale-heartbeat",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-double-paired-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "double-paired",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-cross-session-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "cross-session",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-cross-session-pi-build-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "cross-session-pi-build",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-lease-cross-session-stale-apply-patch",
+      "class": "write",
+      "kind": "tool",
+      "columns": ["codex"],
+      "lease": "cross-session-stale",
+      "tool": "apply_patch",
+      "input": { "command": "*** Begin Patch\n*** Add File: patched.txt\n+mutated\n*** End Patch\n" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-mcp-foreign-write",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__other__write_file",
+      "input": { "path": "foreign.txt", "content": "mutated" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-claude-style-bridge-name",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi-claude-bridge__save_plan",
+      "input": { "planText": "x" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-bridge-match",
+      "class": "read",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "codex-security-seed", "harness": "codex" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-mcp-bridge-injects-identity",
+      "class": "read",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": { "query": "x" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-mcp-bridge-forged-session",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "other-session", "harness": "codex" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-bridge-forged-alias",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": { "query": "x", "claudeSessionId": "other-session" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-bridge-forged-harness",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "codex-security-seed", "harness": "claude" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-bridge-missing-identity",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "identity": null,
+      "input": { "query": "x" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-bridge-missing-args",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": null,
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-mcp-lease-forged-session",
+      "class": "write",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "lease": "holder-other",
+      "tool": "mcp__pi_claude_bridge__recall_memory",
+      "input": { "query": "x", "sessionId": "codex-other-security-seed", "harness": "codex" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-stdin-empty",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["codex"],
+      "stdinKind": "empty",
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-stdin-non-json",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["codex"],
+      "stdinKind": "non-json",
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-stdin-array",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["codex"],
+      "stdinKind": "array",
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "codex-stdin-oversized",
+      "class": "ambiguous",
+      "kind": "stdin",
+      "columns": ["codex"],
+      "stdinKind": "oversized",
+      "expect": { "codex": "deny" }
     }
   ]
 }

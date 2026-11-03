@@ -19,14 +19,14 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { applyPlan, planInstall } from "../agent/extensions/harness-setup/setup.ts";
-import { HARNESS_MANIFEST } from "../agent/extensions/harness-setup/manifest.ts";
+import { CODEX_PRETOOL_GUARD, HARNESS_MANIFEST } from "../agent/extensions/harness-setup/manifest.ts";
 import type { Harness } from "../agent/extensions/harness-setup/manifest.ts";
 import { noSandboxDecision } from "../agent/extensions/workflow-modes/policy.ts";
 import { detectLauncher, wrapCommand } from "../agent/extensions/workflow-modes/sandbox.ts";
 
 const PACKAGE_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_CORPUS = path.join(PACKAGE_ROOT, "scripts", "security-corpus.json");
-const COLUMNS = ["claude", "cursor", "opencode", "pi-discuss", "pi-plan"] as const;
+const COLUMNS = ["claude", "cursor", "opencode", "codex", "pi-discuss", "pi-plan"] as const;
 const OUTCOMES = new Set(["allow", "wrap", "ask", "deny", "throw"]);
 const CLASSES = new Set(["read", "write", "ambiguous"]);
 const PLATFORM_KEYS = new Set(["darwin", "linux", "sandbox-disabled", "default"]);
@@ -45,10 +45,11 @@ const LEASE_STATES = new Set([
 	"cross-session-stale",
 ] as const);
 const STDIN_KINDS = new Set(["empty", "non-json", "array", "oversized"] as const);
-const CRASH_VARIANTS = ["missing", "syntax", "throws"] as const;
+// "silent" exits nonzero with no stderr, like a killed process: Codex fails open on it unless the guard prints a reason.
+const CRASH_VARIANTS = ["missing", "syntax", "throws", "silent"] as const;
 
 type Column = (typeof COLUMNS)[number];
-type HarnessColumn = "claude" | "cursor" | "opencode";
+type HarnessColumn = "claude" | "cursor" | "opencode" | "codex";
 type Outcome = "allow" | "wrap" | "ask" | "deny" | "throw";
 type CaseClass = "read" | "write" | "ambiguous";
 type LeaseState = "none" | "holder-self" | "holder-other" | "expired" | "missing-expiry" | "stale-heartbeat" | "double-paired" | "cross-session" | "cross-session-pi-build" | "cross-session-stale";
@@ -63,7 +64,10 @@ const HARNESS_IDENTITIES: Record<HarnessColumn, { harness: HarnessColumn; id: st
 	claude: { harness: "claude", id: "claude-security-seed" },
 	cursor: { harness: "cursor", id: "cursor-security-seed" },
 	opencode: { harness: "opencode", id: "opencode-security-seed" },
+	codex: { harness: "codex", id: "codex-security-seed" },
 };
+// Codex normalizes the pi-claude-bridge server name in MCP tool names.
+const CODEX_BRIDGE_PREFIX = "mcp__pi_claude_bridge__";
 
 interface SecurityCase {
 	id: string;
@@ -103,6 +107,7 @@ interface RunnerContext {
 	claudeCommand: string;
 	cursorCommands: Partial<Record<"beforeShellExecution" | "beforeMCPExecution" | "preToolUse", string>>;
 	opencodeHandler: (event: unknown) => Promise<void>;
+	codexCommand: string;
 }
 
 interface RunResult {
@@ -238,11 +243,11 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 		if (new Set(columns).size !== columns.length) fail(`case ${id}: columns contains duplicates`);
 	}
 	if (toolKind && (!columns || columns.some((column) => column.startsWith("pi-")))) {
-		fail(`case ${id}: ${kind} cases must pin Claude, Cursor, or OpenCode columns`);
+		fail(`case ${id}: ${kind} cases must pin Claude, Cursor, OpenCode, or Codex columns`);
 	}
 	if (kind === "stdin") {
 		if (!columns || columns.some((column) => column === "opencode" || column.startsWith("pi-"))) {
-			fail(`case ${id}: stdin cases must pin Claude and/or Cursor columns`);
+			fail(`case ${id}: stdin cases must pin Claude, Cursor, and/or Codex columns`);
 		}
 		if (stdin !== undefined && typeof stdin !== "string") fail(`case ${id}: stdin must be a string`);
 		if (stdinKind !== undefined && (typeof stdinKind !== "string" || !STDIN_KINDS.has(stdinKind as StdinKind))) {
@@ -269,7 +274,7 @@ function parseCase(value: unknown, index: number, defaults: CorpusDefaults): Sec
 	const lease = value.lease;
 	if (lease !== undefined) {
 		if (typeof lease !== "string" || !LEASE_STATES.has(lease as LeaseState)) fail(`case ${id}: unknown lease state ${JSON.stringify(lease)}`);
-		if (!columns || columns.some((column) => column.startsWith("pi-"))) fail(`case ${id}: lease cases must pin Claude, Cursor, or OpenCode columns`);
+		if (!columns || columns.some((column) => column.startsWith("pi-"))) fail(`case ${id}: lease cases must pin Claude, Cursor, OpenCode, or Codex columns`);
 	}
 	const ownExpectation = value.expect === undefined ? {} : parseExpectationMap(value.expect, `case ${id}`);
 	const targetColumns = columns ?? COLUMNS;
@@ -509,6 +514,67 @@ async function opencodeToolOutcome(testCase: SecurityCase, ctx: RunnerContext): 
 	return { outcome: "allow" };
 }
 
+// Models how Codex itself treats a PreToolUse hook result (verified live, see ADR-0052):
+// a JSON deny or exit 2 with a stderr reason blocks; everything else - empty output, malformed
+// output, unsupported decisions, silent exit 2, other exit codes, timeouts - lets the tool run.
+// Fail-open results are reported as "allow" so a broken guard fails every deny expectation.
+function codexDecision(
+	captured: ReturnType<typeof spawnCaptured>,
+	options: { command?: string; bridgeIdentity?: string | null } = {},
+): RunResult {
+	const { result } = captured;
+	if (captured.error) return { outcome: "allow", detail: "Codex fails open: hook did not finish" };
+	if (result.status === 2) {
+		return result.stderr.trim() ? { outcome: "deny" } : { outcome: "allow", detail: "Codex fails open: exit 2 without a stderr reason" };
+	}
+	if (result.status !== 0) return { outcome: "allow", detail: `Codex fails open: hook exited ${result.status ?? "without status"}` };
+	const trimmed = result.stdout.trim();
+	if (!trimmed) return { outcome: "allow", ...(options.command !== undefined ? { command: options.command } : {}) };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return { outcome: "allow", detail: "Codex fails open: malformed hook output" };
+	}
+	const hook = isRecord(parsed) ? parsed.hookSpecificOutput : undefined;
+	if (!isRecord(hook) || hook.hookEventName !== "PreToolUse") return { outcome: "allow", detail: "Codex fails open: unsupported hook output" };
+	if (hook.permissionDecision === "deny" && typeof hook.permissionDecisionReason === "string" && hook.permissionDecisionReason) return { outcome: "deny" };
+	if (hook.permissionDecision !== "allow") return { outcome: "allow", detail: `Codex fails open: unsupported decision ${JSON.stringify(hook.permissionDecision)}` };
+	const updated = hook.updatedInput;
+	if (options.bridgeIdentity !== undefined) {
+		// An allowed bridge call must carry the host identity, never the model's.
+		if (!isRecord(updated) || updated.sessionId !== options.bridgeIdentity || updated.harness !== "codex" || "claudeSessionId" in updated) {
+			return { outcome: "throw", detail: "allowed Codex bridge call did not inject host identity" };
+		}
+		return { outcome: "allow" };
+	}
+	if (options.command !== undefined && isRecord(updated) && typeof updated.command === "string" && updated.command !== options.command) {
+		return { outcome: "wrap", command: updated.command };
+	}
+	return { outcome: "allow", ...(options.command !== undefined ? { command: options.command } : {}) };
+}
+
+function codexOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
+	const command = testCase.command ?? "";
+	const input = JSON.stringify({
+		hook_event_name: "PreToolUse",
+		session_id: "codex-security-seed",
+		cwd: ctx.repo,
+		tool_name: "Bash",
+		tool_input: { command },
+	});
+	return codexDecision(spawnCaptured(ctx.codexCommand, input, ctx.repo, ctx.env), { command });
+}
+
+function codexToolOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
+	const identity = testCase.identity === undefined ? "codex-security-seed" : testCase.identity;
+	const input: Record<string, unknown> = { hook_event_name: "PreToolUse", cwd: ctx.repo, tool_name: testCase.tool };
+	if (identity !== null) input.session_id = identity;
+	if (testCase.input !== undefined && testCase.input !== null) input.tool_input = testCase.input;
+	const bridge = typeof testCase.tool === "string" && testCase.tool.startsWith(CODEX_BRIDGE_PREFIX);
+	return codexDecision(spawnCaptured(ctx.codexCommand, JSON.stringify(input), ctx.repo, ctx.env), bridge ? { bridgeIdentity: identity } : {});
+}
+
 function stdinPayload(testCase: SecurityCase): string {
 	if (testCase.stdin !== undefined) return testCase.stdin;
 	switch (testCase.stdinKind) {
@@ -568,6 +634,7 @@ function piOutcome(testCase: SecurityCase, column: "pi-discuss" | "pi-plan", ctx
 
 async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerContext): Promise<RunResult> {
 	if (testCase.kind === "stdin") {
+		if (column === "codex") return codexDecision(spawnCaptured(ctx.codexCommand, stdinPayload(testCase), ctx.repo, ctx.env));
 		if (column !== "claude" && column !== "cursor") fail(`case ${testCase.id}: stdin case cannot run on ${column}`);
 		return stdinOutcome(testCase, column, ctx);
 	}
@@ -582,11 +649,13 @@ async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerCont
 	if (testCase.kind === "shell") {
 		if (column === "claude") return claudeOutcome(testCase, ctx);
 		if (column === "cursor") return cursorOutcome(testCase, ctx);
+		if (column === "codex") return codexOutcome(testCase, ctx);
 		return opencodeOutcome(testCase, ctx);
 	}
 	if (testCase.kind === "tool" || testCase.kind === "mcp") {
 		if (column === "claude") return claudeToolOutcome(testCase, ctx);
 		if (column === "cursor") return cursorToolOutcome(testCase, ctx);
+		if (column === "codex") return codexToolOutcome(testCase, ctx);
 		return opencodeToolOutcome(testCase, ctx);
 	}
 	fail(`case ${testCase.id}: unsupported kind ${testCase.kind}`);
@@ -727,6 +796,7 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 		claudeMcp: path.join(home, ".claude.json"),
 		cursor: path.join(home, ".cursor"),
 		opencode: path.join(home, ".config", "opencode"),
+		codex: path.join(home, ".codex"),
 	};
 	for (const directory of [home, workDir, repo, scratchDir, agentDir]) mkdirSync(directory, { recursive: true });
 	mkdirSync(path.join(repo, ".pi"), { recursive: true });
@@ -743,7 +813,7 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 		runGit(repo, ["config", "user.name", "Security Corpus"], env);
 		runGit(repo, ["add", "seed.txt"], env);
 		runGit(repo, ["commit", "-qm", "seed"], env);
-		for (const harness of ["claude", "cursor", "opencode"] as const satisfies Harness[]) {
+		for (const harness of ["claude", "cursor", "opencode", "codex"] as const satisfies Harness[]) {
 			const plan = await planInstall(harness, { pkgRoot: PACKAGE_ROOT, roots, agentDir });
 			const results = await applyPlan(plan);
 			const failed = results.find((result) => !result.applied);
@@ -762,6 +832,11 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 			if (!command) fail(`installed Cursor ${event} hook is missing`);
 			cursorCommands[event] = command;
 		}
+
+		const codexHooks = JSON.parse(readFileSync(path.join(roots.codex, "hooks.json"), "utf8")) as Record<string, unknown>;
+		const codexCommand = installedHookCommand(codexHooks, "PreToolUse", "pi-codex-hook.js");
+		if (!codexCommand) fail("installed Codex PreToolUse command is missing");
+		if (!codexCommand.trimEnd().endsWith(CODEX_PRETOOL_GUARD)) fail("installed Codex PreToolUse command is missing its stderr-reason exit 2 guard");
 
 		const pluginPath = path.join(roots.opencode, "plugins", "pi-opencode-build-lease.js");
 		if (!existsSync(pluginPath)) fail("installed OpenCode plugin is missing");
@@ -799,6 +874,7 @@ async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 			claudeCommand,
 			cursorCommands,
 			opencodeHandler: handler,
+			codexCommand,
 		};
 	} catch (error) {
 		rmSync(runtime, { recursive: true, force: true });
@@ -968,7 +1044,7 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 			if (expectation === undefined) continue;
 			const expected = outcomesFor(expectation, column, platform, ctx.sandboxDisabled);
 			try {
-				if (column === "claude" || column === "cursor" || column === "opencode") setupLease(testCase, column, ctx);
+				if (column === "claude" || column === "cursor" || column === "opencode" || column === "codex") setupLease(testCase, column, ctx);
 				const before = snapshotRepo(ctx.repo, ctx.env);
 				let result: RunResult;
 				try {
@@ -1106,20 +1182,24 @@ function copyPackageForHarness(pkgRoot: string, harness: Harness): void {
 			copyPackageAsset(PACKAGE_ROOT, pkgRoot, `agent/claude-bridge-client/${script}`);
 		}
 	}
+	// The Codex hook reuses Cursor's shell classifier.
+	if (harness === "codex") copyPackageAsset(PACKAGE_ROOT, pkgRoot, "agent/cursor-bridge-client/cursor-readonly-hook.js");
 }
 
-function crashRoots(home: string): { claude: string; claudeMcp: string; cursor: string; opencode: string } {
+function crashRoots(home: string): { claude: string; claudeMcp: string; cursor: string; opencode: string; codex: string } {
 	return {
 		claude: path.join(home, ".claude"),
 		claudeMcp: path.join(home, ".claude.json"),
 		cursor: path.join(home, ".cursor"),
 		opencode: path.join(home, ".config", "opencode"),
+		codex: path.join(home, ".codex"),
 	};
 }
 
 function crashAsset(harness: Harness): string {
 	if (harness === "claude") return "agent/claude-bridge-client/pi-readonly-hook.js";
 	if (harness === "cursor") return "agent/cursor-bridge-client/cursor-readonly-hook.js";
+	if (harness === "codex") return "agent/codex-bridge-client/pi-codex-hook.js";
 	return "agent/opencode-bridge-client/pi-opencode-plugin.js";
 }
 
@@ -1131,6 +1211,10 @@ function mutateCrashAsset(pkgRoot: string, harness: Harness, variant: CrashVaria
 	}
 	if (variant === "syntax") {
 		writeFileSync(file, "function broken( {\n", "utf8");
+		return;
+	}
+	if (variant === "silent") {
+		writeFileSync(file, "process.exit(1);\n", "utf8");
 		return;
 	}
 	writeFileSync(file, "throw new Error(\"security corpus crash\");\n", "utf8");
@@ -1199,6 +1283,24 @@ async function runCrashChecks(ctx: RunnerContext): Promise<number> {
 				failures += 1;
 				console.error(`FAIL CRASH ${harness} ${variant}: ${error instanceof Error ? error.message : String(error)}`);
 			}
+		}
+	}
+
+	// Codex fails open on hook crashes unless the installed guard turns them into exit 2 with a stderr reason.
+	const codexStdin = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "codex-security-seed", cwd: ctx.repo, tool_name: "apply_patch", tool_input: { command: "*** Begin Patch" } });
+	for (const variant of CRASH_VARIANTS) {
+		try {
+			const installed = await installCrashPackage(ctx, "codex", variant);
+			const hooks = JSON.parse(readFileSync(path.join(installed.roots.codex, "hooks.json"), "utf8")) as Record<string, unknown>;
+			const command = installedHookCommand(hooks, "PreToolUse", "pi-codex-hook.js");
+			if (!command) fail("installed Codex PreToolUse command is missing");
+			const decision = codexDecision(spawnCaptured(command, codexStdin, ctx.repo, ctx.env));
+			if (decision.outcome !== "deny") fail(`broken Codex hook would not block: ${decision.detail ?? decision.outcome}`);
+			pass += 1;
+			console.log(`CRASH codex ${variant} installed-command-exit=2 stderr-reason`);
+		} catch (error) {
+			failures += 1;
+			console.error(`FAIL CRASH codex ${variant}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
