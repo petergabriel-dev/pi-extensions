@@ -73,6 +73,7 @@ const publishedFiles = [
   "agent/opencode-bridge-client/pi-opencode-plugin.js",
   "agent/codex-bridge-client/pi-codex-hook.js",
   "agent/harness-commands/**/*.md",
+  "agent/harness-commands/codex/*/agents/openai.yaml",
   "agent/agents/*.md",
   "agent/skills/**/*.md",
   "README.md",

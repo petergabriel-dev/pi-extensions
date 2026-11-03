@@ -25,6 +25,12 @@ const harnessTemplates = [
   "agent/harness-commands/opencode/pi-discuss.md",
   "agent/harness-commands/opencode/pi-plan.md",
   "agent/harness-commands/opencode/pi-build.md",
+  "agent/harness-commands/codex/pi-discuss/SKILL.md",
+  "agent/harness-commands/codex/pi-discuss/agents/openai.yaml",
+  "agent/harness-commands/codex/pi-plan/SKILL.md",
+  "agent/harness-commands/codex/pi-plan/agents/openai.yaml",
+  "agent/harness-commands/codex/pi-build/SKILL.md",
+  "agent/harness-commands/codex/pi-build/agents/openai.yaml",
 ];
 const result = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
   cwd: root,

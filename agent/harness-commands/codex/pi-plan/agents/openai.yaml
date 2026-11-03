@@ -1,0 +1,3 @@
+# Explicit $pi-plan only: an implicit Discuss/Plan recall would release a held Pi Build lease.
+policy:
+  allow_implicit_invocation: false
