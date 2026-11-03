@@ -103,6 +103,12 @@ function getLastAssistantText(ctx: ExtensionContext): string | undefined {
 	return undefined;
 }
 
+// The one place workflow-modes:changed is emitted. hasPlan follows the active plan
+// ID, as workflow-modes:state does; the plan text is file-backed.
+function emitModeChanged(pi: ExtensionAPI): void {
+	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+}
+
 // Session branch entries. A branch with any non-object (corrupt or partial) entry
 // is unreadable: skipping the entry could let an older mode or plan entry win, so
 // callers fail closed instead.
@@ -262,7 +268,7 @@ async function setMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: Mode): Pro
 	currentMode = mode;
 	updateStatus(ctx);
 	ctx.ui.notify(`Mode: ${MODE_LABELS[mode]}`, "info");
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+	emitModeChanged(pi);
 }
 
 async function selectOverlay(ctx: ExtensionCommandContext, title: string, items: SelectItem[]): Promise<string | null> {
@@ -323,8 +329,6 @@ async function chooseMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 }
 
 async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
-	// After a restore the plan text is not loaded until the first turn; load it now.
-	if (currentPlanId && !currentPlan) await refreshPlanFromDisk(ctx);
 	if (!currentPlan) {
 		ctx.ui.notify("No saved plan for this branch.", "info");
 		return;
@@ -411,27 +415,30 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	const savedAt = metadata.savedAt ?? new Date().toISOString();
 	if (Number.isNaN(Date.parse(savedAt))) throw new Error("savedAt must be an ISO date");
 
-	// Fail before any durable write if the branch cannot be read.
-	readBranch(ctx);
+	// Read the branch before any durable write, so an unreadable branch fails with
+	// nothing saved; task state is then derived from it plus the new entries, with no
+	// re-read that could fail after the plan is saved.
+	const branch = readBranch(ctx);
 	const path = await writePlanFile(getAgentDir(), sessionIdFromContext(ctx), planId, text);
 	const tasks = parsePlanTasks(text);
 	const at = Date.now();
 	const entry = { event: "set" satisfies PlanEvent, planId, path, savedAt, at, tasks };
+	const activate = { event: "activate" satisfies PlanEvent, planId, at: Date.now() };
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
-	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "activate" satisfies PlanEvent, planId, at: Date.now() }));
+	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, activate));
 
 	currentPlan = text;
 	currentPlanId = planId;
 	currentPlanPath = path;
 	currentPlanSavedAt = savedAt;
-	const taskState = resolveSavedPlanTaskState(readBranch(ctx), planId, tasks);
+	const taskState = resolveSavedPlanTaskState([...branch, { type: "custom", customType: PLAN_ENTRY, data: entry }, { type: "custom", customType: PLAN_ENTRY, data: activate }], planId, tasks);
 	currentPlanTasks = taskState.tasks;
 	currentPlanCompletedTaskIds = taskState.completedTaskIds;
 	currentPlanProgress = taskState.progress;
 	currentPlanNextTask = taskState.nextTask;
 	planReadNoticeKey = undefined;
 	updateStatus(ctx);
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: true });
+	emitModeChanged(pi);
 	return entry;
 }
 
@@ -464,7 +471,7 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanProgress = nextState.progress;
 	currentPlanNextTask = nextState.nextTask;
 	updateStatus(ctx);
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+	emitModeChanged(pi);
 	const storedNote = nextState.tickNotes.get(taskId);
 	return { planId, taskId, ...(storedNote ? { note: storedNote } : {}), progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
 }
@@ -603,7 +610,7 @@ async function selectPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext, reques
 	// Plan state only: plan commands never re-derive the mode (only session restore does).
 	await refreshPlanFromDisk(ctx);
 	ctx.ui.notify(`Selected plan ${target.planId}.`, "success");
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+	emitModeChanged(pi);
 }
 
 async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -616,7 +623,7 @@ async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 	// Plan state only: plan commands never re-derive the mode (only session restore does).
 	await refreshPlanFromDisk(ctx);
 	ctx.ui.notify(`Cleared plan ${planId}; file retained.`, "success");
-	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+	emitModeChanged(pi);
 }
 
 async function choosePlanAction(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -935,6 +942,14 @@ export default function (pi: ExtensionAPI) {
 		} catch { /* notification is best-effort */ }
 	}
 
+	// Restore loads the active plan's file-backed text before announcing the mode, so
+	// workflow-modes:state and bridge recall carry it, and a missing file clears the
+	// plan before anyone sees hasPlan: true. Never rejects.
+	async function loadRestoredPlan(ctx: ExtensionContext): Promise<void> {
+		if (currentPlanId === undefined) return;
+		try { await refreshPlanFromDisk(ctx); } catch { /* refreshPlanFromDisk already reset plan state */ }
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
 		pendingPlanSave = false;
@@ -944,7 +959,8 @@ export default function (pi: ExtensionAPI) {
 		// Plan file GC is best-effort: it must not skip the landing or the mode emit.
 		try { await gcSessionPlans(ctx); } catch { /* best-effort: errors are ignored, and an unreadable branch is never GC'd */ }
 		await landing;
-		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+		await loadRestoredPlan(ctx);
+		emitModeChanged(pi);
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		latestContext = ctx;
@@ -952,7 +968,8 @@ export default function (pi: ExtensionAPI) {
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
 		await landRestoredBuildInPlan(ctx);
-		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+		await loadRestoredPlan(ctx);
+		emitModeChanged(pi);
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {

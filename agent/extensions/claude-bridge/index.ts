@@ -349,14 +349,17 @@ function gcStaleNamespaces(sessionsDir: string, now = Date.now()): void {
 	for (const id of entries) {
 		if (!isSafeId(id)) continue;
 		const namespace = path.join(sessionsDir, id);
-		let dirMtimeMs: number;
 		try {
 			const stat = fs.lstatSync(namespace);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
-			dirMtimeMs = stat.mtimeMs;
 		} catch { continue; }
 		const presence = readPresence(path.join(namespace, "presence.json"), id);
 		const heartbeat = parseTime(presence?.heartbeatAt);
+		// The mtime is read after presence, so a namespace recreated in between looks fresh.
+		let dirMtimeMs = Number.NaN;
+		if (!presence) {
+			try { dirMtimeMs = fs.lstatSync(namespace).mtimeMs; } catch { continue; }
+		}
 		// Stale heartbeat, or abandoned before its first presence write (for example a
 		// startup that threw after creating the directory). claimSessionNamespace runs
 		// this first, so an abandoned namespace is reclaimed on the next start.
@@ -412,11 +415,13 @@ function claimSessionNamespace(paths: BridgePaths, piSessionId: string): { activ
 	return { active: true };
 }
 
-function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString()): void {
-	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
+// Returns whether presence was written; a skipped write (bridge directories not
+// private, or ownership lost) returns false.
+function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString()): boolean {
+	if (!activePiSessionId || activePaths !== paths || !namespaceDirsArePrivate(paths)) return false;
 	if (presenceInitialized) {
 		const owner = readPresence(paths.presence, activePiSessionId);
-		if (!owner || owner.pid !== process.pid || owner.startedAt !== startedAt) return;
+		if (!owner || owner.pid !== process.pid || owner.startedAt !== startedAt) return false;
 	}
 	const peers = Array.from(pairedPeers.values()).map((peer) => {
 		const identity: PeerIdentity = { kind: peer.harness, id: peer.id };
@@ -438,6 +443,7 @@ function writePresence(paths: BridgePaths, heartbeatAt = new Date().toISOString(
 		...(buildLease ? { buildLease: { ...buildLease } } : {}),
 	} satisfies BridgePresence);
 	presenceInitialized = true;
+	return true;
 }
 
 // forClaims: writer-claim counting reads presence liberally (drifted permissions
@@ -1337,8 +1343,16 @@ function scheduleScan(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePath
 	lastScanAt = now;
 	setTimeout(() => {
 		scanScheduled = false;
-		void scanRequests(pi, ctx, paths);
+		scanRequestsBestEffort(pi, ctx, paths);
 	}, SCAN_COALESCE_MS).unref?.();
+}
+
+// A rejected request scan (for example a presence or response write error) must not
+// become an unhandled rejection that ends Pi; the client's request times out instead.
+function scanRequestsBestEffort(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): void {
+	scanRequests(pi, ctx, paths).catch((error) => {
+		notifyBestEffort(ctx, `claude-bridge request handling failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+	});
 }
 
 function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContext): void {
@@ -1348,7 +1362,7 @@ function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContex
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.ui.notify(`claude-bridge watcher failed: ${message}`, "error");
 	});
-	void scanRequests(pi, ctx, paths);
+	scanRequestsBestEffort(pi, ctx, paths);
 	// No backup poll — fs.watch is sufficient on modern macOS/Node with O(1) in-flight requests.
 }
 
@@ -1457,7 +1471,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	pi.events.on("workflow-modes:changed", (data: unknown) => {
 		const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
 		cachedMode = typeof record.mode === "string" ? record.mode : null;
-		if (activePaths) writePresence(activePaths);
+		// Best-effort: a write error here must not skip the lease release below.
+		refreshPresenceBestEffort(activeContext ?? undefined);
 		void (async () => {
 			try {
 				const workflowState = await requestWorkflowState(pi);
@@ -1626,9 +1641,14 @@ export default function claudeBridge(pi: ExtensionAPI) {
 					if (buildLease && !isBuildLeaseActive(buildLease, Date.now())) {
 						setBuildLease(null, ctx, "revoked");
 					}
-					writePresence(activePaths);
+					if (!writePresence(activePaths)) throw new Error("presence was not written (bridge directories are not private, or ownership changed)");
 					heartbeatFailure.succeeded();
 				} catch (error) {
+					// After an ownership-change teardown cleared the timer there is no retry.
+					if (heartbeatTimer === null) {
+						notifyBestEffort(ctx, `claude-bridge passive: ${passiveReason ?? "bridge stopped"} (${error instanceof Error ? error.message : String(error)})`, "warning");
+						return;
+					}
 					heartbeatFailure.failed(error);
 				}
 			}, HEARTBEAT_MS);

@@ -446,15 +446,32 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	if (!planEvent("clear", "r6-b")) throw new Error("/plan clear did not clear the plan");
 	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("/plan clear restored Build after a failed landing save");
 	branchEntries = savedBranchEntries;
-	// A restored session with an active plan reports hasPlan from the plan ID, and
-	// /plan view loads the file-backed plan text on demand.
+	// A restored session with an active plan loads its file-backed text before the
+	// mode emit: hasPlan is true, and workflow-modes:state (bridge recall) carries it.
 	await tools.get("workflow_plan_save").execute("r7-save", { plan: "# R7 plan\\n\\n## Section 4 — Tasks\\n- [ ] R7 task\\n" }, undefined, undefined, context);
 	changedEvents.length = 0;
 	await handlers.get("session_tree")?.({}, context);
 	if ((changedEvents.at(-1) as { hasPlan?: boolean } | undefined)?.hasPlan !== true) throw new Error("restored session with an active plan reported hasPlan false");
+	let r7State: { plan?: string } | undefined;
+	events.on("workflow-modes:state", (state: { plan?: string }) => { r7State = state; });
+	events.emit("workflow-modes:get");
+	if (!r7State?.plan?.includes("# R7 plan")) throw new Error("restore did not load the plan text for workflow-modes:state");
 	notifications.length = 0;
 	await commands.get("plan")?.handler("view", context);
-	if (!notifications.some((message) => message.includes("# R7 plan"))) throw new Error("/plan view did not load the restored plan text");
+	if (!notifications.some((message) => message.includes("# R7 plan"))) throw new Error("/plan view did not show the restored plan text");
+	// A plan whose file is missing is cleared before the emit, so nobody sees hasPlan: true.
+	changedEvents.length = 0;
+	warnings.length = 0;
+	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "r6-a", path: "r6-a.md", savedAt: r6SavedAt } },
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "activate", planId: "r6-a", at: Date.now() } },
+	], getSessionId: () => "session-test" }, ui: context.ui });
+	if ((changedEvents.at(-1) as { hasPlan?: boolean } | undefined)?.hasPlan !== false || !warnings.some((message) => message.includes("Saved plan unavailable"))) throw new Error("restored plan with a missing file reported hasPlan true");
+	// Plan save never re-reads the branch after its durable writes.
+	let saveReads = 0;
+	const oneReadContext = { sessionManager: { getBranch: () => { saveReads += 1; if (saveReads > 1) throw new Error("branch read after save"); return []; }, getSessionId: () => "session-test" }, ui: context.ui };
+	const oneReadSave = await tools.get("workflow_plan_save").execute("r7-one-read", { plan: "# One read\\n\\n## Section 4 — Tasks\\n- [ ] Only task\\n" }, undefined, undefined, oneReadContext);
+	if ((oneReadSave.details as { taskCount?: number } | undefined)?.taskCount !== 1 || saveReads !== 1) throw new Error("plan save re-read the branch after saving");
 	// Plan save fails before any durable write when the branch cannot be read.
 	const unreadableSaveContext = { sessionManager: { getBranch: () => { throw new Error("branch unreadable"); }, getSessionId: () => "session-unreadable-save" }, ui: context.ui };
 	operations.length = 0;
@@ -467,11 +484,8 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	if (!unreadableSaveError.includes("unreadable") || operations.some((operation) => operation.type === PLAN_ENTRY) || existsSync(join(process.env.PI_CODING_AGENT_DIR ?? "", "plans", "session-unreadable-save"))) throw new Error("plan save on an unreadable branch wrote before failing");
 	// Restore fails closed: a branch that cannot be read in full is Unknown, never Off or
 	// Build, and no plan state from the previous branch survives.
-	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [
-		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "r6-a", path: "r6-a.md", savedAt: r6SavedAt } },
-		{ type: "custom", customType: PLAN_ENTRY, data: { event: "activate", planId: "r6-a", at: Date.now() } },
-	], getSessionId: () => "session-test" }, ui: context.ui });
-	if (!statuses.at(-1)?.includes("Saved Plan: r6-a")) throw new Error("setup: plan r6-a was not active before the failed restore");
+	await handlers.get("session_tree")?.({}, context);
+	if (!statuses.at(-1)?.includes("Saved Plan: ") || statuses.at(-1)?.includes("Saved Plan: OFF")) throw new Error("setup: no plan was active before the failed restore");
 	warnings.length = 0;
 	const unreadable = { sessionManager: { getBranch: () => { throw new Error("branch unreadable"); }, getSessionId: () => "session-test" }, ui: context.ui };
 	await handlers.get("session_start")?.({}, unreadable);
