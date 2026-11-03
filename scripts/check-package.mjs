@@ -13,6 +13,7 @@ const bridgeClients = [
   "agent/claude-bridge-client/pi-statusline.js",
   "agent/cursor-bridge-client/cursor-readonly-hook.js",
   "agent/opencode-bridge-client/pi-opencode-plugin.js",
+  "agent/codex-bridge-client/pi-codex-hook.js",
 ];
 const harnessTemplates = [
   "agent/harness-commands/claude/pi-discuss.md",
@@ -90,7 +91,8 @@ assert.deepEqual(
       (file) =>
         file.startsWith("agent/claude-bridge-client/") ||
         file.startsWith("agent/cursor-bridge-client/") ||
-        file.startsWith("agent/opencode-bridge-client/"),
+        file.startsWith("agent/opencode-bridge-client/") ||
+        file.startsWith("agent/codex-bridge-client/"),
     )
     .sort(),
   bridgeClients.slice().sort(),
