@@ -36,18 +36,20 @@ Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi upda
 pi install git:github.com/petergabriel-dev/pi-extensions@v0.11.0
 ```
 
-After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, or OpenCode, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config, `pi-*` commands, and all 23 package-skill directory links in harness-specific roots; consumers do not hand-merge settings or create symlinks. Foreign skill destinations are preserved; `/harness` does not export to `~/.agents/skills`. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.
+After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, OpenCode, or Codex, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config, `pi-*` commands, and all 23 package-skill directory links in harness-specific roots; consumers do not hand-merge settings or create symlinks. Foreign skill destinations are preserved; `/harness` does not export to `~/.agents/skills`. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.
 
 Cursor setup installs global `pi-*` commands. If Cursor does not discover them, use project-local commands: copy `pi-discuss.md`, `pi-plan.md`, and `pi-build.md` from the installed package's `agent/harness-commands/cursor/` into your project's `.cursor/commands/`. Real Cursor global-command discovery remains unverified. This repository's `.cursor/commands/pi-*` symlinks point to the packaged templates, but `.cursor/` is repository-only. Cursor and OpenCode global skill discovery also remain unverified pending live acceptance; OpenCode's possible discovery of `~/.claude/skills/` must be checked for duplicates. Pi's [package documentation (`packages.md`)](https://pi.dev/docs/packages) describes Git/npm sources and personal versus project install scope.
+
+Codex setup (CLI and desktop app share `~/.codex`, or `CODEX_HOME`) installs a guarded hook in `hooks.json`, adds only a `[mcp_servers.pi-claude-bridge]` table to `config.toml`, and links `pi-discuss`/`pi-plan`/`pi-build` as explicit-only skills (`$pi-discuss`, `$pi-plan`, `$pi-build`). Codex runs the hook only after you trust it in each surface: in the CLI open `/hooks`, press Enter on PreToolUse, and trust only the Pi hook (not `t`); in the desktop app use Settings > Hooks. Re-trust after any install or repair that changes `hooks.json`.
 
 Install `ccc` separately before using `ccc_search`; verify it with `ccc --version`. Raw or global copies of these extensions can load twice alongside the package. Use `pi list` and `pi config` to inspect registrations, then remove or disable duplicates.
 
 ## Build leases
 
-Claude Code, Cursor, and OpenCode stay read-only in a `.pi` project until you approve a Build lease in Pi:
+Claude Code, Cursor, OpenCode, and Codex stay read-only in a `.pi` project until you approve a Build lease in Pi:
 
 1. Save a plan in Pi and keep Pi out of Build mode.
-2. In the harness, run `/pi-build`. The first request stops with `build_lease_pending` and a short id such as `claude:1a2b3c4d`.
+2. In the harness, run `/pi-build` (`$pi-build` in Codex). The first request stops with `build_lease_pending` and a short id such as `claude:1a2b3c4d`.
 3. In interactive Pi, run `/build-lease approve`, check the short id, plan, and four-hour expiry, then confirm. Rerun `/pi-build`.
 
 - `/build-lease` shows the holder, remaining time, pending requests, and any project writer conflict. `/build-lease release` revokes the lease.
@@ -55,6 +57,7 @@ Claude Code, Cursor, and OpenCode stay read-only in a `.pi` project until you ap
 - The lease also ends when the holder switches to `/pi-discuss` or `/pi-plan`, unpairs, or Pi enters Build, and when the plan is cleared, switched, or completed. Commit before the final task tick, because completing the plan releases the lease.
 - One writer per project: while another live Pi session in the same project is in Build or holds a lease, new requests, approvals, task ticks, `/mode build`, and Pi Build tools other than reads (including starting or steering subagents) are refused with a message naming that session. Release it there with `/build-lease release` or by leaving Build; a session that quits stops counting within about five seconds.
 - Pi Off is not guarded and never takes the writer.
+- Codex's own sandbox keeps `.git` read-only, so commits from `$pi-build` need Codex approval: accept the desktop prompt, or choose an approval mode with `/permissions` in the CLI. `codex exec` cannot commit.
 - After upgrading the package, rerun `/harness` → **Install / repair** so harness hooks use the current checks.
 
 ## Develop from source
@@ -120,7 +123,7 @@ In a saved interactive TUI session, `/agents` lists child runs in tree order and
 - `personal-memory` — user-global indexed memory and `/remember`.
 - `subagents` — isolated RPC child Pi processes, automatic user question relay, and the `/agents` TUI overlay.
 - `workflow-modes` — `/mode`, `/plan`, `/caveman`, prompt composition, and read-only/mutation gates.
-- `harness-setup` — `/harness` inspect, install/repair, and uninstall for Claude, Cursor, and OpenCode.
+- `harness-setup` — `/harness` inspect, install/repair, and uninstall for Claude, Cursor, OpenCode, and Codex.
 
 ### Skills and agents
 
@@ -146,7 +149,7 @@ The launcher reuses the current Pi user state; it does not create a separate Pi 
 
 Never add credentials, trust/settings/model files, sessions, plans, personal memory, caches, databases, logs, dependency trees, bridge IPC, CCC indexes, or external symlinks to the repository. The only tracked `.pi/` resource is the internal `.pi/agents` symlink.
 
-Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly six bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, and `agent/opencode-bridge-client/pi-opencode-plugin.js`. It also ships nine `pi-*` harness command templates across Claude, Cursor, and OpenCode. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=2 MiB` unpacked limits.
+Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpers, the workflow plan template, agent and skill Markdown, `README.md`, `LICENSE`, `CHANGELOG.md`, required nested READMEs, and exactly seven bridge-client runtime files: `agent/claude-bridge-client/pi-bridge-mcp.js`, `agent/claude-bridge-client/pi-readonly-hook.js`, `agent/claude-bridge-client/pi-peer-hook.js`, `agent/claude-bridge-client/pi-statusline.js`, `agent/cursor-bridge-client/cursor-readonly-hook.js`, `agent/opencode-bridge-client/pi-opencode-plugin.js`, and `agent/codex-bridge-client/pi-codex-hook.js`. It also ships nine `pi-*` harness command templates across Claude, Cursor, and OpenCode, plus three Codex `pi-*` skills. It excludes `docs/engineering/**`, `.cursor/**`, tests, nested manifests/lockfiles/TypeScript configs, `.pi`, `node_modules`, and runtime/user state. Main retains all engineering docs and development material, including `.cursor/`; those files are not packaged. From `0.8.0` onward the `release` branch mirrors the unpacked tarball exactly, with only an optional root `.npmrc` extra. Package checks enforce `<=512 KiB` packed and `<=2 MiB` unpacked limits.
 
 ### Enforcement limits
 
@@ -155,7 +158,8 @@ Starting with release `0.8.0`, the npm tarball includes runtime TypeScript/helpe
 - In `.pi` projects, Claude no-lease Bash is denied off macOS; it does not fall back to unsandboxed approval.
 - `~/.pi` is Pi's global agent dir and never marks a project. Dedicated edit tools are checked against the nearest Pi root of their target, so a write into another Pi project needs that project's own Build lease.
 - Bash and patch-style tools with no path field can still write into a Pi project from a session outside it; the target check covers dedicated edit tools only and this gap is not fixed (F11).
-- Host handling of Cursor `failClosed`, Claude exit-2 guards, and OpenCode plugin-load failure remains unverified; config and runner checks are not host-enforcement proof.
+- Host handling of Cursor `failClosed`, Claude exit-2 guards, and OpenCode plugin-load failure remains unverified; config and runner checks are not host-enforcement proof. Codex itself runs the tool when its hook times out, returns unsupported output, or is untrusted, and hosted tools and MCP server startup bypass the hook (accepted limit F14).
+- `/harness` keeps backups of removed or retargeted skill links next to them (`skills/<name>.harness-bak-<ts>`), and harnesses can still load them as skills; delete those links by hand after verifying an uninstall.
 - Pi Off is unguarded. Pi Review posting requires fresh human Pi approval for each command; decline, no UI/headless execution, or confirmation error blocks posting.
 - Without a sandbox launcher (for example Linux without bwrap), Pi Discuss runs no bash (the read tool and any active search tool still work), and Pi Plan and Review ask for fresh approval before every single-line bash command and refuse multi-line or obviously mutating ones (Review also keeps its allow-list); decline or headless execution blocks them. Install bwrap to avoid this.
 - Cursor's shell hook allows `rg`, `sort`, `uniq`, `find`, `tree`, and `git` only with flags on per-command safe lists; any other flag prompts. Git can still run programs configured in a repository's `.git/config`.

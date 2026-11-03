@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Codex harness peer for the Codex CLI and desktop app (ADR-0052): `codex` bridge harness kind and Build-lease peer, a fail-closed PreToolUse hook (`agent/codex-bridge-client/pi-codex-hook.js`) with host `session_id` injection for bridge calls, and explicit-only `$pi-discuss`, `$pi-plan`, `$pi-build` skills.
+- `/harness` manages Codex under `CODEX_HOME` (default `~/.codex`): a guarded `hooks.json` hook in its own group, only the `[mcp_servers.pi-claude-bridge]` table in `config.toml` (other bytes untouched; new file `0600`), and 26 skill links, with a re-trust reminder when hooks change.
+- Security corpus Codex column scored by Codex's own hook semantics, plus a `silent` crash variant for every harness.
+
+### Notes
+
+- Trust the Pi hook in each Codex surface you use (CLI `/hooks`, desktop Settings > Hooks), and only that hook. Commits from `$pi-build` need Codex approval because its sandbox keeps `.git` read-only.
+- Known issue: `/harness` skill-link backups (`skills/<name>.harness-bak-<ts>`) can still load as skills after uninstall or retarget; remove them by hand for now.
+
 ## [0.11.0] - 2026-11-03
 
 ### Breaking
