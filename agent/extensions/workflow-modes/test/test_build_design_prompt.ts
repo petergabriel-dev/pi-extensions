@@ -437,25 +437,46 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	await handlers.get("session_tree")?.({}, context);
 	failModeAppend = false;
 	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("failed landing save left Build writable before plan commands");
+	const planEvent = (event: string, planId: string) => operations.some((operation) => operation.type === PLAN_ENTRY && (operation.data as { event?: string }).event === event && (operation.data as { planId?: string }).planId === planId);
+	operations.length = 0;
 	await commands.get("plan")?.handler("select r6-b", context);
+	if (!planEvent("activate", "r6-b")) throw new Error("/plan select did not activate the plan");
 	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("/plan select restored Build after a failed landing save");
 	await commands.get("plan")?.handler("clear", context);
+	if (!planEvent("clear", "r6-b")) throw new Error("/plan clear did not clear the plan");
 	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("/plan clear restored Build after a failed landing save");
 	branchEntries = savedBranchEntries;
-	// Restore fails closed: a branch that cannot be read in full is Unknown, never Off or Build.
+	// Restore fails closed: a branch that cannot be read in full is Unknown, never Off or
+	// Build, and no plan state from the previous branch survives.
+	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "r6-a", path: "r6-a.md", savedAt: r6SavedAt } },
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "activate", planId: "r6-a", at: Date.now() } },
+	], getSessionId: () => "session-test" }, ui: context.ui });
+	if (!statuses.at(-1)?.includes("Saved Plan: r6-a")) throw new Error("setup: plan r6-a was not active before the failed restore");
 	warnings.length = 0;
 	const unreadable = { sessionManager: { getBranch: () => { throw new Error("branch unreadable"); }, getSessionId: () => "session-test" }, ui: context.ui };
 	await handlers.get("session_start")?.({}, unreadable);
 	const unreadableWrite = await toolCall?.({ toolName: "write", input: {} }) as { reason?: string } | undefined;
 	if (!unreadableWrite?.reason?.startsWith("Unknown workflow mode") || !warnings.some((message) => message.includes("could not be restored"))) throw new Error("unreadable branch did not restore Unknown");
+	let restoredState: { mode?: string; planId?: string; hasPlan?: boolean } | undefined;
+	events.on("workflow-modes:state", (state: typeof restoredState) => { restoredState = state; });
+	events.emit("workflow-modes:get");
+	if (restoredState?.mode !== undefined || restoredState.hasPlan !== false || restoredState.planId !== undefined || !statuses.at(-1)?.includes("Saved Plan: OFF")) throw new Error("failed restore kept stale plan state");
+	// Unknown is read-only, deny-unknown: only read-only tools run.
+	for (const toolName of ["bash", "subagent", "subagent_message", "workflow_plan_save", "workflow_plan_tick", "some_future_tool"]) {
+		const blocked = await toolCall?.({ toolName, input: {} }) as { block?: boolean } | undefined;
+		if (blocked?.block !== true) throw new Error("Unknown mode allowed " + toolName);
+	}
+	if (await toolCall?.({ toolName: "read", input: {} }) !== undefined) throw new Error("Unknown mode blocked a read");
 	const corruptPlanEntry = { type: "custom", customType: PLAN_ENTRY, get data() { throw new Error("corrupt plan entry"); } };
 	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }, corruptPlanEntry], getSessionId: () => "session-test" }, ui: context.ui });
 	const corruptWrite = await toolCall?.({ toolName: "write", input: {} }) as { reason?: string } | undefined;
 	if (!corruptWrite?.reason?.startsWith("Unknown workflow mode")) throw new Error("corrupt plan entry left a half-restored Build");
-	operations.length = 0;
-	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }, null], getSessionId: () => "session-test" }, ui: context.ui });
+	// A non-object entry makes the branch unreadable: skipping it could let an older
+	// entry (here, Off) win.
+	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "off" } }, null], getSessionId: () => "session-test" }, ui: context.ui });
 	const nullWrite = await toolCall?.({ toolName: "write", input: {} }) as { reason?: string } | undefined;
-	if (nullWrite === undefined || nullWrite.reason?.includes("Unknown") || !operations.some((operation) => operation.type === MODE_ENTRY && (operation.data as { mode?: string }).mode === "plan")) throw new Error("null branch entry did not land in Plan");
+	if (!nullWrite?.reason?.startsWith("Unknown workflow mode")) throw new Error("a null branch entry did not make the branch unreadable");
 	await commands.get("mode")?.handler("build", context);
 	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");

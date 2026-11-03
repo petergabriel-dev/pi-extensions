@@ -116,10 +116,25 @@ function getLastAssistantText(ctx: ExtensionContext): string | undefined {
 	return undefined;
 }
 
-// Session branch entries. Anything that is not an object (a corrupt or partial
-// entry) is skipped instead of crashing every resolver.
+// Session branch entries. A branch with any non-object (corrupt or partial) entry
+// is unreadable: skipping the entry could let an older mode or plan entry win, so
+// callers fail closed instead.
 function readBranch(ctx: ExtensionContext | ExtensionCommandContext) {
-	return ctx.sessionManager.getBranch().filter((entry: unknown) => entry !== null && typeof entry === "object");
+	const branch = ctx.sessionManager.getBranch();
+	if (branch.some((entry: unknown) => entry === null || typeof entry !== "object")) throw new Error("the session branch has an unreadable entry");
+	return branch;
+}
+
+// Clears every branch-derived plan field: no active plan.
+function resetPlanState(): void {
+	currentPlan = undefined;
+	currentPlanId = undefined;
+	currentPlanPath = undefined;
+	currentPlanSavedAt = undefined;
+	currentPlanProgress = { done: 0, total: 0 };
+	currentPlanTasks = [];
+	currentPlanCompletedTaskIds = [];
+	currentPlanNextTask = undefined;
 }
 
 function modeFromBranch(branch: readonly unknown[]): Mode | undefined {
@@ -161,7 +176,12 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 		applyPlanState(branch);
 		currentMode = mode;
 	} catch (error) {
+		// Nothing from the previous branch or session survives: no mode, no plan, and
+		// the default Caveman setting, so no other extension sees stale plan state.
 		currentMode = undefined;
+		resetPlanState();
+		cavemanEnabled = resolveCavemanEnabled([]);
+		planReadNoticeKey = undefined;
 		try {
 			ctx.ui.notify(`Workflow state could not be restored (${error instanceof Error ? error.message : String(error)}); this session is read-only until you choose a mode with /mode.`, "warning");
 		} catch { /* notification is best-effort */ }
@@ -170,27 +190,12 @@ function reconstructFromBranch(ctx: ExtensionContext): void {
 	try { updateStatus(ctx); } catch { /* best-effort */ }
 }
 
-// Plan commands refresh plan state only. The mode stays as it is, so a session
-// whose Plan landing could not be saved (its branch still ends in Build) never
-// slips back into Build here.
-function refreshPlanState(ctx: ExtensionCommandContext): void {
-	applyPlanState(readBranch(ctx));
-	try { updateStatus(ctx); } catch { /* best-effort */ }
-}
-
 async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanMarker | undefined> {
 	try {
 		const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
 		const active = state.plans.find((item) => item.planId === state.activePlanId);
 		if (!active) {
-			currentPlan = undefined;
-			currentPlanId = undefined;
-			currentPlanPath = undefined;
-			currentPlanSavedAt = undefined;
-			currentPlanProgress = { done: 0, total: 0 };
-			currentPlanTasks = [];
-			currentPlanCompletedTaskIds = [];
-			currentPlanNextTask = undefined;
+			resetPlanState();
 			planReadNoticeKey = undefined;
 			updateStatus(ctx);
 			return undefined;
@@ -218,14 +223,7 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		};
 	} catch (error) {
 		const key = currentPlanPath ?? currentPlanId ?? "active-plan";
-		currentPlan = undefined;
-		currentPlanId = undefined;
-		currentPlanPath = undefined;
-		currentPlanSavedAt = undefined;
-		currentPlanProgress = { done: 0, total: 0 };
-		currentPlanTasks = [];
-		currentPlanCompletedTaskIds = [];
-		currentPlanNextTask = undefined;
+		resetPlanState();
 		if (planReadNoticeKey !== key) {
 			planReadNoticeKey = key;
 			try {
@@ -610,7 +608,7 @@ async function selectPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext, reques
 	if (!target) return ctx.ui.notify(`Unknown planId ${planId}.\n${formatPlanList(state.plans, state.activePlanId)}`, "warning");
 
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "activate" satisfies PlanEvent, planId: target.planId, at: Date.now() }));
-	refreshPlanState(ctx);
+	// Plan state only: plan commands never re-derive the mode (only session restore does).
 	await refreshPlanFromDisk(ctx);
 	ctx.ui.notify(`Selected plan ${target.planId}.`, "success");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
@@ -623,7 +621,7 @@ async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 	const ok = ctx.hasUI ? await ctx.ui.confirm("Clear plan?", "Drop active plan from this branch? Its file stays on disk.") : true;
 	if (!ok) return;
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, planId, at: Date.now() }));
-	refreshPlanState(ctx);
+	// Plan state only: plan commands never re-derive the mode (only session restore does).
 	await refreshPlanFromDisk(ctx);
 	ctx.ui.notify(`Cleared plan ${planId}; file retained.`, "success");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
@@ -664,7 +662,7 @@ ${PLAN_FRONTEND_PROMPT}`;
 
 export const REVIEW_PROMPT = `Workflow mode: Review. Act as a read-only PR reviewer: inspect and assess changes, never modify the repository. When available, use GitHub PR read data from \`gh pr view\`, \`gh pr diff\`, and \`gh pr checks\` or status as the review source. Grade changes against \`docs/engineering/invariants.md\`, \`conventions.md\`, and \`traps.md\`. Draft findings and a verdict first; findings must cite \`file:line\` in plain text. Posting requires human approval through the harness; if declined or blocked, stop and do not retry. Without a sandbox, every bash command needs the user's approval, multi-line commands (including a multi-line review body) are refused, and headless runs cannot approve. Publish at most one verdict with \`gh pr review\` using inline \`--body\` only (never a body file). Fetch, merge, and branch alignment happen in Build mode.`;
 
-export const UNKNOWN_MODE_PROMPT = `Workflow mode state is unknown or legacy. Treat the workspace as read-only: do not use mutation tools or Bash. Select a supported workflow mode before continuing.`;
+export const UNKNOWN_MODE_PROMPT = `Workflow mode state is unknown or legacy. Treat the workspace as read-only: only read-only tools run, and Bash, mutation, plan, and subagent tools are blocked. Select a supported workflow mode with /mode before continuing.`;
 
 const BUILD_BASE_PROMPT = `Workflow mode: Build. Implement requested changes using the available tools.
 
@@ -952,7 +950,7 @@ export default function (pi: ExtensionAPI) {
 		reconstructFromBranch(ctx);
 		const landing = landRestoredBuildInPlan(ctx);
 		// Plan file GC is best-effort: it must not skip the landing or the mode emit.
-		try { await gcSessionPlans(ctx); } catch { /* retried on the next session start */ }
+		try { await gcSessionPlans(ctx); } catch { /* best-effort: errors are ignored, and an unreadable branch is never GC'd */ }
 		await landing;
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});
@@ -989,10 +987,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (currentMode === undefined) {
-			if (MUTATION_TOOLS.has(event.toolName) || event.toolName === "bash") {
-				return { block: true, reason: `Unknown workflow mode was restored; ${event.toolName} was blocked. Select a supported mode before continuing.` };
-			}
-			return;
+			// Unknown is read-only, deny-unknown: only the read-only tool set runs.
+			if (BUILD_READ_ONLY_TOOLS.has(event.toolName)) return;
+			return { block: true, reason: `Unknown workflow mode was restored; ${event.toolName} was blocked. Select a supported mode with /mode before continuing.` };
 		}
 		if (currentMode === "build") {
 			// Project-wide single writer, deny-unknown: every tool outside the read-only
