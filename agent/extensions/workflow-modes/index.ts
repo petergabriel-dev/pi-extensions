@@ -106,7 +106,7 @@ function textFromContent(content: unknown): string {
 }
 
 function getLastAssistantText(ctx: ExtensionContext): string | undefined {
-	for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
+	for (const entry of [...readBranch(ctx)].reverse()) {
 		const maybe = entry as { type?: string; message?: { role?: string; content?: unknown }; role?: string; content?: unknown };
 		const message = maybe.message ?? maybe;
 		if (message.role !== "assistant") continue;
@@ -116,35 +116,71 @@ function getLastAssistantText(ctx: ExtensionContext): string | undefined {
 	return undefined;
 }
 
-function reconstructFromBranch(ctx: ExtensionContext): void {
-	currentMode = "off";
-	const branch = ctx.sessionManager.getBranch();
+// Session branch entries. Anything that is not an object (a corrupt or partial
+// entry) is skipped instead of crashing every resolver.
+function readBranch(ctx: ExtensionContext | ExtensionCommandContext) {
+	return ctx.sessionManager.getBranch().filter((entry: unknown) => entry !== null && typeof entry === "object");
+}
+
+function modeFromBranch(branch: readonly unknown[]): Mode | undefined {
+	let mode: Mode | undefined = "off";
 	for (const entry of branch) {
 		const e = entry as { type?: string; customType?: string; data?: unknown };
 		if (e.type !== "custom" || e.customType !== MODE_ENTRY) continue;
-		const mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
-		currentMode = mode;
+		mode = normalizeMode(String((e.data as { mode?: unknown } | undefined)?.mode ?? ""));
 	}
-	cavemanEnabled = resolveCavemanEnabled(branch);
+	return mode;
+}
+
+// Plan, task, and caveman state, computed in full before anything is assigned.
+// Never touches the mode.
+function applyPlanState(branch: ReturnType<typeof readBranch>): void {
+	const caveman = resolveCavemanEnabled(branch);
 	const plan = resolveSavedPlanState(branch, PLAN_ENTRY);
 	const active = plan.plans.find((item) => item.planId === plan.activePlanId);
+	const taskState = active ? resolveSavedPlanTaskState(branch, active.planId) : undefined;
+	cavemanEnabled = caveman;
 	currentPlan = plan.plan;
 	currentPlanId = active?.planId ?? plan.planId;
 	currentPlanPath = active?.path;
 	currentPlanSavedAt = active?.savedAt ?? plan.savedAt;
-	const taskState = active ? resolveSavedPlanTaskState(branch, active.planId) : undefined;
 	currentPlanTasks = taskState?.tasks ?? [];
 	currentPlanCompletedTaskIds = taskState?.completedTaskIds ?? [];
 	currentPlanProgress = taskState?.progress ?? { done: 0, total: 0 };
 	currentPlanNextTask = taskState?.nextTask;
 	planReadNoticeKey = undefined;
+}
+
+// Session restore is the only place the mode is derived from the branch. It fails
+// closed: if the branch cannot be read in full, the session is Unknown (read-only)
+// until the user picks a mode, never Off or a half-restored Build.
+function reconstructFromBranch(ctx: ExtensionContext): void {
+	try {
+		const branch = readBranch(ctx);
+		const mode = modeFromBranch(branch);
+		applyPlanState(branch);
+		currentMode = mode;
+	} catch (error) {
+		currentMode = undefined;
+		try {
+			ctx.ui.notify(`Workflow state could not be restored (${error instanceof Error ? error.message : String(error)}); this session is read-only until you choose a mode with /mode.`, "warning");
+		} catch { /* notification is best-effort */ }
+	}
 	// Status is cosmetic: a throwing UI must not stop a restored Build from landing in Plan.
+	try { updateStatus(ctx); } catch { /* best-effort */ }
+}
+
+// Plan commands refresh plan state only. The mode stays as it is, so a session
+// whose Plan landing could not be saved (its branch still ends in Build) never
+// slips back into Build here.
+function refreshPlanState(ctx: ExtensionCommandContext): void {
+	applyPlanState(readBranch(ctx));
 	try { updateStatus(ctx); } catch { /* best-effort */ }
 }
 
 async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanMarker | undefined> {
 	try {
-		const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+		const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
 		const active = state.plans.find((item) => item.planId === state.activePlanId);
 		if (!active) {
 			currentPlan = undefined;
@@ -167,7 +203,7 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		if (text === undefined) throw new Error("plan file is missing");
 		currentPlan = text;
 		planReadNoticeKey = undefined;
-		const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), active.planId, parsePlanTasks(text));
+		const taskState = resolveSavedPlanTaskState(readBranch(ctx), active.planId, parsePlanTasks(text));
 		currentPlanTasks = taskState.tasks;
 		currentPlanCompletedTaskIds = taskState.completedTaskIds;
 		currentPlanProgress = taskState.progress;
@@ -398,7 +434,7 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanId = planId;
 	currentPlanPath = path;
 	currentPlanSavedAt = savedAt;
-	const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId, tasks);
+	const taskState = resolveSavedPlanTaskState(readBranch(ctx), planId, tasks);
 	currentPlanTasks = taskState.tasks;
 	currentPlanCompletedTaskIds = taskState.completedTaskIds;
 	currentPlanProgress = taskState.progress;
@@ -411,10 +447,10 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 
 export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawReference: unknown): Promise<WorkflowPlanTaskTickResult> {
 	const { reference, note } = normalizeTaskTickReference(rawReference);
-	const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+	const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
 	const planId = state.activePlanId;
 	if (!planId) throw new Error("no active saved plan");
-	const taskState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId);
+	const taskState = resolveSavedPlanTaskState(readBranch(ctx), planId);
 	const resolution = resolvePlanTaskReference(taskState.tasks, reference);
 	if (!resolution.ok) {
 		const description = resolution.reason === "ambiguous" ? "ambiguous task reference" : "unknown task reference";
@@ -432,7 +468,7 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 
 	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, ...(note ? { note } : {}), at: Date.now() };
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
-	const nextState = resolveSavedPlanTaskState(ctx.sessionManager.getBranch(), planId);
+	const nextState = resolveSavedPlanTaskState(readBranch(ctx), planId);
 	currentPlanTasks = nextState.tasks;
 	currentPlanCompletedTaskIds = nextState.completedTaskIds;
 	currentPlanProgress = nextState.progress;
@@ -521,7 +557,7 @@ async function savePlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 }
 
 function planState(ctx: ExtensionCommandContext | ExtensionContext) {
-	return resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+	return resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
 }
 
 function currentWorkflowPlanTasks(requestedPlanId?: string): WorkflowPlanTasksResult {
@@ -557,7 +593,7 @@ function planSelectItems(plans: readonly SavedPlan[], activePlanId: string | und
 }
 
 async function gcSessionPlans(ctx: ExtensionContext): Promise<void> {
-	const state = resolveSavedPlanState(ctx.sessionManager.getBranch(), PLAN_ENTRY);
+	const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
 	await gcPlanFiles(getAgentDir(), sessionIdFromContext(ctx), state.plans.map((plan) => ({ planId: plan.planId })));
 }
 
@@ -574,7 +610,7 @@ async function selectPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext, reques
 	if (!target) return ctx.ui.notify(`Unknown planId ${planId}.\n${formatPlanList(state.plans, state.activePlanId)}`, "warning");
 
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "activate" satisfies PlanEvent, planId: target.planId, at: Date.now() }));
-	reconstructFromBranch(ctx);
+	refreshPlanState(ctx);
 	await refreshPlanFromDisk(ctx);
 	ctx.ui.notify(`Selected plan ${target.planId}.`, "success");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
@@ -587,7 +623,7 @@ async function clearPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 	const ok = ctx.hasUI ? await ctx.ui.confirm("Clear plan?", "Drop active plan from this branch? Its file stays on disk.") : true;
 	if (!ok) return;
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, { event: "clear" satisfies PlanEvent, planId, at: Date.now() }));
-	reconstructFromBranch(ctx);
+	refreshPlanState(ctx);
 	await refreshPlanFromDisk(ctx);
 	ctx.ui.notify(`Cleared plan ${planId}; file retained.`, "success");
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
@@ -915,7 +951,8 @@ export default function (pi: ExtensionAPI) {
 		planSaveToolCalled = false;
 		reconstructFromBranch(ctx);
 		const landing = landRestoredBuildInPlan(ctx);
-		await gcSessionPlans(ctx);
+		// Plan file GC is best-effort: it must not skip the landing or the mode emit.
+		try { await gcSessionPlans(ctx); } catch { /* retried on the next session start */ }
 		await landing;
 		pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlan !== undefined });
 	});

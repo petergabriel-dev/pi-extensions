@@ -423,6 +423,39 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	failModeAppend = false;
 	if (!warnings.some((message) => message.includes("saving the switch to Plan failed"))) throw new Error("failed landing save was not reported");
 	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("failed landing save left Build writable");
+	// Plan commands never re-derive the mode: after a failed landing save the branch
+	// still ends in Build, and /plan select or /plan clear must keep Plan.
+	const savedBranchEntries = branchEntries;
+	const r6SavedAt = new Date().toISOString();
+	branchEntries = [
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "r6-a", path: "r6-a.md", savedAt: r6SavedAt } },
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "set", planId: "r6-b", path: "r6-b.md", savedAt: r6SavedAt } },
+		{ type: "custom", customType: PLAN_ENTRY, data: { event: "activate", planId: "r6-a", at: Date.now() } },
+		{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } },
+	];
+	failModeAppend = true;
+	await handlers.get("session_tree")?.({}, context);
+	failModeAppend = false;
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("failed landing save left Build writable before plan commands");
+	await commands.get("plan")?.handler("select r6-b", context);
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("/plan select restored Build after a failed landing save");
+	await commands.get("plan")?.handler("clear", context);
+	if (await toolCall?.({ toolName: "write", input: {} }) === undefined) throw new Error("/plan clear restored Build after a failed landing save");
+	branchEntries = savedBranchEntries;
+	// Restore fails closed: a branch that cannot be read in full is Unknown, never Off or Build.
+	warnings.length = 0;
+	const unreadable = { sessionManager: { getBranch: () => { throw new Error("branch unreadable"); }, getSessionId: () => "session-test" }, ui: context.ui };
+	await handlers.get("session_start")?.({}, unreadable);
+	const unreadableWrite = await toolCall?.({ toolName: "write", input: {} }) as { reason?: string } | undefined;
+	if (!unreadableWrite?.reason?.startsWith("Unknown workflow mode") || !warnings.some((message) => message.includes("could not be restored"))) throw new Error("unreadable branch did not restore Unknown");
+	const corruptPlanEntry = { type: "custom", customType: PLAN_ENTRY, get data() { throw new Error("corrupt plan entry"); } };
+	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }, corruptPlanEntry], getSessionId: () => "session-test" }, ui: context.ui });
+	const corruptWrite = await toolCall?.({ toolName: "write", input: {} }) as { reason?: string } | undefined;
+	if (!corruptWrite?.reason?.startsWith("Unknown workflow mode")) throw new Error("corrupt plan entry left a half-restored Build");
+	operations.length = 0;
+	await handlers.get("session_tree")?.({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: MODE_ENTRY, data: { mode: "build" } }, null], getSessionId: () => "session-test" }, ui: context.ui });
+	const nullWrite = await toolCall?.({ toolName: "write", input: {} }) as { reason?: string } | undefined;
+	if (nullWrite === undefined || nullWrite.reason?.includes("Unknown") || !operations.some((operation) => operation.type === MODE_ENTRY && (operation.data as { mode?: string }).mode === "plan")) throw new Error("null branch entry did not land in Plan");
 	await commands.get("mode")?.handler("build", context);
 	for (const toolName of [...browserMutationTools, ...browserReadTools]) {
 		if (await toolCall?.({ toolName, input: {} }) !== undefined) throw new Error("Build " + toolName + " was blocked");
