@@ -265,7 +265,7 @@ async function test(name, fn, responderFactory = startResponder) {
 async function main() {
 	const toolNames = client.tools.map((tool) => tool.name);
 	assert.ok(toolNames.includes("list_sessions") && toolNames.includes("pair_session"), "session tools missing from MCP tool list");
-	assert.deepEqual(client.tools[0].inputSchema.properties.harness.enum, ["claude", "cursor", "pi", "opencode"]);
+	assert.deepEqual(client.tools[0].inputSchema.properties.harness.enum, ["claude", "cursor", "pi", "opencode", "codex"]);
 	const resolved = client.resolveHarnessIdentity({ sessionId: "primary-id", claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" });
 	assert.deepEqual(resolved, { harness: "claude", id: "primary-id" });
 	assert.deepEqual(client.resolveHarnessIdentity({ sessionId: OPENCODE.id, harness: OPENCODE.harness }, {}), OPENCODE);
@@ -298,6 +298,17 @@ async function main() {
 		assert.equal(liveSession.age, "1m");
 		assert.equal(liveSession.peers[0].pendingCount, 2);
 		assert.equal(liveSession.peers[0].inboundPendingCount, 1);
+	});
+
+	await test("codex build lease matches only the codex holder identity", async (cwd) => {
+		const codex = { harness: "codex", id: "01a1a1d0-d93a-7d71-a0ba-1bca624c4fce" };
+		const paths = addSession(cwd, "pi-codex-holder", [codex]);
+		const lease = leaseFixture(codex);
+		setBuildLease(paths, lease);
+		assert.equal(client.holdsBuildLease(cwd, codex), true);
+		assert.equal(client.holdsBuildLease(cwd, { harness: "claude", id: codex.id }), false, "same id under another harness must not match");
+		assert.equal(client.holdsBuildLease(cwd, { harness: "codex", id: "01a1a1d0-0000-7000-8000-000000000000" }), false, "other codex session must not match");
+		assert.equal(client.holdsBuildLease(cwd, codex, lease.expiresAt), false, "lease must be inactive at its expiry instant");
 	});
 
 	await test("build lease allows holder tools without Bash wrapping or bridge writes", async (cwd) => {

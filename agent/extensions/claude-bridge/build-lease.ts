@@ -50,7 +50,7 @@ export type ApproveBuildLeaseResult =
 
 export const BUILD_LEASE_TTL_MS = 4 * 60 * 60 * 1000;
 
-const LEASE_HARNESSES = new Set<BuildLeaseHarness>(["claude", "cursor", "opencode"]);
+const LEASE_HARNESSES = new Set<BuildLeaseHarness>(["claude", "cursor", "opencode", "codex"]);
 
 function isLeasePeer(peer: BuildLeasePeer | null | undefined): peer is BuildLeasePeer & { harness: BuildLeaseHarness } {
 	return !!peer && LEASE_HARNESSES.has(peer.harness as BuildLeaseHarness) && isSafeId(peer.id);
@@ -63,7 +63,7 @@ function refusal(code: BuildLeaseErrorCode, message: string): BuildLeaseRefusal 
 function peerKindRefusal(): BuildLeaseRefusal {
 	return refusal(
 		"build_lease_peer_kind",
-		"A paired Claude, Cursor, or OpenCode peer is required; Pi cannot hold a build lease.",
+		"A paired Claude, Cursor, OpenCode, or Codex peer is required; Pi cannot hold a build lease.",
 	);
 }
 

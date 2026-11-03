@@ -38,6 +38,12 @@ opencodeMailbox.pair(opencode);
 assert.deepEqual(opencodeMailbox.peers(), [opencode]);
 assert.deepEqual(opencodeMailbox.send(opencode, "hello from OpenCode").to, opencode);
 
+const codex = identity("codex", "01a1a1d0-d93a-7d71-a0ba-1bca624c4fce"); // Codex session_id is UUIDv7
+const codexMailbox = makeMailbox(local);
+codexMailbox.pair(codex);
+assert.deepEqual(codexMailbox.peers(), [codex]);
+assert.deepEqual(codexMailbox.send(codex, "hello from Codex").to, codex);
+
 const mailbox = makeMailbox(local);
 expectCode(() => mailbox.send(claude, "hello"), "unpaired");
 expectCode(() => mailbox.pair(identity("pi", "../escape")), "invalid-id");

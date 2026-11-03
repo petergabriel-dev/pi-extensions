@@ -136,6 +136,16 @@ if (!approved.ok) throw new Error("Expected approved lease");
 assert.equal(approved.lease.expiresAt - approved.lease.grantedAt, BUILD_LEASE_TTL_MS);
 assert.equal(approved.lease.expiresAt, now + 4 * 60 * 60 * 1000);
 
+// Codex peers request and receive leases bound to their own identity.
+const codex: BuildLeasePeer = { harness: "codex", id: "01a1a1d0-d93a-7d71-a0ba-1bca624c4fce" };
+const codexRequest = requestBuildLease(null, null, codex, workflow, now);
+if (!codexRequest.ok || codexRequest.status !== "pending") throw new Error("Expected pending codex request");
+const codexApproved = approveBuildLease(null, codexRequest.entry, workflow, true, now);
+assert.deepEqual(codexApproved, {
+	ok: true,
+	lease: { harness: "codex", id: codex.id, planId: "plan-1", grantedAt: now, expiresAt: now + BUILD_LEASE_TTL_MS },
+});
+
 // Approve re-validates pairing, plan identity, Pi mode, and other holders.
 expectRefusal(approveBuildLease(null, request, workflow, false, now), "build_lease_peer_kind");
 expectRefusal(approveBuildLease(null, request, { mode: "plan" }, true, now), "build_lease_no_plan");
