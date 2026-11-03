@@ -9,6 +9,7 @@ import { createTwoFilesPatch } from "diff";
 import {
 	applyPlan,
 	classifyPackageRoot,
+	codexHookTrustNotice,
 	inspectHarness,
 	planInstall,
 	planUninstall,
@@ -20,8 +21,8 @@ import type { ApplyResult, HarnessSetupStamp, SetupInspection, SetupPlan } from 
 import type { Harness } from "./manifest.ts";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const HARNESSES: Harness[] = ["claude", "cursor", "opencode"];
-const HARNESS_NAMES: Record<Harness, string> = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
+const HARNESSES: Harness[] = ["claude", "cursor", "opencode", "codex"];
+const HARNESS_NAMES: Record<Harness, string> = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", codex: "Codex" };
 const STARTUP_WARNING = "Harness setup needs repair";
 const CLAUDE_PLATFORM_WARNING = "Claude Bash sandbox behavior is platform-dependent; verify fail-closed behavior on this non-macOS host.";
 const CURSOR_REMOVAL_WARNING = "Cursor failClosed hooks can block tools globally after package removal. Run `/harness uninstall cursor` before `pi remove`.";
@@ -246,6 +247,8 @@ function planPreview(harness: Harness, action: "install" | "uninstall", plan: Se
 	if (harness === "claude" && process.platform !== "darwin") warnings.push(CLAUDE_PLATFORM_WARNING);
 	if (rootWarning) warnings.push(rootWarning);
 	if (harness === "cursor") warnings.push(CURSOR_REMOVAL_WARNING);
+	const trustNotice = action === "install" ? codexHookTrustNotice(harness, plan.changes.map(({ path }) => path)) : undefined;
+	if (trustNotice) warnings.push(trustNotice);
 	const uniqueWarnings = [...new Set(warnings)];
 	if (uniqueWarnings.length) {
 		lines.push("## Warnings", ...uniqueWarnings.map((warning) => `- ${warning}`), "");
@@ -293,11 +296,13 @@ async function showPreview(ctx: ExtensionCommandContext, content: string): Promi
 	}, { overlay: true, overlayOptions: { width: "90%", minWidth: 50, maxHeight: "80%", margin: 2 } });
 }
 
-async function showOutcomes(ctx: ExtensionCommandContext, fileResults: ApplyResult[], cliResults: string[]): Promise<void> {
+async function showOutcomes(ctx: ExtensionCommandContext, harness: Harness, action: "install" | "uninstall", fileResults: ApplyResult[], cliResults: string[]): Promise<void> {
 	const lines = ["# Harness setup results", "", "## Files"];
 	if (fileResults.length) {
 		for (const result of fileResults) lines.push(`- ${result.applied ? "Applied" : "Not applied"}: ${result.path}${result.backup ? ` (backup: ${result.backup})` : ""}${result.reason ? ` — ${result.reason}` : ""}`);
 	} else lines.push("- No file changes planned.");
+	const trustNotice = action === "install" ? codexHookTrustNotice(harness, fileResults.filter(({ applied }) => applied).map(({ path }) => path)) : undefined;
+	if (trustNotice) lines.push("", "## Codex hook trust", `- ${trustNotice}`);
 	lines.push("", "## Claude CLI");
 	if (cliResults.length) lines.push(...cliResults.map((result) => `- ${result}`));
 	else lines.push("- No Claude CLI steps planned.");
@@ -342,7 +347,7 @@ async function handleInteractive(ctx: ExtensionCommandContext, agentDir: string,
 
 			const fileResults = await applyPlan(plan);
 			const cliResults = await runCliSteps(plan);
-			await showOutcomes(ctx, fileResults, cliResults);
+			await showOutcomes(ctx, selected, action, fileResults, cliResults);
 			inspections = await inspectAll(agentDir, roots);
 			break;
 		}
@@ -352,7 +357,7 @@ async function handleInteractive(ctx: ExtensionCommandContext, agentDir: string,
 export default function registerHarnessSetup(pi: ExtensionAPI): void {
 	const agentDir = getAgentDir();
 	pi.registerCommand("harness", {
-		description: "Inspect and manage Claude, Cursor, and OpenCode setup",
+		description: "Inspect and manage Claude, Cursor, OpenCode, and Codex setup",
 		handler: async (_args, ctx) => {
 			const roots = resolveHarnessRoots(process.env, homedir());
 			const classification = await classifyPackageRoot(PACKAGE_ROOT, agentDir);

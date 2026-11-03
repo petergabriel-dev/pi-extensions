@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PACKAGE_SKILL_NAMES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "../manifest.ts";
-import { applyPlan, classifyPackageRoot, inspectHarness, planInstall, planUninstall, PLAYWRIGHT_CLI_ADVISORY, playwrightCliAdvisory, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
+import { spawnSync } from "node:child_process";
+import { CODEX_PRETOOL_GUARD, CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PACKAGE_SKILL_NAMES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "../manifest.ts";
+import { applyPlan, classifyPackageRoot, CODEX_HOOK_TRUST_NOTICE, codexHookTrustNotice, inspectHarness, planInstall, planUninstall, PLAYWRIGHT_CLI_ADVISORY, playwrightCliAdvisory, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
+import { scanBridgeTable } from "../codex-toml.ts";
 import type { Harness, ProblemKind, SetupProblem } from "../setup.ts";
 
 async function main(): Promise<void> {
@@ -42,7 +44,7 @@ const createPackage = async (root: string): Promise<string> => {
 	const pkgRoot = path.join(root, "package");
 	await mkdir(pkgRoot, { recursive: true });
 	await writeJson(path.join(pkgRoot, "package.json"), { name: "fixture", version: "1.2.3" });
-	for (const harness of ["claude", "cursor", "opencode"] as const) {
+	for (const harness of ["claude", "cursor", "opencode", "codex"] as const) {
 		for (const entry of HARNESS_MANIFEST[harness]) {
 			const asset = path.join(pkgRoot, entry.script);
 			if (entry.kind === "skill") {
@@ -61,6 +63,7 @@ const makeRoots = (root: string) => ({
 	claudeMcp: path.join(root, "claude-user.json"),
 	cursor: path.join(root, "cursor"),
 	opencode: path.join(root, "opencode"),
+	codex: path.join(root, "codex"),
 });
 const command = (pkgRoot: string, relative: string): string => `node ${JSON.stringify(path.join(pkgRoot, relative))}`;
 const preToolCommand = (pkgRoot: string, relative: string): string => `${command(pkgRoot, relative)} || exit 2`;
@@ -177,12 +180,14 @@ try {
 		claudeMcp: "/custom/claude/.claude.json",
 		cursor: "/users/tester/.cursor",
 		opencode: "/custom/xdg/opencode",
+		codex: "/users/tester/.codex",
 	});
 	assert.deepEqual(resolveHarnessRoots({}, "/users/tester"), {
 		claude: "/users/tester/.claude",
 		claudeMcp: "/users/tester/.claude.json",
 		cursor: "/users/tester/.cursor",
 		opencode: "/users/tester/.config/opencode",
+		codex: "/users/tester/.codex",
 	});
 	record("harness roots and overrides");
 
@@ -931,6 +936,216 @@ try {
 	assert.equal(boundaryResults.find(({ path: file }) => file === outsideFile)?.applied, false);
 	await assert.rejects(lstat(outsideFile));
 	record("apply write confinement to harness roots and stamp");
+
+	// ---------------------------------------------------------------- Codex
+	const codexHook = "agent/codex-bridge-client/pi-codex-hook.js";
+	const bridgeScript = "agent/claude-bridge-client/pi-bridge-mcp.js";
+	const codexGuarded = (pkg: string): string => `${command(pkg, codexHook)} ${CODEX_PRETOOL_GUARD}`;
+	const codexBlock = (pkg: string): string => `[mcp_servers.pi-claude-bridge]\ncommand = "node"\nargs = [${JSON.stringify(path.join(pkg, bridgeScript))}]\ndefault_tools_approval_mode = "approve"\n`;
+	const modeOf = async (file: string): Promise<number> => (await lstat(file)).mode & 0o777;
+
+	assert.deepEqual(HARNESS_MANIFEST.codex.filter(({ kind }) => kind === "hook").map(({ event, script, dest }) => [event, script, dest]), [["PreToolUse", codexHook, "hooks.json#/hooks/PreToolUse"]]);
+	assert.equal(HARNESS_MANIFEST.codex.find(({ kind }) => kind === "mcp")?.dest, "config.toml#mcp_servers.pi-claude-bridge");
+	assert.deepEqual(HARNESS_MANIFEST.codex.filter(({ kind }) => kind === "skill").map(({ script, dest }) => [script, dest]), [
+		...["discuss", "plan", "build"].map((name) => [`agent/harness-commands/codex/pi-${name}`, `skills/pi-${name}`]),
+		...PACKAGE_SKILL_NAMES.map((name) => [`agent/skills/${name}`, `skills/${name}`]),
+	]);
+	assert.equal(HARNESS_MANIFEST.codex.some(({ kind }) => kind === "command"), false, "Codex ships skills, never command files");
+	assert.match(CODEX_PRETOOL_GUARD, />&2/, "Codex guard must print a stderr reason");
+	assert.equal(resolveHarnessRoots({ CODEX_HOME: "/custom/codex" }, "/users/tester").codex, "/custom/codex");
+	record("codex manifest and CODEX_HOME root");
+
+	// The guard's real shell semantics: a crashed hook becomes exit 2 with a non-empty stderr reason.
+	const guardRun = spawnSync("/bin/sh", ["-c", `node ${JSON.stringify(path.join(temp, "missing-hook.js"))} ${CODEX_PRETOOL_GUARD}`], { encoding: "utf8" });
+	assert.equal(guardRun.status, 2);
+	assert.match(guardRun.stderr, /Pi Codex hook failed closed/);
+	record("codex guard turns a crash into exit 2 with stderr");
+
+	// Fresh install into an empty Codex home.
+	const codexFreshBase = path.join(temp, "codex-fresh");
+	const codexFreshPkg = await createPackage(codexFreshBase);
+	const codexFreshRoots = makeRoots(path.join(codexFreshBase, "fixture"));
+	const codexFreshOptions = { pkgRoot: codexFreshPkg, roots: codexFreshRoots, agentDir: path.join(codexFreshBase, "agent-dir"), platform: "darwin" };
+	assert.equal((await inspectHarness("codex", codexFreshOptions)).state, "not-installed");
+	const codexFreshPlan = await planInstall("codex", codexFreshOptions);
+	const codexToml = path.join(codexFreshRoots.codex, "config.toml");
+	const codexHooksFile = path.join(codexFreshRoots.codex, "hooks.json");
+	assert.deepEqual(codexFreshPlan.changes.find(({ path: file }) => file === codexToml), { path: codexToml, kind: "toml", before: null, after: codexBlock(codexFreshPkg) });
+	assert.equal(codexFreshPlan.changes.filter(({ kind }) => kind === "symlink").length, 3 + PACKAGE_SKILL_NAMES.length);
+	assert.equal(codexHookTrustNotice("codex", codexFreshPlan.changes.map(({ path: file }) => file)), CODEX_HOOK_TRUST_NOTICE);
+	assert.equal(codexHookTrustNotice("claude", [codexHooksFile]), undefined);
+	assert.ok((await applyPlan(codexFreshPlan)).every(({ applied }) => applied));
+	assert.equal(await modeOf(codexToml), 0o600, "new config.toml is owner-only");
+	assert.deepEqual(JSON.parse(await readFile(codexHooksFile, "utf8")), { hooks: { PreToolUse: [{ hooks: [{ type: "command", command: codexGuarded(codexFreshPkg) }] }] } });
+	assert.equal(await realpath(path.join(codexFreshRoots.codex, "skills/pi-build")), await realpath(path.join(codexFreshPkg, "agent/harness-commands/codex/pi-build")));
+	const codexFreshInspect = await inspectHarness("codex", { ...codexFreshOptions, stamp: await readStamp(codexFreshOptions.agentDir) });
+	assert.equal(codexFreshInspect.state, "ok", JSON.stringify(codexFreshInspect.problems));
+	const codexFreshSecond = await planInstall("codex", codexFreshOptions);
+	assert.deepEqual(codexFreshSecond.changes, [], "codex install is idempotent");
+	assert.equal(codexHookTrustNotice("codex", codexFreshSecond.changes.map(({ path: file }) => file)), undefined, "no re-trust notice without hook changes");
+	record("codex fresh install, 0600 config, idempotence, trust notice");
+
+	// Realistic existing config: Codex-managed tables, a multi-line string that mentions the table, foreign hooks and skills.
+	const codexLiveBase = path.join(temp, "codex-live");
+	const codexLivePkg = await createPackage(codexLiveBase);
+	const codexLiveRoots = makeRoots(path.join(codexLiveBase, "fixture"));
+	const codexLiveOptions = { pkgRoot: codexLivePkg, roots: codexLiveRoots, agentDir: path.join(codexLiveBase, "agent-dir"), platform: "darwin" };
+	const liveToml = path.join(codexLiveRoots.codex, "config.toml");
+	const liveHooks = path.join(codexLiveRoots.codex, "hooks.json");
+	const originalToml = [
+		'model = "gpt-6.1-sol"',
+		"# keep this comment",
+		'developer_instructions = """',
+		"Never edit [mcp_servers.pi-claude-bridge] by hand.",
+		'"""',
+		"",
+		'[projects."/Users/me/My Project"]',
+		'trust_level = "trusted"',
+		"",
+		"[mcp_servers.node_repl]",
+		'command = "node"',
+		"args = [",
+		'  "/opt/repl.js", # trailing comment',
+		"]",
+		"",
+		"[mcp_servers.node_repl.env]",
+		'TOKEN = "kept-out-of-tests"',
+		"",
+		'[hooks.state."/Users/me/.codex/hooks.json:pre_tool_use:0:0"]',
+		'trusted_hash = "sha256:abc"',
+		"",
+		"[desktop]",
+		'conversationDetailMode = "STEPS_COMMANDS"',
+		"",
+	].join("\n");
+	await mkdir(codexLiveRoots.codex, { recursive: true });
+	await writeFile(liveToml, originalToml, { mode: 0o600 });
+	await chmod(liveToml, 0o600);
+	const foreignHooks = {
+		description: "user hooks",
+		hooks: {
+			PreToolUse: [
+				{ matcher: "Bash", hooks: [{ type: "command", command: "python3 ~/.codex/hooks/policy.py" }] },
+				{ matcher: "Write|Edit", hooks: [{ type: "mcp_tool", server: "scanner", tool: "scan_patch" }] },
+			],
+			SessionStart: [{ hooks: [{ type: "command", command: "python3 ~/.codex/hooks/start.py" }] }],
+		},
+	};
+	await writeJson(liveHooks, foreignHooks);
+	await mkdir(path.join(codexLiveRoots.codex, "skills/.system/skill-creator"), { recursive: true });
+	await writeFile(path.join(codexLiveRoots.codex, "skills/.system/skill-creator/SKILL.md"), "system skill\n");
+	await mkdir(path.join(codexLiveRoots.codex, "skills/my-skill"), { recursive: true });
+	await writeFile(path.join(codexLiveRoots.codex, "skills/my-skill/SKILL.md"), "mine\n");
+	await mkdir(path.join(codexLiveRoots.codex, "commands"), { recursive: true });
+	await writeFile(path.join(codexLiveRoots.codex, "commands/plan.md"), "not ours\n");
+	assert.equal(scanBridgeTable(originalToml).kind, "absent", "table text inside a multi-line string is not a header");
+
+	const livePlan = await planInstall("codex", codexLiveOptions);
+	assert.ok(!livePlan.changes.some(({ path: file }) => file.includes(`${path.sep}commands${path.sep}`)), "Codex commands/ paths are never legacy-managed");
+	const liveApplied = await applyPlan(livePlan);
+	assert.ok(liveApplied.every(({ applied }) => applied), JSON.stringify(liveApplied));
+	const installedToml = await readFile(liveToml, "utf8");
+	assert.equal(installedToml, `${originalToml}\n${codexBlock(codexLivePkg)}`, "only the owned table is appended; every other byte survives");
+	assert.equal(await modeOf(liveToml), 0o600, "existing config.toml mode is preserved");
+	const tomlBackup = liveApplied.find(({ path: file }) => file === liveToml)?.backup;
+	assert.ok(tomlBackup);
+	assert.equal(await readFile(tomlBackup, "utf8"), originalToml);
+	assert.equal(await modeOf(tomlBackup), 0o600, "backup keeps the owner-only mode");
+	const installedHooks = JSON.parse(await readFile(liveHooks, "utf8"));
+	assert.deepEqual(installedHooks.hooks.PreToolUse.slice(0, 2), foreignHooks.hooks.PreToolUse, "foreign groups untouched");
+	assert.deepEqual(installedHooks.hooks.PreToolUse[2], { hooks: [{ type: "command", command: codexGuarded(codexLivePkg) }] }, "Pi hook gets its own matcher-less group");
+	assert.deepEqual(installedHooks.hooks.SessionStart, foreignHooks.hooks.SessionStart);
+	assert.equal(installedHooks.description, "user hooks");
+	assert.equal(await readFile(path.join(codexLiveRoots.codex, "skills/.system/skill-creator/SKILL.md"), "utf8"), "system skill\n");
+	assert.equal(await readFile(path.join(codexLiveRoots.codex, "skills/my-skill/SKILL.md"), "utf8"), "mine\n");
+	assert.equal(await readFile(path.join(codexLiveRoots.codex, "commands/plan.md"), "utf8"), "not ours\n");
+	assert.equal((await inspectHarness("codex", codexLiveOptions)).state, "ok");
+	assert.deepEqual((await planInstall("codex", codexLiveOptions)).changes, [], "second install plans nothing");
+	record("codex install preserves bytes, mode, foreign hooks, .system, and foreign skills");
+
+	// Reformatted owned table (quoting, spacing, order, extra key) is still ours and unchanged.
+	const reformatted = `${originalToml}\n[ mcp_servers . "pi-claude-bridge" ]  # pi bridge\nargs = [\n  '${path.join(codexLivePkg, bridgeScript)}',\n]\ncommand = 'node'\nstartup_timeout_sec = 30\ndefault_tools_approval_mode = "approve"\n`;
+	await writeFile(liveToml, reformatted);
+	assert.ok(!(await planInstall("codex", codexLiveOptions)).changes.some(({ path: file }) => file === liveToml), "reformatted owned table needs no rewrite");
+	assert.equal((await inspectHarness("codex", codexLiveOptions)).state, "ok");
+	// Missing approval: only that key is added; header, extra key, and other bytes stay.
+	await writeFile(liveToml, reformatted.replace('default_tools_approval_mode = "approve"\n', ""));
+	const approvalPlan = await planInstall("codex", codexLiveOptions);
+	const approvalChange = approvalPlan.changes.find(({ path: file }) => file === liveToml);
+	assert.ok(approvalChange?.after?.startsWith(`${originalToml}\n[ mcp_servers . "pi-claude-bridge" ]  # pi bridge\n`));
+	assert.match(approvalChange!.after!, /startup_timeout_sec = 30\n/);
+	assert.match(approvalChange!.after!, /default_tools_approval_mode = "approve"\n$/);
+	noted((await inspectHarness("codex", codexLiveOptions)).problems, "malformed-shape");
+	record("codex reformatted owned table recognized; minimal key repair");
+
+	// An owned table from another package root is retargeted.
+	const codexStalePkg = await createPackage(path.join(temp, "codex-stale-package"));
+	await writeFile(liveToml, `${originalToml}\n${codexBlock(codexStalePkg)}`);
+	noted((await inspectHarness("codex", codexLiveOptions)).problems, "wrong-root");
+	const retarget = (await planInstall("codex", codexLiveOptions)).changes.find(({ path: file }) => file === liveToml);
+	assert.equal(retarget?.after, `${originalToml}\n${codexBlock(codexLivePkg)}`);
+	record("codex owned table retargeted across package roots");
+
+	// A foreign table with the same name is preserved and reported, on install and uninstall.
+	const foreignTable = `${originalToml}\n[mcp_servers.pi-claude-bridge]\ncommand = "npx"\nargs = ["some-other-bridge"]\n`;
+	await writeFile(liveToml, foreignTable);
+	const foreignInstall = await planInstall("codex", codexLiveOptions);
+	assert.ok(!foreignInstall.changes.some(({ path: file }) => file === liveToml));
+	assert.ok(foreignInstall.skipped.some(({ path: file, reason }) => file === liveToml && /not owned/.test(reason)));
+	const foreignUninstall = await planUninstall("codex", codexLiveOptions);
+	assert.ok(!foreignUninstall.changes.some(({ path: file }) => file === liveToml));
+	noted((await inspectHarness("codex", codexLiveOptions)).problems, "malformed-shape");
+	record("codex foreign same-name table preserved");
+
+	// Unsupported shapes are never edited.
+	for (const [label, text] of [
+		["sub-table", `${codexBlock(codexLivePkg)}\n[mcp_servers.pi-claude-bridge.env]\nX = "1"\n`],
+		["dotted root key", `mcp_servers.pi-claude-bridge.command = "node"\n`],
+		["inline table", `[mcp_servers]\npi-claude-bridge = { command = "node" }\n`],
+		["duplicate", `${codexBlock(codexLivePkg)}\n${codexBlock(codexLivePkg)}`],
+		["broken string", `model = "unterminated\n${codexBlock(codexLivePkg)}`],
+	] as const) {
+		assert.equal(scanBridgeTable(text).kind, "unsupported", label);
+		await writeFile(liveToml, text);
+		const plan = await planInstall("codex", codexLiveOptions);
+		assert.ok(!plan.changes.some(({ path: file }) => file === liveToml), `${label}: no edit`);
+		assert.ok(plan.skipped.some(({ path: file }) => file === liveToml), `${label}: reported`);
+	}
+	record("codex unsupported TOML shapes skipped");
+
+	// Owned Pi hook narrowed by a foreign matcher, or unguarded, is flagged and repaired into its own group.
+	await writeFile(liveToml, installedToml);
+	const narrowed: { hooks: { PreToolUse: Array<{ hooks: unknown[] }> } } = structuredClone(foreignHooks);
+	narrowed.hooks.PreToolUse[0].hooks.push({ type: "command", command: command(codexLivePkg, codexHook) });
+	await writeJson(liveHooks, narrowed);
+	const narrowedInspect = await inspectHarness("codex", codexLiveOptions);
+	noted(narrowedInspect.problems, "unguarded-hook");
+	assert.ok(narrowedInspect.problems.some(({ message }) => /without a matcher/.test(message)));
+	assert.ok((await applyPlan(await planInstall("codex", codexLiveOptions))).every(({ applied }) => applied));
+	const repairedHooks = JSON.parse(await readFile(liveHooks, "utf8"));
+	assert.deepEqual(repairedHooks.hooks.PreToolUse.slice(0, 2), foreignHooks.hooks.PreToolUse, "owned hook removed from the foreign group only");
+	assert.deepEqual(repairedHooks.hooks.PreToolUse[2], { hooks: [{ type: "command", command: codexGuarded(codexLivePkg) }] });
+	assert.equal((await inspectHarness("codex", codexLiveOptions)).state, "ok");
+	record("codex hook scope and guard repair");
+
+	// Uninstall round-trips config.toml and hooks.json, removes owned links only.
+	const codexUninstallPlan = await planUninstall("codex", codexLiveOptions);
+	assert.ok((await applyPlan(codexUninstallPlan)).every(({ applied }) => applied));
+	assert.equal(await readFile(liveToml, "utf8"), originalToml, "install + uninstall restores config.toml bytes");
+	assert.equal(await modeOf(liveToml), 0o600);
+	assert.deepEqual(JSON.parse(await readFile(liveHooks, "utf8")), foreignHooks, "hooks.json back to the foreign hooks");
+	await assert.rejects(lstat(path.join(codexLiveRoots.codex, "skills/pi-discuss")));
+	await assert.rejects(lstat(path.join(codexLiveRoots.codex, `skills/${PACKAGE_SKILL_NAMES[0]}`)));
+	assert.equal(await readFile(path.join(codexLiveRoots.codex, "skills/.system/skill-creator/SKILL.md"), "utf8"), "system skill\n");
+	assert.equal(await readFile(path.join(codexLiveRoots.codex, "skills/my-skill/SKILL.md"), "utf8"), "mine\n");
+	assert.equal(await readFile(path.join(codexLiveRoots.codex, "commands/plan.md"), "utf8"), "not ours\n");
+	record("codex uninstall round-trip and ownership");
+
+	// Fresh-install uninstall leaves an empty config and no Pi hook keys.
+	assert.ok((await applyPlan(await planUninstall("codex", codexFreshOptions))).every(({ applied }) => applied));
+	assert.equal(await readFile(codexToml, "utf8"), "");
+	assert.deepEqual(JSON.parse(await readFile(codexHooksFile, "utf8")), {});
+	record("codex fresh uninstall cleanup");
 
 	console.log(`assertion coverage: ${[...covered].sort().join(", ")}`);
 	console.log(`problem-kind coverage: ${[...seenProblems].sort().join(", ")}`);
