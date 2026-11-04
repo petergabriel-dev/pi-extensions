@@ -299,7 +299,7 @@ async function showPreview(ctx: ExtensionCommandContext, content: string): Promi
 async function showOutcomes(ctx: ExtensionCommandContext, harness: Harness, action: "install" | "uninstall", fileResults: ApplyResult[], cliResults: string[]): Promise<void> {
 	const lines = ["# Harness setup results", "", "## Files"];
 	if (fileResults.length) {
-		for (const result of fileResults) lines.push(`- ${result.applied ? "Applied" : "Not applied"}: ${result.path}${result.backup ? ` (backup: ${result.backup})` : ""}${result.reason ? ` — ${result.reason}` : ""}`);
+		for (const result of fileResults) lines.push(`- ${result.applied ? "Applied" : "Not applied"}: ${result.path}${result.backup ? ` (backup: ${result.backup})` : ""}${result.previous ? ` (previous target: ${result.previous})` : ""}${result.reason ? ` — ${result.reason}` : ""}`);
 	} else lines.push("- No file changes planned.");
 	const trustNotice = action === "install" ? codexHookTrustNotice(harness, fileResults.filter(({ applied }) => applied).map(({ path }) => path)) : undefined;
 	if (trustNotice) lines.push("", "## Codex hook trust", `- ${trustNotice}`);

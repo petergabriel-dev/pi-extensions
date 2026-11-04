@@ -822,7 +822,10 @@ export interface ApplyResult {
 	path: string;
 	applied: boolean;
 	reason?: string;
+	/** Regular-file backup path. */
 	backup?: string;
+	/** Old target of an applied link retarget or delete; links are never backed up. */
+	previous?: string;
 }
 
 interface PlanScope {
@@ -1579,8 +1582,11 @@ function valueMatches(change: PlannedChange, current: { exists: boolean; value?:
 	return current.exists && current.value === change.before;
 }
 
+// Only regular files (config, stamp, legacy command content) are backed up. A sibling backup of a
+// link would still load as a skill or command; the preview diff and ApplyResult.previous carry the
+// old target instead.
 async function makeBackup(change: PlannedChange, current: { exists: boolean; value?: string; info?: Awaited<ReturnType<typeof lstat>> }, timestamp: string): Promise<string | undefined> {
-	if (!current.exists) return undefined;
+	if (!current.exists || !(isTextConfig(change) || change.legacyFile)) return undefined;
 	const backup = `${change.path}.harness-bak-${timestamp}`;
 	try {
 		await lstat(backup);
@@ -1588,22 +1594,17 @@ async function makeBackup(change: PlannedChange, current: { exists: boolean; val
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	if (isTextConfig(change) || change.legacyFile) {
-		if (!current.info?.isFile() || current.info.isSymbolicLink()) {
-			throw new Error(change.legacyFile ? "Refusing to back up non-regular legacy command file." : "Refusing to back up non-regular config file.");
-		}
-		await copyFile(change.path, backup, constants.COPYFILE_EXCL);
-		await chmod(backup, current.info.mode & 0o7777);
-		const backupRead = await readCapped(backup, change.legacyFile === true);
-		const backupMatches = change.legacyFile
-			? change.beforeBytes !== undefined && backupRead.bytes?.equals(change.beforeBytes) === true
-			: backupRead.text === change.before;
-		if (backupRead.state !== "ok" || !backupMatches) {
-			throw new Error(change.legacyFile ? "Legacy command changed while creating backup." : "Config changed while creating backup.");
-		}
-	} else {
-		if (!current.info?.isSymbolicLink() || current.value === undefined) throw new Error("Refusing to back up non-symlink destination.");
-		await symlink(current.value, backup);
+	if (!current.info?.isFile() || current.info.isSymbolicLink()) {
+		throw new Error(change.legacyFile ? "Refusing to back up non-regular legacy command file." : "Refusing to back up non-regular config file.");
+	}
+	await copyFile(change.path, backup, constants.COPYFILE_EXCL);
+	await chmod(backup, current.info.mode & 0o7777);
+	const backupRead = await readCapped(backup, change.legacyFile === true);
+	const backupMatches = change.legacyFile
+		? change.beforeBytes !== undefined && backupRead.bytes?.equals(change.beforeBytes) === true
+		: backupRead.text === change.before;
+	if (backupRead.state !== "ok" || !backupMatches) {
+		throw new Error(change.legacyFile ? "Legacy command changed while creating backup." : "Config changed while creating backup.");
 	}
 	return backup;
 }
@@ -1625,11 +1626,13 @@ async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: stri
 		const current = await currentChangeValue(change);
 		if (!valueMatches(change, current)) return { path: change.path, applied: false, reason: "Path changed since planning or is not an owned regular file/symlink." };
 		backup = await makeBackup(change, current, timestamp);
+		// An existing link change has no backup; report the old target it replaced or removed.
+		const previous = !isTextConfig(change) && !change.legacyFile && change.before !== null ? { previous: change.before } : {};
 		if (change.kind === "delete") {
 			await assertPlanPathAllowed(change.path, scope);
 			if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no delete performed.", ...(backup ? { backup } : {}) };
 			await unlink(change.path);
-			return { path: change.path, applied: true, ...(backup ? { backup } : {}) };
+			return { path: change.path, applied: true, ...(backup ? { backup } : {}), ...previous };
 		}
 		const parent = path.dirname(change.path);
 		await mkdir(parent, { recursive: true });
@@ -1654,7 +1657,7 @@ async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: stri
 		if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no write performed.", ...(backup ? { backup } : {}) };
 		await rename(temp, change.path);
 		temp = undefined;
-		return { path: change.path, applied: true, ...(backup ? { backup } : {}) };
+		return { path: change.path, applied: true, ...(backup ? { backup } : {}), ...previous };
 	} catch (error) {
 		return { path: change.path, applied: false, reason: error instanceof Error ? error.message : String(error), ...(backup ? { backup } : {}) };
 	} finally {

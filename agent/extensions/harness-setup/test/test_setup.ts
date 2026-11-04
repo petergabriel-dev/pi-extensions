@@ -642,17 +642,19 @@ try {
 	]);
 	for (const entry of rootSwitchEntries) {
 		const file = path.join(rootSwitchRoots.claude, entry.dest);
-		const backup = `${file}.harness-bak-${backupTimestamp(rootSwitchIso)}`;
 		assert.equal(await readlink(file), path.join(rootSwitchPkgB, entry.script));
-		assert.ok((await lstat(backup)).isSymbolicLink());
-		assert.equal(await readlink(backup), path.join(rootSwitchPkgA, entry.script));
+		// A sibling backup link would load as a duplicate skill; the result reports the old target instead.
+		await assert.rejects(lstat(`${file}.harness-bak-${backupTimestamp(rootSwitchIso)}`), `no backup link for ${entry.dest}`);
+		const result = rootSwitchResults.find(({ path: resultPath }) => resultPath === file);
+		assert.equal(result?.backup, undefined);
+		assert.equal(result?.previous, path.join(rootSwitchPkgA, entry.script));
 	}
 	await writeJson(rootSwitchRoots.claudeMcp, {
 		mcpServers: { [PI_BRIDGE_MCP_KEY]: { command: "node", args: [path.join(rootSwitchPkgB, "agent/claude-bridge-client/pi-bridge-mcp.js")] } },
 	});
 	const rootSwitchInspect = await inspectHarness("claude", { pkgRoot: rootSwitchPkgB, roots: rootSwitchRoots, agentDir: rootSwitchAgent });
 	assert.equal(rootSwitchInspect.state, "ok", JSON.stringify(rootSwitchInspect.problems));
-	record("live owned links retarget across package roots with backups");
+	record("live owned links retarget across package roots without backup links");
 
 	const danglingBase = path.join(temp, "planner-dangling-owned-symlink");
 	const danglingPkgA = await createPackage(path.join(danglingBase, "removed-package"));
@@ -674,9 +676,8 @@ try {
 	const danglingResults = await applyPlan(danglingPlan, { now: new Date(danglingIso) });
 	assert.ok(danglingResults.every(({ applied: ok }) => ok), JSON.stringify(danglingResults));
 	assert.equal(await readlink(danglingPath), path.join(danglingPkgB, danglingEntry.script));
-	const danglingBackup = `${danglingPath}.harness-bak-${backupTimestamp(danglingIso)}`;
-	assert.ok((await lstat(danglingBackup)).isSymbolicLink());
-	assert.equal(await readlink(danglingBackup), path.join(danglingPkgA, danglingEntry.script));
+	await assert.rejects(lstat(`${danglingPath}.harness-bak-${backupTimestamp(danglingIso)}`));
+	assert.equal(danglingResults.find(({ path: file }) => file === danglingPath)?.previous, path.join(danglingPkgA, danglingEntry.script));
 	const danglingInspect = await inspectHarness("opencode", { pkgRoot: danglingPkgB, roots: danglingRoots, agentDir: danglingAgent });
 	assert.equal(danglingInspect.state, "ok", JSON.stringify(danglingInspect.problems));
 	record("dangling owned plugin link retargets from removed package root");
@@ -700,9 +701,8 @@ try {
 	for (const entry of uninstallOwnedEntries) {
 		const file = path.join(uninstallOwnedRoots.cursor, entry.dest);
 		await assert.rejects(lstat(file));
-		const backup = `${file}.harness-bak-${backupTimestamp(uninstallOwnedIso)}`;
-		assert.ok((await lstat(backup)).isSymbolicLink(), `backup exists for ${entry.dest}`);
-		assert.equal(await readlink(backup), path.join(uninstallOwnedPkgA, entry.script));
+		await assert.rejects(lstat(`${file}.harness-bak-${backupTimestamp(uninstallOwnedIso)}`), `no backup link for ${entry.dest}`);
+		assert.equal(uninstallOwnedResults.find(({ path: resultPath }) => resultPath === file)?.previous, path.join(uninstallOwnedPkgA, entry.script));
 	}
 	const uninstalledOwnedInspect = await inspectHarness("cursor", { pkgRoot: uninstallOwnedPkgB, roots: uninstallOwnedRoots, agentDir: path.join(uninstallOwnedBase, "agent-dir") });
 	assert.equal(uninstalledOwnedInspect.state, "not-installed", JSON.stringify(uninstalledOwnedInspect.problems));
@@ -838,18 +838,44 @@ try {
 	const backupResults = await applyPlan(backupPlan, { now: new Date(backupIso) });
 	assert.ok(backupResults.every(({ applied: ok }) => ok), JSON.stringify(backupResults));
 	assert.equal((await lstat(backupSettingsFile)).mode & 0o777, 0o640, "atomic replacement preserves original mode");
-	for (const change of priorExistingChanges) {
+	const fileChanges = priorExistingChanges.filter(({ kind, legacyFile }) => kind === "json" || kind === "toml" || legacyFile);
+	const linkChanges = priorExistingChanges.filter((change) => !fileChanges.includes(change));
+	assert.ok(fileChanges.length >= 1 && linkChanges.length >= 2, "fixture covers both config and link changes");
+	for (const change of fileChanges) {
 		const backup = `${change.path}.harness-bak-${backupStamp}`;
-		const info = await lstat(backup);
-		if (change.kind === "json") {
-			assert.ok(info.isFile());
-			assert.equal(await readFile(backup, "utf8"), change.before);
-		} else {
-			assert.ok(info.isSymbolicLink());
-			assert.equal(await readlink(backup), change.before);
-		}
+		assert.ok((await lstat(backup)).isFile());
+		assert.equal(await readFile(backup, "utf8"), change.before);
+		assert.equal(backupResults.find(({ path: file }) => file === change.path)?.backup, backup);
 	}
-	record("backup before every changed existing file or symlink");
+	for (const change of linkChanges) {
+		await assert.rejects(lstat(`${change.path}.harness-bak-${backupStamp}`), `no backup link for ${change.path}`);
+		const result = backupResults.find(({ path: file }) => file === change.path);
+		assert.equal(result?.backup, undefined);
+		assert.equal(result?.previous, change.before);
+	}
+	record("backup before every changed existing regular file; links report previous target");
+
+	// A link changed between planning and apply is left alone: no write and no backup.
+	const linkRaceBase = path.join(temp, "planner-link-race");
+	const linkRacePkgA = await createPackage(path.join(linkRaceBase, "package-a"));
+	const linkRacePkgB = await createPackage(path.join(linkRaceBase, "package-b"));
+	const linkRaceRoots = makeRoots(path.join(linkRaceBase, "fixture"));
+	await setupRoot(linkRaceRoots.cursor, "cursor", linkRacePkgA);
+	const linkRacePlan = await planInstall("cursor", { pkgRoot: linkRacePkgB, roots: linkRaceRoots, agentDir: path.join(linkRaceBase, "agent-dir") });
+	const linkRaceFile = path.join(linkRaceRoots.cursor, "commands/pi-plan.md");
+	assert.equal(linkRacePlan.changes.find(({ path: file }) => file === linkRaceFile)?.kind, "symlink");
+	const linkRaceForeign = path.join(linkRaceBase, "user/pi-plan.md");
+	await mkdir(path.dirname(linkRaceForeign), { recursive: true });
+	await writeFile(linkRaceForeign, "user command\n");
+	await rm(linkRaceFile);
+	await symlink(linkRaceForeign, linkRaceFile);
+	const linkRaceIso = "2024-02-04T04:05:06.000Z";
+	const linkRaceResult = (await applyPlan(linkRacePlan, { now: new Date(linkRaceIso) })).find(({ path: file }) => file === linkRaceFile);
+	assert.equal(linkRaceResult?.applied, false);
+	assert.equal(linkRaceResult?.previous, undefined);
+	assert.equal(await readlink(linkRaceFile), linkRaceForeign, "changed link is preserved");
+	await assert.rejects(lstat(`${linkRaceFile}.harness-bak-${backupTimestamp(linkRaceIso)}`));
+	record("link preimage mismatch aborts without backup or mutation");
 
 	const uninstallBase = path.join(temp, "planner-uninstall");
 	const uninstallPkg = await createPackage(uninstallBase);
