@@ -24,14 +24,15 @@ Claude Code, Cursor, and OpenCode already pair with Pi through the bridge MCP, a
 - **Guard.** `agent/codex-bridge-client/pi-codex-hook.js` is a PreToolUse hook in its own matcher-less `hooks.json` group, installed as `node "<hook>" || { echo 'Pi Codex hook failed closed' >&2; exit 2; }`. Decisions:
   - invalid input or any exception: deny; the script prints only Codex-supported allow/deny shapes;
   - bridge MCP (`mcp__pi_claude_bridge__*`, Codex's normalized server name), inside or outside a Pi project: inject host `sessionId` and `harness: "codex"` through `updatedInput`, drop `claudeSessionId`, deny mismatched or missing identity;
+  - `apply_patch`, from any cwd: every `*** Add/Update/Delete File:` and `*** Move to:` path is resolved against the session cwd (`targetPiProjectRoot`, symlinks resolved); a target in a Pi project other than the session's own denies unless this session holds that project's lease, and a patch with no readable path denies outside a Pi project;
   - outside a Pi project: allow; matching unexpired lease: allow;
   - otherwise `apply_patch` denies; `Bash` (Codex's name for shell and unified exec) runs Cursor's `classifyShell`, and anything not `allow` denies because Codex cannot ask; `view_image`, `update_plan`, `request_user_input`, `request_user_input_async`, `list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource` pass; every other tool, including `spawn_agent`, `write_stdin`, and foreign MCP, denies.
 - **Layering.** Codex's own sandbox and approval prompts remain a backstop, never the authorization boundary.
 - **Setup.** `/harness` manages Codex under `CODEX_HOME || ~/.codex`:
   - `hooks.json`: the guarded hook group; misplaced (matcher-narrowed) or unguarded owned hooks are flagged and moved; foreign groups and `mcp_tool` handlers are preserved;
-  - `config.toml`: dependency-free `agent/extensions/harness-setup/codex-toml.ts` edits only `[mcp_servers.pi-claude-bridge]` (`command = "node"`, the package `pi-bridge-mcp.js`, `default_tools_approval_mode = "approve"`). Ownership is by content; reformatted owned tables are recognized; foreign same-name tables, sub-tables, dotted or inline forms, duplicates, and unreadable TOML are skipped and reported. Every byte outside the table survives; install plus uninstall round-trips; a new file is created `0600`;
+  - `config.toml`: dependency-free `agent/extensions/harness-setup/codex-toml.ts` edits only `[mcp_servers.pi-claude-bridge]` (`command = "node"`, the package `pi-bridge-mcp.js`, `default_tools_approval_mode = "approve"`). Ownership is by content; reformatted owned tables are recognized; foreign same-name tables, sub-tables, dotted or inline forms, an `mcp_servers` set as one value or as `[[mcp_servers]]` (which cannot take the table), duplicates, and unreadable TOML are skipped and reported. Every byte outside the table survives; install plus uninstall round-trips; a new file is created `0600`;
   - `skills/`: links for `pi-discuss`, `pi-plan`, `pi-build` and the 23 package skills; `skills/.system` and foreign entries are untouched; Codex `commands/` paths are never treated as legacy Pi commands;
-  - preview and results show a re-trust notice whenever `hooks.json` changes.
+  - preview and results show a re-trust notice whenever `hooks.json` changes; on Uninstall it asks to re-check the remaining hooks, whose positions can shift. The preview also warns to uninstall before `pi remove`, because the guard fails closed.
 - **Workflows.** Codex workflows ship as skills (`agent/harness-commands/codex/<name>/SKILL.md`) with `agents/openai.yaml` `allow_implicit_invocation: false`, invoked as `$pi-discuss`, `$pi-plan`, `$pi-build`. Skills detect `.pi/` with plain `ls -a` and avoid dynamic shell before a lease.
 - **Not shipped.** No peer-chat hook, statusline, or SessionStart identity hook.
 
@@ -55,7 +56,7 @@ Recorded as ADR-0045 F14. Mitigations: the stderr guard, the re-trust notice, Co
 - Host-side hook failures fail open: timeout, malformed or unsupported output, or a failure the shell guard never sees.
 - Hooks run only after the user trusts them in each surface; a changed hook position or definition needs re-trust, and `codex exec` skips untrusted hooks without warning.
 - Hosted tools (web search) and MCP server processes at startup bypass PreToolUse.
-- `apply_patch` from a session outside a Pi project is not target-checked (ADR-0045 F11 class).
+- Shell from a session outside a Pi project is not target-checked (ADR-0045 F11); `apply_patch` paths are.
 - Codex subagent identity is unverified; `spawn_agent` denies without a lease.
 
 ## Evidence
@@ -99,6 +100,7 @@ Code:
 - Bad/risk: enforcement depends on per-surface hook trust that Codex can skip; docs must tell users to trust only the Pi hook (never "trust all").
 - Bad/risk: allowlists track Codex tool names, which differ between surfaces and versions.
 - Fixed: `/harness` no longer backs up skill links and removes stale `.harness-bak-` links on Install / repair and Uninstall (ADR-0044).
+- Good (2026-11-04 review): `apply_patch` paths are target-checked like Claude edit tools, so a Codex session outside a Pi project cannot patch into one without its lease; hook unit tests cover absolute, relative, Move-to, symlink, and cross-project targets (p95 52 ms).
 
 ## Read when
 
