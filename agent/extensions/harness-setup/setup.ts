@@ -47,9 +47,13 @@ function usesHookGroups(harness: Harness): boolean {
 
 export const CODEX_HOOK_TRUST_NOTICE = "Codex skips new or changed hooks until you trust them, separately in each surface: in the Codex CLI open /hooks, press Enter on PreToolUse, and trust only the Pi hook (do not press t, which trusts every hook); in the Codex desktop app use Settings > Hooks.";
 
+// Codex keys hook trust by position, so removing the Pi group can move the user's other hooks.
+export const CODEX_HOOK_UNINSTALL_NOTICE = "Removing the Pi hook can shift the position of your other Codex hooks, and Codex skips a moved hook until you trust it again: check them in each surface (Codex CLI /hooks; desktop app Settings > Hooks).";
+
 /** Re-trust reminder whenever a Codex hooks.json change is planned or applied. */
-export function codexHookTrustNotice(harness: Harness, changedPaths: string[]): string | undefined {
-	return harness === "codex" && changedPaths.some((file) => path.basename(file) === "hooks.json") ? CODEX_HOOK_TRUST_NOTICE : undefined;
+export function codexHookTrustNotice(harness: Harness, changedPaths: string[], action: "install" | "uninstall" = "install"): string | undefined {
+	if (harness !== "codex" || !changedPaths.some((file) => path.basename(file) === "hooks.json")) return undefined;
+	return action === "install" ? CODEX_HOOK_TRUST_NOTICE : CODEX_HOOK_UNINSTALL_NOTICE;
 }
 
 export type PackageRootState = "user" | "dev-checkout" | "refused";
@@ -369,7 +373,7 @@ function hostName(harness: Harness): string {
 
 // A Claude or Codex matcher narrows which tools a group's handlers see; the Pi guard must see every tool.
 function isMatchAllGroup(group: Record<string, unknown>): boolean {
-	return group.matcher === undefined || group.matcher === "" || group.matcher === "*";
+	return group.matcher === undefined || group.matcher === "" || group.matcher === "*" || group.matcher === ".*";
 }
 
 function eventCandidates(eventValue: unknown, harness: Harness, dest: string, problems: SetupProblem[]): HookCandidate[] {

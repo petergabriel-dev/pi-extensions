@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { CODEX_PRETOOL_GUARD, CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PACKAGE_SKILL_NAMES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "../manifest.ts";
-import { applyPlan, classifyPackageRoot, CODEX_HOOK_TRUST_NOTICE, codexHookTrustNotice, inspectHarness, planInstall, planUninstall, PLAYWRIGHT_CLI_ADVISORY, playwrightCliAdvisory, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
+import { applyPlan, classifyPackageRoot, CODEX_HOOK_TRUST_NOTICE, CODEX_HOOK_UNINSTALL_NOTICE, codexHookTrustNotice, inspectHarness, planInstall, planUninstall, PLAYWRIGHT_CLI_ADVISORY, playwrightCliAdvisory, readStamp, removeStampHarness, resolveHarnessRoots, writeStamp } from "../setup.ts";
 import { scanBridgeTable } from "../codex-toml.ts";
 import type { Harness, ProblemKind, SetupProblem } from "../setup.ts";
 
@@ -1040,6 +1040,10 @@ try {
 	assert.deepEqual(groupRepaired.hooks.PreToolUse, [foreignBashGroup, { hooks: [piPreTool] }], "owned hook moved out of the Bash group");
 	assert.equal((await inspectHarness("claude", groupOptions)).problems.some(({ message }) => message.includes("without a matcher")), false);
 	assert.ok(groupRepaired.hooks.PreToolUse[1].hooks[0].command.endsWith("|| exit 2"), "guard kept");
+	// A `.*` matcher matches every tool, so a Pi hook there is correctly scoped and stays put.
+	await writeJson(groupFile, { ...groupRepaired, hooks: { ...groupRepaired.hooks, PreToolUse: [foreignBashGroup, { matcher: ".*", hooks: [piPreTool] }] } });
+	assert.equal((await inspectHarness("claude", groupOptions)).problems.some(({ message }) => message.includes("without a matcher")), false);
+	assert.deepEqual((await planInstall("claude", groupOptions)).changes, [], "`.*` group plans zero changes");
 	// Uninstall removes only the groups it empties, then empty events.
 	assert.ok((await applyPlan(await planUninstall("claude", groupOptions))).every(({ applied }) => applied));
 	assert.deepEqual(JSON.parse(await readFile(groupFile, "utf8")).hooks, { PreToolUse: [foreignBashGroup], UserPromptSubmit: [foreignPromptGroup] });
@@ -1103,6 +1107,12 @@ try {
 	const codexFreshSecond = await planInstall("codex", codexFreshOptions);
 	assert.deepEqual(codexFreshSecond.changes, [], "codex install is idempotent");
 	assert.equal(codexHookTrustNotice("codex", codexFreshSecond.changes.map(({ path: file }) => file)), undefined, "no re-trust notice without hook changes");
+	// Uninstall removes the Pi group, which can shift the user's other hooks: a different notice.
+	const codexFreshUninstallPaths = (await planUninstall("codex", codexFreshOptions)).changes.map(({ path: file }) => file);
+	assert.ok(codexFreshUninstallPaths.includes(codexHooksFile));
+	assert.equal(codexHookTrustNotice("codex", codexFreshUninstallPaths, "uninstall"), CODEX_HOOK_UNINSTALL_NOTICE);
+	assert.equal(codexHookTrustNotice("codex", codexFreshUninstallPaths, "install"), CODEX_HOOK_TRUST_NOTICE);
+	assert.equal(codexHookTrustNotice("claude", [codexHooksFile], "uninstall"), undefined);
 	record("codex fresh install, 0600 config, idempotence, trust notice");
 
 	// Realistic existing config: Codex-managed tables, a multi-line string that mentions the table, foreign hooks and skills.
@@ -1270,6 +1280,13 @@ try {
 	assert.deepEqual(repairedHooks.hooks.PreToolUse.slice(0, 2), foreignHooks.hooks.PreToolUse, "owned hook removed from the foreign group only");
 	assert.deepEqual(repairedHooks.hooks.PreToolUse[2], { hooks: [{ type: "command", command: codexGuarded(codexLivePkg) }] });
 	assert.equal((await inspectHarness("codex", codexLiveOptions)).state, "ok");
+	// A `.*` matcher matches every tool: no problem and no move (a move would force a Codex re-trust).
+	const dotStarHooks = structuredClone(repairedHooks);
+	dotStarHooks.hooks.PreToolUse[2] = { matcher: ".*", ...dotStarHooks.hooks.PreToolUse[2] };
+	await writeJson(liveHooks, dotStarHooks);
+	assert.equal((await inspectHarness("codex", codexLiveOptions)).problems.some(({ message }) => /without a matcher/.test(message)), false);
+	assert.ok(!(await planInstall("codex", codexLiveOptions)).changes.some(({ path: file }) => file === liveHooks), "`.*` group plans no hooks.json change");
+	await writeJson(liveHooks, repairedHooks);
 	record("codex hook scope and guard repair");
 
 	// Uninstall round-trips config.toml and hooks.json, removes owned links only.
