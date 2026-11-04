@@ -1224,14 +1224,38 @@ try {
 		["inline table", `[mcp_servers]\npi-claude-bridge = { command = "node" }\n`],
 		["duplicate", `${codexBlock(codexLivePkg)}\n${codexBlock(codexLivePkg)}`],
 		["broken string", `model = "unterminated\n${codexBlock(codexLivePkg)}`],
+		// mcp_servers that cannot take an appended [mcp_servers.pi-claude-bridge] (would be invalid or misplaced TOML).
+		["inline mcp_servers", `model = "o3"\nmcp_servers = { other = { command = "x" } }\n`],
+		["array-valued mcp_servers", `mcp_servers = []\n`],
+		["array of tables", `[[mcp_servers]]\nname = "x"\ncommand = "y"\n`],
 	] as const) {
 		assert.equal(scanBridgeTable(text).kind, "unsupported", label);
 		await writeFile(liveToml, text);
 		const plan = await planInstall("codex", codexLiveOptions);
 		assert.ok(!plan.changes.some(({ path: file }) => file === liveToml), `${label}: no edit`);
 		assert.ok(plan.skipped.some(({ path: file }) => file === liveToml), `${label}: reported`);
+		assert.ok((await applyPlan(plan)).every(({ applied }) => applied));
+		assert.equal(await readFile(liveToml, "utf8"), text, `${label}: bytes unchanged`);
 	}
 	record("codex unsupported TOML shapes skipped");
+
+	// Root dotted keys define mcp_servers implicitly; TOML still allows adding the bridge sub-table.
+	const dottedToml = `mcp_servers.other.command = "x"\n`;
+	await writeFile(liveToml, dottedToml);
+	assert.equal(scanBridgeTable(dottedToml).kind, "absent");
+	assert.ok((await applyPlan(await planInstall("codex", codexLiveOptions))).every(({ applied }) => applied));
+	assert.equal(await readFile(liveToml, "utf8"), `${dottedToml}\n${codexBlock(codexLivePkg)}`, "dotted keys keep the bridge table installable");
+	assert.ok((await applyPlan(await planUninstall("codex", codexLiveOptions))).every(({ applied }) => applied));
+	assert.equal(await readFile(liveToml, "utf8"), dottedToml, "dotted-key config round-trips");
+	record("codex dotted mcp_servers keys install and round-trip");
+
+	// Keys named like Object.prototype members stay verbatim on repair.
+	const protoKeys = "toString = 1\nconstructor = 2\n";
+	await writeFile(liveToml, `${originalToml}\n${codexBlock(codexStalePkg)}${protoKeys}`);
+	const protoRepair = (await planInstall("codex", codexLiveOptions)).changes.find(({ path: file }) => file === liveToml);
+	assert.equal(protoRepair?.after, `${originalToml}\n${codexBlock(codexLivePkg)}${protoKeys}`, "prototype-named keys kept, owned keys retargeted");
+	assert.doesNotMatch(protoRepair!.after!, /function|native code/);
+	record("codex prototype-named table keys preserved on repair");
 
 	// Owned Pi hook narrowed by a foreign matcher, or unguarded, is flagged and repaired into its own group.
 	await writeFile(liveToml, installedToml);

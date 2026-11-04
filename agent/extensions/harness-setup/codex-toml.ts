@@ -181,6 +181,11 @@ function scan(text: string): BridgeTableScan {
 			if (!rest) throw new TomlScanError("text after table header");
 			pos += rest[0].length;
 			table = key.parts;
+			// [[mcp_servers]] makes mcp_servers an array; an appended [mcp_servers.pi-claude-bridge]
+			// would then nest under its last element instead of defining the server.
+			if (isArray && sameParts(table, ["mcp_servers"])) {
+				return { kind: "unsupported", reason: "mcp_servers is an array of tables; preserve config and review manually." };
+			}
 			if (!isArray && sameParts(table, CODEX_BRIDGE_TABLE)) {
 				if (found) return { kind: "unsupported", reason: "Duplicate [mcp_servers.pi-claude-bridge] tables; preserve config." };
 				found = { kind: "table", start: lineIndex, end: lineIndex, values: new Map(), entries: [] };
@@ -205,8 +210,11 @@ function scan(text: string): BridgeTableScan {
 			found!.values.set(key.parts[0], value.value);
 			found!.entries.push({ key: key.parts[0], first: lineIndex, last: lastLine });
 			found!.end = lastLine;
-		} else if (startsWithParts(full, CODEX_BRIDGE_TABLE) || (sameParts(full, ["mcp_servers"]) && text.slice(valueStart, pos).includes("pi-claude-bridge"))) {
+		} else if (startsWithParts(full, CODEX_BRIDGE_TABLE)) {
 			return { kind: "unsupported", reason: "pi-claude-bridge is defined in an unsupported form; preserve config and review manually." };
+		} else if (sameParts(full, ["mcp_servers"])) {
+			// An inline table (or any value) is closed: TOML forbids adding [mcp_servers.pi-claude-bridge] to it.
+			return { kind: "unsupported", reason: "mcp_servers is set as a single value; preserve config and review manually." };
 		}
 	}
 	return found ?? { kind: "absent" };
@@ -269,7 +277,8 @@ export function planBridgeTable(text: string | null, target: string, install: bo
 	for (const entry of scan.entries) {
 		body.push(...lines.slice(cursor, entry.first)); // blank/comment lines between entries
 		const key = entry.key as keyof typeof wanted;
-		if (key in wanted && !emitted.has(key)) {
+		// Own keys only: `in` would match prototype names such as toString and emit function text.
+		if (Object.hasOwn(wanted, key) && !emitted.has(key)) {
 			body.push(wanted[key]);
 			emitted.add(key);
 		} else body.push(...lines.slice(entry.first, entry.last + 1));
