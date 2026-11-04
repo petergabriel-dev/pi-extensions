@@ -70,6 +70,8 @@ Unchecked top-level task checkboxes seed workflow task tracker when plan is save
 
 The Files hint is advisory input for Build slicing, never ownership.
 
+Prefix a task title with `[LOAD-BEARING]` (before any docs tags) when a mistake would break a must-not-break invariant, a security or data-safety boundary, or behavior later tasks build on. Build restates its invariants before editing, runs the full suite, and verifies each invariant before commit.
+
 ### Rules-first frontend order
 When design rules, tokens, or docs change, schedule `docs/design/README.md` and manifest `tokenFiles` updates before component tasks. Plan only; do not write files.
 
@@ -138,7 +140,7 @@ A checklist that must be fully checked before the feature is considered complete
 - [ ] Each task was verified and committed before the next began — no batch commits
 - [ ] Verification gate passed for every task before proceeding
 - [ ] No [LOAD-BEARING] task was skipped or deferred
-- [ ] Plan mode used for any task marked [LOAD-BEARING]
+- [ ] Every [LOAD-BEARING] task restated its invariants before editing and verified each before commit
 - [ ] Acceptance criteria pass for every task
 - [ ] All `[DOCS:*]` and `[ADR:*]` tasks from Section 4 are implemented
 - [ ] NFR benchmarks verified (manually or via test)
