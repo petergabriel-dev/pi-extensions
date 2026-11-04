@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /*
  * Codex PreToolUse hook for Pi projects. Zero Pi imports.
- * Without this Codex session's Pi Build lease, a session cwd under a .pi marker stays read-only.
+ * Without this Codex session's Pi Build lease, a session cwd under a .pi marker stays read-only,
+ * and apply_patch may not write into any Pi project, wherever the session started.
  *
  * Install as: node "<this file>" || { echo 'Pi Codex hook failed closed' >&2; exit 2; }
  * Codex treats exit 2 as a deny only when stderr carries a reason, and fails open on
@@ -18,6 +19,8 @@ const BRIDGE_MCP_PREFIX = "mcp__pi_claude_bridge__";
 // Codex reports unified exec (exec_command) as Bash; apply_patch carries the whole patch in tool_input.command.
 const SHELL_TOOLS = new Set(["Bash"]);
 const PATCH_TOOLS = new Set(["apply_patch"]);
+// apply_patch names each file it writes in the patch text.
+const PATCH_TARGET = /^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm;
 // Local function tools that cannot write files or start processes. Everything else in a Pi project is denied.
 // The question tool is request_user_input in the CLI and request_user_input_async in the desktop app.
 const READ_TOOLS = new Set(["view_image", "update_plan", "request_user_input", "request_user_input_async", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
@@ -74,6 +77,27 @@ function bridgeMcpDecision(input) {
 	return allow({ ...rest, sessionId, harness: HARNESS });
 }
 
+function patchTargets(toolInput) {
+	const text = isPlainObject(toolInput) && typeof toolInput.command === "string" ? toolInput.command : "";
+	return [...text.matchAll(PATCH_TARGET)].map((match) => match[1].trim()).filter(Boolean);
+}
+
+// Like Claude's edit-target check: a patch target in another Pi project needs that project's lease,
+// wherever this session started. Targets in the session's own project fall through to its lease check.
+function patchTargetDecision(input, cwd, cwdRoot) {
+	const targets = patchTargets(input.tool_input);
+	if (targets.length === 0) return cwdRoot ? null : deny("apply_patch is blocked: no file path could be read from the patch.");
+	const holder = identity(input.session_id);
+	const ownRoot = cwdRoot ? bridgeClient.realpathDeepest(cwdRoot) : null;
+	for (const target of targets) {
+		const targetRoot = bridgeClient.targetPiProjectRoot(target, cwd);
+		if (!targetRoot || targetRoot === ownRoot) continue;
+		if (holder && bridgeClient.holdsBuildLease(targetRoot, holder)) continue;
+		return deny(`apply_patch is blocked: ${target} is in Pi project ${targetRoot}, and this Codex session has no Build lease there. ${nextStep(targetRoot, input.session_id)}`);
+	}
+	return null;
+}
+
 function decide(input) {
 	if (!isPlainObject(input)) return deny("Pi Codex hook failed closed: hook input must be an object.");
 	if (input.hook_event_name !== undefined && input.hook_event_name !== "PreToolUse") return null;
@@ -83,7 +107,12 @@ function decide(input) {
 	// Identity is enforced for every bridge call, inside or outside a Pi project: the call's own cwd may name one.
 	if (toolName.startsWith(BRIDGE_MCP_PREFIX)) return bridgeMcpDecision(input);
 
-	const projectRoot = bridgeClient.findPiProjectRoot(typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd());
+	const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
+	const projectRoot = bridgeClient.findPiProjectRoot(cwd);
+	if (PATCH_TOOLS.has(toolName)) {
+		const targetDecision = patchTargetDecision(input, cwd, projectRoot);
+		if (targetDecision) return targetDecision;
+	}
 	if (!projectRoot) return null;
 
 	const holder = identity(input.session_id);

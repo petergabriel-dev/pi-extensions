@@ -125,15 +125,50 @@ for (const cwd of [outsideDir(), setupProject()]) {
 }
 console.log("PASS bridge MCP identity comes from the host session_id only");
 
-// --- outside a Pi project the hook stays out of the way
+// --- outside a Pi project the hook stays out of the way, except for patches it cannot read
 {
 	const cwd = outsideDir();
-	for (const [tool, input] of [["apply_patch", { command: "*** Begin Patch" }], ["Bash", { command: "rm -rf build" }], ["mcp__github__create_issue", {}], ["some_future_tool", {}]]) {
+	for (const [tool, input] of [["apply_patch", { command: "*** Begin Patch\n*** Add File: notes.txt\n+hi\n*** End Patch\n" }], ["Bash", { command: "rm -rf build" }], ["mcp__github__create_issue", {}], ["some_future_tool", {}]]) {
 		assert.equal(hook.decide(pre(cwd, tool, input)), null, `outside project: ${tool}`);
 	}
+	// Without a readable target the patch could land anywhere, including a Pi project.
+	assertDeny(hook.decide(pre(cwd, "apply_patch", { command: "*** Begin Patch\n*** End Patch\n" })), /no file path/, "outside: patch without target");
+	assertDeny(hook.decide(pre(cwd, "apply_patch", {})), /no file path/, "outside: patch without command");
 	fs.rmSync(cwd, { recursive: true, force: true });
-	console.log("PASS outside a Pi project every tool passes");
+	console.log("PASS outside a Pi project every tool passes; unreadable patches deny");
 }
+
+// --- apply_patch targets need the lease of the Pi project they land in, wherever the session started
+withProject("apply_patch into a Pi project from outside or from another project needs that project's lease", (project) => {
+	const outside = outsideDir();
+	const other = setupProject();
+	const patch = (...lines) => ({ command: ["*** Begin Patch", ...lines, "*** End Patch", ""].join("\n") });
+	try {
+		const into = path.join(project, "src", "x.ts");
+		// No lease anywhere: every way of naming a file in the project is denied.
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch(`*** Update File: ${into}`, "@@", "-a", "+b"))), /no Build lease there/, "absolute Update File");
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch(`*** Add File: ${path.relative(outside, path.join(project, "new.txt"))}`, "+x"))), /no Build lease there/, "relative Add File");
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch(`*** Delete File: ${into}`))), /no Build lease there/, "Delete File");
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch(`*** Update File: ${path.join(outside, "a.txt")}`, `*** Move to: ${into}`))), /no Build lease there/, "Move to");
+		fs.symlinkSync(project, path.join(outside, "link"));
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch("*** Add File: link/via-symlink.txt", "+x"))), /no Build lease there/, "symlink into the project");
+		// One target outside and one inside still denies.
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch(`*** Add File: ${path.join(outside, "ok.txt")}`, "+x", `*** Add File: ${into}`, "+y"))), /no Build lease there/, "mixed targets");
+		// A lease in the session's own project does not cover another project.
+		addSession(other, "pi-b", [CODEX], { buildLease: lease(CODEX) });
+		assert.equal(hook.decide(pre(other, "apply_patch", patch(`*** Add File: ${path.join(other, "mine.txt")}`, "+x"))), null, "own-project target with lease");
+		assertDeny(hook.decide(pre(other, "apply_patch", patch(`*** Update File: ${into}`, "@@", "-a", "+b"))), /no Build lease there/, "lease in another project");
+		// With the target project's lease, the same patches are allowed from outside.
+		addSession(project, "pi-a", [CODEX], { buildLease: lease(CODEX) });
+		assert.equal(hook.decide(pre(outside, "apply_patch", patch(`*** Update File: ${into}`, "@@", "-a", "+b"))), null, "outside session with the target project's lease");
+		assert.equal(hook.decide(pre(other, "apply_patch", patch(`*** Update File: ${into}`, "@@", "-a", "+b"))), null, "both leases held");
+		// Another Codex session never borrows that lease.
+		assertDeny(hook.decide(pre(outside, "apply_patch", patch(`*** Update File: ${into}`, "@@", "-a", "+b"), OTHER_SID)), /no Build lease there/, "other session id");
+	} finally {
+		fs.rmSync(outside, { recursive: true, force: true });
+		fs.rmSync(other, { recursive: true, force: true });
+	}
+});
 
 // --- inside a Pi project without a lease: read-only, deny-unknown
 withProject("no lease: patch, writing shell, unknown, and foreign MCP are denied; reads pass", (cwd) => {
