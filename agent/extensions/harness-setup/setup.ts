@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, open, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, open, readdir, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
 import path from "node:path";
 import { CODEX_PRETOOL_GUARD, CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "./manifest.ts";
 import type { Harness, HarnessEntry } from "./manifest.ts";
@@ -1239,6 +1239,53 @@ async function planSymlink(
 	else changes.push({ path: file, kind: "symlink", before: raw, after: expected });
 }
 
+// Versions up to 0.11.0 left `<dest>.harness-bak-<ts>` sibling links; a skill one still loads as a
+// duplicate skill. Delete those that pass the owned-link rule above. Regular-file backups hold user
+// content and foreign links are not ours, so both stay.
+async function planStaleBackupLinks(
+	root: string,
+	entries: HarnessEntry[],
+	pkgRoot: string,
+	changes: PlannedChange[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	let packagePath: string | undefined;
+	try {
+		packagePath = await realpath(pkgRoot);
+	} catch {
+		// Without a resolvable package, only the path-shape rule can mark a link owned.
+	}
+	const listings = new Map<string, string[]>();
+	for (const entry of entries) {
+		if (entry.kind !== "command" && entry.kind !== "plugin" && entry.kind !== "skill") continue;
+		const dest = path.resolve(root, ...entry.dest.split("/"));
+		const dir = path.dirname(dest);
+		let names = listings.get(dir);
+		if (!names) {
+			names = await readdir(dir).catch(() => []);
+			listings.set(dir, names);
+		}
+		const prefix = `${path.basename(dest)}.harness-bak-`;
+		for (const name of names) {
+			if (!name.startsWith(prefix)) continue;
+			const file = path.join(dir, name);
+			const info = await lstat(file).catch(() => undefined);
+			if (!info?.isSymbolicLink()) continue;
+			let raw: string;
+			try {
+				raw = await readlink(file);
+			} catch {
+				addSkip(skipped, file, "Backup link target cannot be verified; preserve it.");
+				continue;
+			}
+			const target = await realpath(file).catch(() => undefined);
+			const owned = (target !== undefined && packagePath !== undefined && inside(packagePath, target)) || looksLikeOwnedTarget(target ?? raw, entry.script);
+			if (owned) changes.push({ path: file, kind: "delete", before: raw, after: null });
+			else addSkip(skipped, file, "Backup-named link points outside a Pi package; preserve it.");
+		}
+	}
+}
+
 async function planLegacyLinks(
 	root: string,
 	pkgRoot: string,
@@ -1499,6 +1546,7 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 			await planSymlink(root, entry, options.pkgRoot, install, changes, skipped);
 		}
 	}
+	await planStaleBackupLinks(root, entries, options.pkgRoot, changes, skipped);
 	// Codex never had Pi command files; never treat its commands/ paths as legacy.
 	if (harness !== "codex") await planLegacyLinks(root, options.pkgRoot, install, changes, skipped);
 	await updateStampPlan(harness, options, install, changes, skipped);
