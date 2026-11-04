@@ -910,6 +910,15 @@ try {
 	const staleDeletes = (plan: { changes: Array<{ path: string; kind: string }> }) =>
 		plan.changes.filter(({ path: file }) => file.includes(".harness-bak-")).map(({ path: file, kind }) => [file, kind]).sort();
 	const staleOwned = [ownedCommand, ownedSelected, ownedDangling, ownedLive].sort();
+	// Inspection (and so the startup check) reports them as one warning, without touching them.
+	const staleInspect = await inspectHarness("claude", { pkgRoot: stalePkgNew, roots: staleRoots });
+	noted(staleInspect.problems, "stale-backup-link");
+	const staleProblems = staleInspect.problems.filter(({ kind }) => kind === "stale-backup-link");
+	assert.equal(staleProblems.length, 1);
+	assert.equal(staleProblems[0]!.severity, "warning");
+	assert.match(staleProblems[0]!.message, /^4 old \.harness-bak- links .*Install \/ repair/);
+	assert.equal(staleInspect.state, "ok", JSON.stringify(staleInspect.problems));
+	for (const file of staleOwned) assert.ok((await lstat(file)).isSymbolicLink(), "inspection never deletes");
 	const staleInstallPlan = await planInstall("claude", { pkgRoot: stalePkgNew, roots: staleRoots, agentDir: staleAgent });
 	assert.deepEqual(staleDeletes(staleInstallPlan), staleOwned.map((file) => [file, "delete"]).sort(), "install deletes exactly the owned backup links");
 	assert.ok(staleInstallPlan.skipped.some(({ path: file }) => file === foreignBackupLink), "foreign backup-named link reported as preserved");
@@ -923,6 +932,9 @@ try {
 	assert.equal(await readlink(path.join(staleSkills, skillA!)), path.join(stalePkgNew, "agent/skills", skillA!), "live link untouched");
 	const staleRepeat = await planInstall("claude", { pkgRoot: stalePkgNew, roots: staleRoots, agentDir: staleAgent });
 	assert.deepEqual(staleRepeat.changes, [], "second install plans zero changes");
+	// Only the foreign backup-named link is left, which is not ours: no warning.
+	const staleAfterInspect = await inspectHarness("claude", { pkgRoot: stalePkgNew, roots: staleRoots });
+	assert.equal(staleAfterInspect.problems.some(({ kind }) => kind === "stale-backup-link"), false, JSON.stringify(staleAfterInspect.problems));
 	await symlink(path.join(stalePkgOld, "agent/skills", skillA!), ownedLive);
 	const staleUninstallPlan = await planUninstall("claude", { pkgRoot: stalePkgNew, roots: staleRoots, agentDir: staleAgent });
 	assert.deepEqual(staleDeletes(staleUninstallPlan), [[ownedLive, "delete"]], "uninstall deletes owned backup links too");

@@ -77,6 +77,7 @@ export type ProblemKind =
 	| "unguarded-hook"
 	| "stamp-version-mismatch"
 	| "non-macos-claude-bash-warning"
+	| "stale-backup-link"
 	| "unreadable";
 
 export interface SetupProblem {
@@ -752,6 +753,12 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 
 	// Codex never had Pi command files; its commands/ paths are never ours.
 	if (harness !== "codex") await inspectLegacyCommands(harness, root, options.pkgRoot, problems, signal);
+	// Report (never delete) the stale backup links Install / repair would remove; they load as duplicate skills.
+	const staleLinks: PlannedChange[] = [];
+	await planStaleBackupLinks(root, entries, options.pkgRoot, staleLinks, []);
+	if (staleLinks.length) {
+		problem(problems, harness, "stale-backup-link", `${staleLinks.length} old .harness-bak- link${staleLinks.length === 1 ? "" : "s"} from an earlier /harness version can load as duplicate skills or commands; run Install / repair (or Uninstall) to remove them.`, undefined, "warning");
+	}
 	if (!signal.value && !problems.some(({ severity }) => severity === "error")) return { state: "not-installed", problems };
 	for (const entry of entries) {
 		if (!satisfied.has(entry.dest)) problem(problems, harness, "missing-entry", "Expected owned manifest entry is missing or incorrect.", entry.dest);
