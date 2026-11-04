@@ -1,4 +1,4 @@
-export type Harness = "claude" | "cursor" | "opencode";
+export type Harness = "claude" | "cursor" | "opencode" | "codex";
 export type EntryKind = "hook" | "statusline" | "mcp" | "command" | "plugin" | "skill";
 
 export interface HarnessEntry {
@@ -135,6 +135,29 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 		},
 		...skillEntries(),
 	],
+	codex: [
+		{
+			kind: "hook",
+			event: "PreToolUse",
+			script: "agent/codex-bridge-client/pi-codex-hook.js",
+			dest: "hooks.json#/hooks/PreToolUse",
+			ownerExtension: bridgeOwner,
+		},
+		{
+			kind: "mcp",
+			script: "agent/claude-bridge-client/pi-bridge-mcp.js",
+			dest: "config.toml#mcp_servers.pi-claude-bridge",
+			ownerExtension: bridgeOwner,
+		},
+		// Codex has no command files; the Pi workflows ship as explicit-only skill directories.
+		...(["discuss", "plan", "build"] as const).map((command): HarnessEntry => ({
+			kind: "skill",
+			script: `agent/harness-commands/codex/pi-${command}`,
+			dest: `skills/pi-${command}`,
+			ownerExtension: bridgeOwner,
+		})),
+		...skillEntries(),
+	],
 };
 
 export const harnessManifest = HARNESS_MANIFEST;
@@ -142,4 +165,6 @@ export const harnessManifest = HARNESS_MANIFEST;
 export const MAX_CONFIG_BYTES = 1024 * 1024;
 export const STATUSLINE_REFRESH_INTERVAL = 5;
 export const CURSOR_HOOK_FAIL_CLOSED = true;
+// Codex denies on exit 2 only when stderr carries a reason; a silent exit 2 lets the tool run.
+export const CODEX_PRETOOL_GUARD = "|| { echo 'Pi Codex hook failed closed' >&2; exit 2; }";
 export const PI_BRIDGE_MCP_KEY = "pi-claude-bridge";

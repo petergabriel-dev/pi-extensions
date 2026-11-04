@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, open, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, open, readdir, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
 import path from "node:path";
-import { CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "./manifest.ts";
+import { CODEX_PRETOOL_GUARD, CURSOR_HOOK_FAIL_CLOSED, HARNESS_MANIFEST, MAX_CONFIG_BYTES, PI_BRIDGE_MCP_KEY, STATUSLINE_REFRESH_INTERVAL } from "./manifest.ts";
 import type { Harness, HarnessEntry } from "./manifest.ts";
+import { CODEX_MCP_APPROVAL, bridgeTableTarget, planBridgeTable, scanBridgeTable } from "./codex-toml.ts";
 
 export const PLAYWRIGHT_CLI_ADVISORY = "playwright-cli not found on PATH; install manually with npm install -g @playwright/cli@latest before cross-harness visual verification.";
 
@@ -29,12 +30,30 @@ export async function playwrightCliAdvisory(env: NodeJS.ProcessEnv | Record<stri
 
 const CLAUDE_PRETOOL_GUARD = "|| exit 2";
 
-function requiresClaudePretoolGuard(harness: Harness, event: string | undefined): boolean {
-	return harness === "claude" && event === "PreToolUse";
+// PreToolUse hooks must deny when the hook process itself fails; each host needs its own guard.
+function pretoolGuard(harness: Harness, event: string | undefined): string | undefined {
+	if (event !== "PreToolUse") return undefined;
+	return harness === "claude" ? CLAUDE_PRETOOL_GUARD : harness === "codex" ? CODEX_PRETOOL_GUARD : undefined;
 }
 
-function hasClaudePretoolGuard(command: string): boolean {
-	return command.trimEnd().endsWith(CLAUDE_PRETOOL_GUARD);
+function hasPretoolGuard(command: string, guard: string): boolean {
+	return command.trimEnd().endsWith(guard);
+}
+
+// Claude and Codex nest hook handlers inside matcher groups; Cursor lists handlers directly.
+function usesHookGroups(harness: Harness): boolean {
+	return harness === "claude" || harness === "codex";
+}
+
+export const CODEX_HOOK_TRUST_NOTICE = "Codex skips new or changed hooks until you trust them, separately in each surface: in the Codex CLI open /hooks, press Enter on PreToolUse, and trust only the Pi hook (do not press t, which trusts every hook); in the Codex desktop app use Settings > Hooks.";
+
+// Codex keys hook trust by position, so removing the Pi group can move the user's other hooks.
+export const CODEX_HOOK_UNINSTALL_NOTICE = "Removing the Pi hook can shift the position of your other Codex hooks, and Codex skips a moved hook until you trust it again: check them in each surface (Codex CLI /hooks; desktop app Settings > Hooks).";
+
+/** Re-trust reminder whenever a Codex hooks.json change is planned or applied. */
+export function codexHookTrustNotice(harness: Harness, changedPaths: string[], action: "install" | "uninstall" = "install"): string | undefined {
+	if (harness !== "codex" || !changedPaths.some((file) => path.basename(file) === "hooks.json")) return undefined;
+	return action === "install" ? CODEX_HOOK_TRUST_NOTICE : CODEX_HOOK_UNINSTALL_NOTICE;
 }
 
 export type PackageRootState = "user" | "dev-checkout" | "refused";
@@ -58,6 +77,7 @@ export type ProblemKind =
 	| "unguarded-hook"
 	| "stamp-version-mismatch"
 	| "non-macos-claude-bash-warning"
+	| "stale-backup-link"
 	| "unreadable";
 
 export interface SetupProblem {
@@ -78,6 +98,11 @@ export interface HarnessRoots {
 	claudeMcp: string;
 	cursor: string;
 	opencode: string;
+	codex: string;
+}
+
+function harnessRoot(harness: Harness, roots: HarnessRoots): string {
+	return roots[harness];
 }
 
 export interface InspectOptions {
@@ -167,6 +192,7 @@ export function resolveHarnessRoots(env: NodeJS.ProcessEnv | Record<string, stri
 		claudeMcp: path.join(env.CLAUDE_CONFIG_DIR ? claude : home, ".claude.json"),
 		cursor: path.join(home, ".cursor"),
 		opencode: path.join(path.resolve(env.XDG_CONFIG_HOME || path.join(home, ".config")), "opencode"),
+		codex: path.resolve(env.CODEX_HOME || path.join(home, ".codex")),
 	};
 }
 
@@ -337,29 +363,44 @@ async function checkTarget(
 	return true;
 }
 
-function eventCandidates(eventValue: unknown, harness: Harness, dest: string, problems: SetupProblem[]): Record<string, unknown>[] {
+interface HookCandidate {
+	hook: Record<string, unknown>;
+	group: Record<string, unknown>;
+}
+
+function hostName(harness: Harness): string {
+	return harness === "claude" ? "Claude" : harness === "codex" ? "Codex" : harness === "cursor" ? "Cursor" : "OpenCode";
+}
+
+// A Claude or Codex matcher narrows which tools a group's handlers see; the Pi guard must see every tool.
+function isMatchAllGroup(group: Record<string, unknown>): boolean {
+	return group.matcher === undefined || group.matcher === "" || group.matcher === "*" || group.matcher === ".*";
+}
+
+function eventCandidates(eventValue: unknown, harness: Harness, dest: string, problems: SetupProblem[]): HookCandidate[] {
 	if (!Array.isArray(eventValue)) {
 		problem(problems, harness, "malformed-shape", "Hook event must be an array.", dest);
 		return [];
 	}
-	const candidates: Record<string, unknown>[] = [];
+	const candidates: HookCandidate[] = [];
 	for (const event of eventValue) {
 		if (!isRecord(event)) {
 			problem(problems, harness, "malformed-shape", "Hook event entries must be objects.", dest);
 			continue;
 		}
-		if (harness === "claude") {
+		if (usesHookGroups(harness)) {
 			if (!Array.isArray(event.hooks)) {
-				problem(problems, harness, "malformed-shape", "Claude hook entries must contain hooks array.", dest);
+				problem(problems, harness, "malformed-shape", `${hostName(harness)} hook entries must contain hooks array.`, dest);
 				continue;
 			}
 			for (const hook of event.hooks) {
-				if (!isRecord(hook) || typeof hook.command !== "string" || hook.type !== "command") problem(problems, harness, "malformed-shape", "Claude hook must use type command with a string command.", dest);
-				else candidates.push(hook);
+				if (isRecord(hook) && typeof hook.command === "string" && hook.type === "command") candidates.push({ hook, group: event });
+				// Codex also supports foreign mcp_tool handlers; they are simply not ours.
+				else if (!(harness === "codex" && isRecord(hook))) problem(problems, harness, "malformed-shape", `${hostName(harness)} hook must use type command with a string command.`, dest);
 			}
 		} else if (typeof event.command !== "string") {
 			problem(problems, harness, "malformed-shape", "Cursor hook command must be a string.", dest);
-		} else candidates.push(event);
+		} else candidates.push({ hook: event, group: event });
 	}
 	return candidates;
 }
@@ -386,7 +427,7 @@ async function inspectHooks(
 		signal.value = true;
 		const candidates = eventCandidates(hooks[entry.event], harness, entry.dest, problems);
 		let foundForeign = false;
-		for (const candidate of candidates) {
+		for (const { hook: candidate, group } of candidates) {
 			const target = commandTarget(candidate.command as string);
 			if (!looksLikeOwnedTarget(target, entry.script)) {
 				foundForeign = true;
@@ -395,9 +436,12 @@ async function inspectHooks(
 			const validTarget = await checkTarget(target, entry.script, pkgRoot, harness, entry.dest, problems);
 			const validCursor = harness !== "cursor" || candidate.failClosed === CURSOR_HOOK_FAIL_CLOSED;
 			if (!validCursor) problem(problems, harness, "malformed-shape", `Cursor bridge hook must set failClosed: ${CURSOR_HOOK_FAIL_CLOSED}.`, entry.dest);
-			const validGuard = !requiresClaudePretoolGuard(harness, entry.event) || hasClaudePretoolGuard(candidate.command as string);
-			if (!validGuard) problem(problems, harness, "unguarded-hook", `Claude PreToolUse hook must end with ${CLAUDE_PRETOOL_GUARD}.`, entry.dest);
-			if (validTarget && validCursor && validGuard) satisfied.add(entry.dest);
+			const guard = pretoolGuard(harness, entry.event);
+			const validGuard = guard === undefined || hasPretoolGuard(candidate.command as string, guard);
+			if (!validGuard) problem(problems, harness, "unguarded-hook", `${hostName(harness)} PreToolUse hook must end with ${guard}.`, entry.dest);
+			const validScope = !usesHookGroups(harness) || isMatchAllGroup(group);
+			if (!validScope) problem(problems, harness, "malformed-shape", `${hostName(harness)} Pi hook must sit in a hook group without a matcher so it runs for every tool.`, entry.dest);
+			if (validTarget && validCursor && validGuard && validScope) satisfied.add(entry.dest);
 		}
 		if (foundForeign && !satisfied.has(entry.dest)) problem(problems, harness, "entry-not-ours", "Configured hook event contains no owned client entry.", entry.dest);
 	}
@@ -446,6 +490,44 @@ async function inspectMcp(
 		return;
 	}
 	if (await checkTarget(target, entry.script, pkgRoot, harness, dest, problems)) satisfied.add(dest);
+}
+
+async function inspectCodexMcp(
+	file: string,
+	entry: HarnessEntry,
+	pkgRoot: string,
+	satisfied: Set<string>,
+	problems: SetupProblem[],
+	signal: { value: boolean },
+): Promise<void> {
+	const read = await readCapped(file);
+	if (read.state === "missing") return;
+	if (read.state === "oversized" || read.state === "unreadable") {
+		signal.value = true;
+		problem(problems, "codex", read.state, read.state === "oversized" ? `Config exceeds ${MAX_CONFIG_BYTES} bytes.` : "Config is not a readable regular file.", "config.toml");
+		return;
+	}
+	const text = read.text ?? "";
+	const scan = scanBridgeTable(text);
+	if (scan.kind === "absent") return;
+	// Unreadable TOML elsewhere in the file only matters when it may hide the bridge table.
+	if (scan.kind === "unsupported" && !text.includes(PI_BRIDGE_MCP_KEY)) return;
+	signal.value = true;
+	if (scan.kind === "unsupported") {
+		problem(problems, "codex", "malformed-shape", scan.reason, entry.dest);
+		return;
+	}
+	const target = bridgeTableTarget(scan);
+	if (!target) {
+		problem(problems, "codex", "malformed-shape", "MCP entry has invalid command/args shape.", entry.dest);
+		return;
+	}
+	if (!(await checkTarget(target, entry.script, pkgRoot, "codex", entry.dest, problems))) return;
+	if (scan.values.get("default_tools_approval_mode") !== CODEX_MCP_APPROVAL) {
+		problem(problems, "codex", "malformed-shape", `Codex bridge MCP table must set default_tools_approval_mode = "${CODEX_MCP_APPROVAL}".`, entry.dest);
+		return;
+	}
+	satisfied.add(entry.dest);
 }
 
 async function inspectSymlink(
@@ -622,7 +704,7 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 	const signal = { value: options.stamp !== undefined && options.stamp !== null };
 	await inspectPackageVersion(options.pkgRoot, harness, options.stamp, problems, signal);
 
-	const root = harness === "claude" ? options.roots.claude : harness === "cursor" ? options.roots.cursor : options.roots.opencode;
+	const root = harnessRoot(harness, options.roots);
 	if (harness === "claude") {
 		const settings = await readConfig(path.join(root, "settings.json"), harness, "settings.json", problems);
 		if (settings.exists && !settings.value && problems.some((item) => item.dest === "settings.json")) signal.value = true;
@@ -654,6 +736,12 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 		if (mcp.exists && !mcp.value && problems.some((item) => item.dest === "mcp.json")) signal.value = true;
 		await inspectMcp(harness, mcp, entries.find(({ kind }) => kind === "mcp")!, options.pkgRoot, satisfied, problems, signal);
 		await inspectSymlinkEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
+	} else if (harness === "codex") {
+		const hooks = await readConfig(path.join(root, "hooks.json"), harness, "hooks.json", problems);
+		if (hooks.exists && !hooks.value && problems.some((item) => item.dest === "hooks.json")) signal.value = true;
+		await inspectHooks(harness, hooks, entries, options.pkgRoot, satisfied, problems, signal);
+		await inspectCodexMcp(path.join(root, "config.toml"), entries.find(({ kind }) => kind === "mcp")!, options.pkgRoot, satisfied, problems, signal);
+		await inspectSymlinkEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
 	} else {
 		const plugin = entries.find(({ kind }) => kind === "plugin")!;
 		await inspectSymlink(harness, root, plugin, options.pkgRoot, satisfied, problems, signal);
@@ -663,7 +751,14 @@ export async function inspectHarness(harness: Harness, options: InspectOptions):
 		await inspectSymlinkEntries(harness, root, entries, options.pkgRoot, satisfied, problems, signal);
 	}
 
-	await inspectLegacyCommands(harness, root, options.pkgRoot, problems, signal);
+	// Codex never had Pi command files; its commands/ paths are never ours.
+	if (harness !== "codex") await inspectLegacyCommands(harness, root, options.pkgRoot, problems, signal);
+	// Report (never delete) the stale backup links Install / repair would remove; they load as duplicate skills.
+	const staleLinks: PlannedChange[] = [];
+	await planStaleBackupLinks(root, entries, options.pkgRoot, staleLinks, []);
+	if (staleLinks.length) {
+		problem(problems, harness, "stale-backup-link", `${staleLinks.length} old .harness-bak- link${staleLinks.length === 1 ? "" : "s"} from an earlier /harness version can load as duplicate skills or commands; run Install / repair (or Uninstall) to remove them.`, undefined, "warning");
+	}
 	if (!signal.value && !problems.some(({ severity }) => severity === "error")) return { state: "not-installed", problems };
 	for (const entry of entries) {
 		if (!satisfied.has(entry.dest)) problem(problems, harness, "missing-entry", "Expected owned manifest entry is missing or incorrect.", entry.dest);
@@ -692,7 +787,8 @@ async function inspectSymlinkEntries(
 
 export interface PlannedChange {
 	path: string;
-	kind: "json" | "symlink" | "delete";
+	/** json and toml are whole-file text configs; toml is only Codex's config.toml. */
+	kind: "json" | "toml" | "symlink" | "delete";
 	before: string | null;
 	after: string | null;
 	legacyFile?: true;
@@ -737,7 +833,10 @@ export interface ApplyResult {
 	path: string;
 	applied: boolean;
 	reason?: string;
+	/** Regular-file backup path. */
 	backup?: string;
+	/** Old target of an applied link retarget or delete; links are never backed up. */
+	previous?: string;
 }
 
 interface PlanScope {
@@ -758,7 +857,7 @@ function addSkip(skipped: PlannedSkip[], file: string, reason: string): void {
 	if (!skipped.some((item) => item.path === file && item.reason === reason)) skipped.push({ path: file, reason });
 }
 
-async function readJsonDraft(file: string, skipped: PlannedSkip[]): Promise<JsonDraft | undefined> {
+async function readTextDraft(file: string, skipped: PlannedSkip[]): Promise<{ path: string; before: string | null } | undefined> {
 	let info;
 	try {
 		info = await lstat(file);
@@ -767,7 +866,7 @@ async function readJsonDraft(file: string, skipped: PlannedSkip[]): Promise<Json
 			addSkip(skipped, file, "Cannot inspect config file.");
 			return undefined;
 		}
-		return { path: file, before: null, value: {} };
+		return { path: file, before: null };
 	}
 	if (info.isSymbolicLink() || !info.isFile()) {
 		addSkip(skipped, file, "Config path is not a regular file; preserve it.");
@@ -782,6 +881,14 @@ async function readJsonDraft(file: string, skipped: PlannedSkip[]): Promise<Json
 		addSkip(skipped, file, "Config is unreadable; preserve it.");
 		return undefined;
 	}
+	return { path: file, before: read.text ?? "" };
+}
+
+async function readJsonDraft(file: string, skipped: PlannedSkip[]): Promise<JsonDraft | undefined> {
+	const text = await readTextDraft(file, skipped);
+	if (!text) return undefined;
+	if (text.before === null) return { path: file, before: null, value: {} };
+	const read = { text: text.before };
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(read.text ?? "");
@@ -810,12 +917,110 @@ function ownedCommand(command: string | undefined, script: string): boolean {
 function expectedHook(harness: Harness, entry: HarnessEntry, pkgRoot: string): Record<string, unknown> {
 	const command = `node ${JSON.stringify(packageAsset(pkgRoot, entry.script))}`;
 	if (harness === "cursor") return { command, failClosed: CURSOR_HOOK_FAIL_CLOSED };
-	const guarded = requiresClaudePretoolGuard(harness, entry.event) ? `${command} ${CLAUDE_PRETOOL_GUARD}` : command;
-	return { type: "command", command: guarded };
+	const guard = pretoolGuard(harness, entry.event);
+	return { type: "command", command: guard ? `${command} ${guard}` : command };
 }
 
-function updateHook(
-	harness: Harness,
+// Claude and Codex: each Pi hook lives in its own matcher-less group so it runs for every tool.
+// Joining a foreign group would inherit that group's matcher (e.g. Bash only) and skip edits.
+function updateGroupedHook(
+	harness: "claude" | "codex",
+	entry: HarnessEntry,
+	config: Record<string, unknown>,
+	pkgRoot: string,
+	install: boolean,
+	skipped: PlannedSkip[],
+	file: string,
+): boolean {
+	const event = entry.event!;
+	let hooks = config.hooks;
+	if (hooks === undefined) {
+		if (!install) return false;
+		hooks = {};
+		config.hooks = hooks;
+	}
+	if (!isRecord(hooks)) {
+		addSkip(skipped, file, `hooks is not an object; preserve ${event}.`);
+		return false;
+	}
+	let groups = hooks[event];
+	if (groups === undefined) {
+		if (!install) return false;
+		groups = [];
+		hooks[event] = groups;
+	}
+	if (!Array.isArray(groups)) {
+		addSkip(skipped, file, `Hook event ${event} is not an array; preserve it.`);
+		return false;
+	}
+	const list = groups as unknown[];
+	const owned: Array<{ group: Record<string, unknown>; index: number }> = [];
+	let foreignPresent = false;
+	for (const group of list) {
+		if (!isRecord(group) || !Array.isArray(group.hooks)) {
+			foreignPresent = true;
+			continue;
+		}
+		group.hooks.forEach((hook: unknown, index: number) => {
+			if (isRecord(hook) && hook.type === "command" && typeof hook.command === "string" && ownedCommand(hook.command, entry.script)) owned.push({ group, index });
+			else foreignPresent = true;
+		});
+	}
+	if (foreignPresent) addSkip(skipped, file, `Foreign hooks in ${event} are preserved.`);
+	const desired = expectedHook(harness, entry, pkgRoot);
+	// Keep a correctly scoped owned hook in place: Codex keys hook trust by its position, and an
+	// already-correct Claude install then plans no change.
+	const keeper = install ? owned.find(({ group }) => isMatchAllGroup(group)) : undefined;
+	let dirty = false;
+	const removals = owned.filter((candidate) => candidate !== keeper).reverse();
+	for (const { group, index } of removals) {
+		(group.hooks as unknown[]).splice(index, 1);
+		dirty = true;
+		const keys = Object.keys(group);
+		if ((group.hooks as unknown[]).length === 0 && keys.every((key) => key === "hooks" || key === "matcher")) list.splice(list.indexOf(group), 1);
+	}
+	if (keeper) {
+		const hooksArray = keeper.group.hooks as unknown[];
+		if (JSON.stringify(hooksArray[keeper.index]) !== JSON.stringify(desired)) {
+			hooksArray[keeper.index] = desired;
+			dirty = true;
+		}
+	} else if (install) {
+		list.push({ hooks: [desired] });
+		dirty = true;
+	}
+	if (!install && dirty) {
+		if (list.length === 0) delete hooks[event];
+		if (Object.keys(hooks).length === 0) delete config.hooks;
+	}
+	return dirty;
+}
+
+async function planCodexToml(
+	file: string,
+	pkgRoot: string,
+	install: boolean,
+	changes: PlannedChange[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	const entry = HARNESS_MANIFEST.codex.find(({ kind }) => kind === "mcp")!;
+	if (install && !(await packageAssetExists(pkgRoot, entry.script))) {
+		addSkip(skipped, file, "Expected MCP package asset is missing or outside package root.");
+		return;
+	}
+	const draft = await readTextDraft(file, skipped);
+	if (!draft) return;
+	const plan = planBridgeTable(draft.before, packageAsset(pkgRoot, entry.script), install, (target) => looksLikeOwnedTarget(target, entry.script));
+	if (plan.kind === "skip") {
+		// Unreadable TOML that cannot hide a bridge table needs no uninstall work.
+		if (install || (draft.before ?? "").includes(PI_BRIDGE_MCP_KEY)) addSkip(skipped, file, plan.reason);
+		return;
+	}
+	if (plan.kind === "change" && plan.after !== draft.before) changes.push({ path: file, kind: "toml", before: draft.before, after: plan.after });
+}
+
+// Cursor: flat hook entries, one per event entry.
+function updateCursorHook(
 	entry: HarnessEntry,
 	config: Record<string, unknown>,
 	pkgRoot: string,
@@ -844,65 +1049,36 @@ function updateHook(
 		addSkip(skipped, file, `Hook event ${event} is not an array; preserve it.`);
 		return false;
 	}
-	const owned: Array<{ group: Record<string, unknown>; index: number }> = [];
+	const owned: Record<string, unknown>[] = [];
 	let foreignPresent = false;
 	for (const group of groups) {
 		if (!isRecord(group)) continue;
-		if (harness === "claude") {
-			if (!Array.isArray(group.hooks)) continue;
-			for (let index = 0; index < group.hooks.length; index++) {
-				const hook = group.hooks[index];
-				if (isRecord(hook) && hook.type === "command" && typeof hook.command === "string" && ownedCommand(hook.command, entry.script)) owned.push({ group, index });
-				else foreignPresent = true;
-			}
-		} else if (typeof group.command === "string" && ownedCommand(group.command, entry.script)) {
-			owned.push({ group, index: -1 });
-		} else foreignPresent = true;
+		if (typeof group.command === "string" && ownedCommand(group.command, entry.script)) owned.push(group);
+		else foreignPresent = true;
 	}
 	if (foreignPresent) addSkip(skipped, file, `Foreign hooks in ${event} are preserved.`);
 	let dirty = false;
 	if (!install) {
 		for (const candidate of owned.reverse()) {
-			if (harness === "claude") {
-				(candidate.group.hooks as unknown[]).splice(candidate.index, 1);
-			} else {
-				groups.splice(groups.indexOf(candidate.group), 1);
-			}
+			groups.splice(groups.indexOf(candidate), 1);
 			dirty = true;
 		}
 		return dirty;
 	}
-	const desired = expectedHook(harness, entry, pkgRoot);
+	const desired = expectedHook("cursor", entry, pkgRoot);
 	if (owned.length) {
 		const first = owned[0]!;
-		if (harness === "claude") {
-			const array = first.group.hooks as unknown[];
-			if (JSON.stringify(array[first.index]) !== JSON.stringify(desired)) {
-				array[first.index] = desired;
-				dirty = true;
-			}
-			for (const duplicate of owned.slice(1).reverse()) {
-				(duplicate.group.hooks as unknown[]).splice(duplicate.index, 1);
-				dirty = true;
-			}
-		} else {
-			if (JSON.stringify(first.group) !== JSON.stringify(desired)) {
-				const index = groups.indexOf(first.group);
-				groups[index] = desired;
-				dirty = true;
-			}
-			for (const duplicate of owned.slice(1).reverse()) {
-				groups.splice(groups.indexOf(duplicate.group), 1);
-				dirty = true;
-			}
+		if (JSON.stringify(first) !== JSON.stringify(desired)) {
+			groups[groups.indexOf(first)] = desired;
+			dirty = true;
+		}
+		for (const duplicate of owned.slice(1).reverse()) {
+			groups.splice(groups.indexOf(duplicate), 1);
+			dirty = true;
 		}
 		return dirty;
 	}
-	if (harness === "claude") {
-		const group = groups.find((item): item is Record<string, unknown> => isRecord(item) && Array.isArray(item.hooks));
-		if (group) (group.hooks as unknown[]).push(desired);
-		else groups.push({ hooks: [desired] });
-	} else groups.push(desired);
+	groups.push(desired);
 	return true;
 }
 
@@ -1045,6 +1221,53 @@ async function planSymlink(
 	}
 	if (!install) changes.push({ path: file, kind: "delete", before: raw, after: null });
 	else changes.push({ path: file, kind: "symlink", before: raw, after: expected });
+}
+
+// Versions up to 0.11.0 left `<dest>.harness-bak-<ts>` sibling links; a skill one still loads as a
+// duplicate skill. Delete those that pass the owned-link rule above. Regular-file backups hold user
+// content and foreign links are not ours, so both stay.
+async function planStaleBackupLinks(
+	root: string,
+	entries: HarnessEntry[],
+	pkgRoot: string,
+	changes: PlannedChange[],
+	skipped: PlannedSkip[],
+): Promise<void> {
+	let packagePath: string | undefined;
+	try {
+		packagePath = await realpath(pkgRoot);
+	} catch {
+		// Without a resolvable package, only the path-shape rule can mark a link owned.
+	}
+	const listings = new Map<string, string[]>();
+	for (const entry of entries) {
+		if (entry.kind !== "command" && entry.kind !== "plugin" && entry.kind !== "skill") continue;
+		const dest = path.resolve(root, ...entry.dest.split("/"));
+		const dir = path.dirname(dest);
+		let names = listings.get(dir);
+		if (!names) {
+			names = await readdir(dir).catch(() => []);
+			listings.set(dir, names);
+		}
+		const prefix = `${path.basename(dest)}.harness-bak-`;
+		for (const name of names) {
+			if (!name.startsWith(prefix)) continue;
+			const file = path.join(dir, name);
+			const info = await lstat(file).catch(() => undefined);
+			if (!info?.isSymbolicLink()) continue;
+			let raw: string;
+			try {
+				raw = await readlink(file);
+			} catch {
+				addSkip(skipped, file, "Backup link target cannot be verified; preserve it.");
+				continue;
+			}
+			const target = await realpath(file).catch(() => undefined);
+			const owned = (target !== undefined && packagePath !== undefined && inside(packagePath, target)) || looksLikeOwnedTarget(target ?? raw, entry.script);
+			if (owned) changes.push({ path: file, kind: "delete", before: raw, after: null });
+			else addSkip(skipped, file, "Backup-named link points outside a Pi package; preserve it.");
+		}
+	}
 }
 
 async function planLegacyLinks(
@@ -1245,13 +1468,15 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 	if (!Object.hasOwn(HARNESS_MANIFEST, harness)) {
 		return attachScope({ changes, skipped: [{ path: options.agentDir, reason: "Unknown harness name." }], cliSteps }, [], options.agentDir);
 	}
-	const root = harness === "claude" ? options.roots.claude : harness === "cursor" ? options.roots.cursor : options.roots.opencode;
+	const root = harnessRoot(harness, options.roots);
 	const entries = HARNESS_MANIFEST[harness];
 	const jsonFiles: string[] = harness === "claude"
 		? [path.join(root, "settings.json")]
 		: harness === "cursor"
 			? [path.join(root, "hooks.json"), path.join(root, "mcp.json")]
-			: [path.join(root, "opencode.json")];
+			: harness === "codex"
+				? [path.join(root, "hooks.json")]
+				: [path.join(root, "opencode.json")];
 	for (const file of jsonFiles) {
 		const draft = await readJsonDraft(file, skipped);
 		if (!draft) continue;
@@ -1260,7 +1485,7 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 			for (const entry of entries) {
 				if (entry.kind === "hook") {
 					if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
-					else dirty = updateHook(harness, entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+					else dirty = updateGroupedHook("claude", entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
 				} else if (entry.kind === "statusline") {
 					if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) {
 						addSkip(skipped, file, "Expected statusLine package asset is missing or outside package root.");
@@ -1285,7 +1510,13 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 			for (const entry of entries) {
 				if (entry.kind !== "hook") continue;
 				if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
-				else dirty = updateHook(harness, entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+				else dirty = updateCursorHook(entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+			}
+		} else if (harness === "codex") {
+			for (const entry of entries) {
+				if (entry.kind !== "hook") continue;
+				if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
+				else dirty = updateGroupedHook("codex", entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
 			}
 		} else {
 			dirty = await updateMcp(harness, draft.value, options.pkgRoot, install, skipped, file);
@@ -1293,12 +1524,15 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 		draftFromChange(draft, dirty, changes);
 	}
 	if (harness === "claude") await planClaudeMcp(options, install, cliSteps, skipped);
+	if (harness === "codex") await planCodexToml(path.join(root, "config.toml"), options.pkgRoot, install, changes, skipped);
 	for (const entry of entries) {
 		if (entry.kind === "command" || entry.kind === "plugin" || entry.kind === "skill") {
 			await planSymlink(root, entry, options.pkgRoot, install, changes, skipped);
 		}
 	}
-	await planLegacyLinks(root, options.pkgRoot, install, changes, skipped);
+	await planStaleBackupLinks(root, entries, options.pkgRoot, changes, skipped);
+	// Codex never had Pi command files; never treat its commands/ paths as legacy.
+	if (harness !== "codex") await planLegacyLinks(root, options.pkgRoot, install, changes, skipped);
 	await updateStampPlan(harness, options, install, changes, skipped);
 	return attachScope({ changes, skipped, cliSteps }, [root], options.agentDir);
 }
@@ -1350,6 +1584,10 @@ async function assertPlanPathAllowed(file: string, scope: PlanScope): Promise<vo
 	throw new Error("Planned path is outside resolved harness roots and stamp path.");
 }
 
+function isTextConfig(change: PlannedChange): boolean {
+	return change.kind === "json" || change.kind === "toml";
+}
+
 async function currentChangeValue(change: PlannedChange): Promise<{ exists: boolean; value?: string; bytes?: Buffer; info?: Awaited<ReturnType<typeof lstat>> }> {
 	let info;
 	try {
@@ -1358,7 +1596,7 @@ async function currentChangeValue(change: PlannedChange): Promise<{ exists: bool
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false };
 		throw error;
 	}
-	if (change.kind === "json" || change.legacyFile) {
+	if (isTextConfig(change) || change.legacyFile) {
 		if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CONFIG_BYTES) return { exists: true, info };
 		const read = await readCapped(change.path, change.legacyFile === true);
 		if (read.state !== "ok") return { exists: true, info };
@@ -1376,8 +1614,11 @@ function valueMatches(change: PlannedChange, current: { exists: boolean; value?:
 	return current.exists && current.value === change.before;
 }
 
+// Only regular files (config, stamp, legacy command content) are backed up. A sibling backup of a
+// link would still load as a skill or command; the preview diff and ApplyResult.previous carry the
+// old target instead.
 async function makeBackup(change: PlannedChange, current: { exists: boolean; value?: string; info?: Awaited<ReturnType<typeof lstat>> }, timestamp: string): Promise<string | undefined> {
-	if (!current.exists) return undefined;
+	if (!current.exists || !(isTextConfig(change) || change.legacyFile)) return undefined;
 	const backup = `${change.path}.harness-bak-${timestamp}`;
 	try {
 		await lstat(backup);
@@ -1385,22 +1626,17 @@ async function makeBackup(change: PlannedChange, current: { exists: boolean; val
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	if (change.kind === "json" || change.legacyFile) {
-		if (!current.info?.isFile() || current.info.isSymbolicLink()) {
-			throw new Error(change.legacyFile ? "Refusing to back up non-regular legacy command file." : "Refusing to back up non-regular config file.");
-		}
-		await copyFile(change.path, backup, constants.COPYFILE_EXCL);
-		await chmod(backup, current.info.mode & 0o7777);
-		const backupRead = await readCapped(backup, change.legacyFile === true);
-		const backupMatches = change.legacyFile
-			? change.beforeBytes !== undefined && backupRead.bytes?.equals(change.beforeBytes) === true
-			: backupRead.text === change.before;
-		if (backupRead.state !== "ok" || !backupMatches) {
-			throw new Error(change.legacyFile ? "Legacy command changed while creating backup." : "Config changed while creating backup.");
-		}
-	} else {
-		if (!current.info?.isSymbolicLink() || current.value === undefined) throw new Error("Refusing to back up non-symlink destination.");
-		await symlink(current.value, backup);
+	if (!current.info?.isFile() || current.info.isSymbolicLink()) {
+		throw new Error(change.legacyFile ? "Refusing to back up non-regular legacy command file." : "Refusing to back up non-regular config file.");
+	}
+	await copyFile(change.path, backup, constants.COPYFILE_EXCL);
+	await chmod(backup, current.info.mode & 0o7777);
+	const backupRead = await readCapped(backup, change.legacyFile === true);
+	const backupMatches = change.legacyFile
+		? change.beforeBytes !== undefined && backupRead.bytes?.equals(change.beforeBytes) === true
+		: backupRead.text === change.before;
+	if (backupRead.state !== "ok" || !backupMatches) {
+		throw new Error(change.legacyFile ? "Legacy command changed while creating backup." : "Config changed while creating backup.");
 	}
 	return backup;
 }
@@ -1422,18 +1658,21 @@ async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: stri
 		const current = await currentChangeValue(change);
 		if (!valueMatches(change, current)) return { path: change.path, applied: false, reason: "Path changed since planning or is not an owned regular file/symlink." };
 		backup = await makeBackup(change, current, timestamp);
+		// An existing link change has no backup; report the old target it replaced or removed.
+		const previous = !isTextConfig(change) && !change.legacyFile && change.before !== null ? { previous: change.before } : {};
 		if (change.kind === "delete") {
 			await assertPlanPathAllowed(change.path, scope);
 			if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no delete performed.", ...(backup ? { backup } : {}) };
 			await unlink(change.path);
-			return { path: change.path, applied: true, ...(backup ? { backup } : {}) };
+			return { path: change.path, applied: true, ...(backup ? { backup } : {}), ...previous };
 		}
 		const parent = path.dirname(change.path);
 		await mkdir(parent, { recursive: true });
 		temp = path.join(parent, `.${path.basename(change.path)}.harness-tmp-${randomUUID()}`);
-		if (change.kind === "json") {
-			if (change.after === null) throw new Error("JSON change requires after content.");
-			const mode = current.exists && current.info ? current.info.mode & 0o7777 : 0o666;
+		if (isTextConfig(change)) {
+			if (change.after === null) throw new Error("Config change requires after content.");
+			// A new Codex config.toml may later hold secrets (MCP env, tokens): create it owner-only.
+			const mode = current.exists && current.info ? current.info.mode & 0o7777 : change.kind === "toml" ? 0o600 : 0o666;
 			const handle = await open(temp, "wx", mode);
 			try {
 				await handle.writeFile(change.after, "utf8");
@@ -1450,7 +1689,7 @@ async function applyOne(change: PlannedChange, scope: PlanScope, timestamp: stri
 		if (!(await assertStillMatches(change))) return { path: change.path, applied: false, reason: "Path changed after backup; no write performed.", ...(backup ? { backup } : {}) };
 		await rename(temp, change.path);
 		temp = undefined;
-		return { path: change.path, applied: true, ...(backup ? { backup } : {}) };
+		return { path: change.path, applied: true, ...(backup ? { backup } : {}), ...previous };
 	} catch (error) {
 		return { path: change.path, applied: false, reason: error instanceof Error ? error.message : String(error), ...(backup ? { backup } : {}) };
 	} finally {
