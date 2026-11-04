@@ -98,7 +98,7 @@ Code:
 - Good: the corpus scores Codex by Codex semantics, so a weakened guard fails.
 - Bad/risk: enforcement depends on per-surface hook trust that Codex can skip; docs must tell users to trust only the Pi hook (never "trust all").
 - Bad/risk: allowlists track Codex tool names, which differ between surfaces and versions.
-- Bad/risk: `/harness` sibling backups of skill links remain loadable as skills after uninstall or retarget (all harnesses); a follow-up fix is pending.
+- Fixed: `/harness` no longer backs up skill links and removes stale `.harness-bak-` links on Install / repair and Uninstall (ADR-0044).
 
 ## Read when
 

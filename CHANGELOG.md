@@ -10,10 +10,17 @@ All notable changes to this project are documented here.
 - `/harness` manages Codex under `CODEX_HOME` (default `~/.codex`): a guarded `hooks.json` hook in its own group, only the `[mcp_servers.pi-claude-bridge]` table in `config.toml` (other bytes untouched; new file `0600`), and 26 skill links, with a re-trust reminder when hooks change.
 - Security corpus Codex column scored by Codex's own hook semantics, plus a `silent` crash variant for every harness.
 
+### Fixed
+
+- `/harness` no longer backs up symlinks: a sibling `<name>.harness-bak-<ts>` link loaded as a duplicate skill. The preview diff and results show each link's previous target; regular-file backups are unchanged.
+- `/harness` Install / repair and Uninstall remove `.harness-bak-` links left by earlier versions when they point at a Pi package; backup-named files and other links stay.
+- Claude Pi hooks now get their own hook group without a `matcher`. Earlier installs could join a foreign group whose `matcher` (for example `Bash`) narrowed the read-only guard; inspection flags such a hook and Install / repair moves it.
+- Plan template: the Definition of Done line for `[LOAD-BEARING]` tasks now matches Build (invariants restated before editing, each verified before commit), and the tag is defined.
+
 ### Notes
 
 - Trust the Pi hook in each Codex surface you use (CLI `/hooks`, desktop Settings > Hooks), and only that hook. Commits from `$pi-build` need Codex approval because its sandbox keeps `.git` read-only.
-- Known issue: `/harness` skill-link backups (`skills/<name>.harness-bak-<ts>`) can still load as skills after uninstall or retarget; remove them by hand for now.
+- After updating, run `/harness` Install / repair once per harness to remove old backup links and move a misplaced Claude hook, then restart the harness.
 
 ## [0.11.0] - 2026-11-03
 
