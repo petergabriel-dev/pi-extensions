@@ -967,8 +967,8 @@ try {
 	assert.ok(!uninstallPlan.changes.some(({ path: file }) => file === foreignUninstallCommand || file === plainLegacyUninstallCommand), "uninstall never plans changes to plain commands");
 	assert.ok((await applyPlan(uninstallPlan, { now: new Date(uninstallBackupIso) })).every(({ applied: ok }) => ok));
 	const uninstalledSettings = JSON.parse(await readFile(uninstallSettingsFile, "utf8"));
-	assert.deepEqual(uninstalledSettings.hooks.PreToolUse[0].hooks, []);
-	assert.deepEqual(uninstalledSettings.hooks.PreToolUse[1], uninstallForeignHook);
+	// Groups emptied by removing Pi hooks go, with their events; the foreign group stays.
+	assert.deepEqual(uninstalledSettings.hooks, { PreToolUse: [uninstallForeignHook] });
 	assert.equal(Object.hasOwn(uninstalledSettings, "statusLine"), false);
 	assert.match(await readFile(foreignUninstallCommand, "utf8"), /preserve this file/);
 	assert.equal(await readFile(plainLegacyUninstallCommand, "utf8"), "leave unprefixed command alone\n");
@@ -1013,6 +1013,37 @@ try {
 	const repairedInspect = await inspectHarness("claude", { pkgRoot: guardPkg, roots: guardRoots, agentDir: guardAgent });
 	assert.equal(repairedInspect.state, "ok", JSON.stringify(repairedInspect.problems));
 	record("claude PreToolUse guard installed, legacy flagged, peers unguarded");
+
+	// A foreign matcher group must never narrow the Pi hooks: each gets its own matcher-less group.
+	const groupBase = path.join(temp, "claude-hook-groups");
+	const groupPkg = await createPackage(groupBase);
+	const groupRoots = makeRoots(path.join(groupBase, "fixture"));
+	const groupOptions = { pkgRoot: groupPkg, roots: groupRoots, agentDir: path.join(groupBase, "agent-dir") };
+	const groupFile = path.join(groupRoots.claude, "settings.json");
+	const foreignBashGroup = { matcher: "Bash", hooks: [{ type: "command", command: "node /opt/foreign/bash-audit.js" }] };
+	const foreignPromptGroup = { hooks: [{ type: "command", command: "node /opt/foreign/prompt.js" }] };
+	await writeJson(groupFile, { hooks: { PreToolUse: [foreignBashGroup], UserPromptSubmit: [foreignPromptGroup] } });
+	assert.ok((await applyPlan(await planInstall("claude", groupOptions))).every(({ applied }) => applied));
+	const piPreTool = { type: "command", command: preToolCommand(groupPkg, "agent/claude-bridge-client/pi-readonly-hook.js") };
+	const piPeer = { type: "command", command: command(groupPkg, "agent/claude-bridge-client/pi-peer-hook.js") };
+	const groupInstalled = JSON.parse(await readFile(groupFile, "utf8"));
+	assert.deepEqual(groupInstalled.hooks.PreToolUse, [foreignBashGroup, { hooks: [piPreTool] }], "Pi hook gets its own group; Bash group untouched");
+	assert.deepEqual(groupInstalled.hooks.UserPromptSubmit, [foreignPromptGroup, { hooks: [piPeer] }], "Pi never joins a foreign group");
+	assert.deepEqual(groupInstalled.hooks.SessionEnd, [{ hooks: [piPeer] }]);
+	assert.deepEqual((await planInstall("claude", groupOptions)).changes, [], "correct install plans zero changes");
+	// A Pi hook found inside the matcher group (as older versions installed it) is flagged and moved.
+	await writeJson(groupFile, { ...groupInstalled, hooks: { ...groupInstalled.hooks, PreToolUse: [{ ...foreignBashGroup, hooks: [...foreignBashGroup.hooks, piPreTool] }] } });
+	const claudeNarrowedInspect = await inspectHarness("claude", groupOptions);
+	assert.ok(claudeNarrowedInspect.problems.some(({ message }) => message === "Claude Pi hook must sit in a hook group without a matcher so it runs for every tool."), JSON.stringify(claudeNarrowedInspect.problems));
+	assert.ok((await applyPlan(await planInstall("claude", groupOptions))).every(({ applied }) => applied));
+	const groupRepaired = JSON.parse(await readFile(groupFile, "utf8"));
+	assert.deepEqual(groupRepaired.hooks.PreToolUse, [foreignBashGroup, { hooks: [piPreTool] }], "owned hook moved out of the Bash group");
+	assert.equal((await inspectHarness("claude", groupOptions)).problems.some(({ message }) => message.includes("without a matcher")), false);
+	assert.ok(groupRepaired.hooks.PreToolUse[1].hooks[0].command.endsWith("|| exit 2"), "guard kept");
+	// Uninstall removes only the groups it empties, then empty events.
+	assert.ok((await applyPlan(await planUninstall("claude", groupOptions))).every(({ applied }) => applied));
+	assert.deepEqual(JSON.parse(await readFile(groupFile, "utf8")).hooks, { PreToolUse: [foreignBashGroup], UserPromptSubmit: [foreignPromptGroup] });
+	record("claude Pi hooks get their own matcher-less groups; misplaced hooks moved; uninstall cleans emptied groups");
 
 	const boundaryBase = path.join(temp, "planner-boundary");
 	const boundaryPkg = await createPackage(boundaryBase);

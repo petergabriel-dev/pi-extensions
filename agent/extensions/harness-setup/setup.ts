@@ -367,7 +367,7 @@ function hostName(harness: Harness): string {
 	return harness === "claude" ? "Claude" : harness === "codex" ? "Codex" : harness === "cursor" ? "Cursor" : "OpenCode";
 }
 
-// A Codex matcher narrows which tools a group's handlers see; the Pi guard must see every tool.
+// A Claude or Codex matcher narrows which tools a group's handlers see; the Pi guard must see every tool.
 function isMatchAllGroup(group: Record<string, unknown>): boolean {
 	return group.matcher === undefined || group.matcher === "" || group.matcher === "*";
 }
@@ -434,8 +434,8 @@ async function inspectHooks(
 			const guard = pretoolGuard(harness, entry.event);
 			const validGuard = guard === undefined || hasPretoolGuard(candidate.command as string, guard);
 			if (!validGuard) problem(problems, harness, "unguarded-hook", `${hostName(harness)} PreToolUse hook must end with ${guard}.`, entry.dest);
-			const validScope = harness !== "codex" || isMatchAllGroup(group);
-			if (!validScope) problem(problems, harness, "malformed-shape", "Codex Pi hook must sit in a hook group without a matcher so it runs for every tool.", entry.dest);
+			const validScope = !usesHookGroups(harness) || isMatchAllGroup(group);
+			if (!validScope) problem(problems, harness, "malformed-shape", `${hostName(harness)} Pi hook must sit in a hook group without a matcher so it runs for every tool.`, entry.dest);
 			if (validTarget && validCursor && validGuard && validScope) satisfied.add(entry.dest);
 		}
 		if (foundForeign && !satisfied.has(entry.dest)) problem(problems, harness, "entry-not-ours", "Configured hook event contains no owned client entry.", entry.dest);
@@ -910,9 +910,10 @@ function expectedHook(harness: Harness, entry: HarnessEntry, pkgRoot: string): R
 	return { type: "command", command: guard ? `${command} ${guard}` : command };
 }
 
-// Codex: the Pi hook lives in its own matcher-less group so it runs for every tool. Joining a
-// foreign group would inherit that group's matcher (e.g. Bash only) and skip apply_patch.
-function updateCodexHook(
+// Claude and Codex: each Pi hook lives in its own matcher-less group so it runs for every tool.
+// Joining a foreign group would inherit that group's matcher (e.g. Bash only) and skip edits.
+function updateGroupedHook(
+	harness: "claude" | "codex",
 	entry: HarnessEntry,
 	config: Record<string, unknown>,
 	pkgRoot: string,
@@ -955,8 +956,9 @@ function updateCodexHook(
 		});
 	}
 	if (foreignPresent) addSkip(skipped, file, `Foreign hooks in ${event} are preserved.`);
-	const desired = expectedHook("codex", entry, pkgRoot);
-	// Keep a correctly scoped owned hook in place: Codex keys hook trust by its position.
+	const desired = expectedHook(harness, entry, pkgRoot);
+	// Keep a correctly scoped owned hook in place: Codex keys hook trust by its position, and an
+	// already-correct Claude install then plans no change.
 	const keeper = install ? owned.find(({ group }) => isMatchAllGroup(group)) : undefined;
 	let dirty = false;
 	const removals = owned.filter((candidate) => candidate !== keeper).reverse();
@@ -1006,8 +1008,8 @@ async function planCodexToml(
 	if (plan.kind === "change" && plan.after !== draft.before) changes.push({ path: file, kind: "toml", before: draft.before, after: plan.after });
 }
 
-function updateHook(
-	harness: Harness,
+// Cursor: flat hook entries, one per event entry.
+function updateCursorHook(
 	entry: HarnessEntry,
 	config: Record<string, unknown>,
 	pkgRoot: string,
@@ -1036,65 +1038,36 @@ function updateHook(
 		addSkip(skipped, file, `Hook event ${event} is not an array; preserve it.`);
 		return false;
 	}
-	const owned: Array<{ group: Record<string, unknown>; index: number }> = [];
+	const owned: Record<string, unknown>[] = [];
 	let foreignPresent = false;
 	for (const group of groups) {
 		if (!isRecord(group)) continue;
-		if (harness === "claude") {
-			if (!Array.isArray(group.hooks)) continue;
-			for (let index = 0; index < group.hooks.length; index++) {
-				const hook = group.hooks[index];
-				if (isRecord(hook) && hook.type === "command" && typeof hook.command === "string" && ownedCommand(hook.command, entry.script)) owned.push({ group, index });
-				else foreignPresent = true;
-			}
-		} else if (typeof group.command === "string" && ownedCommand(group.command, entry.script)) {
-			owned.push({ group, index: -1 });
-		} else foreignPresent = true;
+		if (typeof group.command === "string" && ownedCommand(group.command, entry.script)) owned.push(group);
+		else foreignPresent = true;
 	}
 	if (foreignPresent) addSkip(skipped, file, `Foreign hooks in ${event} are preserved.`);
 	let dirty = false;
 	if (!install) {
 		for (const candidate of owned.reverse()) {
-			if (harness === "claude") {
-				(candidate.group.hooks as unknown[]).splice(candidate.index, 1);
-			} else {
-				groups.splice(groups.indexOf(candidate.group), 1);
-			}
+			groups.splice(groups.indexOf(candidate), 1);
 			dirty = true;
 		}
 		return dirty;
 	}
-	const desired = expectedHook(harness, entry, pkgRoot);
+	const desired = expectedHook("cursor", entry, pkgRoot);
 	if (owned.length) {
 		const first = owned[0]!;
-		if (harness === "claude") {
-			const array = first.group.hooks as unknown[];
-			if (JSON.stringify(array[first.index]) !== JSON.stringify(desired)) {
-				array[first.index] = desired;
-				dirty = true;
-			}
-			for (const duplicate of owned.slice(1).reverse()) {
-				(duplicate.group.hooks as unknown[]).splice(duplicate.index, 1);
-				dirty = true;
-			}
-		} else {
-			if (JSON.stringify(first.group) !== JSON.stringify(desired)) {
-				const index = groups.indexOf(first.group);
-				groups[index] = desired;
-				dirty = true;
-			}
-			for (const duplicate of owned.slice(1).reverse()) {
-				groups.splice(groups.indexOf(duplicate.group), 1);
-				dirty = true;
-			}
+		if (JSON.stringify(first) !== JSON.stringify(desired)) {
+			groups[groups.indexOf(first)] = desired;
+			dirty = true;
+		}
+		for (const duplicate of owned.slice(1).reverse()) {
+			groups.splice(groups.indexOf(duplicate), 1);
+			dirty = true;
 		}
 		return dirty;
 	}
-	if (harness === "claude") {
-		const group = groups.find((item): item is Record<string, unknown> => isRecord(item) && Array.isArray(item.hooks));
-		if (group) (group.hooks as unknown[]).push(desired);
-		else groups.push({ hooks: [desired] });
-	} else groups.push(desired);
+	groups.push(desired);
 	return true;
 }
 
@@ -1501,7 +1474,7 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 			for (const entry of entries) {
 				if (entry.kind === "hook") {
 					if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
-					else dirty = updateHook(harness, entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+					else dirty = updateGroupedHook("claude", entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
 				} else if (entry.kind === "statusline") {
 					if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) {
 						addSkip(skipped, file, "Expected statusLine package asset is missing or outside package root.");
@@ -1526,13 +1499,13 @@ async function buildPlan(harness: Harness, options: PlanOptions, install: boolea
 			for (const entry of entries) {
 				if (entry.kind !== "hook") continue;
 				if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
-				else dirty = updateHook(harness, entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+				else dirty = updateCursorHook(entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
 			}
 		} else if (harness === "codex") {
 			for (const entry of entries) {
 				if (entry.kind !== "hook") continue;
 				if (install && !(await packageAssetExists(options.pkgRoot, entry.script))) addSkip(skipped, file, `Expected package asset for ${entry.dest} is missing or outside package root.`);
-				else dirty = updateCodexHook(entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
+				else dirty = updateGroupedHook("codex", entry, draft.value, options.pkgRoot, install, skipped, file) || dirty;
 			}
 		} else {
 			dirty = await updateMcp(harness, draft.value, options.pkgRoot, install, skipped, file);
