@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This workspace prepares `@lopezpetergabriel/pi-extensions@0.11.0`, a Pi package and source workspace containing twelve extensions, 23 skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
+This workspace prepares `@lopezpetergabriel/pi-extensions@0.12.0`, a Pi package and source workspace containing twelve extensions, 23 skills, and two bundled agent definitions. The repository is source for the package, not a separate Pi home: Pi continues to own authentication, settings, models, sessions, and personal memory.
 
 ## Requirements
 
@@ -16,13 +16,13 @@ This workspace prepares `@lopezpetergabriel/pi-extensions@0.11.0`, a Pi package 
 Install globally, for one project, or temporarily:
 
 ```bash
-pi install npm:@lopezpetergabriel/pi-extensions@0.11.0
-pi install -l npm:@lopezpetergabriel/pi-extensions@0.11.0   # this project only
-pi -e npm:@lopezpetergabriel/pi-extensions@0.11.0           # temporary try
+pi install npm:@lopezpetergabriel/pi-extensions@0.12.0
+pi install -l npm:@lopezpetergabriel/pi-extensions@0.12.0   # this project only
+pi -e npm:@lopezpetergabriel/pi-extensions@0.12.0           # temporary try
 pi list
 ```
 
-These install commands pin `@0.11.0`. Upgrade an installed package to the latest release with:
+These install commands pin `@0.12.0`. Upgrade an installed package to the latest release with:
 
 ```bash
 pi update npm:@lopezpetergabriel/pi-extensions
@@ -33,7 +33,7 @@ Remove it with `pi remove npm:@lopezpetergabriel/pi-extensions`. A bare `pi upda
 ### Install from Git
 
 ```bash
-pi install git:github.com/petergabriel-dev/pi-extensions@v0.11.0
+pi install git:github.com/petergabriel-dev/pi-extensions@v0.12.0
 ```
 
 After installing the package, start Pi interactively and run `/harness`. Choose Claude, Cursor, OpenCode, or Codex, select **Install / repair**, review the preview, then confirm. This manages package-owned bridge config, `pi-*` commands, and all 23 package-skill directory links in harness-specific roots; consumers do not hand-merge settings or create symlinks. Foreign skill destinations are preserved; `/harness` does not export to `~/.agents/skills`. In `.pi` projects, Claude no-lease Bash is Seatbelt-sandboxed on macOS and denied closed on other platforms. Cursor's fail-closed hooks can block tools globally if the package is removed first; run `/harness`, choose Cursor → **Uninstall**, then `pi remove`.

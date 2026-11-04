@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-04
+
 ### Added
 
 - Codex harness peer for the Codex CLI and desktop app (ADR-0052): `codex` bridge harness kind and Build-lease peer, a fail-closed PreToolUse hook (`agent/codex-bridge-client/pi-codex-hook.js`) with host `session_id` injection for bridge calls and `apply_patch` target checks (a patch into any Pi project needs that project's lease, wherever the session started), and explicit-only `$pi-discuss`, `$pi-plan`, `$pi-build` skills.
@@ -19,10 +21,11 @@ All notable changes to this project are documented here.
 - The `/harness` preview warns for Claude and Codex, as well as Cursor, to uninstall before `pi remove`, since their fail-closed hooks block tools once the package is gone. The Cursor warning named a `/harness uninstall cursor` command that does not exist; it now names the menu path.
 - Plan template: the Definition of Done line for `[LOAD-BEARING]` tasks now matches Build (invariants restated before editing, each verified before commit), and the tag is defined.
 
-### Notes
+### Upgrade
 
-- Trust the Pi hook in each Codex surface you use (CLI `/hooks`, desktop Settings > Hooks), and only that hook. Commits from `$pi-build` need Codex approval because its sandbox keeps `.git` read-only.
+- Installs pinned to a version (for example `npm:@lopezpetergabriel/pi-extensions@0.11.0`) need `pi install npm:@lopezpetergabriel/pi-extensions@0.12.0`; then restart Pi.
 - After updating, run `/harness` Install / repair once per harness to remove old backup links and move a misplaced Claude hook, then restart the harness.
+- Trust the Pi hook in each Codex surface you use (CLI `/hooks`, desktop Settings > Hooks), and only that hook. Commits from `$pi-build` need Codex approval because its sandbox keeps `.git` read-only.
 
 ## [0.11.0] - 2026-11-03
 
