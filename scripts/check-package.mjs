@@ -149,6 +149,7 @@ for (const file of [
   "agent/skills/impeccable/references/critique.md",
   "agent/skills/impeccable/references/polish.md",
   "agent/skills/impeccable/references/audit.md",
+  "agent/skills/impeccable/references/direction.md",
   "agent/skills/playwright-cli/SKILL.md",
   "agent/skills/web-design-guidelines/SKILL.md",
   "agent/skills/web-design-guidelines/references/guidelines.md",
