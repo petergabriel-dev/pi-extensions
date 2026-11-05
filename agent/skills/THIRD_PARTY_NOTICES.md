@@ -487,7 +487,7 @@ The `skill/reference/ios.md` and `skill/reference/android.md` platform reference
 **Author:** ehmo
 ```
 
-- Modified by pi-extensions: Adapted the core skill and critique/polish/audit guidance into manual Markdown workflows; removed executable setup, detector, and persistence paths; redirected product context, tokens, and component specs to `docs/design/`. Omitted scripts, agents, and iOS/Android reference files; the latter are the only content attributed to ehmo in the upstream NOTICE.
+- Modified by pi-extensions: Adapted the core skill and critique/polish/audit guidance into manual Markdown workflows; removed executable setup, detector, and persistence paths; redirected product context, tokens, and component specs to `docs/design/`. Omitted scripts, agents, and iOS/Android reference files; the latter are the only content attributed to ehmo in the upstream NOTICE. Reworded the SKILL.md authority and reuse-first lines and the `references/polish.md` identity and reuse-first lines so a confirmed redesign target wins over the incumbent system. `references/direction.md` is original pi-extensions content, not adapted from upstream.
 
 ## Emil Kowalski — 16 design and engineering skills
 

@@ -1,10 +1,10 @@
 # Scoped polish
 
-Polish is refinement, not concealed redesign. Use only in Build. The saved frontend spec and `docs/design/` contracts override taste defaults. Preserve established identity, behavior, copy, and anything outside scope. If the concept is wrong or a binding rule is unclear, stop and ask for a Plan decision.
+Polish is refinement, not concealed redesign. Use only in Build. The saved frontend spec and `docs/design/` contracts override taste defaults. Preserve the identity the saved spec sets (incumbent, or a confirmed redesign's promoted specs), plus behavior, copy, and anything outside scope. If the concept is wrong or a binding rule is unclear, stop and ask for a Plan decision.
 
 ## Establish the system
 
-Read `docs/design/README.md`, `docs/design/manifest.json`, declared token files, relevant component specs, shared components, neighboring flows, and representative source/screenshots. Reuse the existing system or base library. Do not create a second token/component system.
+Read `docs/design/README.md`, `docs/design/manifest.json`, declared token files, relevant component specs, shared components, neighboring flows, and representative source/screenshots. Reuse the existing system or base library, except where the saved plan restyles or replaces it. Do not create a second token/component system.
 
 Classify drift before fixing:
 

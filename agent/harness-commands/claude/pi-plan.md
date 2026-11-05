@@ -37,7 +37,7 @@ If this is a Pi project:
 ```
 
 6. Docs tags:
-   - Use `[DOCS:architecture]`, `[DOCS:dev-workflow]`, `[DOCS:conventions]`, `[DOCS:invariants]`, `[DOCS:traps]`, `[DOCS:decisions]` when project truth changes.
+   - Use `[DOCS:architecture]`, `[DOCS:dev-workflow]`, `[DOCS:conventions]`, `[DOCS:invariants]`, `[DOCS:traps]`, `[DOCS:decisions]` when project truth changes, and `[DOCS:design]` for design specs/tokens, scheduled first.
    - `[DOCS:decisions]` must also have `[ADR:new]`, `[ADR:update]`, or `[ADR:supersede]`.
    - Never use bare `[DOCS]`.
 

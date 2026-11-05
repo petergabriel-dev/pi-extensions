@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-05
+
+### Added
+
+- `impeccable` Direction playbook (`agent/skills/impeccable/references/direction.md`), the single redesign rulebook: Redesign target, design-input order (snapshot, optional `prototype` and pick, specs/tokens, components, cleanup), 2–3 named directions that differ pairwise on at least two axes, Design deltas, and relative links to six design skills. Plan's short `PLAN_DESIGN_DIRECTION_PROMPT` trigger points at it (ADR-0053).
+- Plan template Redesign target section, `Design delta` component field, reuse/restyle/replace/new base components, and a `[DOCS:design]` tag row (ADR-0053).
+
+### Changed
+
+- Ponytail minimalism in Discuss, Plan, Build, and worker delegation now governs code, wiring, dependencies, and structure, not visual design; fidelity to a confirmed design target is non-negotiable (ADR-0053).
+- A confirmed redesign target wins over existing components and tokens by promotion into `docs/design/` specs first; design inputs are step 0 of the plan task order; Build routes `[DOCS:design]` tasks to `docs/design/`, snapshots out-of-repo targets inside the first design task, deletes superseded parts only in a scheduled cleanup task after a broad reference search, and verifies redesigns against target HTML or each Design delta (ADR-0053).
+- Harness plan commands for Claude, Cursor, OpenCode, and Codex name `[DOCS:design]`; prompt budget tests ignore checkout path length (ADR-0053).
+- `impeccable` polish defers identity and reuse-first to a confirmed redesign's saved spec while still refusing unplanned redesign (ADR-0053).
+
 ## [0.12.0] - 2026-11-04
 
 ### Added

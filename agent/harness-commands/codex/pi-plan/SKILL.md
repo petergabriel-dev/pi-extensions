@@ -36,7 +36,7 @@ Codex reads files through shell. Without a Build lease the Pi hook allows only p
    - Section 3.5 — Context Package
    - Section 4 — Tasks
    - Section 5 — Definition of Done
-6. Section 4 tasks must be Markdown checkboxes with Given/When/Then, NFRs, Verification Gate, and Checkpoint. Add specific `[DOCS:*]` tags when project truth changes; `[DOCS:decisions]` also needs `[ADR:new]`, `[ADR:update]`, or `[ADR:supersede]`. Never use bare `[DOCS]`.
+6. Section 4 tasks must be Markdown checkboxes with Given/When/Then, NFRs, Verification Gate, and Checkpoint. Add specific `[DOCS:*]` tags when project truth changes, including `[DOCS:design]` for design specs/tokens, scheduled first; `[DOCS:decisions]` also needs `[ADR:new]`, `[ADR:update]`, or `[ADR:supersede]`. Never use bare `[DOCS]`.
 7. After each confirmed requirement, decision, constraint, open question, preference, or important implementation fact, say `Recording this in Pi now.` and call `capture_note` with typed notes and `context`. Types: `requirement`, `decision`, `constraint`, `action`, `question`, `preference`, `implementation`, `lesson`. If capture fails, stop.
 8. Before finalizing, call `validate_docs_tags` with the full plan. Fix invalid tags and validate again; do not save an invalid plan.
 9. Present the complete plan, then ask: `Save this plan to Pi build handoff?`

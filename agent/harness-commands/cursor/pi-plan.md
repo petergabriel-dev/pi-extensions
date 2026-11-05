@@ -23,7 +23,7 @@ Use this command when planning work in Cursor inside a Pi project.
    - Section 4 — Tasks
    - Section 5 — Definition of Done
 9. Section 4 tasks must be markdown checkboxes with Given/When/Then, NFRs, Verification Gate, and Checkpoint.
-10. Docs tags: use specific `[DOCS:*]` tags when project truth changes. `[DOCS:decisions]` must include `[ADR:new]`, `[ADR:update]`, or `[ADR:supersede]`. Never use bare `[DOCS]`.
+10. Docs tags: use specific `[DOCS:*]` tags when project truth changes, including `[DOCS:design]` for design specs/tokens, scheduled first. `[DOCS:decisions]` must include `[ADR:new]`, `[ADR:update]`, or `[ADR:supersede]`. Never use bare `[DOCS]`.
 11. Mandatory capture checkpoints: after each confirmed requirement, decision, constraint, open question, preference, or important implementation fact:
     - Say: `Recording this in Pi now.`
     - Call MCP tool `pi-claude-bridge.capture_note`.
