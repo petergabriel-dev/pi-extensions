@@ -5,7 +5,7 @@ status: Active
 date: 2026-11-05
 decision: A confirmed redesign target wins over the incumbent design system by promotion into docs/design/ specs and tokens first; ponytail minimalism governs code, wiring, dependencies, and structure, not visuals; Plan proposes distinct creative directions with the bundled design skills, and Build implements per-component Design deltas and verifies against the target.
 why: Prompts made existing components canonical over handoffs and applied ponytail scope pressure to visual design, so redesigns kept the old UI; promotion keeps one canonical source while letting the target win, and Plan-owned directions add creativity without moving taste into Build.
-affects: agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/plan-template.md, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, agent/skills/impeccable/SKILL.md, agent/skills/impeccable/references/direction.md, agent/skills/THIRD_PARTY_NOTICES.md, scripts/check-package.mjs, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, CHANGELOG.md, docs/engineering/decisions/ADR-0053-redesign-precedence-and-creative-design-direction.md, docs/engineering/decisions/README.md
+affects: agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/plan-template.md, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, agent/skills/impeccable/SKILL.md, agent/skills/impeccable/references/direction.md, agent/skills/impeccable/references/polish.md, agent/skills/THIRD_PARTY_NOTICES.md, scripts/check-package.mjs, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, CHANGELOG.md, docs/engineering/decisions/ADR-0053-redesign-precedence-and-creative-design-direction.md, docs/engineering/decisions/README.md
 consequences: Redesign inputs now change shipped UI instead of being absorbed by old components; docs/design/ stays the single canonical source and references stay untrusted data; plans grow by design-spec tasks, directions, and Design deltas; all behavior remains prompt-only and needs live observation.
 readWhen: changing ponytail wording in any mode, redesign detection, Redesign target or Design delta fields, component contract fields, reference precedence or snapshots, design-skill references, impeccable playbooks, or Build frontend verification
 supersedes: None
@@ -62,6 +62,7 @@ Code, tests, and packaged skills:
 - `agent/extensions/workflow-modes/test/test_build_design_prompt.ts`
 - `agent/skills/impeccable/SKILL.md`
 - `agent/skills/impeccable/references/direction.md`
+- `agent/skills/impeccable/references/polish.md`
 - `agent/skills/THIRD_PARTY_NOTICES.md`
 - `scripts/check-package.mjs`
 
@@ -75,7 +76,7 @@ Code, tests, and packaged skills:
 - Bad/risk: plans grow by design-spec tasks, directions, and Design deltas before component work starts.
 - Bad/risk: `PLAN_DESIGN_DIRECTION_PROMPT` sits close to its 2,000-character budget at long installed skill paths.
 - Bad/risk: delete-if-unreferenced depends on Build's reference search being complete.
-- Follow-up: `impeccable` `references/polish.md` still says to preserve established identity; after promotion the saved spec defines that identity.
+- Resolved follow-up: `impeccable` `references/polish.md` now takes identity from the saved spec (incumbent, or a confirmed redesign's promoted specs), and its reuse-first rule yields where the saved plan restyles or replaces a component; "not concealed redesign" still bars polish from redesigning on its own.
 
 ## Read when
 

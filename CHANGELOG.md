@@ -13,6 +13,7 @@ All notable changes to this project are documented here.
 
 - Ponytail minimalism in Discuss, Plan, Build, and worker delegation now governs code, wiring, dependencies, and structure, not visual design; fidelity to a confirmed design target is non-negotiable (ADR-0053).
 - A confirmed redesign target wins over existing components and tokens by promotion into `docs/design/` specs first; design docs and tokens are step 0 of the plan task order; Build snapshots out-of-repo targets, removes superseded parts once unreferenced, and verifies redesigns against target HTML or each Design delta (ADR-0053).
+- `impeccable` polish defers identity and reuse-first to a confirmed redesign's saved spec while still refusing unplanned redesign (ADR-0053).
 
 ## [0.12.0] - 2026-11-04
 
