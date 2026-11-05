@@ -26,7 +26,7 @@ Use these Markdown playbooks as design guidance; no executable integration or ex
 
 ## Choose a playbook
 
-- [Direction](references/direction.md): propose 2–3 distinct visual directions in Discuss/Plan, recommend one, and record the choice; no file edits.
+- [Direction](references/direction.md): rulebook for redesigns and open visual work in Discuss/Plan: Redesign target, design-input task order, 2–3 distinct directions, Design deltas, and cleanup; no file edits.
 - [Critique](references/critique.md): assess design specificity, usability, and cognitive load; findings only.
 - [Audit](references/audit.md): manual technical review; findings only, with evidence and coverage limits.
 - [Polish](references/polish.md): implement scoped refinements in Build, then review the rendered result.

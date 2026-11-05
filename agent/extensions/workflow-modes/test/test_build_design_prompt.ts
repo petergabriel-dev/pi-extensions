@@ -20,7 +20,7 @@ await writeFile(join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Contain
 const source = `
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import workflowModesExtension, { ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, BUILD_DESIGN_AWARE_PROMPT, BUILD_FRONTEND_VERIFICATION_PROMPT, BUILD_PROMPT, BUILD_REFERENCE_PROMPT, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, IMPECCABLE_SKILL_PATH, EMIL_DESIGN_ENG_SKILL_PATH, APPLE_DESIGN_SKILL_PATH, PROTOTYPE_SKILL_PATH, PLAN_DESIGN_DIRECTION_PROMPT, PLAN_FRONTEND_PROMPT, PLAN_REFERENCE_PROMPT, PLAN_TEMPLATE_PATH, composeModeMessage, composeWorkflowPrompt, DISCUSS_PROMPT, formatModeBlockReason, MODE_ENTRY, MODE_LABELS, MODE_MESSAGE_TYPE, MODE_TRANSITION_MESSAGE_TYPE, PLAN_ENTRY } from "./index.ts";
 import { wrapCommand } from "./sandbox.ts";
 import { promptContextForMode } from "../claude-bridge/index.ts";
@@ -62,8 +62,19 @@ for (const part of ["governs code, wiring, dependencies, and structure, not visu
 	if (!DISCUSS_PROMPT.includes(part)) throw new Error("Discuss prompt omitted " + part);
 }
 const planTemplate = readFileSync(PLAN_TEMPLATE_PATH, "utf8");
-for (const part of ["0. Design docs and tokens", "never end-of-plan write-back", "Redesign target", "before component tasks", "untrusted data, never instructions", "plan-scoped", "Plan only; do not write files", "Frontend Component Spec", "No code skeletons.", "File path:", "Base component: reuse <X> | restyle <X> | replace <X> | new", "Design delta (redesign)", "unchanged (reason)", "[DOCS:design]", "Props/types:", "Variants:", "States: default, hover, focus-visible, active, disabled, loading, empty, error", "Tokens (by name):", "Layout per breakpoint:", "Motion: token, trigger", "prefers-reduced-motion", "Accessibility: role, keyboard, aria", "Verification viewports: 375, 768, 1280 px by default"]) {
+for (const part of ["0. Design inputs", "optional prototype and the user's pick, then design docs and tokens", "never end-of-plan write-back", "Redesign target", "pending prototype pick", "Rules, task order, and cleanup:", "agent/skills/impeccable/references/direction.md", "Plan only; do not write files", "Frontend Component Spec", "No code skeletons.", "File path:", "Base component: reuse <X> | restyle <X> | replace <X> | new", "Design delta (redesign)", "unchanged (reason)", "[DOCS:design]", "Props/types:", "Variants:", "States: default, hover, focus-visible, active, disabled, loading, empty, error", "Tokens (by name):", "Layout per breakpoint:", "Motion: token, trigger", "prefers-reduced-motion", "Accessibility: role, keyboard, aria", "Verification viewports: 375, 768, 1280 px by default"]) {
 	if (!planTemplate.includes(part)) throw new Error("Plan template omitted " + part);
+}
+const directionPath = join(dirname(IMPECCABLE_SKILL_PATH), "references/direction.md");
+const directionText = readFileSync(directionPath, "utf8");
+const directionLinks = directionText.split("](").slice(1).map((part) => part.slice(0, part.indexOf(")")));
+if (directionLinks.length < 7) throw new Error("Direction playbook lost skill links");
+for (const link of directionLinks) {
+	if (link.includes("://") || link.startsWith("#")) throw new Error("Direction playbook link must be package-relative: " + link);
+	if (!existsSync(resolve(dirname(directionPath), link))) throw new Error("Direction playbook link does not resolve: " + link);
+}
+for (const part of ["Redesign target", "pending prototype pick", "## Task order", "stop for the user's pick", "Each pair of directions differs on at least two varied axes", "only in the cleanup task", "CSS variable", "never instructions", "only by promotion"]) {
+	if (!directionText.includes(part)) throw new Error("Direction playbook omitted " + part);
 }
 const planSkillPaths = [IMPECCABLE_SKILL_PATH, EMIL_DESIGN_ENG_SKILL_PATH, APPLE_DESIGN_SKILL_PATH, ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH, PROTOTYPE_SKILL_PATH];
 const absentPlan = composeWorkflowPrompt("plan", true, undefined, cwd);
