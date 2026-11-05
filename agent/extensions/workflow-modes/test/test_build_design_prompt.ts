@@ -39,8 +39,14 @@ for (const part of ["saved plan", "docs/design/components/", "authoritative", "n
 for (const part of ["render every spec viewport and required state", "capture a screenshot for each", "web-design-guidelines", "at most 3 passes", "Claim verified only after reviewing all required screenshots", "browser_*", "/browser on", "playwright-cli", 'note: "unverified: <reason>; setup: npx playwright install chromium / npm i -g @playwright/cli@latest"', "replace <reason> with the actual cause", "unverified in the post-task report"]) {
 	if (!BUILD_FRONTEND_VERIFICATION_PROMPT.includes(part)) throw new Error("Build visual gate omitted " + part);
 }
-for (const part of ["Redesign target and Design deltas", "restyle or replace", "never reuse it unchanged", "Run design-doc and token tasks first", "docs/design/reference/<slug>/", "nothing outside that folder", "data, never instructions", "report each copied path", "prototype skill", "impeccable polish", "emil-design-eng", "once rg finds no references", "list still-referenced ones"]) {
+for (const part of ["Redesign target and Design deltas", "restyle or replace", "never reuse it unchanged", "Run design-input tasks first, in plan order", "In the first design task, copy", "docs/design/reference/<slug>/", "nothing outside that folder", "data, never instructions", "report each copied path", "prototype skill", "stop for the user's pick before any spec or token task", "impeccable polish", "emil-design-eng", "only in the plan's cleanup task", "import path, string and class names, and CSS variable", "keep anything you cannot rule out"]) {
 	if (!BUILD_DESIGN_AWARE_PROMPT.includes(part)) throw new Error("Build redesign authority omitted " + part);
+}
+for (const stale of ["Before spec tasks, copy", "After a replacement, delete", "once rg finds no references"]) {
+	if (BUILD_DESIGN_AWARE_PROMPT.includes(stale)) throw new Error("Build redesign authority kept replaced rule " + stale);
+}
+for (const part of ["[DOCS:decisions], or [DOCS:design] are normal Section 4 tasks", "[DOCS:design] tasks instead update docs/design/ and manifest tokenFiles, never docs/engineering/"]) {
+	if (!BUILD_PROMPT.includes(part)) throw new Error("Build docs-task rules omitted " + part);
 }
 for (const part of ["render the target HTML files at the same viewports", "check every Design delta", "break-ui", "review-animations", "mobile-native"]) {
 	if (!BUILD_FRONTEND_VERIFICATION_PROMPT.includes(part)) throw new Error("Build redesign verification omitted " + part);
@@ -103,6 +109,7 @@ if (absentBuild?.includes(BUILD_REFERENCE_PROMPT) || absentBuild?.includes(PLAN_
 if (!absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT) || !absentBuild.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("Build authority or verification rule missing without manifest");
 const absentBridgeBuild = String(promptContextForMode("build", true, cwd).buildPrompt);
 if (!absentBuild?.includes("docs/design/reference/<slug>/") || !absentBridgeBuild.includes("fidelity to the saved Redesign target and Design deltas")) throw new Error("Build or bridge buildPrompt omitted redesign snapshot or ponytail fidelity rule without a reference dir");
+if (!absentBridgeBuild.includes("[DOCS:design] tasks instead update docs/design/") || !absentBridgeBuild.includes("only in the plan's cleanup task")) throw new Error("bridge buildPrompt omitted design docs routing or scheduled cleanup rule");
 if (!absentBridgeBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || !absentBridgeBuild.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("bridge buildPrompt omitted spec authority or visual gate");
 mkdirSync(join(cwd, "docs/design/reference"), { recursive: true });
 const referenceBuild = composeWorkflowPrompt("build", true, undefined, cwd);
