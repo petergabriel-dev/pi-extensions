@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-05
+
 ### Added
 
 - `impeccable` Direction playbook (`agent/skills/impeccable/references/direction.md`), the single redesign rulebook: Redesign target, design-input order (snapshot, optional `prototype` and pick, specs/tokens, components, cleanup), 2–3 named directions that differ pairwise on at least two axes, Design deltas, and relative links to six design skills. Plan's short `PLAN_DESIGN_DIRECTION_PROMPT` trigger points at it (ADR-0053).
