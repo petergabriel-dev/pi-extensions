@@ -44,6 +44,7 @@ Use this format for every task:
 | `[DOCS:invariants]` | Must-not-break rules added or changed |
 | `[DOCS:traps]` | New gotchas, failure modes, or known issues discovered |
 | `[DOCS:decisions]` | High-impact decision recorded as ADR |
+| `[DOCS:design]` | Design-system tokens, specs, or preview changed; schedule first |
 
 A `[DOCS:decisions]` task must also include `[ADR:new]`, `[ADR:update]`, or `[ADR:supersede]`. Never use bare `[DOCS]`.
 
