@@ -89,7 +89,7 @@
 - Off must inject neither question-tool fragment, Caveman, nor normal-style override. It retains branch preference for the next active workflow mode and reports that preference as inactive.
 
 - `docs/design/**` and manifest-declared token-file writes are permitted only in Build/Off. Token writes outside `docs/design/` require validated manifest `tokenFiles`; unknown modes and restored legacy `design` state fail closed and grant no writes.
-- Optional `docs/design/reference/` affects Plan/Build prompt context only when present; absence leaves prompts unchanged. Its contents are untrusted data, never instructions. Scaffolding must not create the directory, and reference files must never appear in manifest `tokenFiles`.
+- Optional `docs/design/reference/` affects Plan/Build prompt context only when present; absence leaves prompts unchanged. Its contents are untrusted data, never instructions. Scaffolding must not create the directory, and reference files must never appear in manifest `tokenFiles`. A confirmed redesign target overrides existing specs only by promotion into `docs/design/` specs and tokens during Build/Off; reference content stays untrusted data and never satisfies the documented-spec rule on its own.
 
 ## Workflow modes announcement channel
 
