@@ -41,7 +41,7 @@ for (const part of ["docs/design/", "tokenFiles", "before component tasks", "exi
 	if (!PLAN_FRONTEND_PROMPT.includes(part)) throw new Error("Plan frontend clause omitted " + part);
 }
 const planTemplate = readFileSync(PLAN_TEMPLATE_PATH, "utf8");
-for (const part of ["Rules-first frontend order", "before component tasks", "Frontend Component Spec", "No code skeletons.", "File path:", "Base component:", "Props/types:", "Variants:", "States: default, hover, focus-visible, active, disabled, loading, empty, error", "Tokens (by name):", "Layout per breakpoint:", "Motion: token, trigger", "prefers-reduced-motion", "Accessibility: role, keyboard, aria", "Verification viewports: 375, 768, 1280 px by default"]) {
+for (const part of ["0. Design docs and tokens", "never end-of-plan write-back", "Redesign target", "before component tasks", "untrusted data, never instructions", "plan-scoped", "Plan only; do not write files", "Frontend Component Spec", "No code skeletons.", "File path:", "Base component: reuse <X> | restyle <X> | replace <X> | new", "Design delta (redesign)", "unchanged (reason)", "[DOCS:design]", "Props/types:", "Variants:", "States: default, hover, focus-visible, active, disabled, loading, empty, error", "Tokens (by name):", "Layout per breakpoint:", "Motion: token, trigger", "prefers-reduced-motion", "Accessibility: role, keyboard, aria", "Verification viewports: 375, 768, 1280 px by default"]) {
 	if (!planTemplate.includes(part)) throw new Error("Plan template omitted " + part);
 }
 const planSkillPaths = [IMPECCABLE_SKILL_PATH, ANIMATE_SKILL_PATH, ANIMATION_VOCABULARY_SKILL_PATH, FIND_ANIMATION_OPPORTUNITIES_SKILL_PATH];
