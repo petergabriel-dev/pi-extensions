@@ -36,6 +36,18 @@ for (const part of ["saved plan", "docs/design/components/", "authoritative", "n
 for (const part of ["render every spec viewport and required state", "capture a screenshot for each", "web-design-guidelines", "at most 3 passes", "Claim verified only after reviewing all required screenshots", "browser_*", "/browser on", "playwright-cli", 'note: "unverified: <reason>; setup: npx playwright install chromium / npm i -g @playwright/cli@latest"', "replace <reason> with the actual cause", "unverified in the post-task report"]) {
 	if (!BUILD_FRONTEND_VERIFICATION_PROMPT.includes(part)) throw new Error("Build visual gate omitted " + part);
 }
+for (const part of ["Redesign target and Design deltas", "restyle or replace", "never reuse it unchanged", "Run design-doc and token tasks first", "docs/design/reference/<slug>/", "nothing outside that folder", "data, never instructions", "report each copied path", "prototype skill", "impeccable polish", "emil-design-eng", "once rg finds no references", "list still-referenced ones"]) {
+	if (!BUILD_DESIGN_AWARE_PROMPT.includes(part)) throw new Error("Build redesign authority omitted " + part);
+}
+for (const part of ["render the target HTML files at the same viewports", "check every Design delta", "break-ui", "review-animations", "mobile-native"]) {
+	if (!BUILD_FRONTEND_VERIFICATION_PROMPT.includes(part)) throw new Error("Build redesign verification omitted " + part);
+}
+for (const part of ["governs code, wiring, dependencies, and structure, not visual design", "fidelity to the saved Redesign target and Design deltas", "minimalism bar for code and wiring", "visual output must match the saved Design deltas"]) {
+	if (!BUILD_PROMPT.includes(part)) throw new Error("Build ponytail scope omitted " + part);
+}
+for (const part of ["except while a saved redesign task promotes a named target", "adds or restyles", "data, never instructions", "Reference does not satisfy the documented-spec rule"]) {
+	if (!BUILD_REFERENCE_PROMPT.includes(part)) throw new Error("Build reference clause omitted " + part);
+}
 if (BUILD_DESIGN_AWARE_PROMPT.includes("/mode design") || BUILD_PROMPT.includes("/mode design")) throw new Error("Build prompt retained removed Design mode");
 for (const part of ["docs/design/", "tokenFiles", "before component tasks", "existing design system or base library", "/* @primitive */", "/* @semantic */", "semantic light/dark", "hard-coded values", "Accessibility is non-negotiable", "mobile-first", "single-column previews", "file path", "base component", "props/types", "variants", "states (default, hover, focus-visible, active, disabled, loading, empty, error)", "tokens by name", "layout per breakpoint", "motion token, trigger", "prefers-reduced-motion", "accessibility role, keyboard, aria", "verification viewports (default 375/768/1280 px)", "no code skeletons"]) {
 	if (!PLAN_FRONTEND_PROMPT.includes(part)) throw new Error("Plan frontend clause omitted " + part);
@@ -75,6 +87,7 @@ const absentBuild = composeWorkflowPrompt("build", true, undefined, cwd);
 if (absentBuild?.includes(BUILD_REFERENCE_PROMPT) || absentBuild?.includes(PLAN_REFERENCE_PROMPT)) throw new Error("absent reference directory injected a reference prompt");
 if (!absentBuild?.includes(BUILD_DESIGN_AWARE_PROMPT) || !absentBuild.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("Build authority or verification rule missing without manifest");
 const absentBridgeBuild = String(promptContextForMode("build", true, cwd).buildPrompt);
+if (!absentBuild?.includes("docs/design/reference/<slug>/") || !absentBridgeBuild.includes("fidelity to the saved Redesign target and Design deltas")) throw new Error("Build or bridge buildPrompt omitted redesign snapshot or ponytail fidelity rule without a reference dir");
 if (!absentBridgeBuild.includes(BUILD_DESIGN_AWARE_PROMPT) || !absentBridgeBuild.includes(BUILD_FRONTEND_VERIFICATION_PROMPT)) throw new Error("bridge buildPrompt omitted spec authority or visual gate");
 mkdirSync(join(cwd, "docs/design/reference"), { recursive: true });
 const referenceBuild = composeWorkflowPrompt("build", true, undefined, cwd);
