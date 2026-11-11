@@ -855,6 +855,12 @@ export default function (pi: ExtensionAPI) {
 		if (!requestId) return emitResult({ ok: false, error: "workflow-modes save-plan requestId is required" });
 		if (!plan || plan.trim().length === 0) return emitResult({ ok: false, error: "workflow-modes save-plan plan is required" });
 		if (!latestContext) return emitResult({ ok: false, error: "workflow-modes has no active context" });
+		// A bridge client re-sending after outcome_unknown uses a new request id, so without an
+		// explicit planId it would get a new plan. Identical text means the first save landed.
+		const explicitPlanId = typeof request.planId === "string" && request.planId !== requestId ? request.planId : undefined;
+		if (currentPlanId && plan === currentPlan && (!explicitPlanId || explicitPlanId === currentPlanId)) {
+			return emitResult({ ok: true, idempotent: true, planId: currentPlanId, path: currentPlanPath, savedAt: currentPlanSavedAt, taskCount: currentPlanTasks.length, chars: plan.length });
+		}
 		try {
 			const entry = await setSavedWorkflowPlan(pi, latestContext, plan, { planId });
 			emitResult({ ok: true, planId: entry.planId, path: entry.path, savedAt: entry.savedAt, taskCount: entry.tasks.length, chars: plan.length });

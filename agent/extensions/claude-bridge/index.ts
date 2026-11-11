@@ -744,6 +744,7 @@ async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request:
 				savedAt,
 				taskCount: typeof result.taskCount === "number" ? result.taskCount : 0,
 				chars: typeof result.chars === "number" ? result.chars : payload.planText.length,
+				idempotent: result.idempotent === true,
 			},
 		};
 	} catch (error) {
