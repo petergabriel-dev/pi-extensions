@@ -9,12 +9,12 @@ import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryInd
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
+import { scanRequests, UUID_RE, type RequestQueue } from "./request-queue.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
 const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
 const PEER_BLOCK_BUDGET_CHARS = 16_000;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
 const NAMESPACE_GC_TTL_MS = 10 * 60_000;
@@ -26,6 +26,8 @@ interface BridgePaths {
 	sessions: string;
 	namespace: string;
 	requests: string;
+	inflight: string;
+	withdrawn: string;
 	responses: string;
 	processed: string;
 	presence: string;
@@ -201,7 +203,7 @@ function isRealDirectory(dir: string, mode?: number): boolean {
 function namespaceDirsArePrivate(paths: BridgePaths): boolean {
 	return isRealDirectory(path.join(paths.projectRoot, ".pi"))
 		&& isRealDirectory(path.join(paths.projectRoot, ".pi", "memory"))
-		&& [paths.root, paths.sessions, paths.namespace, paths.requests, paths.responses, paths.processed].every((dir) => isRealDirectory(dir, 0o700));
+		&& [paths.root, paths.sessions, paths.namespace, paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed].every((dir) => isRealDirectory(dir, 0o700));
 }
 
 // Rename keeps presence and response files atomic; every bridge file stays private.
@@ -287,6 +289,8 @@ function bridgePaths(projectRoot: string, piSessionId: string): BridgePaths {
 		sessions,
 		namespace,
 		requests: path.join(namespace, "requests"),
+		inflight: path.join(namespace, "inflight"),
+		withdrawn: path.join(namespace, "withdrawn"),
 		responses: path.join(namespace, "responses"),
 		processed: path.join(namespace, "processed"),
 		presence: path.join(namespace, "presence.json"),
@@ -340,7 +344,7 @@ function readPresence(filePath: string, expectedSessionId?: string, { requirePri
 
 function ensureBridgeDirs(paths: BridgePaths): void {
 	ensureBridgeParents(paths);
-	for (const dir of [paths.namespace, paths.requests, paths.responses, paths.processed]) ensurePrivateDir(dir);
+	for (const dir of [paths.namespace, paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed]) ensurePrivateDir(dir);
 }
 
 function gcStaleNamespaces(sessionsDir: string, now = Date.now()): void {
@@ -487,18 +491,6 @@ function formatAge(startedAt: string, now = Date.now()): string {
 	return `${Math.floor(minutes / 60)}h`;
 }
 
-function responsePath(paths: BridgePaths, id: string): string {
-	return path.join(paths.responses, `${id}.json`);
-}
-
-function processedPath(paths: BridgePaths, id: string): string {
-	return path.join(paths.processed, `${id}.json`);
-}
-
-function requestPath(paths: BridgePaths, fileName: string): string {
-	return path.join(paths.requests, fileName);
-}
-
 function errorResponse(id: string, code: string, message: string): BridgeResponse {
 	return { id, ok: false, error: { code, message } };
 }
@@ -525,10 +517,6 @@ function validateRequest(fileId: string, raw: unknown): BridgeRequest {
 		ts: record.ts,
 		...(peer ? { peer } : {}),
 	};
-}
-
-function existsSync(filePath: string): boolean {
-	try { fs.accessSync(filePath); return true; } catch { return false; }
 }
 
 function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: string }> {
@@ -1247,92 +1235,37 @@ async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	return errorResponse(request.id, "not_implemented", `Bridge handler not implemented for request type: ${request.type}.`);
 }
 
-function writeResponse(paths: BridgePaths, response: BridgeResponse): void {
-	if (!namespaceDirsArePrivate(paths)) return;
-	// Write processed/ first (source of truth for idempotency), then responses/.
-	// Both use writeJsonFast — no fsync, rename-only. Safe since we unlink the
-	// request file immediately after, so no concurrent reader can see a
-	// partial-in-progress response before both files are stable.
-	writeJsonFast(processedPath(paths, response.id), response);
-	writeJsonFast(responsePath(paths, response.id), response);
-}
-
-function replayProcessedResponse(paths: BridgePaths, id: string): boolean {
-	// Fast path: if response already exists, nothing to do (no read of processed/).
-	if (existsSync(responsePath(paths, id))) return true;
-	const processed = readJson(processedPath(paths, id));
-	if (!processed) return false;
-	writeJsonFast(responsePath(paths, id), processed);
-	return true;
-}
-
-async function processRequestFile(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths, fileName: string): Promise<void> {
-	if (activePaths !== paths || !fileName.endsWith(".json")) return;
-	const fileId = fileName.slice(0, -".json".length);
-	if (!UUID_RE.test(fileId)) return;
-	if (replayProcessedResponse(paths, fileId)) {
-		safeUnlink(requestPath(paths, fileName));
-		return;
+// Validation errors throw; the request queue turns them into invalid_request responses.
+async function handleQueuedRequest(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths, fileId: string, raw: unknown): Promise<BridgeResponse> {
+	const request = validateRequest(fileId, raw);
+	if (request.type !== "pair" && request.type !== "unpair") return handleRequest(pi, ctx, request);
+	const peer = request.peer!;
+	const key = peerKey(peer);
+	if (request.type === "pair" && !pairedPeers.has(key) && pairedPeers.size >= MAX_PEERS) {
+		return errorResponse(request.id, "peer_cap", `Cannot pair more than ${MAX_PEERS} peers.`);
 	}
-
-	const absolute = requestPath(paths, fileName);
-	const resolved = path.resolve(absolute);
-	const requestRoot = path.resolve(paths.requests) + path.sep;
-	let requestStat: fs.Stats | null = null;
-	try { requestStat = fs.lstatSync(resolved); } catch { return; }
-	if (!resolved.startsWith(requestRoot)) {
-		writeResponse(paths, errorResponse(fileId, "path_traversal", "Request path escaped bridge requests directory."));
-		return;
+	if (request.type === "pair") {
+		pairedPeers.set(key, peer);
+		mailbox?.pair({ kind: peer.harness, id: peer.id });
+	} else {
+		pairedPeers.delete(key);
+		mailbox?.unpair({ kind: peer.harness, id: peer.id });
+		buildLeaseRequests.delete(key);
+		if (buildLease && peerKey(buildLease) === key) setBuildLease(null, ctx, "revoked");
 	}
-	if (!requestStat.isFile() || requestStat.isSymbolicLink() || (requestStat.mode & 0o777) !== 0o600) {
-		safeUnlink(absolute);
-		return;
-	}
-
-	let response: BridgeResponse;
-	try {
-		const raw = JSON.parse(fs.readFileSync(resolved, "utf-8"));
-		const request = validateRequest(fileId, raw);
-		if (request.type === "pair" || request.type === "unpair") {
-			const peer = request.peer!;
-			const key = peerKey(peer);
-			if (request.type === "pair" && !pairedPeers.has(key) && pairedPeers.size >= MAX_PEERS) {
-				response = errorResponse(request.id, "peer_cap", `Cannot pair more than ${MAX_PEERS} peers.`);
-			} else {
-				if (request.type === "pair") {
-					pairedPeers.set(key, peer);
-					mailbox?.pair({ kind: peer.harness, id: peer.id });
-				} else {
-					pairedPeers.delete(key);
-					mailbox?.unpair({ kind: peer.harness, id: peer.id });
-					buildLeaseRequests.delete(key);
-					if (buildLease && peerKey(buildLease) === key) setBuildLease(null, ctx, "revoked");
-				}
-				writePresence(paths);
-				response = { id: request.id, ok: true, result: { paired: request.type === "pair", peer } };
-			}
-		} else {
-			response = await handleRequest(pi, ctx, request);
-		}
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		response = errorResponse(fileId, "invalid_request", message);
-	}
-	writeResponse(paths, response);
-	// Unlink request file so subsequent scans are O(in-flight), not O(history).
-	safeUnlink(requestPath(paths, fileName));
 	writePresence(paths);
+	return { id: request.id, ok: true, result: { paired: request.type === "pair", peer } };
 }
 
-async function scanRequests(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): Promise<void> {
-	if (activePaths !== paths || !namespaceDirsArePrivate(paths)) return;
-	let fileNames: string[] = [];
-	try {
-		fileNames = fs.readdirSync(paths.requests);
-	} catch {
-		return;
-	}
-	for (const fileName of fileNames) await processRequestFile(pi, ctx, paths, fileName);
+function requestQueue(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): RequestQueue {
+	return {
+		paths,
+		isCurrent: () => activePaths === paths,
+		dirsArePrivate: () => namespaceDirsArePrivate(paths),
+		writeJson: writeJsonFast,
+		handle: (fileId, raw) => handleQueuedRequest(pi, ctx, paths, fileId, raw),
+		afterResponse: () => { writePresence(paths); },
+	};
 }
 
 function scheduleScan(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): void {
@@ -1350,7 +1283,7 @@ function scheduleScan(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePath
 // A rejected request scan (for example a presence or response write error) must not
 // become an unhandled rejection that ends Pi; the client's request times out instead.
 function scanRequestsBestEffort(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePaths): void {
-	scanRequests(pi, ctx, paths).catch((error) => {
+	scanRequests(requestQueue(pi, ctx, paths)).catch((error) => {
 		notifyBestEffort(ctx, `claude-bridge request handling failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 	});
 }
@@ -1388,7 +1321,7 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
 			try {
 				writePresence(activePaths, stoppedHeartbeatAt(Date.now()));
-				clearRequestCache([activePaths.requests, activePaths.responses, activePaths.processed]);
+				clearRequestCache([activePaths.requests, activePaths.inflight, activePaths.withdrawn, activePaths.responses, activePaths.processed]);
 			} catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
 		}
 	}
