@@ -66,6 +66,14 @@ console.log("Running test_sandbox...");
 	assert.doesNotMatch(networkCommand, /--unshare-net/);
 	assert.match(networkCommand, /--ro-bind \/ \//);
 	assert.match(networkCommand, /--tmpfs '\/tmp\/pi-scratch'/);
+
+	// A fresh /dev must come after the read-only root bind (bwrap applies mounts in order).
+	for (const wrapped of [command, networkCommand]) {
+		const rootBind = wrapped.indexOf("--ro-bind / /");
+		const dev = wrapped.indexOf("--dev /dev");
+		assert.ok(rootBind >= 0 && dev > rootBind, `--dev /dev must follow --ro-bind / /: ${wrapped}`);
+		assert.ok(dev < wrapped.indexOf("/bin/bash -lc"), "--dev /dev must precede the inner command");
+	}
 }
 
 console.log("test_sandbox passed!");

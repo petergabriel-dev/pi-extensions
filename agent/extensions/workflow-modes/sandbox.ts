@@ -69,6 +69,9 @@ export function buildBubblewrapCommand(command: string, options: { cwd: string; 
 		"bwrap",
 		...(options.allowNetwork ? [] : ["--unshare-net"]),
 		"--ro-bind / /",
+		// A fresh minimal /dev (null, zero, urandom, tty) after the read-only root: some hosts
+		// leave /dev/null unwritable under the root bind, and shells and git write to it.
+		"--dev /dev",
 		`--tmpfs ${shellQuote(scratch)}`,
 		`--setenv TMPDIR ${shellQuote(scratch)}`,
 		"--setenv PYTHONDONTWRITEBYTECODE 1",
