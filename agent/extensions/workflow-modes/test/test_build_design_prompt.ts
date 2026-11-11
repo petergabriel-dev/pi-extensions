@@ -88,6 +88,13 @@ for (const part of ["Redesign target", "pending prototype pick", "## Task order"
 const planSkillPaths = [IMPECCABLE_SKILL_PATH, DIRECTION_PLAYBOOK_PATH];
 const absentPlan = composeWorkflowPrompt("plan", true, undefined, cwd);
 const absentBridgePlan = String(promptContextForMode("plan", true, cwd).planPrompt);
+// Bridge recall returns only the requested mode's prompt; the plan template only in plan mode.
+for (const [mode, keys] of [["discuss", ["mode", "cavemanEnabled", "discussPrompt"]], ["plan", ["mode", "cavemanEnabled", "planPrompt", "planTemplatePath", "planTemplate"]], ["build", ["mode", "cavemanEnabled", "buildPrompt"]]] as const) {
+	const context = promptContextForMode(mode, true, cwd);
+	if (JSON.stringify(Object.keys(context)) !== JSON.stringify(keys)) throw new Error(mode + " bridge prompt context keys: " + Object.keys(context).join(","));
+	if (!String(context[mode + "Prompt"]).includes("CAVEMAN MODE ACTIVE.")) throw new Error(mode + " bridge prompt lost live Caveman composition");
+}
+if (Object.keys(promptContextForMode(undefined, false, cwd)).join(",") !== "mode,cavemanEnabled,planPrompt,planTemplatePath,planTemplate") throw new Error("bridge prompt context must default to plan");
 if (!absentPlan?.includes(PLAN_DESIGN_DIRECTION_PROMPT) || !absentBridgePlan.includes(PLAN_DESIGN_DIRECTION_PROMPT)) throw new Error("Plan or bridge planPrompt omitted design direction clause");
 for (const part of ["governs code, wiring, dependencies, and structure, not visual design", "never merge away or drop design spec/token tasks", "fidelity to a confirmed design target non-negotiable"]) {
 	if (!absentPlan?.includes(part)) throw new Error("Plan prompt omitted " + part);

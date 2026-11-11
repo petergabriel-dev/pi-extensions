@@ -491,11 +491,11 @@ function toolResult(name, data) {
 const tools = [
 	{
 		name: "recall_memory",
-		description: "Recall Pi persistent memory and engineering docs through the live Pi bridge. Fails loudly if Pi bridge is down.",
+		description: "Recall the mode prompt, saved plan, and the engineering-doc sections and personal-memory entries most relevant to query, within a size budget, through the live Pi bridge. Each section carries path and startLine-endLine for reading more with a file Read. Fails loudly if Pi bridge is down.",
 		inputSchema: {
 			type: "object",
 			properties: {
-				query: { type: "string" },
+				query: { type: "string", description: "Topic, feature, and module words used to rank doc sections and memory entries." },
 				mode: { type: "string", enum: ["discuss", "plan", "build"] },
 				cwd: { type: "string", description: "Optional cwd; defaults to MCP server cwd." }
 			},
@@ -643,7 +643,8 @@ async function callTool(name, args) {
 	if (name === "list_sessions") return toolResult(name, { sessions: listSessions(cwd) });
 	const identity = resolveHarnessIdentity(args);
 	if (name === "pair_session") return toolResult(name, await pairSession(args.piSessionId, { cwd, identity }));
-	if (name === "recall_memory") return toolResult(name, await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd, identity }));
+	// Text only, compact: recall is the one large result, and a structuredContent copy would double it.
+	if (name === "recall_memory") return content(JSON.stringify(await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd, identity })));
 	if (name === "recall_memory_entry") return toolResult(name, await bridgeRequest("recall_entry", { slug: args.slug }, { cwd, identity }));
 	if (name === "save_memory") return toolResult(name, await bridgeRequest("save_memory", { name: args.name, description: args.description, type: args.type, body: args.body }, { cwd, identity }));
 	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, sessionId: args.sessionId, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd, identity }));

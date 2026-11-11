@@ -702,6 +702,17 @@ async function main() {
 		assert.equal(responder.requests.length, 1);
 	}, (cwd) => startClaimingResponder(cwd, (request) => ({ id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } })));
 
+	await test("recall_memory is text-only compact JSON; other tools keep structuredContent", async (cwd) => {
+		addModernSession(cwd, "pi-modern", [HARNESS]);
+		const recall = await client.callTool("recall_memory", { query: "bridge", mode: "discuss", cwd, sessionId: HARNESS.id });
+		assert.equal(recall.structuredContent, undefined);
+		assert.equal(recall.content.length, 1);
+		assert.ok(!recall.content[0].text.includes("\n"), "recall text must be compact JSON");
+		assert.equal(JSON.parse(recall.content[0].text).result.type, "recall");
+		const tasks = await client.callTool("read_plan_tasks", { cwd, sessionId: HARNESS.id });
+		assert.equal(tasks.structuredContent.result.type, "read_plan_tasks");
+	}, (cwd) => startClaimingResponder(cwd));
+
 	await test("peer hook stays fast and silent when Pi claims but hangs", async (cwd, responder) => {
 		addModernSession(cwd, "pi-modern", [{ ...HARNESS, pendingCount: 1 }]);
 		const started = Date.now();

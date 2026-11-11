@@ -9,6 +9,9 @@ export const RANKED_FLOOR_BYTES = 8 * 1024;
 export const SECTION_SPLIT_BYTES = 4 * 1024;
 // Section text is capped; the line range points at the rest.
 export const SECTION_TEXT_CAP_BYTES = 4 * 1024;
+// Memory entries are small, high-signal pointers: the best few are packed before sections
+// so a full section budget cannot starve them.
+export const MEMORY_FIRST_ENTRIES = 8;
 
 const HEADING_WEIGHT = 3;
 const K1 = 1.2;
@@ -214,10 +217,11 @@ export function rankRecall(input: RankRecallInput): RankedRecall {
 	};
 	let omittedDocs = 0;
 	for (const doc of split) if (!tryAdd(result.docIndex, { path: doc.path, title: doc.title })) omittedDocs++;
+	let omittedMemory = queryTerms.length === 0 ? input.memory.length : 0;
+	for (const { line } of memoryOrder.slice(0, MEMORY_FIRST_ENTRIES)) if (!tryAdd(result.memory, line)) omittedMemory++;
 	let omittedSections = 0;
 	for (const { section } of sectionOrder) if (!tryAdd(result.sections, section)) omittedSections++;
-	let omittedMemory = queryTerms.length === 0 ? input.memory.length : 0;
-	for (const { line } of memoryOrder) if (!tryAdd(result.memory, line)) omittedMemory++;
+	for (const { line } of memoryOrder.slice(MEMORY_FIRST_ENTRIES)) if (!tryAdd(result.memory, line)) omittedMemory++;
 
 	const bytes = input.fixedBytes + byteLength(JSON.stringify(result));
 	return {

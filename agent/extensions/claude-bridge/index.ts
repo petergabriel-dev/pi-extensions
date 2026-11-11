@@ -5,11 +5,12 @@ import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { composeWorkflowPrompt, PLAN_TEMPLATE_PATH } from "../workflow-modes/index.js";
 import { validatePlanDocsTags } from "../engineering-docs/filesystem.js";
-import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
+import { migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, writeMemoryFact } from "../personal-memory/store.js";
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
 import { cacheDirs, failureCode, OutcomeUnknownError, recoverInflight, scanRequests, startPolling, UUID_RE, type RequestQueue } from "./request-queue.js";
+import { DEFAULT_RECALL_BUDGET_BYTES, rankRecall } from "./recall-rank.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
@@ -542,17 +543,24 @@ function readEngineeringDocs(projectRoot: string): Array<{ path: string; text: s
 	return docs;
 }
 
+// Only the requested mode's prompt (harness commands read prompts.<mode>Prompt), plus the
+// plan template in plan mode.
 export function promptContextForMode(mode: RecallPayload["mode"], cavemanEnabled: boolean, cwd: string): Record<string, unknown> {
+	const active = mode ?? "plan";
 	return {
-		mode: mode ?? "plan",
+		mode: active,
 		cavemanEnabled,
-		discussPrompt: composeWorkflowPrompt("discuss", cavemanEnabled),
-		planPrompt: composeWorkflowPrompt("plan", cavemanEnabled, undefined, cwd),
-		buildPrompt: composeWorkflowPrompt("build", cavemanEnabled, undefined, cwd),
-		reviewPrompt: composeWorkflowPrompt("review", cavemanEnabled),
-		planTemplatePath: PLAN_TEMPLATE_PATH,
-		planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH),
+		[`${active}Prompt`]: active === "discuss" ? composeWorkflowPrompt("discuss", cavemanEnabled) : composeWorkflowPrompt(active, cavemanEnabled, undefined, cwd),
+		...(active === "plan" ? { planTemplatePath: PLAN_TEMPLATE_PATH, planTemplate: readTextIfExists(PLAN_TEMPLATE_PATH) } : {}),
 	};
+}
+
+const MAX_RECALL_BUDGET_BYTES = 4 * 1024 * 1024;
+
+function recallBudgetBytes(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PI_BRIDGE_RECALL_BUDGET_BYTES;
+	const value = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+	return Number.isInteger(value) && value > 0 && value <= MAX_RECALL_BUDGET_BYTES ? value : DEFAULT_RECALL_BUDGET_BYTES;
 }
 
 function normalizeRecallPayload(payload: Record<string, unknown>): RecallPayload {
@@ -899,27 +907,42 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 	const memoryDir = resolveMemoryDir(getAgentDir());
 	await migrateFlatFile(memoryDir);
 	const personalIndex = await readMemoryIndex(memoryDir);
-	const personalBlock = formatMemoryIndexBlock(personalIndex) ?? "";
-	const memoryBlocks = personalBlock ? [personalBlock] : [];
+	const memoryEntries = (personalIndex ?? "").split("\n").map((line) => line.trim()).filter((line) => line.startsWith("- "));
+	// Never cut: prompts, saved plan and lease. Docs and memory entries are ranked into the rest.
+	const fixed = {
+		requestId: request.id,
+		projectRoot,
+		query: payload.query ?? "",
+		prompts: promptContextForMode(payload.mode, cavemanEnabled, projectRoot),
+		savedPlan,
+		buildLease: buildLease ? { ...buildLease } : null,
+		memory: {
+			path: path.join(memoryDir, "MEMORY.md"),
+			loaded: Boolean(personalIndex),
+			hint: "Ranked personal-memory index entries; fetch a full entry with recall_memory_entry(slug).",
+		},
+		docsHint: "Doc sections ranked by query; read more with your file Read tool at path lines startLine-endLine.",
+	};
+	// Sized with the empty ranked containers and a worst-case meta, so meta.bytes is an
+	// upper bound on the compact result.
+	const maxCount = Number.MAX_SAFE_INTEGER;
+	const sizing = { ...fixed, memory: { ...fixed.memory, entries: [] }, docIndex: [], sections: [], meta: { bytes: maxCount, budget: maxCount, budgetExceeded: false, omittedDocs: maxCount, omittedSections: maxCount, omittedMemory: maxCount } };
+	const ranked = rankRecall({
+		query: payload.query ?? "",
+		docs: readEngineeringDocs(projectRoot),
+		memory: memoryEntries,
+		budgetBytes: recallBudgetBytes(),
+		fixedBytes: Buffer.byteLength(JSON.stringify(sizing), "utf8"),
+	});
 	return {
 		id: request.id,
 		ok: true,
 		result: {
-			requestId: request.id,
-			projectRoot,
-			query: payload.query ?? "",
-			memory: {
-				personal: {
-					path: path.join(memoryDir, "MEMORY.md"),
-					loaded: Boolean(personalIndex),
-					block: personalBlock,
-				},
-				blocks: memoryBlocks,
-			},
-			docs: readEngineeringDocs(projectRoot),
-			prompts: promptContextForMode(payload.mode, cavemanEnabled, projectRoot),
-			savedPlan,
-			buildLease: buildLease ? { ...buildLease } : null,
+			...fixed,
+			memory: { ...fixed.memory, entries: ranked.memory },
+			docIndex: ranked.docIndex,
+			sections: ranked.sections,
+			meta: ranked.meta,
 		},
 	};
 }

@@ -118,6 +118,14 @@ for (const budgetBytes of [1 * KB, 8 * KB, 16 * KB, 32 * KB]) {
 		assertPointers(result, largeCorpus);
 	}
 }
+// A full section budget cannot starve the best memory entries: hundreds of uniform small
+// sections leave less room than one memory line once they fill the budget.
+const tinyDoc: RecallDoc = { path: "t.md", text: ["# Tiny", ...Array.from({ length: 400 }, (_, index) => `## L${1000 + index}\nlease plan`)].join("\n") };
+const crowded = rank("commit attribution lease plan", 8 * KB, 0, { docs: [tinyDoc] });
+assert.ok(crowded.meta.omittedSections > 0, "sections must overflow the budget here");
+assert.ok(Buffer.byteLength(JSON.stringify(memory[0])) > Buffer.byteLength(JSON.stringify(crowded.sections[0])), "memory line must be larger than one section");
+assert.equal(crowded.memory[0], memory[0]);
+
 // Floor: a large fixed part still leaves 8 KB for ranked content and is reported over budget.
 const floored = rank("bridge request lease", 32 * KB, 30 * KB, { docs: largeCorpus });
 assert.ok(rankedBytes(floored) > 2 * KB && rankedBytes(floored) <= RANKED_FLOOR_BYTES);
