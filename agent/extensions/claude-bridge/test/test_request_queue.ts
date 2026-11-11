@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { processRequestFile, scanRequests, type QueueResponse, type RequestQueue } from "../request-queue.js";
+import { clearRequestCache } from "../presence.js";
+import { cacheDirs, failureCode, OUTCOME_UNKNOWN, OutcomeUnknownError, processRequestFile, recoverInflight, scanRequests, type QueueResponse, type RequestQueue } from "../request-queue.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-bridge-queue-"));
 
@@ -12,6 +13,7 @@ function setup(name: string, handle: RequestQueue["handle"] = async (fileId) => 
 	const paths = {
 		requests: path.join(base, "requests"),
 		inflight: path.join(base, "inflight"),
+		withdrawn: path.join(base, "withdrawn"),
 		responses: path.join(base, "responses"),
 		processed: path.join(base, "processed"),
 	};
@@ -170,6 +172,58 @@ async function main(): Promise<void> {
 		assert.equal(calls.length, 0);
 		assert.deepEqual(fs.readdirSync(paths.requests), [`${id}.json`]);
 	}
+
+	// Restart recovery: leftovers in inflight/ are never re-run. Unanswered ones become
+	// outcome_unknown; answered ones replay processed/; a second start changes nothing.
+	{
+		const { paths, queue, calls } = setup("recover");
+		const lost = randomUUID();
+		const answered = randomUUID();
+		const answer = { id: answered, ok: true, result: { saved: true } };
+		writeRequest(paths.inflight, lost);
+		writeRequest(paths.inflight, answered);
+		fs.writeFileSync(path.join(paths.processed, `${answered}.json`), JSON.stringify(answer), { mode: 0o600 });
+		fs.writeFileSync(path.join(paths.inflight, "not-a-uuid.json"), "{}", { mode: 0o600 });
+		assert.equal(recoverInflight(queue), 1);
+		assert.equal(calls.length, 0, "recovery must never run a leftover request");
+		const unknown = readJson(path.join(paths.responses, `${lost}.json`));
+		assert.equal(unknown.ok, false);
+		assert.equal(unknown.error?.code, OUTCOME_UNKNOWN);
+		assert.deepEqual(readJson(path.join(paths.processed, `${lost}.json`)), unknown);
+		assert.deepEqual(readJson(path.join(paths.responses, `${answered}.json`)), answer);
+		assert.deepEqual(fs.readdirSync(paths.inflight), ["not-a-uuid.json"]);
+		// A repeated ID now gets the recorded answer instead of running.
+		writeRequest(paths.requests, lost);
+		await scanRequests(queue);
+		assert.equal(calls.length, 0);
+		assert.deepEqual(readJson(path.join(paths.responses, `${lost}.json`)), unknown);
+		// Idempotent across repeated starts.
+		assert.equal(recoverInflight(queue), 0);
+		assert.deepEqual(readJson(path.join(paths.processed, `${lost}.json`)), unknown);
+		// Non-private namespace: no recovery writes.
+		const later = randomUUID();
+		writeRequest(paths.inflight, later);
+		fs.chmodSync(paths.responses, 0o755);
+		assert.equal(recoverInflight(queue), 0);
+		assert.ok(fs.existsSync(path.join(paths.inflight, `${later}.json`)));
+		fs.chmodSync(paths.responses, 0o700);
+	}
+
+	// Clean stop: clearing cacheDirs leaves only presence.json in the namespace.
+	{
+		const { paths } = setup("clean-stop");
+		const namespace = path.dirname(paths.requests);
+		for (const dir of cacheDirs(paths)) fs.writeFileSync(path.join(dir, `${randomUUID()}.json`), "{}", { mode: 0o600 });
+		fs.writeFileSync(path.join(namespace, "presence.json"), "{}", { mode: 0o600 });
+		assert.deepEqual(new Set(cacheDirs(paths)), new Set(Object.values(paths)), "cacheDirs must cover every queue dir");
+		clearRequestCache(cacheDirs(paths));
+		assert.deepEqual(fs.readdirSync(namespace), ["presence.json"]);
+	}
+
+	// Only OutcomeUnknownError maps to outcome_unknown; every other error keeps its code.
+	assert.equal(failureCode(new OutcomeUnknownError("timed out"), "save_plan_failed"), OUTCOME_UNKNOWN);
+	assert.equal(failureCode(new Error("timed out"), "read_plan_tasks_failed"), "read_plan_tasks_failed");
+	assert.equal(failureCode("boom", "capture_failed"), "capture_failed");
 
 	console.log("request-queue tests passed");
 }

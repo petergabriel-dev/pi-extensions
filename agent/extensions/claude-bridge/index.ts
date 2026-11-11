@@ -9,7 +9,7 @@ import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryInd
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
-import { scanRequests, UUID_RE, type RequestQueue } from "./request-queue.js";
+import { cacheDirs, failureCode, OutcomeUnknownError, recoverInflight, scanRequests, UUID_RE, type RequestQueue } from "./request-queue.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
@@ -688,7 +688,7 @@ function requestWorkflowSavePlan(pi: ExtensionAPI, requestId: string, payload: S
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
 			pendingSavePlans.delete(requestId);
-			reject(new Error("workflow-modes save-plan event timed out."));
+			reject(new OutcomeUnknownError("workflow-modes save-plan event timed out; the plan may or may not have been saved."));
 		}, 1_500);
 		timer.unref?.();
 		pendingSavePlans.set(requestId, { resolve, reject, timer });
@@ -716,7 +716,7 @@ function requestWorkflowPlanTaskTick(pi: ExtensionAPI, requestId: string, payloa
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
 			pendingPlanTaskTicks.delete(requestId);
-			reject(new Error("workflow-modes task tick event timed out."));
+			reject(new OutcomeUnknownError("workflow-modes task tick event timed out; the tick may or may not have been recorded."));
 		}, 1_500);
 		timer.unref?.();
 		pendingPlanTaskTicks.set(requestId, { resolve, reject, timer });
@@ -746,7 +746,7 @@ async function handleSavePlan(pi: ExtensionAPI, _ctx: ExtensionContext, request:
 			},
 		};
 	} catch (error) {
-		return errorResponse(request.id, "save_plan_failed", error instanceof Error ? error.message : String(error));
+		return errorResponse(request.id, failureCode(error, "save_plan_failed"), error instanceof Error ? error.message : String(error));
 	}
 }
 
@@ -818,7 +818,7 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 			},
 		};
 	} catch (error) {
-		return errorResponse(request.id, "tick_plan_task_failed", error instanceof Error ? error.message : String(error));
+		return errorResponse(request.id, failureCode(error, "tick_plan_task_failed"), error instanceof Error ? error.message : String(error));
 	}
 }
 
@@ -1161,7 +1161,7 @@ function requestDiscussionNotesAdd(pi: ExtensionAPI, requestId: string, payload:
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
 			pendingDiscussionNotes.delete(requestId);
-			reject(new Error("discussion-notes add event timed out."));
+			reject(new OutcomeUnknownError("discussion-notes add event timed out; the notes may or may not have been added."));
 		}, 1_500);
 		timer.unref?.();
 		pendingDiscussionNotes.set(requestId, {
@@ -1216,7 +1216,7 @@ async function handleCapture(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 			},
 		};
 	} catch (error) {
-		return errorResponse(request.id, "capture_failed", error instanceof Error ? error.message : String(error));
+		return errorResponse(request.id, failureCode(error, "capture_failed"), error instanceof Error ? error.message : String(error));
 	}
 }
 
@@ -1321,7 +1321,7 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
 			try {
 				writePresence(activePaths, stoppedHeartbeatAt(Date.now()));
-				clearRequestCache([activePaths.requests, activePaths.inflight, activePaths.withdrawn, activePaths.responses, activePaths.processed]);
+				clearRequestCache(cacheDirs(activePaths));
 			} catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
 		}
 	}
@@ -1539,6 +1539,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
 			for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
 			writePresence(paths);
+			recoverInflight(requestQueue(pi, ctx, paths));
 			startWatcher(pi, paths, ctx);
 			// A timer error would be an uncaught exception that ends Pi. Instead, warn once
 			// per failure streak and keep retrying: while presence cannot be written it goes

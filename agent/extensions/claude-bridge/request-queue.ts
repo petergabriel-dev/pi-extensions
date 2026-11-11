@@ -8,11 +8,27 @@ import * as path from "node:path";
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// The operation may or may not have been applied (crash mid-request, or a write whose
+// owner did not answer in time). Never report it as a plain failure.
+export const OUTCOME_UNKNOWN = "outcome_unknown";
+
+export class OutcomeUnknownError extends Error {}
+
+export function failureCode(error: unknown, fallback: string): string {
+	return error instanceof OutcomeUnknownError ? OUTCOME_UNKNOWN : fallback;
+}
+
 export interface QueuePaths {
 	requests: string;
 	inflight: string;
+	withdrawn: string;
 	responses: string;
 	processed: string;
+}
+
+/** Every request-cache directory; a clean stop removes all of them (presence.json stays). */
+export function cacheDirs(paths: QueuePaths): string[] {
+	return [paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed];
 }
 
 export interface QueueResponse {
@@ -99,6 +115,28 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 	writeResponse(queue, response);
 	safeUnlink(claimed);
 	queue.afterResponse();
+}
+
+// Startup: a request left in inflight/ was claimed by a Pi that stopped before
+// answering, so it may or may not have run. It is never re-run: an existing processed/
+// answer is replayed, otherwise outcome_unknown is recorded so a repeated ID gets the
+// same answer. Returns how many requests were converted to outcome_unknown.
+export function recoverInflight(queue: RequestQueue): number {
+	if (!queue.dirsArePrivate()) return 0;
+	let fileNames: string[];
+	try { fileNames = fs.readdirSync(queue.paths.inflight); } catch { return 0; }
+	let converted = 0;
+	for (const fileName of fileNames) {
+		if (!fileName.endsWith(".json")) continue;
+		const fileId = fileName.slice(0, -".json".length);
+		if (!UUID_RE.test(fileId)) continue;
+		if (!replayProcessedResponse(queue, fileId)) {
+			writeResponse(queue, errorResponse(fileId, OUTCOME_UNKNOWN, "Pi stopped while handling this request; it may or may not have been applied."));
+			converted += 1;
+		}
+		safeUnlink(path.join(queue.paths.inflight, fileName));
+	}
+	return converted;
 }
 
 export async function scanRequests(queue: RequestQueue): Promise<void> {
