@@ -11,7 +11,7 @@ const docPaths = [
 	"docs/engineering/traps.md",
 ];
 const docs: RecallDoc[] = docPaths.map((docPath) => ({ path: docPath, text: fs.readFileSync(path.join(corpusRoot, docPath), "utf8") }));
-const memory = fs.readFileSync(path.join(corpusRoot, "memory.md"), "utf8").split("\n").filter((line) => line.startsWith("- "));
+const memory = fs.readFileSync(path.join(corpusRoot, "memory-index.md"), "utf8").split("\n").filter((line) => line.startsWith("- "));
 const KB = 1024;
 
 function rank(query: string, budgetBytes = 32 * KB, fixedBytes = 0, input: { docs?: RecallDoc[]; memory?: string[] } = {}): RankedRecall {
