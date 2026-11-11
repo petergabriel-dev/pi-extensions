@@ -33,7 +33,7 @@ supersedes:
 - `discussion-notes` owns explicit `/notes promote`: it packages active lesson notes as untrusted data for a visible current-session turn that targets only current-project engineering docs. Build/Off may edit; read-only modes propose changes.
 - `agent/extensions/personal-memory` owns guided bare/prefilled `/remember`, index injection via `before_agent_start`, deterministic `remember` persistence, and fetch-on-demand full entries. Its first curation response asks what to retain and saves nothing.
 - Visible command turns may use the current session model to classify, deduplicate, and merge. Only successful `remember` or edit/write tool results prove persistence; no lifecycle/background model call exists.
-- `claude-bridge` no longer depends on persistent-memory internals. `capture_note` updates live discussion notes only; `recall_memory` returns engineering docs plus compact personal-memory index.
+- `claude-bridge` no longer depends on persistent-memory internals. `capture_note` updates live discussion notes only; `recall_memory` returns engineering docs plus compact personal-memory index (query-ranked within a size budget since ADR-0054).
 - `agent/extensions/persistent-memory/` is deleted. Its extraction, reconciliation, staging, SQLite index, reinforcement, codebase map, `/memory` UI, and `save_to_memory` tool remain retired.
 
 ## Why
