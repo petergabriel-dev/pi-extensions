@@ -50,7 +50,7 @@
 
 ## Personal memory
 
-- Personal-memory recall is index-first. Inject or bridge-return `~/.pi/memory/MEMORY.md`, then fetch one full slug only through `recall_memory_entry` / bridge `recall_entry`.
+- Personal-memory recall is index-first. Pi injects `~/.pi/memory/MEMORY.md`; bridge recall returns only the index entries that best match the query (`memory.entries`, within the recall budget). Fetch one full slug only through `recall_memory_entry` / bridge `recall_entry`.
 - Saves go through `writeMemoryFact` so one slug file is written and `MEMORY.md` is regenerated. Do not append new data to legacy `~/.pi/memory.md`.
 - Slugs are validated identifiers, never paths. Callers pass slug without `.md`.
 

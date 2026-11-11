@@ -122,9 +122,16 @@ test("recall returns memory/prompts shape", async ({ projectRoot }) => {
 	assert(response.result?.memory, "recall missing memory");
 	assert(response.result?.buildLease === null, "recall without lease must return buildLease:null");
 	assert(response.result?.prompts?.cavemanEnabled === true, "recall must default Caveman ON");
-	for (const field of ["discussPrompt", "planPrompt", "buildPrompt"]) {
-		assert(response.result?.prompts?.[field]?.includes("CAVEMAN MODE ACTIVE."), `${field} missing Caveman prompt`);
+	assert(response.result?.prompts?.planPrompt?.includes("CAVEMAN MODE ACTIVE."), "planPrompt missing Caveman prompt");
+	for (const field of ["discussPrompt", "buildPrompt", "reviewPrompt"]) {
+		assert(response.result?.prompts?.[field] === undefined, `plan recall must not include ${field}`);
 	}
+	assert(typeof response.result?.prompts?.planTemplate === "string", "plan recall missing plan template");
+	assert(Array.isArray(response.result?.docIndex) && Array.isArray(response.result?.sections), "recall missing ranked docs");
+	assert(Array.isArray(response.result?.memory?.entries), "recall missing ranked memory entries");
+	const meta = response.result?.meta;
+	assert(meta && meta.budget > 0 && meta.bytes > 0 && typeof meta.budgetExceeded === "boolean", "recall missing size meta");
+	assert(Buffer.byteLength(JSON.stringify(response.result)) <= meta.bytes, "recall meta.bytes must bound the result");
 });
 
 test("build recall requires a paired peer and active plan", async ({ projectRoot }) => {

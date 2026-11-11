@@ -210,11 +210,11 @@ GitHub Actions runs the same bootstrap and `npm test` gate for pull requests and
 This runs:
 
 1. Workspace inventory/integrity, package artifact, and read-only engineering-doc checks (full-content decision index, root spokes, and ADR validity).
-2. Focused ask-user-question queue test, then CCC, engineering-docs, personal-memory, subagent RPC/timeout/lifecycle, and workflow-mode tests.
+2. Focused ask-user-question queue test, bridge request-queue and recall-ranking tests (`test:claude-bridge`), bridge client tests (`test:bridge-client`), the cross-process bridge e2e (`test:bridge-e2e`), then CCC, engineering-docs, personal-memory, subagent RPC/timeout/lifecycle, and workflow-mode tests.
 3. Configured TypeScript checks.
 4. Cursor read-only hook and neutral Cursor-kit tests.
 
-It does not start Pi, call a model, run live bridge protocol tests, exercise file-change rollback interactively, or verify terminal notification rendering.
+`test:bridge-e2e` (`agent/claude-bridge-client/test-bridge-e2e.mjs`, ~16 s) starts the bootstrap-installed Pi CLI in RPC mode in a temp project and drives it through the real MCP client: pairing, plan save and task reads, a Build lease approved through Pi's own confirm dialog, ticks, the read-only hook decision, duplicates, `/bridge-health`, and injected faults (paused Pi, oversized request, crash with a claimed request). It needs `npm run bootstrap` and fails if a model is called. Apart from that headless Pi, the gate does not call a model, run the live interactive bridge protocol test, exercise file-change rollback interactively, or verify terminal notification rendering.
 
 ## Security corpus regression test
 
@@ -264,7 +264,7 @@ done
 | Root package, twelve entrypoints, 23 skills, two agents, seven bridge runtimes, nine harness templates plus three Codex skills | `npm run check` (includes read-only `check:docs`) | Source header lists twelve extensions once; clean packed artifact loads and discovers bundled explorer/worker; the 23-skill inventory matches `package.json`; decision index, spokes, and ADRs are current. |
 | `browser` | `npm --prefix agent/extensions/browser test` and `npm --prefix agent/extensions/browser run typecheck` | After `npx playwright install chromium`, `/browser on` enables tools; live navigation, console/network inspection, page actions, and screenshots work without orphaning Chromium. |
 | `ccc-search` | `npm --prefix agent/extensions/ccc-search test` and `npm --prefix agent/extensions/ccc-search run typecheck` | `ccc_search` works in Build and Plan after project index exists; uninitialized error points to Build. |
-| `claude-bridge` | Live `test-core-protocol.js` procedure below; interactive Pi approval required, bounded wait ≤120s | Footer says active; protocol covers pending/no lease, operator-approved lease with four-hour expiry, holder/non-holder ticks, and live owner dispatch. |
+| `claude-bridge` | `npm run test:claude-bridge` (request queue, recall ranking with fixed corpus) and `npm run test:bridge-e2e` (headless RPC Pi); live `test-core-protocol.js` procedure below needs interactive Pi approval, bounded wait ≤120s | Footer says active; protocol covers pending/no lease, operator-approved lease with four-hour expiry, holder/non-holder ticks, and live owner dispatch. |
 | `discussion-notes` | Core protocol exercises event-bus capture/idempotency | `/notes` restores branch state across tree navigation; clear affects selected branch. |
 | `engineering-docs` | `npm --prefix agent/extensions/engineering-docs test`; `npm run check:docs` | `/docs check --check` reports managed docs, healthy spokes/ADRs/tags, and full-content current index. |
 | `filechanges` | Package load/inventory; no dedicated unit suite | Make disposable `edit`/`write`, inspect cumulative diff, verify accept keeps and decline restores/deletes. |
@@ -294,6 +294,18 @@ done
 External `/pi-build` needs an active saved plan, paired harness peer, and Pi outside Build. First request returns `build_lease_pending` with no writes; only interactive Pi `/build-lease approve` can grant after confirmation and fresh plan/pairing/mode/holder checks. Approve the exact short id shown, then rerun `/pi-build`; headless Pi returns `build_lease_no_approval` without recording a request. A grant expires at `expiresAt = grantedAt + 4 hours`; hooks require fresh presence, unexpired lease, and matching host identity. Only the active holder may tick tasks; a non-holder or expired lease returns `build_lease_required`. `/build-lease` shows holder, remaining time, and pending requests; `/build-lease release` clears the lease. Holder Discuss/Plan recall or unpair, plan clear/switch/completion, Pi Build mode, expiry, and bridge/session lifecycle revoke it. Expiry mid-build denies the next write or tick; stop and ask for re-approval. Pi `/mode build` is blocked while leased; Pi Off is intentionally unguarded. Commit before the final task tick because completion releases the lease.
 
 One writer per project: while another live Pi session in the same project is in Build or holds a lease, lease requests and ticks return `build_lease_held`, `/build-lease approve` refuses with a `Project writer blocked by …` warning (checked before and after the confirm), `/mode build` is blocked, and Pi Build blocks every tool outside its read-only set (including `subagent` and `subagent_message`), each naming the other session's short id with how to release it. Harness `pi-build` templates stop on `build_lease_held` and ask the user to resolve what the message names. If the message names this session's own stale or passive bridge, fix `.pi/memory/bridge` permissions, close the other Pi process that owns the session, or restart Pi. Harness hook denials name the conflicting session the same way. Resuming a session whose last mode was Build lands in Plan; re-enter Build with `/mode build`. `/build-lease` lists the conflict as `Project writer conflict`. Release it in that session with `/build-lease release` or by leaving Build; a quit or crashed session stops counting once its presence is stale (five seconds). If two claims ever coexist, every claimant is denied until one releases. After upgrading the package, run `/harness` → Install / repair so harness hooks use the current check.
+
+## Bridge timeouts, recall budget, and health
+
+Optional environment settings; invalid values fall back to the defaults:
+
+| Variable | Read by | Default | Effect |
+|---|---|---|---|
+| `PI_BRIDGE_PICKUP_TIMEOUT_MS` | harness client | 2000 | How long Pi has to claim a request before the client withdraws it (`not_delivered`) |
+| `PI_BRIDGE_COMPLETION_TIMEOUT_MS` | harness client; Pi (slow-completion counter) | 30000 | How long a claimed request may run before the client reports `outcome_unknown` |
+| `PI_BRIDGE_RECALL_BUDGET_BYTES` | Pi | 32768 | Recall size budget; ranked content always gets at least 8 KB |
+
+In Pi, `/bridge-health` prints p50/p95 latency and response size per request type plus counts of withdrawn requests, `outcome_unknown` answers, replays, restart conversions, and slow completions, from the 500-entry `health.jsonl` ring. After upgrading, restart Pi: until then its namespace has no `inflight/`, and clients fall back to the old single 2 s deadline.
 
 ## Isolated live bridge protocol test
 

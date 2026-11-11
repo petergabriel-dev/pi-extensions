@@ -16,7 +16,7 @@ updated: 2026-10-30
 - Claude Code side talks to Pi through a small file protocol under `<project>/.pi/memory/bridge/` and imports no Pi internals.
 - The Pi bridge extension is the only Pi-coupled layer and reuses real sibling extension functions.
 - `capture_note` updates live discussion notes through the event bus and never writes retired memory queues.
-- `recall_memory` returns engineering docs, compact `~/.pi/memory/MEMORY.md` index, workflow prompts, and saved-plan context; it does not read retired private memory indexes.
+- `recall_memory` returns engineering docs, compact `~/.pi/memory/MEMORY.md` index, workflow prompts, and saved-plan context; it does not read retired private memory indexes. Since ADR-0054 the docs and index entries are query-ranked within a size budget, and the request lifecycle follows ADR-0054.
 - A live active Pi session is required for bridge use; bridge tools fail loudly when Pi is not running or bridge heartbeat is stale.
 - Without a matching lease, Claude Code mutation tools are denied in `.pi` projects and Bash is structurally sandboxed or denied closed; ADR-0043 defines the lease-scoped exception.
 

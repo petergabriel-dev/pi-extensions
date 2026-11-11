@@ -1,0 +1,4 @@
+- [Commit message attribution](commit-attribution.md) — end commits with the configured Co-Authored-By trailer
+- [Prefer stdlib in bridge clients](prefer-stdlib.md) — Node built-ins only, no new dependencies in hooks
+- [Run the full suite for load-bearing tasks](full-suite.md) — npm test before committing risky changes
+- [Docs tags need an area](docs-tags.md) — never use a bare docs tag

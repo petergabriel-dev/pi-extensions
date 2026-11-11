@@ -10,8 +10,18 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const readline = require("node:readline");
 
-const BRIDGE_TIMEOUT_MS = 2_000;
+// Two-stage deadline: Pi must claim a request (move it out of requests/) within the
+// pickup deadline, then answer within the completion deadline.
+const DEFAULT_PICKUP_TIMEOUT_MS = 2_000;
+const DEFAULT_COMPLETION_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 10 * 60_000;
 const POLL_MS = 100;
+const NOT_DELIVERED = "not_delivered";
+const OUTCOME_UNKNOWN = "outcome_unknown";
+// Re-sent once under a new id when Pi answers outcome_unknown. These are safe to repeat:
+// reads, and recall, whose only side effects (requesting or releasing the Build lease)
+// are idempotent.
+const READ_ONLY_TYPES = new Set(["recall", "recall_entry", "read_plan_tasks", "read_messages"]);
 const LIVE_TTL_MS = 5_000;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HARNESS_KINDS = new Set(["claude", "cursor", "pi", "opencode", "codex"]);
@@ -109,6 +119,8 @@ function bridgePaths(projectRoot, piSessionId) {
 		sessions,
 		namespace,
 		requests: path.join(namespace, "requests"),
+		inflight: path.join(namespace, "inflight"),
+		withdrawn: path.join(namespace, "withdrawn"),
 		responses: path.join(namespace, "responses"),
 		processed: path.join(namespace, "processed"),
 		presence: path.join(namespace, "presence.json"),
@@ -323,12 +335,38 @@ function ensureBridgeIsLive(session) {
 	}
 }
 
-async function sendRequestToSession(projectRoot, session, type, payload, identity, options = {}) {
+function bridgeError(message, code, answered = false) {
+	const error = new Error(message);
+	if (code) error.code = code;
+	// answered: Pi itself returned this error (as opposed to a client-side deadline).
+	error.answered = answered;
+	return error;
+}
+
+function timeoutValue(value, fallback) {
+	const number = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+	return Number.isInteger(number) && number > 0 && number <= MAX_TIMEOUT_MS ? number : fallback;
+}
+
+/** Per-call options win over env; invalid values fall back to the defaults. */
+function bridgeTimeouts(options = {}, env = options.env || process.env) {
+	return {
+		pickupMs: timeoutValue(options.pickupTimeoutMs, timeoutValue(env.PI_BRIDGE_PICKUP_TIMEOUT_MS, DEFAULT_PICKUP_TIMEOUT_MS)),
+		completionMs: timeoutValue(options.completionTimeoutMs, timeoutValue(env.PI_BRIDGE_COMPLETION_TIMEOUT_MS, DEFAULT_COMPLETION_TIMEOUT_MS)),
+	};
+}
+
+function outcomeUnknownMessage(type) {
+	return `Pi bridge ${type} outcome unknown: Pi took the request but did not answer in time, so it may have been applied. Check current state before retrying.`;
+}
+
+async function sendRequestOnce(projectRoot, session, type, payload, identity, options) {
 	ensureBridgeIsLive(session);
 	const id = options.requestId || crypto.randomUUID();
 	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error("Bridge request id must be a UUID.");
-	const requestFile = path.join(session.paths.requests, `${id}.json`);
-	const responseFile = path.join(session.paths.responses, `${id}.json`);
+	const fileName = `${id}.json`;
+	const requestFile = path.join(session.paths.requests, fileName);
+	const responseFile = path.join(session.paths.responses, fileName);
 	const request = { id, type, payload: payload || {}, ts: Date.now(), ...(identity ? { peer: identity } : {}) };
 	const tmp = path.join(session.paths.requests, `${id}.tmp.${process.pid}.${crypto.randomUUID()}`);
 	try {
@@ -340,16 +378,63 @@ async function sendRequestToSession(projectRoot, session, type, payload, identit
 		if (error && (error.code === "ENOENT" || error.code === "EACCES")) throw new Error(BRIDGE_DOWN_MESSAGE);
 		throw error;
 	}
-	const deadline = Date.now() + BRIDGE_TIMEOUT_MS;
-	while (Date.now() < deadline) {
+	const answer = () => {
 		const response = readJson(responseFile);
-		if (response && response.id === id) {
-			if (response.ok) return { projectRoot, piSessionId: session.id, requestId: id, result: response.result };
-			throw new Error(response.error && response.error.message ? response.error.message : `Pi bridge ${type} failed.`);
+		if (!response || response.id !== id) return null;
+		try { fs.unlinkSync(responseFile); } catch {}
+		if (response.ok) return { projectRoot, piSessionId: session.id, requestId: id, result: response.result };
+		const code = response.error && typeof response.error.code === "string" ? response.error.code : undefined;
+		throw bridgeError(response.error && response.error.message ? response.error.message : `Pi bridge ${type} failed.`, code, true);
+	};
+	const { pickupMs, completionMs } = bridgeTimeouts(options);
+	const pickupDeadline = Date.now() + pickupMs;
+
+	// Legacy Pi (no inflight/): one deadline, no withdraw, exact bridge-down error.
+	if (!isPrivateDir(session.paths.inflight) || !isPrivateDir(session.paths.withdrawn)) {
+		while (Date.now() < pickupDeadline) {
+			const result = answer();
+			if (result) return result;
+			await sleep(POLL_MS);
+		}
+		throw new Error(BRIDGE_DOWN_MESSAGE);
+	}
+
+	// Stage 1: wait for Pi to claim the request. At the deadline, withdraw it by rename:
+	// success means Pi can never run it (not delivered); ENOENT means Pi just claimed it.
+	while (fs.existsSync(requestFile)) {
+		const result = answer();
+		if (result) return result;
+		if (Date.now() >= pickupDeadline) {
+			try {
+				fs.renameSync(requestFile, path.join(session.paths.withdrawn, fileName));
+			} catch (error) {
+				if (error && error.code === "ENOENT") break;
+				// Could not withdraw, so Pi may still run it.
+				throw bridgeError(outcomeUnknownMessage(type), OUTCOME_UNKNOWN);
+			}
+			throw bridgeError(BRIDGE_DOWN_MESSAGE, NOT_DELIVERED);
 		}
 		await sleep(POLL_MS);
 	}
-	throw new Error(BRIDGE_DOWN_MESSAGE);
+
+	// Stage 2: Pi claimed it; wait for the answer.
+	const completionDeadline = Date.now() + completionMs;
+	while (true) {
+		const result = answer();
+		if (result) return result;
+		if (Date.now() >= completionDeadline) throw bridgeError(outcomeUnknownMessage(type), OUTCOME_UNKNOWN);
+		await sleep(POLL_MS);
+	}
+}
+
+async function sendRequestToSession(projectRoot, session, type, payload, identity, options = {}) {
+	try {
+		return await sendRequestOnce(projectRoot, session, type, payload, identity, options);
+	} catch (error) {
+		// Pi answered outcome_unknown (it stopped mid-request): a read is safe to re-send once.
+		if (!error || error.code !== OUTCOME_UNKNOWN || !error.answered || !READ_ONLY_TYPES.has(type)) throw error;
+		return sendRequestOnce(projectRoot, session, type, payload, identity, { ...options, requestId: undefined });
+	}
 }
 
 function requireIdentity(identity) {
@@ -408,11 +493,11 @@ function toolResult(name, data) {
 const tools = [
 	{
 		name: "recall_memory",
-		description: "Recall Pi persistent memory and engineering docs through the live Pi bridge. Fails loudly if Pi bridge is down.",
+		description: "Recall the mode prompt, saved plan, and the engineering-doc sections and personal-memory entries most relevant to query, within a size budget, through the live Pi bridge. Each section carries path and startLine-endLine for reading more with a file Read. Fails loudly if Pi bridge is down.",
 		inputSchema: {
 			type: "object",
 			properties: {
-				query: { type: "string" },
+				query: { type: "string", description: "Topic, feature, and module words used to rank doc sections and memory entries." },
 				mode: { type: "string", enum: ["discuss", "plan", "build"] },
 				cwd: { type: "string", description: "Optional cwd; defaults to MCP server cwd." }
 			},
@@ -560,7 +645,8 @@ async function callTool(name, args) {
 	if (name === "list_sessions") return toolResult(name, { sessions: listSessions(cwd) });
 	const identity = resolveHarnessIdentity(args);
 	if (name === "pair_session") return toolResult(name, await pairSession(args.piSessionId, { cwd, identity }));
-	if (name === "recall_memory") return toolResult(name, await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd, identity }));
+	// Text only, compact: recall is the one large result, and a structuredContent copy would double it.
+	if (name === "recall_memory") return content(JSON.stringify(await bridgeRequest("recall", { query: args.query, mode: args.mode || "plan" }, { cwd, identity })));
 	if (name === "recall_memory_entry") return toolResult(name, await bridgeRequest("recall_entry", { slug: args.slug }, { cwd, identity }));
 	if (name === "save_memory") return toolResult(name, await bridgeRequest("save_memory", { name: args.name, description: args.description, type: args.type, body: args.body }, { cwd, identity }));
 	if (name === "capture_note") return toolResult(name, await bridgeRequest("capture", { notes: args.notes, sessionId: args.sessionId, claudeSessionId: args.claudeSessionId, context: args.context }, { cwd, identity }));
@@ -632,6 +718,7 @@ async function main() {
 module.exports = {
 	BRIDGE_DOWN_MESSAGE,
 	bridgePaths,
+	bridgeTimeouts,
 	bridgePathsRoot,
 	bridgeRequest,
 	callTool,
