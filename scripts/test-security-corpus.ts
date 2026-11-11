@@ -784,6 +784,31 @@ function assertRunnerEnvIsolation(): void {
 	assert.equal(env.XDG_CONFIG_HOME, path.join("/home", ".config"));
 }
 
+const STDERR_SUMMARY_LINES = 3;
+const STDERR_SUMMARY_CHARS = 400;
+
+// A failed read's own reason (for example git's fatal line), bounded, with the runner's
+// temporary root masked so logs carry no machine paths.
+function summarizeStderr(stderr: string | null | undefined, runtime: string): string {
+	let realRuntime = runtime;
+	try { realRuntime = realpathSync(runtime); } catch { /* the root may be gone */ }
+	let text = String(stderr ?? "");
+	// Longest first: macOS realpaths (/private/var/...) contain the plain path.
+	for (const root of [...new Set([runtime, realRuntime])].sort((a, b) => b.length - a.length)) text = text.split(root).join("<runtime>");
+	const summary = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, STDERR_SUMMARY_LINES).join(" | ");
+	return summary.length > STDERR_SUMMARY_CHARS ? `${summary.slice(0, STDERR_SUMMARY_CHARS)}…` : summary;
+}
+
+function assertStderrSummary(): void {
+	const runtime = "/tmp/pi-security-corpus-selfcheck";
+	assert.equal(
+		summarizeStderr(`\nfatal: detected dubious ownership in repository at '${runtime}/work/repo'\nsecond\n\nthird\nfourth\n`, runtime),
+		"fatal: detected dubious ownership in repository at '<runtime>/work/repo' | second | third",
+	);
+	assert.equal(summarizeStderr("x".repeat(2_000), runtime).length, STDERR_SUMMARY_CHARS + 1);
+	assert.equal(summarizeStderr(undefined, runtime), "");
+}
+
 async function createContext(sandboxDisabled: boolean): Promise<RunnerContext> {
 	const runtime = mkdtempSync(path.join(tmpdir(), "pi-security-corpus-"));
 	const home = path.join(runtime, "home");
@@ -1125,7 +1150,8 @@ async function runCorpus(cases: SecurityCase[], ctx: RunnerContext, platform: st
 						if (testCase.class === "read" && executed.status !== 0) {
 							stats[column].fail += 1;
 							failures += 1;
-							reportFailure(testCase, column, expected, result.outcome, `read command exited ${executed.status}`);
+							const reason = summarizeStderr(executed.stderr, ctx.runtime);
+							reportFailure(testCase, column, expected, result.outcome, `read command exited ${executed.status}${reason ? `: ${reason}` : ""}`);
 							continue;
 						}
 					}
@@ -1409,6 +1435,7 @@ function corruptExpectation(cases: SecurityCase[]): void {
 
 async function main(): Promise<void> {
 	assertRunnerEnvIsolation();
+	assertStderrSummary();
 	assertSandboxWrapperRecognizer();
 	assertCorpusValidation();
 	const args = process.argv.slice(2);
