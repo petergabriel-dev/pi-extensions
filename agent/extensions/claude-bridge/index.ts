@@ -9,7 +9,7 @@ import { migrateFlatFile, readMemoryEntry, readMemoryIndex, resolveMemoryDir, wr
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
-import { cacheDirs, failureCode, OutcomeUnknownError, recoverInflight, scanRequests, startPolling, UUID_RE, type RequestQueue } from "./request-queue.js";
+import { BridgeHealth, cachePaths, failureCode, OutcomeUnknownError, recoverInflight, scanRequests, startPolling, UUID_RE, type RequestQueue } from "./request-queue.js";
 import { DEFAULT_RECALL_BUDGET_BYTES, rankRecall } from "./recall-rank.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
@@ -31,6 +31,7 @@ interface BridgePaths {
 	withdrawn: string;
 	responses: string;
 	processed: string;
+	health: string;
 	presence: string;
 }
 
@@ -159,6 +160,7 @@ let pairedPeers = new Map<string, HarnessPeer>();
 let mailbox: PeerMailbox | null = null;
 let watcher: FSWatcher | null = null;
 let stopPolling: (() => void) | null = null;
+let health: BridgeHealth | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
 let buildLease: BuildLease | null = null;
@@ -295,6 +297,7 @@ function bridgePaths(projectRoot: string, piSessionId: string): BridgePaths {
 		withdrawn: path.join(namespace, "withdrawn"),
 		responses: path.join(namespace, "responses"),
 		processed: path.join(namespace, "processed"),
+		health: path.join(namespace, "health.jsonl"),
 		presence: path.join(namespace, "presence.json"),
 	};
 }
@@ -1290,6 +1293,7 @@ function requestQueue(pi: ExtensionAPI, ctx: ExtensionContext, paths: BridgePath
 		writeJson: writeJsonFast,
 		handle: (fileId, raw) => handleQueuedRequest(pi, ctx, paths, fileId, raw),
 		afterResponse: () => { writePresence(paths); },
+		health,
 	};
 }
 
@@ -1353,7 +1357,7 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 		if (owner?.pid === process.pid && owner.startedAt === startedAt) {
 			try {
 				writePresence(activePaths, stoppedHeartbeatAt(Date.now()));
-				clearRequestCache(cacheDirs(activePaths));
+				clearRequestCache(cachePaths(activePaths));
 			} catch { try { fs.rmSync(activePaths.namespace, { recursive: true, force: true }); } catch { /* own namespace cleanup is best-effort */ } }
 		}
 	}
@@ -1365,6 +1369,7 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 	presenceInitialized = false;
 	activeContext = null;
 	pairedPeers = new Map();
+	health = null;
 }
 
 function peerLabel(peer: PeerIdentity): string {
@@ -1571,6 +1576,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 			mailbox = new PeerMailbox({ kind: "pi", id: piSessionId });
 			for (const peer of pairedPeers.values()) mailbox.pair({ kind: peer.harness, id: peer.id });
 			writePresence(paths);
+			health = new BridgeHealth(paths.health, () => namespaceDirsArePrivate(paths));
 			recoverInflight(requestQueue(pi, ctx, paths));
 			startWatcher(pi, paths, ctx);
 			// A timer error would be an uncaught exception that ends Pi. Instead, warn once
@@ -1599,6 +1605,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 						activePiSessionId = null;
 						presenceInitialized = false;
 						pairedPeers = new Map();
+						health = null;
 						ctx.ui.setStatus(EXTENSION_ID, "Claude bridge: passive");
 						ctx.ui.notify(`claude-bridge passive: ${passiveReason}`, "warning");
 						return;
@@ -1635,6 +1642,13 @@ export default function claudeBridge(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		stopActiveBridge(ctx, "shutdown");
+	});
+
+	pi.registerCommand("bridge-health", {
+		description: "Show bridge request latency, sizes, and outcome counters (no payloads or ids)",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(health ? health.summary() : "Claude bridge is not active in this session.", "info");
+		},
 	});
 
 	pi.registerCommand("build-lease", {

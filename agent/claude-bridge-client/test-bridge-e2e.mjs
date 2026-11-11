@@ -74,7 +74,7 @@ function startPi() {
 		env,
 		stdio: ["pipe", "pipe", "pipe"],
 	});
-	const pi = { child, stderr: "", dialogs: [] };
+	const pi = { child, stderr: "", dialogs: [], notices: [] };
 	let buffer = "";
 	child.stdout.setEncoding("utf8");
 	child.stdout.on("data", (chunk) => {
@@ -85,6 +85,7 @@ function startPi() {
 			buffer = buffer.slice(newline + 1);
 			let record;
 			try { record = JSON.parse(line); } catch { continue; }
+			if (record?.type === "extension_ui_request" && record.method === "notify" && typeof record.message === "string") pi.notices.push(record.message);
 			if (record?.type !== "extension_ui_request" || (record.method !== "confirm" && record.method !== "select")) continue;
 			pi.dialogs.push({ method: record.method, title: record.title });
 			const reply = record.method === "confirm" ? { confirmed: true } : { value: record.options?.[0] };
@@ -214,6 +215,15 @@ try {
 	assert.equal(resaved.result.planId, "e2e-plan");
 	assert.equal(resaved.result.idempotent, true);
 	assert.deepEqual((await call("read_plan_tasks")).result.progress, { done: 1, total: 2 });
+
+	step = "/bridge-health reports recorded requests without ids";
+	pi.prompt("/bridge-health");
+	const report = await waitFor(() => pi.notices.find((message) => message.startsWith("Bridge health:")), "bridge health report");
+	assert.match(report, /save_plan\s+n=\d+\s+p50 \d+ms\s+p95 \d+ms/);
+	assert.match(report, /tick_plan_task\s+n=\d+/);
+	assert.ok(!report.includes(IDENTITY.id) && !report.includes(PI_SESSION_ID), "health report must not name sessions");
+	const ring = readFileSync(path.join(namespace, "health.jsonl"), "utf8");
+	assert.ok(ring.trim().split("\n").length >= 8 && !ring.includes(IDENTITY.id) && !ring.includes("First task"), "health ring holds no ids or payload text");
 
 	step = "fault: Pi paused -> not delivered, and the withdrawn request never runs";
 	pi.child.kill("SIGSTOP");

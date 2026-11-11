@@ -30,11 +30,105 @@ export interface QueuePaths {
 	withdrawn: string;
 	responses: string;
 	processed: string;
+	/** health.jsonl ring file. */
+	health: string;
 }
 
-/** Every request-cache directory; a clean stop removes all of them (presence.json stays). */
-export function cacheDirs(paths: QueuePaths): string[] {
-	return [paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed];
+/** Every request-cache path; a clean stop removes all of them (presence.json stays). */
+export function cachePaths(paths: QueuePaths): string[] {
+	return [paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed, paths.health];
+}
+
+// Health: timings, sizes and outcome codes only. Never payloads, query or plan text,
+// peer ids or session ids; type and outcome are reduced to a short [a-z_] code.
+export const HEALTH_RING_SIZE = 500;
+export const DEFAULT_SLOW_COMPLETION_MS = 30_000;
+
+export interface HealthEntry {
+	ts: number;
+	type: string;
+	outcome: string;
+	ms: number;
+	reqBytes: number;
+	resBytes: number;
+	replay: boolean;
+}
+
+function code(value: unknown): string {
+	return typeof value === "string" && /^[a-z_]{1,40}$/.test(value) ? value : "unknown";
+}
+
+function count(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0;
+}
+
+// Raw values are sanitized here; anything not a short code or a count is dropped.
+type HealthInput = { [Key in keyof HealthEntry]?: unknown };
+
+function healthEntry(value: HealthInput): HealthEntry {
+	return { ts: count(value.ts), type: code(value.type), outcome: code(value.outcome), ms: count(value.ms), reqBytes: count(value.reqBytes), resBytes: count(value.resBytes), replay: value.replay === true };
+}
+
+/** Slow-completion threshold: Pi's PI_BRIDGE_COMPLETION_TIMEOUT_MS when valid, else 30 s. */
+export function slowCompletionMs(env: NodeJS.ProcessEnv = process.env): number {
+	const value = Number(env.PI_BRIDGE_COMPLETION_TIMEOUT_MS);
+	return Number.isInteger(value) && value > 0 && value <= 10 * 60_000 ? value : DEFAULT_SLOW_COMPLETION_MS;
+}
+
+function percentile(sorted: number[], fraction: number): number {
+	return sorted[Math.max(0, Math.ceil(fraction * sorted.length) - 1)] ?? 0;
+}
+
+export class BridgeHealth {
+	entries: HealthEntry[] = [];
+	counters = { restartConversions: 0, withdrawn: 0, slowCompletions: 0 };
+
+	constructor(private readonly file: string, private readonly canWrite: () => boolean, private readonly slowMs = slowCompletionMs()) {
+		// Survives a crash: reload the ring, keeping only well-formed whitelisted entries.
+		let raw = "";
+		try { raw = fs.readFileSync(file, "utf-8"); } catch { return; }
+		const keys = JSON.stringify(Object.keys(healthEntry({})));
+		for (const line of raw.split("\n")) {
+			try {
+				const parsed = JSON.parse(line);
+				if (parsed && typeof parsed === "object" && JSON.stringify(Object.keys(parsed)) === keys) this.entries.push(healthEntry(parsed));
+			} catch { /* skip malformed line */ }
+		}
+		this.entries = this.entries.slice(-HEALTH_RING_SIZE);
+	}
+
+	record(value: HealthInput): void {
+		const entry = healthEntry({ ts: Date.now(), ...value });
+		this.entries.push(entry);
+		if (this.entries.length > HEALTH_RING_SIZE) this.entries = this.entries.slice(-HEALTH_RING_SIZE);
+		if (entry.ms > this.slowMs) this.counters.slowCompletions += 1;
+		if (!this.canWrite()) return;
+		const tmp = `${this.file}.tmp.${process.pid}`;
+		try {
+			fs.writeFileSync(tmp, `${this.entries.map((item) => JSON.stringify(item)).join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+			fs.chmodSync(tmp, 0o600);
+			fs.renameSync(tmp, this.file);
+		} catch {
+			safeUnlink(tmp); // Diagnostics are best-effort; never fail a request over them.
+		}
+	}
+
+	summary(): string {
+		if (this.entries.length === 0 && Object.values(this.counters).every((value) => value === 0)) return "Bridge health: no requests recorded yet.";
+		const byType = new Map<string, HealthEntry[]>();
+		for (const entry of this.entries) byType.set(entry.type, [...(byType.get(entry.type) ?? []), entry]);
+		const lines = [`Bridge health: last ${this.entries.length} request(s)${this.entries[0] ? ` since ${new Date(this.entries[0].ts).toISOString()}` : ""}`];
+		for (const [type, items] of [...byType].sort(([a], [b]) => a.localeCompare(b))) {
+			const ms = items.map((item) => item.ms).sort((a, b) => a - b);
+			const res = items.map((item) => item.resBytes).sort((a, b) => a - b);
+			const errors = items.filter((item) => item.outcome !== "ok" && item.outcome !== "replay").length;
+			lines.push(`${type.padEnd(16)} n=${items.length}  p50 ${percentile(ms, 0.5)}ms  p95 ${percentile(ms, 0.95)}ms  res p95 ${(percentile(res, 0.95) / 1024).toFixed(1)}KB  errors ${errors}`);
+		}
+		const outcomeUnknown = this.entries.filter((entry) => entry.outcome === OUTCOME_UNKNOWN).length;
+		const replays = this.entries.filter((entry) => entry.replay).length;
+		lines.push(`not_delivered (withdrawn) ${this.counters.withdrawn} · outcome_unknown ${outcomeUnknown} · replays ${replays} · restart conversions ${this.counters.restartConversions} · slow completions ${this.counters.slowCompletions}`);
+		return lines.join("\n");
+	}
 }
 
 export interface QueueResponse {
@@ -55,6 +149,7 @@ export interface RequestQueue {
 	/** Validates and runs one parsed request; a throw becomes an invalid_request response. */
 	handle(fileId: string, raw: unknown): Promise<QueueResponse>;
 	afterResponse(): void;
+	health?: BridgeHealth | null;
 }
 
 function readJson(filePath: string): unknown | null {
@@ -92,6 +187,7 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 	const requestFile = path.join(queue.paths.requests, fileName);
 	if (replayProcessedResponse(queue, fileId)) {
 		safeUnlink(requestFile);
+		queue.health?.record({ type: "unknown", outcome: "replay", replay: true });
 		return;
 	}
 
@@ -111,22 +207,35 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 		safeUnlink(claimed);
 		return;
 	}
-	if (stat.size > MAX_REQUEST_BYTES) {
-		writeResponse(queue, errorResponse(fileId, "payload_too_large", `Bridge request exceeds ${MAX_REQUEST_BYTES} bytes.`));
+	const started = Date.now();
+	const reqBytes = stat.size;
+	const finish = (response: QueueResponse, type: unknown): void => {
+		writeResponse(queue, response);
 		safeUnlink(claimed);
+		queue.health?.record({
+			type,
+			outcome: response.ok ? "ok" : response.error?.code,
+			ms: Date.now() - started,
+			reqBytes,
+			resBytes: Buffer.byteLength(JSON.stringify(response), "utf-8"),
+			replay: false,
+		});
 		queue.afterResponse();
+	};
+	if (reqBytes > MAX_REQUEST_BYTES) {
+		finish(errorResponse(fileId, "payload_too_large", `Bridge request exceeds ${MAX_REQUEST_BYTES} bytes.`), "unknown");
 		return;
 	}
 
+	let raw: unknown;
 	let response: QueueResponse;
 	try {
-		response = await queue.handle(fileId, JSON.parse(fs.readFileSync(claimed, "utf-8")));
+		raw = JSON.parse(fs.readFileSync(claimed, "utf-8"));
+		response = await queue.handle(fileId, raw);
 	} catch (error) {
 		response = errorResponse(fileId, "invalid_request", error instanceof Error ? error.message : String(error));
 	}
-	writeResponse(queue, response);
-	safeUnlink(claimed);
-	queue.afterResponse();
+	finish(response, raw && typeof raw === "object" ? (raw as { type?: unknown }).type : "unknown");
 }
 
 // Startup: a request left in inflight/ was claimed by a Pi that stopped before
@@ -148,6 +257,7 @@ export function recoverInflight(queue: RequestQueue): number {
 		}
 		safeUnlink(path.join(queue.paths.inflight, fileName));
 	}
+	if (queue.health) queue.health.counters.restartConversions += converted;
 	return converted;
 }
 
@@ -185,7 +295,8 @@ export function startPolling(queue: RequestQueue, scan: () => void, { intervalMs
 	const timer = setInterval(() => {
 		try {
 			if (!queue.isCurrent()) return;
-			clearWithdrawn(queue);
+			const withdrawn = clearWithdrawn(queue);
+			if (queue.health) queue.health.counters.withdrawn += withdrawn;
 			const now = Date.now();
 			if (now - lastPruneAt >= pruneEveryMs) {
 				lastPruneAt = now;

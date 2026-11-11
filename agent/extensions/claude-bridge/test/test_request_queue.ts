@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearRequestCache } from "../presence.js";
-import { cacheDirs, clearWithdrawn, failureCode, MAX_REQUEST_BYTES, OUTCOME_UNKNOWN, OutcomeUnknownError, processRequestFile, pruneAnswers, recoverInflight, RETENTION_MS, scanRequests, startPolling, type QueueResponse, type RequestQueue } from "../request-queue.js";
+import { BridgeHealth, cachePaths, clearWithdrawn, HEALTH_RING_SIZE, failureCode, MAX_REQUEST_BYTES, OUTCOME_UNKNOWN, OutcomeUnknownError, processRequestFile, pruneAnswers, recoverInflight, RETENTION_MS, scanRequests, startPolling, type QueueResponse, type RequestQueue } from "../request-queue.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-bridge-queue-"));
 
@@ -16,14 +16,16 @@ function setup(name: string, handle: RequestQueue["handle"] = async (fileId) => 
 		withdrawn: path.join(base, "withdrawn"),
 		responses: path.join(base, "responses"),
 		processed: path.join(base, "processed"),
+		health: path.join(base, "health.jsonl"),
 	};
-	for (const dir of Object.values(paths)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const dirs = [paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed];
+	for (const dir of dirs) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const calls: Array<{ fileId: string; raw: unknown }> = [];
 	let afterResponses = 0;
 	const queue: RequestQueue = {
 		paths,
 		isCurrent: () => true,
-		dirsArePrivate: () => Object.values(paths).every((dir) => {
+		dirsArePrivate: () => dirs.every((dir) => {
 			const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
 			return !!stat && stat.isDirectory() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o700;
 		}),
@@ -209,15 +211,81 @@ async function main(): Promise<void> {
 		fs.chmodSync(paths.responses, 0o700);
 	}
 
-	// Clean stop: clearing cacheDirs leaves only presence.json in the namespace.
+	// Clean stop: clearing cachePaths leaves only presence.json in the namespace.
 	{
 		const { paths } = setup("clean-stop");
 		const namespace = path.dirname(paths.requests);
-		for (const dir of cacheDirs(paths)) fs.writeFileSync(path.join(dir, `${randomUUID()}.json`), "{}", { mode: 0o600 });
+		for (const dir of [paths.requests, paths.inflight, paths.withdrawn, paths.responses, paths.processed]) fs.writeFileSync(path.join(dir, `${randomUUID()}.json`), "{}", { mode: 0o600 });
+		fs.writeFileSync(paths.health, "{}\n", { mode: 0o600 });
 		fs.writeFileSync(path.join(namespace, "presence.json"), "{}", { mode: 0o600 });
-		assert.deepEqual(new Set(cacheDirs(paths)), new Set(Object.values(paths)), "cacheDirs must cover every queue dir");
-		clearRequestCache(cacheDirs(paths));
+		assert.deepEqual(new Set(cachePaths(paths)), new Set(Object.values(paths)), "cachePaths must cover every queue path");
+		clearRequestCache(cachePaths(paths));
 		assert.deepEqual(fs.readdirSync(namespace), ["presence.json"]);
+	}
+
+	// Health: whitelisted fields only, ring capped, counters, survives a restart.
+	{
+		const { paths, queue } = setup("health");
+		const health = new BridgeHealth(paths.health, () => true, 1_000);
+		const healthQueue = { ...queue, health };
+		// Recorded per answered request, replay and size rejection.
+		const id = randomUUID();
+		writeRequest(paths.requests, id);
+		await scanRequests(healthQueue);
+		writeRequest(paths.requests, id);
+		await scanRequests(healthQueue);
+		const big = randomUUID();
+		writeRequest(paths.requests, big, "x".repeat(MAX_REQUEST_BYTES + 1));
+		await scanRequests(healthQueue);
+		assert.deepEqual(health.entries.map(({ type, outcome, replay }) => ({ type, outcome, replay })), [
+			{ type: "recall", outcome: "ok", replay: false },
+			{ type: "unknown", outcome: "replay", replay: true },
+			{ type: "unknown", outcome: "payload_too_large", replay: false },
+		]);
+		assert.equal(health.entries[2].reqBytes, MAX_REQUEST_BYTES + 1);
+		// Free text never lands in the ring.
+		health.record({ type: "../secret plan text", outcome: "Pi said: hello", ms: 5 });
+		const keys = ["ts", "type", "outcome", "ms", "reqBytes", "resBytes", "replay"];
+		for (const entry of health.entries) assert.deepEqual(Object.keys(entry), keys);
+		assert.deepEqual({ type: health.entries[3].type, outcome: health.entries[3].outcome }, { type: "unknown", outcome: "unknown" });
+		const fileText = fs.readFileSync(paths.health, "utf8");
+		assert.ok(!fileText.includes("secret") && !fileText.includes(id), "health file must hold no payload text or ids");
+		assert.equal(fs.statSync(paths.health).mode & 0o777, 0o600);
+		// Slow completions and restart conversions are counted.
+		health.record({ type: "save_plan", outcome: "ok", ms: 1_500 });
+		assert.equal(health.counters.slowCompletions, 1);
+		writeRequest(paths.inflight, randomUUID());
+		assert.equal(recoverInflight(healthQueue), 1);
+		assert.equal(health.counters.restartConversions, 1);
+		// Ring capped at HEALTH_RING_SIZE, file included; a restart reloads it and drops bad lines.
+		for (let index = 0; index < HEALTH_RING_SIZE + 10; index++) health.record({ type: "recall", outcome: "ok", ms: index % 100 });
+		assert.equal(health.entries.length, HEALTH_RING_SIZE);
+		fs.appendFileSync(paths.health, "not json\n{\"ts\":1,\"type\":\"recall\",\"extra\":true}\n");
+		const reloaded = new BridgeHealth(paths.health, () => true);
+		assert.deepEqual(reloaded.entries, health.entries);
+		// Summary: nearest-rank p50/p95 per type, plus counters.
+		const seeded = new BridgeHealth(path.join(paths.processed, "seeded.jsonl"), () => false);
+		for (let ms = 10; ms <= 100; ms += 10) seeded.record({ type: "recall", outcome: "ok", ms, resBytes: 2_048 });
+		seeded.record({ type: "tick_plan_task", outcome: OUTCOME_UNKNOWN, ms: 7 });
+		seeded.counters.withdrawn = 2;
+		const summary = seeded.summary();
+		assert.match(summary, /recall\s+n=10\s+p50 50ms\s+p95 100ms\s+res p95 2\.0KB\s+errors 0/);
+		assert.match(summary, /tick_plan_task\s+n=1\s+p50 7ms\s+p95 7ms\s+res p95 0\.0KB\s+errors 1/);
+		assert.match(summary, /not_delivered \(withdrawn\) 2 · outcome_unknown 1 · replays 0 · restart conversions 0 · slow completions 0/);
+		assert.equal(fs.existsSync(path.join(paths.processed, "seeded.jsonl")), false, "no write when the namespace is not private");
+		assert.equal(new BridgeHealth(path.join(paths.processed, "none.jsonl"), () => true).summary(), "Bridge health: no requests recorded yet.");
+	}
+
+	// The poll counts withdrawn requests before clearing them.
+	{
+		const { paths, queue } = setup("health-poll");
+		const health = new BridgeHealth(paths.health, () => true);
+		fs.writeFileSync(path.join(paths.withdrawn, `${randomUUID()}.json`), "{}", { mode: 0o600 });
+		const stop = startPolling({ ...queue, health }, () => {}, { intervalMs: 20 });
+		const deadline = Date.now() + 2_000;
+		while (health.counters.withdrawn === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		stop();
+		assert.equal(health.counters.withdrawn, 1);
 	}
 
 	// Size cap: over MAX_REQUEST_BYTES is answered payload_too_large without parsing;
