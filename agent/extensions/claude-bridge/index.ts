@@ -9,7 +9,7 @@ import { formatMemoryIndexBlock, migrateFlatFile, readMemoryEntry, readMemoryInd
 import { formatPeerBlock, isHarnessKind, MAX_MESSAGE_CHARS, MAX_PEERS, MAX_PENDING_PER_PEER, PeerMailbox, type HarnessKind, type PeerIdentity } from "./mailbox.js";
 import { ABANDONED_NAMESPACE_MS, clearRequestCache, failureStreakReporter, isAbandonedNamespace, LIVE_TTL_MS, restorablePeers, stoppedHeartbeatAt } from "./presence.js";
 import { findProjectRoot } from "./project-root.js";
-import { cacheDirs, failureCode, OutcomeUnknownError, recoverInflight, scanRequests, UUID_RE, type RequestQueue } from "./request-queue.js";
+import { cacheDirs, failureCode, OutcomeUnknownError, recoverInflight, scanRequests, startPolling, UUID_RE, type RequestQueue } from "./request-queue.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
 const EXTENSION_ID = "claude-bridge";
@@ -157,6 +157,7 @@ let cachedMode: string | null = null;
 let pairedPeers = new Map<string, HarnessPeer>();
 let mailbox: PeerMailbox | null = null;
 let watcher: FSWatcher | null = null;
+let stopPolling: (() => void) | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let passiveReason: string | null = null;
 let buildLease: BuildLease | null = null;
@@ -1288,15 +1289,23 @@ function scanRequestsBestEffort(pi: ExtensionAPI, ctx: ExtensionContext, paths: 
 	});
 }
 
-function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContext): void {
+function stopWatching(): void {
 	watcher?.close();
+	watcher = null;
+	stopPolling?.();
+	stopPolling = null;
+}
+
+// fs.watch delivers most requests at once; the poll is the backstop for missed events.
+function startWatcher(pi: ExtensionAPI, paths: BridgePaths, ctx: ExtensionContext): void {
+	stopWatching();
 	watcher = fs.watch(paths.requests, (_eventType, _fileName) => scheduleScan(pi, ctx, paths));
 	watcher.on("error", (error) => {
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.ui.notify(`claude-bridge watcher failed: ${message}`, "error");
 	});
+	stopPolling = startPolling(requestQueue(pi, ctx, paths), () => scheduleScan(pi, ctx, paths));
 	scanRequestsBestEffort(pi, ctx, paths);
-	// No backup poll — fs.watch is sufficient on modern macOS/Node with O(1) in-flight requests.
 }
 
 function dropPendingMessages(ctx: ExtensionContext | undefined, reason: string): number {
@@ -1311,8 +1320,7 @@ function stopActiveBridge(ctx?: ExtensionContext, reason = "shutdown"): void {
 	const previousLease = buildLease;
 	buildLease = null;
 	buildLeaseRequests = new Map();
-	watcher?.close();
-	watcher = null;
+	stopWatching();
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	heartbeatTimer = null;
 	dropPendingMessages(noticeContext, reason);
@@ -1556,8 +1564,7 @@ export default function claudeBridge(pi: ExtensionAPI) {
 					const current = readPresence(activePaths.presence, activePiSessionId);
 					if (!current || current.pid !== process.pid || current.startedAt !== startedAt) {
 						passiveReason = `Pi session ${activePiSessionId} bridge ownership changed.`;
-						watcher?.close();
-						watcher = null;
+						stopWatching();
 						clearInterval(heartbeatTimer!);
 						heartbeatTimer = null;
 						dropPendingMessages(ctx, "bridge ownership change");

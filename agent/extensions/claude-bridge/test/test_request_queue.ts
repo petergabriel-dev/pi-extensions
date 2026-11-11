@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearRequestCache } from "../presence.js";
-import { cacheDirs, failureCode, OUTCOME_UNKNOWN, OutcomeUnknownError, processRequestFile, recoverInflight, scanRequests, type QueueResponse, type RequestQueue } from "../request-queue.js";
+import { cacheDirs, clearWithdrawn, failureCode, MAX_REQUEST_BYTES, OUTCOME_UNKNOWN, OutcomeUnknownError, processRequestFile, pruneAnswers, recoverInflight, RETENTION_MS, scanRequests, startPolling, type QueueResponse, type RequestQueue } from "../request-queue.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-bridge-queue-"));
 
@@ -218,6 +218,67 @@ async function main(): Promise<void> {
 		assert.deepEqual(new Set(cacheDirs(paths)), new Set(Object.values(paths)), "cacheDirs must cover every queue dir");
 		clearRequestCache(cacheDirs(paths));
 		assert.deepEqual(fs.readdirSync(namespace), ["presence.json"]);
+	}
+
+	// Size cap: over MAX_REQUEST_BYTES is answered payload_too_large without parsing;
+	// exactly MAX_REQUEST_BYTES is still handled.
+	{
+		const { paths, queue, calls } = setup("size");
+		const big = randomUUID();
+		writeRequest(paths.requests, big, "x".repeat(MAX_REQUEST_BYTES + 1));
+		const edge = randomUUID();
+		const prefix = JSON.stringify({ id: edge, type: "recall", payload: {}, ts: 1, pad: "" }).slice(0, -2);
+		writeRequest(paths.requests, edge, `${prefix}${"y".repeat(MAX_REQUEST_BYTES - prefix.length - 2)}"}`);
+		assert.equal(fs.statSync(path.join(paths.requests, `${edge}.json`)).size, MAX_REQUEST_BYTES);
+		await scanRequests(queue);
+		const tooLarge = readJson(path.join(paths.responses, `${big}.json`));
+		assert.equal(tooLarge.error?.code, "payload_too_large");
+		assert.deepEqual(calls.map((call) => call.fileId), [edge]);
+		assert.deepEqual(fs.readdirSync(paths.inflight), []);
+	}
+
+	// Poll backstop: with no watcher, a request is still handled; withdrawn/ is cleared;
+	// after stop nothing more runs.
+	{
+		const { paths, queue, calls } = setup("poll");
+		const waitFor = async (check: () => boolean, ms = 2_000) => {
+			const deadline = Date.now() + ms;
+			while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+			return check();
+		};
+		fs.writeFileSync(path.join(paths.withdrawn, `${randomUUID()}.json`), "{}", { mode: 0o600 });
+		const stop = startPolling(queue, () => { void scanRequests(queue); }, { intervalMs: 20 });
+		const id = randomUUID();
+		writeRequest(paths.requests, id);
+		assert.ok(await waitFor(() => fs.existsSync(path.join(paths.responses, `${id}.json`))), "poll must handle the request");
+		assert.ok(await waitFor(() => fs.readdirSync(paths.withdrawn).length === 0), "poll must clear withdrawn/");
+		stop();
+		const after = randomUUID();
+		writeRequest(paths.requests, after);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.deepEqual(calls.map((call) => call.fileId), [id]);
+		assert.deepEqual(fs.readdirSync(paths.requests), [`${after}.json`]);
+		// A namespace that is no longer current is not polled.
+		const idle = startPolling({ ...queue, isCurrent: () => false }, () => { void scanRequests(queue); }, { intervalMs: 20 });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		idle();
+		assert.deepEqual(fs.readdirSync(paths.requests), [`${after}.json`]);
+	}
+
+	// Retention: answers older than RETENTION_MS are pruned, fresh ones kept.
+	{
+		const { paths, queue } = setup("retention");
+		const now = Date.now();
+		const old = new Date(now - RETENTION_MS - 1_000);
+		for (const dir of [paths.processed, paths.responses]) {
+			fs.writeFileSync(path.join(dir, "old.json"), "{}", { mode: 0o600 });
+			fs.utimesSync(path.join(dir, "old.json"), old, old);
+			fs.writeFileSync(path.join(dir, "fresh.json"), "{}", { mode: 0o600 });
+		}
+		pruneAnswers(queue, now);
+		assert.deepEqual(fs.readdirSync(paths.processed), ["fresh.json"]);
+		assert.deepEqual(fs.readdirSync(paths.responses), ["fresh.json"]);
+		assert.equal(clearWithdrawn(queue), 0);
 	}
 
 	// Only OutcomeUnknownError maps to outcome_unknown; every other error keeps its code.

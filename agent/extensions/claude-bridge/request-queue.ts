@@ -7,6 +7,12 @@ import * as path from "node:path";
 // execute one request twice.
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const MAX_REQUEST_BYTES = 1024 * 1024;
+// Backstop for missed fs.watch events: a lost event costs at most one poll interval.
+export const POLL_MS = 500;
+// Old answers are kept long enough to replay a repeated ID (clients wait ~32 s at most).
+export const RETENTION_MS = 10 * 60_000;
+export const PRUNE_EVERY_MS = 60_000;
 
 // The operation may or may not have been applied (crash mid-request, or a write whose
 // owner did not answer in time). Never report it as a plain failure.
@@ -105,6 +111,12 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 		safeUnlink(claimed);
 		return;
 	}
+	if (stat.size > MAX_REQUEST_BYTES) {
+		writeResponse(queue, errorResponse(fileId, "payload_too_large", `Bridge request exceeds ${MAX_REQUEST_BYTES} bytes.`));
+		safeUnlink(claimed);
+		queue.afterResponse();
+		return;
+	}
 
 	let response: QueueResponse;
 	try {
@@ -137,6 +149,53 @@ export function recoverInflight(queue: RequestQueue): number {
 		safeUnlink(path.join(queue.paths.inflight, fileName));
 	}
 	return converted;
+}
+
+function removeEntries(dir: string, shouldRemove: (stat: fs.Stats) => boolean): number {
+	let fileNames: string[];
+	try { fileNames = fs.readdirSync(dir); } catch { return 0; }
+	let removed = 0;
+	for (const fileName of fileNames) {
+		const filePath = path.join(dir, fileName);
+		let stat: fs.Stats;
+		try { stat = fs.lstatSync(filePath); } catch { continue; }
+		if (stat.isDirectory() || !shouldRemove(stat)) continue;
+		safeUnlink(filePath);
+		removed += 1;
+	}
+	return removed;
+}
+
+/** Removes requests the client withdrew (never run). Returns how many were removed. */
+export function clearWithdrawn(queue: RequestQueue): number {
+	if (!queue.dirsArePrivate()) return 0;
+	return removeEntries(queue.paths.withdrawn, () => true);
+}
+
+/** Removes processed/ and responses/ entries older than RETENTION_MS. */
+export function pruneAnswers(queue: RequestQueue, now = Date.now()): void {
+	if (!queue.dirsArePrivate()) return;
+	for (const dir of [queue.paths.processed, queue.paths.responses]) removeEntries(dir, (stat) => now - stat.mtimeMs > RETENTION_MS);
+}
+
+// Every tick: clear withdrawn/ and request a scan; prune old answers once per
+// PRUNE_EVERY_MS. Unref'd, never throws, and idle once the namespace is not current.
+export function startPolling(queue: RequestQueue, scan: () => void, { intervalMs = POLL_MS, pruneEveryMs = PRUNE_EVERY_MS }: { intervalMs?: number; pruneEveryMs?: number } = {}): () => void {
+	let lastPruneAt = 0;
+	const timer = setInterval(() => {
+		try {
+			if (!queue.isCurrent()) return;
+			clearWithdrawn(queue);
+			const now = Date.now();
+			if (now - lastPruneAt >= pruneEveryMs) {
+				lastPruneAt = now;
+				pruneAnswers(queue, now);
+			}
+			scan();
+		} catch { /* best-effort backstop; the next tick retries */ }
+	}, intervalMs);
+	timer.unref?.();
+	return () => clearInterval(timer);
 }
 
 export async function scanRequests(queue: RequestQueue): Promise<void> {
