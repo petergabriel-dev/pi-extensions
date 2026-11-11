@@ -18,7 +18,9 @@ const MAX_TIMEOUT_MS = 10 * 60_000;
 const POLL_MS = 100;
 const NOT_DELIVERED = "not_delivered";
 const OUTCOME_UNKNOWN = "outcome_unknown";
-// Re-sent once under a new id when Pi answers outcome_unknown; reads have no side effects.
+// Re-sent once under a new id when Pi answers outcome_unknown. These are safe to repeat:
+// reads, and recall, whose only side effects (requesting or releasing the Build lease)
+// are idempotent.
 const READ_ONLY_TYPES = new Set(["recall", "recall_entry", "read_plan_tasks", "read_messages"]);
 const LIVE_TTL_MS = 5_000;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;

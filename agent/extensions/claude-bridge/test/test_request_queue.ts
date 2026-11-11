@@ -114,7 +114,7 @@ async function main(): Promise<void> {
 		assert.deepEqual(fs.readdirSync(paths.requests), []);
 	}
 
-	// Symlinks and non-0600 files are claimed, dropped and never parsed or answered.
+	// Symlinks and non-0600 files are claimed and never parsed, but answered invalid_request.
 	{
 		const { paths, queue, calls } = setup("unsafe");
 		const target = path.join(root, "outside.json");
@@ -127,8 +127,53 @@ async function main(): Promise<void> {
 		assert.equal(calls.length, 0);
 		assert.deepEqual(fs.readdirSync(paths.requests), []);
 		assert.deepEqual(fs.readdirSync(paths.inflight), []);
-		assert.deepEqual(fs.readdirSync(paths.responses), []);
+		for (const id of [linkId, loose]) {
+			const answer = readJson(path.join(paths.responses, `${id}.json`));
+			assert.deepEqual([answer.id, answer.ok, answer.error?.code], [id, false, "invalid_request"]);
+		}
 		assert.ok(fs.existsSync(target), "symlink target must be untouched");
+	}
+
+	// A same-ID duplicate written while the first copy runs is not claimed (that would
+	// replace the running file and run it twice); it is answered by replay afterwards.
+	{
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const { paths, queue, calls } = setup("duplicate", async (fileId) => {
+			await gate;
+			return { id: fileId, ok: true, result: { ran: calls.length } };
+		});
+		const id = randomUUID();
+		const fileName = `${id}.json`;
+		writeRequest(paths.requests, id);
+		const first = processRequestFile(queue, fileName);
+		writeRequest(paths.requests, id);
+		// Not awaited before the check: a regression would block on the same gate.
+		const duplicateScan = scanRequests(queue);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const callsWhileRunning = calls.length;
+		const waiting = fs.readdirSync(paths.requests);
+		release();
+		await Promise.all([first, duplicateScan]);
+		assert.equal(callsWhileRunning, 1, "duplicate must not run while the first copy runs");
+		assert.deepEqual(waiting, [fileName], "duplicate must wait in requests/");
+		fs.unlinkSync(path.join(paths.responses, fileName)); // The first client read its answer.
+		await scanRequests(queue);
+		assert.equal(calls.length, 1, "duplicate must never run");
+		assert.deepEqual(readJson(path.join(paths.responses, fileName)), { id, ok: true, result: { ran: 1 } });
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}
+
+	// A stale listing (the request file is already gone) writes nothing, even with a cached answer.
+	{
+		const { paths, queue, calls } = setup("stale");
+		const health = new BridgeHealth(paths.health, () => true);
+		const id = randomUUID();
+		fs.writeFileSync(path.join(paths.processed, `${id}.json`), JSON.stringify({ id, ok: true, result: {} }), { mode: 0o600 });
+		await processRequestFile({ ...queue, health }, `${id}.json`);
+		assert.equal(calls.length, 0);
+		assert.deepEqual(fs.readdirSync(paths.responses), []);
+		assert.deepEqual(health.entries, []);
 	}
 
 	// Non-UUID names (including traversal attempts) and temp files are ignored.

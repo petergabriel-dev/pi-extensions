@@ -185,6 +185,8 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 	const fileId = fileName.slice(0, -".json".length);
 	if (!UUID_RE.test(fileId)) return;
 	const requestFile = path.join(queue.paths.requests, fileName);
+	// A stale directory listing: another scan already handled it, or the client withdrew it.
+	if (!fs.lstatSync(requestFile, { throwIfNoEntry: false })) return;
 	if (replayProcessedResponse(queue, fileId)) {
 		safeUnlink(requestFile);
 		queue.health?.record({ type: "unknown", outcome: "replay", replay: true });
@@ -198,15 +200,14 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 		writeResponse(queue, errorResponse(fileId, "path_traversal", "Request path escaped bridge inflight directory."));
 		return;
 	}
+	// The same ID is still running: rename would replace it and run it twice. Leave the
+	// duplicate in requests/; once the first answer lands it is replayed.
+	if (fs.lstatSync(claimed, { throwIfNoEntry: false })) return;
 	try { fs.renameSync(requestFile, claimed); } catch { return; }
 
 	// rename moves a symlink itself, so lstat sees exactly what was claimed.
 	let stat: fs.Stats;
 	try { stat = fs.lstatSync(claimed); } catch { return; }
-	if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
-		safeUnlink(claimed);
-		return;
-	}
 	const started = Date.now();
 	const reqBytes = stat.size;
 	const finish = (response: QueueResponse, type: unknown): void => {
@@ -222,6 +223,11 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 		});
 		queue.afterResponse();
 	};
+	// Never parsed, but answered, so the client is not left waiting for an outcome.
+	if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
+		finish(errorResponse(fileId, "invalid_request", "Bridge request file must be a regular 0600 file."), "unknown");
+		return;
+	}
 	if (reqBytes > MAX_REQUEST_BYTES) {
 		finish(errorResponse(fileId, "payload_too_large", `Bridge request exceeds ${MAX_REQUEST_BYTES} bytes.`), "unknown");
 		return;
