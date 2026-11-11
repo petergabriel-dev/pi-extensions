@@ -929,7 +929,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 	// Sized with the empty ranked containers and a worst-case meta, so meta.bytes is an
 	// upper bound on the compact result.
 	const maxCount = Number.MAX_SAFE_INTEGER;
-	const sizing = { ...fixed, memory: { ...fixed.memory, entries: [] }, docIndex: [], sections: [], meta: { bytes: maxCount, budget: maxCount, budgetExceeded: false, omittedDocs: maxCount, omittedSections: maxCount, omittedMemory: maxCount } };
+	const sizing = { ...fixed, memory: { ...fixed.memory, entries: [] }, docIndex: [], sections: [], meta: { bytes: maxCount, budget: maxCount, budgetExceeded: false, omittedDocs: maxCount, omittedSections: maxCount, omittedMemory: maxCount, fallback: false } };
 	const ranked = rankRecall({
 		query: payload.query ?? "",
 		docs: readEngineeringDocs(projectRoot),

@@ -43,6 +43,8 @@ export interface RankedRecall {
 		omittedDocs: number;
 		omittedSections: number;
 		omittedMemory: number;
+		/** Sections are the invariants default (empty query, or nothing matched it). */
+		fallback: boolean;
 	};
 }
 
@@ -184,9 +186,10 @@ export function rankRecall(input: RankRecallInput): RankedRecall {
 
 	const split = input.docs.map((doc) => ({ path: doc.path, ...splitSections(doc) }));
 	const allSections = split.flatMap((doc, docOrder) => doc.sections.map((section) => ({ section, docOrder })));
+	const invariantsSections = allSections.filter(({ section }) => section.path.endsWith("invariants.md"));
 	let sectionOrder: typeof allSections;
 	if (queryTerms.length === 0) {
-		sectionOrder = allSections.filter(({ section }) => section.path.endsWith("invariants.md"));
+		sectionOrder = invariantsSections;
 	} else {
 		const sectionTokens = allSections.map(({ section }) => {
 			const heading = tokenize(section.heading);
@@ -198,6 +201,9 @@ export function rankRecall(input: RankRecallInput): RankedRecall {
 			.filter((entry) => entry.score > 0)
 			.sort((a, b) => b.score - a.score || a.docOrder - b.docOrder || a.section.startLine - b.section.startLine);
 	}
+	// A query that matches no section still gets the must-not-break rules.
+	const fallback = sectionOrder.length === 0 || queryTerms.length === 0;
+	if (sectionOrder.length === 0) sectionOrder = invariantsSections;
 	const memoryScores = bm25(input.memory.map(tokenize), queryTerms);
 	const memoryOrder = queryTerms.length === 0 ? [] : input.memory
 		.map((line, index) => ({ line, index, score: memoryScores[index] }))
@@ -208,24 +214,31 @@ export function rankRecall(input: RankRecallInput): RankedRecall {
 	// containers plus each item and one separator.
 	const result: Pick<RankedRecall, "docIndex" | "sections" | "memory"> = { docIndex: [], sections: [], memory: [] };
 	let used = byteLength(JSON.stringify(result));
-	const tryAdd = <T>(list: T[], item: T): boolean => {
+	const tryAdd = <T>(list: T[], item: T, limit = rankedBudget): boolean => {
 		const size = byteLength(JSON.stringify(item)) + 1;
-		if (used + size > rankedBudget) return false;
+		if (used + size > limit) return false;
 		list.push(item);
 		used += size;
 		return true;
 	};
-	let omittedDocs = 0;
-	for (const doc of split) if (!tryAdd(result.docIndex, { path: doc.path, title: doc.title })) omittedDocs++;
+	// The doc index is a fallback pointer list: sections come first, but leave room for it
+	// (its own size, at most a third of the ranked budget). Unused room goes back to sections.
+	const docEntries = split.map((doc) => ({ path: doc.path, title: doc.title }));
+	const docIndexBytes = docEntries.reduce((sum, entry) => sum + byteLength(JSON.stringify(entry)) + 1, 0);
+	const docReserve = Math.min(docIndexBytes, Math.floor(rankedBudget / 3));
 	let omittedMemory = queryTerms.length === 0 ? input.memory.length : 0;
 	for (const { line } of memoryOrder.slice(0, MEMORY_FIRST_ENTRIES)) if (!tryAdd(result.memory, line)) omittedMemory++;
+	const deferred: RecallSection[] = [];
+	for (const { section } of sectionOrder) if (!tryAdd(result.sections, section, rankedBudget - docReserve)) deferred.push(section);
+	let omittedDocs = 0;
+	for (const entry of docEntries) if (!tryAdd(result.docIndex, entry)) omittedDocs++;
 	let omittedSections = 0;
-	for (const { section } of sectionOrder) if (!tryAdd(result.sections, section)) omittedSections++;
+	for (const section of deferred) if (!tryAdd(result.sections, section)) omittedSections++;
 	for (const { line } of memoryOrder.slice(MEMORY_FIRST_ENTRIES)) if (!tryAdd(result.memory, line)) omittedMemory++;
 
 	const bytes = input.fixedBytes + byteLength(JSON.stringify(result));
 	return {
 		...result,
-		meta: { bytes, budget, budgetExceeded: bytes > budget, omittedDocs, omittedSections, omittedMemory },
+		meta: { bytes, budget, budgetExceeded: bytes > budget, omittedDocs, omittedSections, omittedMemory, fallback },
 	};
 }

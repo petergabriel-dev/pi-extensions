@@ -71,9 +71,13 @@ assert.deepEqual(empty.sections.map((section) => section.startLine), [...empty.s
 assert.deepEqual(empty.memory, []);
 assert.equal(empty.meta.omittedMemory, memory.length);
 
-// No match: nothing ranked, nothing omitted.
+assert.equal(empty.meta.fallback, true);
+
+// No match: the invariants sections are the fallback, flagged; no memory.
 const none = rank("zzzz qqqq");
-assert.deepEqual([none.sections, none.memory, none.meta.omittedSections, none.meta.omittedMemory], [[], [], 0, 0]);
+assert.deepEqual(none.sections, empty.sections);
+assert.deepEqual([none.memory, none.meta.fallback, none.meta.omittedMemory], [[], true, 0]);
+assert.equal(rank("build lease human approval").meta.fallback, false);
 
 // Deterministic.
 assert.deepEqual(rank("bridge plan lease"), rank("bridge plan lease"));
@@ -125,6 +129,26 @@ const crowded = rank("commit attribution lease plan", 8 * KB, 0, { docs: [tinyDo
 assert.ok(crowded.meta.omittedSections > 0, "sections must overflow the budget here");
 assert.ok(Buffer.byteLength(JSON.stringify(memory[0])) > Buffer.byteLength(JSON.stringify(crowded.sections[0])), "memory line must be larger than one section");
 assert.equal(crowded.memory[0], memory[0]);
+
+// A repo-sized doc index (61 docs, ~8 KB) must not starve sections and memory when a
+// build-mode fixed part leaves only the 8 KB floor; with an ample budget it stays complete.
+const repoDocs: RecallDoc[] = Array.from({ length: 61 }, (_, index) => ({
+	path: `docs/engineering/decisions/ADR-${String(index).padStart(4, "0")}-bridge-request-decision-${index}.md`,
+	text: `---\ntitle: Bridge request lifecycle decision ${index}\n---\n\n## Decision\n- Lease ${index} claims requests by rename.\n`,
+}));
+const repoIndexBytes = Buffer.byteLength(JSON.stringify(repoDocs.map((doc) => ({ path: doc.path, title: splitSections(doc).title }))), "utf8");
+assert.ok(repoIndexBytes > 7 * KB && repoIndexBytes < RANKED_FLOOR_BYTES, `index fixture is ${repoIndexBytes} bytes`);
+const buildSized = rank("commit attribution lease claims", 32 * KB, 37 * KB, { docs: repoDocs });
+assert.ok(rankedBytes(buildSized) <= RANKED_FLOOR_BYTES);
+assert.ok(buildSized.sections.length > 0, "doc index must not starve sections");
+assert.equal(buildSized.memory[0], memory[0], "doc index must not starve memory");
+assert.ok(buildSized.meta.omittedDocs > 0 && buildSized.docIndex.length > 0);
+assert.deepEqual(buildSized.docIndex.map((entry) => entry.path), repoDocs.map((doc) => doc.path).filter((docPath) => buildSized.docIndex.some((entry) => entry.path === docPath)), "partial index keeps doc order");
+assert.equal(buildSized.docIndex[0].path, repoDocs[0].path, "partial index keeps the first docs");
+const ample = rank("commit attribution lease claims", 32 * KB, 4 * KB, { docs: repoDocs });
+assert.equal(ample.meta.omittedDocs, 0);
+assert.equal(ample.docIndex.length, repoDocs.length);
+assert.ok(ample.sections.length > buildSized.sections.length);
 
 // Floor: a large fixed part still leaves 8 KB for ranked content and is reported over budget.
 const floored = rank("bridge request lease", 32 * KB, 30 * KB, { docs: largeCorpus });
