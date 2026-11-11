@@ -111,6 +111,41 @@ function startResponder(cwd) {
 	return { requests, stop: () => clearInterval(timer) };
 }
 
+// A namespace from a Pi that claims requests (has inflight/ and withdrawn/).
+function addModernSession(cwd, id, peers = []) {
+	const paths = addSession(cwd, id, peers);
+	for (const dir of [paths.inflight, paths.withdrawn]) {
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		fs.chmodSync(dir, 0o700);
+	}
+	return paths;
+}
+
+// Claims like Pi (requests/ -> inflight/) and answers with reply(request, count); a null
+// reply leaves the request claimed and unanswered.
+function startClaimingResponder(cwd, reply = (request) => ({ id: request.id, ok: true, result: { type: request.type } })) {
+	const requests = [];
+	const timer = setInterval(() => {
+		for (const session of client.liveSessions(cwd)) {
+			let names;
+			try { names = fs.readdirSync(session.paths.requests); } catch { continue; }
+			for (const name of names) {
+				if (!name.endsWith(".json")) continue;
+				const claimed = path.join(session.paths.inflight, name);
+				try { fs.renameSync(path.join(session.paths.requests, name), claimed); } catch { continue; }
+				const request = JSON.parse(fs.readFileSync(claimed, "utf8"));
+				requests.push(request);
+				const response = reply(request, requests.length);
+				if (!response) continue;
+				writeJson(path.join(session.paths.responses, name), response);
+				fs.unlinkSync(claimed);
+			}
+		}
+	}, 10);
+	timer.unref();
+	return { requests, stop: () => clearInterval(timer) };
+}
+
 function startMailboxResponder(cwd, initialMessages = [], failedAcks = 0) {
 	const requests = [];
 	let messages = initialMessages.map((message) => structuredClone(message));
@@ -560,6 +595,121 @@ async function main() {
 		await assert.rejects(client.bridgeRequest("recall", {}, { cwd, identity: HARNESS }), (error) => error.message === client.BRIDGE_DOWN_MESSAGE);
 		assert.deepEqual(fs.readdirSync(legacyRequests), []);
 	});
+
+	assert.deepEqual(client.bridgeTimeouts({}, {}), { pickupMs: 2_000, completionMs: 30_000 });
+	assert.deepEqual(client.bridgeTimeouts({}, { PI_BRIDGE_PICKUP_TIMEOUT_MS: "500", PI_BRIDGE_COMPLETION_TIMEOUT_MS: "9000" }), { pickupMs: 500, completionMs: 9_000 });
+	for (const bad of ["", "abc", "0", "-5", "1.5", "99999999999"]) {
+		assert.deepEqual(client.bridgeTimeouts({}, { PI_BRIDGE_PICKUP_TIMEOUT_MS: bad, PI_BRIDGE_COMPLETION_TIMEOUT_MS: bad }), { pickupMs: 2_000, completionMs: 30_000 }, `invalid timeout ${JSON.stringify(bad)}`);
+	}
+	assert.deepEqual(client.bridgeTimeouts({ pickupTimeoutMs: 1_000, completionTimeoutMs: 1_000 }, { PI_BRIDGE_PICKUP_TIMEOUT_MS: "500" }), { pickupMs: 1_000, completionMs: 1_000 });
+	assert.deepEqual(client.bridgeTimeouts({ pickupTimeoutMs: -1 }, {}), { pickupMs: 2_000, completionMs: 30_000 });
+
+	await test("claimed request answers and its response file is removed", async (cwd, responder) => {
+		const paths = addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		const result = await client.sendRequestToSession(cwd, session, "recall", {}, HARNESS);
+		assert.equal(result.result.type, "recall");
+		assert.equal(responder.requests.length, 1);
+		assert.deepEqual(fs.readdirSync(paths.responses), []);
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+	}, (cwd) => startClaimingResponder(cwd));
+
+	await test("unclaimed request is withdrawn and reported not delivered with exact text", async (cwd) => {
+		const paths = addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		const started = Date.now();
+		await assert.rejects(
+			client.sendRequestToSession(cwd, session, "save_plan", { planText: "x" }, HARNESS, { pickupTimeoutMs: 200 }),
+			(error) => error.message === client.BRIDGE_DOWN_MESSAGE && error.code === "not_delivered",
+		);
+		assert.ok(Date.now() - started < 1_500, "pickup deadline must bound the wait");
+		assert.deepEqual(fs.readdirSync(paths.requests), [], "a not-delivered request must not stay where Pi could claim it");
+		assert.equal(fs.readdirSync(paths.withdrawn).length, 1);
+	}, noResponder);
+
+	await test("claimed but unanswered request reports outcome unknown, never bridge-down", async (cwd, responder) => {
+		const paths = addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		await assert.rejects(
+			client.sendRequestToSession(cwd, session, "tick_plan_task", { taskId: "t" }, HARNESS, { pickupTimeoutMs: 1_000, completionTimeoutMs: 200 }),
+			(error) => error.code === "outcome_unknown" && /may have been applied/.test(error.message) && error.message !== client.BRIDGE_DOWN_MESSAGE,
+		);
+		assert.equal(responder.requests.length, 1, "a write must not be re-sent");
+		assert.equal(fs.readdirSync(paths.inflight).length, 1);
+		assert.deepEqual(fs.readdirSync(paths.withdrawn), []);
+	}, (cwd) => startClaimingResponder(cwd, () => null));
+
+	await test("claim racing the withdraw keeps waiting for the answer", async (cwd) => {
+		const paths = addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		const originalRename = fs.renameSync;
+		let raced = false;
+		fs.renameSync = function renameWithClaim(from, to) {
+			if (!raced && path.dirname(to) === paths.withdrawn) {
+				raced = true;
+				const name = path.basename(from);
+				originalRename.call(fs, from, path.join(paths.inflight, name)); // Pi claims at the last instant.
+				setTimeout(() => writeJson(path.join(paths.responses, name), { id: name.slice(0, -".json".length), ok: true, result: { late: true } }), 50);
+			}
+			return originalRename.call(fs, from, to);
+		};
+		try {
+			const result = await client.sendRequestToSession(cwd, session, "save_plan", {}, HARNESS, { pickupTimeoutMs: 100, completionTimeoutMs: 2_000 });
+			assert.deepEqual(result.result, { late: true });
+		} finally {
+			fs.renameSync = originalRename;
+		}
+		assert.ok(raced, "withdraw must have raced the claim");
+		assert.deepEqual(fs.readdirSync(paths.withdrawn), []);
+	}, noResponder);
+
+	await test("legacy namespace without inflight/ keeps one deadline and exact bridge-down text", async (cwd) => {
+		const paths = addSession(cwd, "pi-legacy", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		await assert.rejects(
+			client.sendRequestToSession(cwd, session, "recall", {}, HARNESS, { pickupTimeoutMs: 200 }),
+			(error) => error.message === client.BRIDGE_DOWN_MESSAGE && error.code === undefined,
+		);
+		assert.equal(fs.readdirSync(paths.requests).length, 1, "legacy mode does not withdraw");
+	}, noResponder);
+
+	await test("read answered outcome_unknown is re-sent once under a new id", async (cwd, responder) => {
+		addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		const result = await client.sendRequestToSession(cwd, session, "recall", {}, HARNESS);
+		assert.equal(result.result.type, "recall");
+		assert.equal(responder.requests.length, 2);
+		assert.notEqual(responder.requests[0].id, responder.requests[1].id);
+		assert.equal(result.requestId, responder.requests[1].id);
+	}, (cwd) => startClaimingResponder(cwd, (request, count) => count === 1
+		? { id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } }
+		: { id: request.id, ok: true, result: { type: request.type } }));
+
+	await test("read re-send happens at most once", async (cwd, responder) => {
+		addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		await assert.rejects(client.sendRequestToSession(cwd, session, "read_plan_tasks", {}, HARNESS), (error) => error.code === "outcome_unknown");
+		assert.equal(responder.requests.length, 2);
+	}, (cwd) => startClaimingResponder(cwd, (request) => ({ id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } })));
+
+	await test("write answered outcome_unknown is not re-sent", async (cwd, responder) => {
+		addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		await assert.rejects(
+			client.sendRequestToSession(cwd, session, "save_plan", { planText: "x" }, HARNESS),
+			(error) => error.code === "outcome_unknown" && error.message === "Pi stopped mid-request.",
+		);
+		assert.equal(responder.requests.length, 1);
+	}, (cwd) => startClaimingResponder(cwd, (request) => ({ id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } })));
+
+	await test("peer hook stays fast and silent when Pi claims but hangs", async (cwd, responder) => {
+		addModernSession(cwd, "pi-modern", [{ ...HARNESS, pendingCount: 1 }]);
+		const started = Date.now();
+		const result = await runScript("pi-peer-hook.js", cwd, { hook_event_name: "UserPromptSubmit", session_id: HARNESS.id });
+		assert.ok(Date.now() - started < 3_500, `peer hook took ${Date.now() - started}ms`);
+		assert.equal(result.stdout, "");
+		assert.equal(responder.requests[0]?.type, "read_messages");
+	}, (cwd) => startClaimingResponder(cwd, () => null));
 
 	await test("ambiguous sessions fail with choices and pair_session instruction", async (cwd, responder) => {
 		addSession(cwd, "pi-one");
