@@ -247,7 +247,7 @@ try {
 	step = "fault: crash with a claimed request -> outcome_unknown after restart";
 	pi.child.kill("SIGSTOP");
 	const lost = randomUUID();
-	writeFileSync(path.join(dir("inflight"), `${lost}.json`), JSON.stringify({ id: lost, type: "tick_plan_task", payload: {}, ts: Date.now(), peer: IDENTITY }), { mode: 0o600 });
+	writeFileSync(path.join(dir("inflight"), `${lost}.json`), JSON.stringify({ id: lost, type: "tick_plan_task", payload: { taskId: tasks.result.tasks[1].id }, ts: Date.now(), peer: IDENTITY }), { mode: 0o600 });
 	await stopPi(pi, "SIGKILL");
 	// A fresh presence from the killed pid would make the restart passive; wait out the 5 s TTL.
 	await sleep(5_500);
@@ -255,6 +255,12 @@ try {
 	const recovered = await waitFor(() => readAnswer(lost), "restart recovery answer", 20_000);
 	assert.equal(recovered.error?.code, "outcome_unknown");
 	assert.deepEqual(readdirSync(dir("inflight")), []);
+	// The in-memory Build lease does not survive the restart.
+	assert.equal(client.holdsBuildLease(project, IDENTITY), false, "a restart must release the Build lease");
+	// ponytail: plan/progress survival is not asserted. Pi writes no session file until the
+	// first assistant message and this e2e makes no model calls, so the restart starts a new
+	// session with no saved plan (traps.md, Pi ↔ harness bridge). Assert it once bridge
+	// plan state is durable without an assistant message.
 
 	step = "no model calls";
 	assert.equal(modelCalls, 0);
