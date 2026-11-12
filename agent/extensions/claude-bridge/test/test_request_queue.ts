@@ -290,9 +290,21 @@ async function main(): Promise<void> {
 		assert.equal(health.entries[2].reqBytes, MAX_REQUEST_BYTES + 1);
 		// Free text never lands in the ring.
 		health.record({ type: "../secret plan text", outcome: "Pi said: hello", ms: 5 });
-		const keys = ["ts", "type", "outcome", "ms", "reqBytes", "resBytes", "replay"];
+		const keys = ["ts", "type", "outcome", "ms", "reqBytes", "resBytes", "replay", "retry"];
 		for (const entry of health.entries) assert.deepEqual(Object.keys(entry), keys);
 		assert.deepEqual({ type: health.entries[3].type, outcome: health.entries[3].outcome }, { type: "unknown", outcome: "unknown" });
+		// A client re-send is flagged only by an envelope `retry` of literal true.
+		for (const retry of [true, "yes", 1]) {
+			const retryId = randomUUID();
+			writeRequest(paths.requests, retryId, JSON.stringify({ id: retryId, type: "recall", payload: {}, ts: 1, retry }));
+			await scanRequests(healthQueue);
+		}
+		assert.deepEqual(health.entries.slice(-3).map(({ type, retry }) => ({ type, retry })), [
+			{ type: "recall", retry: true },
+			{ type: "recall", retry: false },
+			{ type: "recall", retry: false },
+		]);
+		assert.ok(health.entries.slice(0, -3).every((entry) => entry.retry === false), "first sends, replays and rejections are never retries");
 		const fileText = fs.readFileSync(paths.health, "utf8");
 		assert.ok(!fileText.includes("secret") && !fileText.includes(id), "health file must hold no payload text or ids");
 		assert.equal(fs.statSync(paths.health).mode & 0o777, 0o600);
@@ -305,18 +317,20 @@ async function main(): Promise<void> {
 		// Ring capped at HEALTH_RING_SIZE, file included; a restart reloads it and drops bad lines.
 		for (let index = 0; index < HEALTH_RING_SIZE + 10; index++) health.record({ type: "recall", outcome: "ok", ms: index % 100 });
 		assert.equal(health.entries.length, HEALTH_RING_SIZE);
-		fs.appendFileSync(paths.health, "not json\n{\"ts\":1,\"type\":\"recall\",\"extra\":true}\n");
+		// The last line has the pre-`retry` key shape: an upgrade drops it once (accepted).
+		fs.appendFileSync(paths.health, "not json\n{\"ts\":1,\"type\":\"recall\",\"extra\":true}\n{\"ts\":1,\"type\":\"recall\",\"outcome\":\"ok\",\"ms\":1,\"reqBytes\":0,\"resBytes\":0,\"replay\":false}\n");
 		const reloaded = new BridgeHealth(paths.health, () => true);
 		assert.deepEqual(reloaded.entries, health.entries);
 		// Summary: nearest-rank p50/p95 per type, plus counters.
 		const seeded = new BridgeHealth(path.join(paths.processed, "seeded.jsonl"), () => false);
 		for (let ms = 10; ms <= 100; ms += 10) seeded.record({ type: "recall", outcome: "ok", ms, resBytes: 2_048 });
 		seeded.record({ type: "tick_plan_task", outcome: OUTCOME_UNKNOWN, ms: 7 });
+		seeded.record({ type: "read_plan_tasks", outcome: "ok", ms: 3, retry: true });
 		seeded.counters.withdrawn = 2;
 		const summary = seeded.summary();
 		assert.match(summary, /recall\s+n=10\s+p50 50ms\s+p95 100ms\s+res p95 2\.0KB\s+errors 0/);
 		assert.match(summary, /tick_plan_task\s+n=1\s+p50 7ms\s+p95 7ms\s+res p95 0\.0KB\s+errors 1/);
-		assert.match(summary, /not_delivered \(withdrawn\) 2 · outcome_unknown 1 · replays 0 · restart conversions 0 · slow completions 0/);
+		assert.match(summary, /not_delivered \(withdrawn\) 2 · outcome_unknown 1 · replays 0 · restart conversions 0 · slow completions 0 · retries 1$/);
 		assert.equal(fs.existsSync(path.join(paths.processed, "seeded.jsonl")), false, "no write when the namespace is not private");
 		assert.equal(new BridgeHealth(path.join(paths.processed, "none.jsonl"), () => true).summary(), "Bridge health: no requests recorded yet.");
 	}

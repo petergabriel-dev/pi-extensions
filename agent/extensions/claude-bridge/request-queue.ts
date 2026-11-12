@@ -52,6 +52,8 @@ export interface HealthEntry {
 	reqBytes: number;
 	resBytes: number;
 	replay: boolean;
+	/** The client's one re-send of a read after outcome_unknown (envelope `retry: true`). */
+	retry: boolean;
 }
 
 function code(value: unknown): string {
@@ -66,7 +68,7 @@ function count(value: unknown): number {
 type HealthInput = { [Key in keyof HealthEntry]?: unknown };
 
 function healthEntry(value: HealthInput): HealthEntry {
-	return { ts: count(value.ts), type: code(value.type), outcome: code(value.outcome), ms: count(value.ms), reqBytes: count(value.reqBytes), resBytes: count(value.resBytes), replay: value.replay === true };
+	return { ts: count(value.ts), type: code(value.type), outcome: code(value.outcome), ms: count(value.ms), reqBytes: count(value.reqBytes), resBytes: count(value.resBytes), replay: value.replay === true, retry: value.retry === true };
 }
 
 /** Slow-completion threshold: Pi's PI_BRIDGE_COMPLETION_TIMEOUT_MS when valid, else 30 s. */
@@ -126,7 +128,8 @@ export class BridgeHealth {
 		}
 		const outcomeUnknown = this.entries.filter((entry) => entry.outcome === OUTCOME_UNKNOWN).length;
 		const replays = this.entries.filter((entry) => entry.replay).length;
-		lines.push(`not_delivered (withdrawn) ${this.counters.withdrawn} · outcome_unknown ${outcomeUnknown} · replays ${replays} · restart conversions ${this.counters.restartConversions} · slow completions ${this.counters.slowCompletions}`);
+		const retries = this.entries.filter((entry) => entry.retry).length;
+		lines.push(`not_delivered (withdrawn) ${this.counters.withdrawn} · outcome_unknown ${outcomeUnknown} · replays ${replays} · restart conversions ${this.counters.restartConversions} · slow completions ${this.counters.slowCompletions} · retries ${retries}`);
 		return lines.join("\n");
 	}
 }
@@ -210,26 +213,27 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 	try { stat = fs.lstatSync(claimed); } catch { return; }
 	const started = Date.now();
 	const reqBytes = stat.size;
-	const finish = (response: QueueResponse, type: unknown): void => {
+	const finish = (response: QueueResponse, envelope: { type?: unknown; retry?: unknown } = {}): void => {
 		writeResponse(queue, response);
 		safeUnlink(claimed);
 		queue.health?.record({
-			type,
+			type: envelope.type ?? "unknown",
 			outcome: response.ok ? "ok" : response.error?.code,
 			ms: Date.now() - started,
 			reqBytes,
 			resBytes: Buffer.byteLength(JSON.stringify(response), "utf-8"),
 			replay: false,
+			retry: envelope.retry,
 		});
 		queue.afterResponse();
 	};
 	// Never parsed, but answered, so the client is not left waiting for an outcome.
 	if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
-		finish(errorResponse(fileId, "invalid_request", "Bridge request file must be a regular 0600 file."), "unknown");
+		finish(errorResponse(fileId, "invalid_request", "Bridge request file must be a regular 0600 file."));
 		return;
 	}
 	if (reqBytes > MAX_REQUEST_BYTES) {
-		finish(errorResponse(fileId, "payload_too_large", `Bridge request exceeds ${MAX_REQUEST_BYTES} bytes.`), "unknown");
+		finish(errorResponse(fileId, "payload_too_large", `Bridge request exceeds ${MAX_REQUEST_BYTES} bytes.`));
 		return;
 	}
 
@@ -241,7 +245,7 @@ export async function processRequestFile(queue: RequestQueue, fileName: string):
 	} catch (error) {
 		response = errorResponse(fileId, "invalid_request", error instanceof Error ? error.message : String(error));
 	}
-	finish(response, raw && typeof raw === "object" ? (raw as { type?: unknown }).type : "unknown");
+	finish(response, raw && typeof raw === "object" ? raw as { type?: unknown; retry?: unknown } : {});
 }
 
 // Startup: a request left in inflight/ was claimed by a Pi that stopped before

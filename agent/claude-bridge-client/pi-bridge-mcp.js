@@ -367,7 +367,7 @@ async function sendRequestOnce(projectRoot, session, type, payload, identity, op
 	const fileName = `${id}.json`;
 	const requestFile = path.join(session.paths.requests, fileName);
 	const responseFile = path.join(session.paths.responses, fileName);
-	const request = { id, type, payload: payload || {}, ts: Date.now(), ...(identity ? { peer: identity } : {}) };
+	const request = { id, type, payload: payload || {}, ts: Date.now(), ...(identity ? { peer: identity } : {}), ...(options.retry === true ? { retry: true } : {}) };
 	const tmp = path.join(session.paths.requests, `${id}.tmp.${process.pid}.${crypto.randomUUID()}`);
 	try {
 		fs.writeFileSync(tmp, `${JSON.stringify(request, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -432,8 +432,9 @@ async function sendRequestToSession(projectRoot, session, type, payload, identit
 		return await sendRequestOnce(projectRoot, session, type, payload, identity, options);
 	} catch (error) {
 		// Pi answered outcome_unknown (it stopped mid-request): a read is safe to re-send once.
+		// `retry: true` lets Pi count it in bridge health; the new id cannot link it to the first send.
 		if (!error || error.code !== OUTCOME_UNKNOWN || !error.answered || !READ_ONLY_TYPES.has(type)) throw error;
-		return sendRequestOnce(projectRoot, session, type, payload, identity, { ...options, requestId: undefined });
+		return sendRequestOnce(projectRoot, session, type, payload, identity, { ...options, requestId: undefined, retry: true });
 	}
 }
 
