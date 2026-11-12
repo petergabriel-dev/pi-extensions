@@ -235,6 +235,13 @@ try {
 	assert.deepEqual(withFinding.result.review.findings.map((finding) => [finding.id, finding.status, finding.classification, finding.by]), [["F1", "open", "suspected", `${OTHER.harness}:${OTHER.id}`]]);
 	const forgedSubmit = await callError("submit_review_findings", { findings: [{ planId: "e2e-plan", taskId: tasks.result.tasks[0].id, commit: head, severity: "low", text: "forged", by: "codex:forged" }] }, OTHER);
 	assert.match(forgedSubmit.message, /unsupported field/);
+
+	step = "5d resolve: the bridge stamps the live lease holder, which Pi refuses first";
+	const holderResolve = await callError("resolve_review_finding", { id: "F1", commit: head }, IDENTITY);
+	assert.match(holderResolve.message, /Build lease holder cannot resolve/, "the holder is refused before any other check");
+	const reviewerResolve = await callError("resolve_review_finding", { id: "F1", commit: head }, OTHER);
+	assert.match(reviewerResolve.message, /only approved findings can be resolved/, "a non-holder passes the holder check");
+	assert.equal(client.holdsBuildLease(project, IDENTITY), true, "resolve attempts leave the lease in place");
 	assert.deepEqual(again.result.progress, { done: 1, total: 2 });
 
 	step = "6 hook decision: lease holder may write, another session may not";

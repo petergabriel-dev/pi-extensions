@@ -1659,6 +1659,228 @@
       "expect": { "codex": "deny" }
     },
     {
+      "id": "claude-mcp-review-read-task-evidence-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "claude-security-seed", "harness": "claude" },
+      "expect": { "claude": "allow" }
+    },
+    {
+      "id": "claude-mcp-review-read-task-evidence-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "other-session", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "cursor-mcp-review-read-task-evidence-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "cursor-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "allow" }
+    },
+    {
+      "id": "cursor-mcp-review-read-task-evidence-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "other-session", "harness": "cursor" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "opencode-mcp-review-read-task-evidence-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "opencode-security-seed", "harness": "opencode" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-review-read-task-evidence-forged-sanitized",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "other-session", "harness": "claude" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "codex-mcp-review-read-task-evidence-injects-identity",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-mcp-review-read-task-evidence-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__read_task_evidence",
+      "input": { "bundleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sessionId": "other-session", "harness": "codex" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "claude-mcp-review-submit-review-findings-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "claude-security-seed", "harness": "claude" },
+      "expect": { "claude": "allow" }
+    },
+    {
+      "id": "claude-mcp-review-submit-review-findings-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "other-session", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "cursor-mcp-review-submit-review-findings-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "cursor-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "allow" }
+    },
+    {
+      "id": "cursor-mcp-review-submit-review-findings-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "other-session", "harness": "cursor" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "opencode-mcp-review-submit-review-findings-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "opencode-security-seed", "harness": "opencode" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-review-submit-review-findings-forged-sanitized",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "other-session", "harness": "claude" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "codex-mcp-review-submit-review-findings-injects-identity",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}] },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-mcp-review-submit-review-findings-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__submit_review_findings",
+      "input": { "findings": [{"planId": "p", "taskId": "t", "commit": "abcdef1", "severity": "low", "text": "x"}], "sessionId": "other-session", "harness": "codex" },
+      "expect": { "codex": "deny" }
+    },
+    {
+      "id": "claude-mcp-review-resolve-review-finding-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "claude-security-seed", "harness": "claude" },
+      "expect": { "claude": "allow" }
+    },
+    {
+      "id": "claude-mcp-review-resolve-review-finding-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["claude"],
+      "tool": "mcp__pi-claude-bridge__resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "other-session", "harness": "claude" },
+      "expect": { "claude": "deny" }
+    },
+    {
+      "id": "cursor-mcp-review-resolve-review-finding-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "cursor-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "allow" }
+    },
+    {
+      "id": "cursor-mcp-review-resolve-review-finding-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["cursor"],
+      "server": "pi-claude-bridge",
+      "tool": "resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "other-session", "harness": "cursor" },
+      "expect": { "cursor": "deny" }
+    },
+    {
+      "id": "opencode-mcp-review-resolve-review-finding-match",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "opencode-security-seed", "harness": "opencode" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "opencode-mcp-review-resolve-review-finding-forged-sanitized",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["opencode"],
+      "tool": "pi-claude-bridge_resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "other-session", "harness": "claude" },
+      "expect": { "opencode": "allow" }
+    },
+    {
+      "id": "codex-mcp-review-resolve-review-finding-injects-identity",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1" },
+      "expect": { "codex": "allow" }
+    },
+    {
+      "id": "codex-mcp-review-resolve-review-finding-forged-session",
+      "class": "ambiguous",
+      "kind": "mcp",
+      "columns": ["codex"],
+      "tool": "mcp__pi_claude_bridge__resolve_review_finding",
+      "input": { "id": "F1", "commit": "abcdef1", "sessionId": "other-session", "harness": "codex" },
+      "expect": { "codex": "deny" }
+    },
+    {
       "id": "codex-stdin-empty",
       "class": "ambiguous",
       "kind": "stdin",
