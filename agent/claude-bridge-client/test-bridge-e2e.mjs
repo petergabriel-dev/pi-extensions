@@ -6,7 +6,7 @@
  * No model is called; a loopback endpoint fails the test if one is.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -191,11 +191,25 @@ try {
 	assert.ok(recall.result.meta.bytes > 0 && typeof recall.result.meta.budgetExceeded === "boolean");
 
 	step = "5 tick_plan_task, then the same task again";
-	const ticked = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id });
+	const git = (...args) => execFileSync("git", ["-C", project, ...args], { encoding: "utf8" }).trim();
+	git("init", "-q");
+	writeFileSync(path.join(project, "task.txt"), "task one\n");
+	git("add", "task.txt");
+	git("-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "task one");
+	const head = git("rev-parse", "HEAD");
+	const [tickSession] = client.liveSessions(project);
+	// The author is host-stamped: a payload `by` is rejected and nothing is recorded.
+	const forged = await client.sendRequestToSession(project, tickSession, "tick_plan_task", { taskId: tasks.result.tasks[0].id, by: "codex:forged" }, IDENTITY).catch((error) => error);
+	assert.ok(forged instanceof Error && /only taskId, title, planId, note, and commit/.test(forged.message), "payload by must be rejected");
+	assert.deepEqual((await call("read_plan_tasks")).result.progress, { done: 0, total: 2 });
+	const ticked = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id, commit: head.slice(0, 8) });
 	assert.deepEqual(ticked.result.progress, { done: 1, total: 2 });
 	assert.equal(ticked.result.idempotent, false);
+	assert.equal(ticked.result.commit, head, "short SHA resolves to the full commit");
+	assert.equal(ticked.result.by, `${IDENTITY.harness}:${IDENTITY.id}`, "author comes from the host-stamped peer");
 	const again = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id });
 	assert.equal(again.result.idempotent, true);
+	assert.equal(again.result.commit, head, "re-tick keeps the first commit");
 	assert.deepEqual(again.result.progress, { done: 1, total: 2 });
 
 	step = "6 hook decision: lease holder may write, another session may not";

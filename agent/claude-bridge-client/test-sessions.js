@@ -301,6 +301,9 @@ async function main() {
 	const toolNames = client.tools.map((tool) => tool.name);
 	assert.ok(toolNames.includes("list_sessions") && toolNames.includes("pair_session"), "session tools missing from MCP tool list");
 	assert.deepEqual(client.tools[0].inputSchema.properties.harness.enum, ["claude", "cursor", "pi", "opencode", "codex"]);
+	const tickSchema = client.tools.find((tool) => tool.name === "tick_plan_task").inputSchema;
+	assert.equal(tickSchema.properties.commit.pattern, "^[0-9a-fA-F]{7,64}$", "tick_plan_task must accept an optional commit SHA");
+	assert.equal(tickSchema.properties.by, undefined, "tick author must never be a payload field");
 	const resolved = client.resolveHarnessIdentity({ sessionId: "primary-id", claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" });
 	assert.deepEqual(resolved, { harness: "claude", id: "primary-id" });
 	assert.deepEqual(client.resolveHarnessIdentity({ sessionId: OPENCODE.id, harness: OPENCODE.harness }, {}), OPENCODE);

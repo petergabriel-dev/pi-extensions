@@ -59,7 +59,7 @@ assert.equal(first.ok, true);
 assert.equal(first.planId, "req-1");
 assert.notEqual(first.idempotent, true);
 
-const ticked = await request("workflow-modes:tick-plan-task", { requestId: "tick-1", title: "Seed task" });
+const ticked = await request("workflow-modes:tick-plan-task", { requestId: "tick-1", title: "Seed task", by: "claude:test-peer" });
 assert.equal(ticked.ok, true);
 const writes = appended.length;
 

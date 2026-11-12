@@ -10,7 +10,8 @@ import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt
 import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, noSandboxDecision } from "./policy.js";
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
-import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, type SavedPlan } from "./plan-state.js";
+import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
+import { normalizeCommitInput, resolveCommit } from "./git.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build" | "review";
@@ -53,6 +54,7 @@ let currentPlanSavedAt: string | undefined;
 let currentPlanProgress = { done: 0, total: 0 };
 let currentPlanTasks: PlanTask[] = [];
 let currentPlanCompletedTaskIds: string[] = [];
+let currentPlanTicks: ReadonlyMap<string, PlanTaskTick> = new Map();
 let currentPlanNextTask: WorkflowPlanMarker["nextTask"] | undefined;
 let planReadNoticeKey: string | undefined;
 let latestContext: ExtensionContext | null = null;
@@ -127,6 +129,7 @@ function resetPlanState(): void {
 	currentPlanProgress = { done: 0, total: 0 };
 	currentPlanTasks = [];
 	currentPlanCompletedTaskIds = [];
+	currentPlanTicks = new Map();
 	currentPlanNextTask = undefined;
 }
 
@@ -155,6 +158,7 @@ function applyPlanState(branch: ReturnType<typeof readBranch>): void {
 	currentPlanSavedAt = active?.savedAt;
 	currentPlanTasks = taskState?.tasks ?? [];
 	currentPlanCompletedTaskIds = taskState?.completedTaskIds ?? [];
+	currentPlanTicks = taskState?.ticks ?? new Map();
 	currentPlanProgress = taskState?.progress ?? { done: 0, total: 0 };
 	currentPlanNextTask = taskState?.nextTask;
 	planReadNoticeKey = undefined;
@@ -205,6 +209,7 @@ async function refreshPlanFromDisk(ctx: ExtensionContext): Promise<WorkflowPlanM
 		const taskState = resolveSavedPlanTaskState(readBranch(ctx), active.planId, parsePlanTasks(text));
 		currentPlanTasks = taskState.tasks;
 		currentPlanCompletedTaskIds = taskState.completedTaskIds;
+		currentPlanTicks = taskState.ticks;
 		currentPlanProgress = taskState.progress;
 		currentPlanNextTask = taskState.nextTask;
 		updateStatus(ctx);
@@ -377,6 +382,8 @@ export interface WorkflowPlanTaskTickEntry {
 	planId: string;
 	taskId: string;
 	note?: string;
+	commit?: string;
+	by?: string;
 	at: number;
 }
 
@@ -384,6 +391,8 @@ export interface WorkflowPlanTaskTickResult {
 	planId: string;
 	taskId: string;
 	note?: string;
+	commit?: string;
+	by?: string;
 	progress: { done: number; total: number };
 	nextTask?: { id: string; title: string };
 	idempotent: boolean;
@@ -394,6 +403,7 @@ export interface WorkflowPlanTasksResult {
 	planId: string;
 	tasks: PlanTask[];
 	completedTaskIds: string[];
+	ticks: Record<string, PlanTaskTick>;
 	progress: { done: number; total: number };
 	nextTask?: { id: string; title: string };
 }
@@ -434,6 +444,7 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	const taskState = resolveSavedPlanTaskState([...branch, { type: "custom", customType: PLAN_ENTRY, data: entry }, { type: "custom", customType: PLAN_ENTRY, data: activate }], planId, tasks);
 	currentPlanTasks = taskState.tasks;
 	currentPlanCompletedTaskIds = taskState.completedTaskIds;
+	currentPlanTicks = taskState.ticks;
 	currentPlanProgress = taskState.progress;
 	currentPlanNextTask = taskState.nextTask;
 	planReadNoticeKey = undefined;
@@ -442,8 +453,11 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 	return entry;
 }
 
-export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawReference: unknown): Promise<WorkflowPlanTaskTickResult> {
-	const { reference, note } = normalizeTaskTickReference(rawReference);
+// `by` is host-derived: "pi" for the Pi tool, "<harness>:<id>" from the bridge's
+// stamped peer. It is never read from a tool or bridge payload.
+export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawReference: unknown, by: string): Promise<WorkflowPlanTaskTickResult> {
+	if (typeof by !== "string" || !TICK_AUTHOR.test(by)) throw new Error("tick author is invalid");
+	const { reference, note, commit: commitInput } = normalizeTaskTickReference(rawReference);
 	const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
 	const planId = state.activePlanId;
 	if (!planId) throw new Error("no active saved plan");
@@ -459,38 +473,46 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	const taskId = resolution.task.id;
 	const outOfOrder = taskState.nextTask !== undefined && taskState.nextTask.id !== taskId;
 	if (taskState.completedTaskIds.includes(taskId)) {
-		const storedNote = taskState.tickNotes.get(taskId);
-		return { planId, taskId, ...(storedNote ? { note: storedNote } : {}), progress: taskState.progress, ...(taskState.nextTask ? { nextTask: taskState.nextTask } : {}), idempotent: true, outOfOrder };
+		// First tick wins: a re-tick changes nothing, including note, commit, and author.
+		return { planId, taskId, ...tickDetails(taskState.ticks.get(taskId)), progress: taskState.progress, ...(taskState.nextTask ? { nextTask: taskState.nextTask } : {}), idempotent: true, outOfOrder };
 	}
 
-	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, ...(note ? { note } : {}), at: Date.now() };
+	// Verify before the durable write: an invalid commit appends nothing.
+	const commit = commitInput === undefined ? undefined : await resolveCommit(ctx.cwd, commitInput);
+	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, ...(note ? { note } : {}), ...(commit ? { commit } : {}), by, at: Date.now() };
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
 	const nextState = resolveSavedPlanTaskState(readBranch(ctx), planId);
 	currentPlanTasks = nextState.tasks;
 	currentPlanCompletedTaskIds = nextState.completedTaskIds;
+	currentPlanTicks = nextState.ticks;
 	currentPlanProgress = nextState.progress;
 	currentPlanNextTask = nextState.nextTask;
 	updateStatus(ctx);
 	emitModeChanged(pi);
-	const storedNote = nextState.tickNotes.get(taskId);
-	return { planId, taskId, ...(storedNote ? { note: storedNote } : {}), progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
+	return { planId, taskId, ...tickDetails(nextState.ticks.get(taskId)), progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
 }
 
-function normalizeTaskTickReference(rawReference: unknown): { reference: PlanTaskReference; note?: string } {
+function normalizeTaskTickReference(rawReference: unknown): { reference: PlanTaskReference; note?: string; commit?: string } {
 	if (typeof rawReference === "string") return { reference: normalizeTaskId(rawReference) };
 	if (!rawReference || typeof rawReference !== "object" || Array.isArray(rawReference)) throw new Error("exactly one of taskId or title is required");
-	const candidate = rawReference as { taskId?: unknown; title?: unknown; note?: unknown };
+	const candidate = rawReference as { taskId?: unknown; title?: unknown; note?: unknown; commit?: unknown };
 	const keys = Object.keys(candidate);
-	if (keys.some((key) => key !== "taskId" && key !== "title" && key !== "note")) throw new Error("workflow_plan_tick accepts only taskId, title, and note");
+	if (keys.some((key) => key !== "taskId" && key !== "title" && key !== "note" && key !== "commit")) throw new Error("workflow_plan_tick accepts only taskId, title, note, and commit");
 	const hasTaskId = Object.prototype.hasOwnProperty.call(candidate, "taskId");
 	const hasTitle = Object.prototype.hasOwnProperty.call(candidate, "title");
 	if (hasTaskId === hasTitle) throw new Error("exactly one of taskId or title is required");
 	const note = candidate.note === undefined ? undefined : normalizePlanTaskTickNote(candidate.note);
-	if (hasTaskId) return { reference: normalizeTaskId(candidate.taskId), ...(note ? { note } : {}) };
+	const commit = candidate.commit === undefined ? undefined : normalizeCommitInput(candidate.commit);
+	const extras = { ...(note ? { note } : {}), ...(commit ? { commit } : {}) };
+	if (hasTaskId) return { reference: normalizeTaskId(candidate.taskId), ...extras };
 	if (typeof candidate.title !== "string" || candidate.title.trim().length === 0 || candidate.title.length > MAX_PLAN_TASK_TITLE_LENGTH) {
 		throw new Error("title must be a non-empty string of at most 512 characters");
 	}
-	return { reference: { title: candidate.title }, ...(note ? { note } : {}) };
+	return { reference: { title: candidate.title }, ...extras };
+}
+
+function tickDetails(tick: PlanTaskTick | undefined): PlanTaskTick {
+	return { ...(tick?.note ? { note: tick.note } : {}), ...(tick?.commit ? { commit: tick.commit } : {}), ...(tick?.by ? { by: tick.by } : {}) };
 }
 
 function normalizePlanTaskTickNote(value: unknown): string {
@@ -538,6 +560,7 @@ const PLAN_TASK_TICK_PARAMETERS = {
 		taskId: { type: "string", minLength: 1, maxLength: MAX_PLAN_TASK_ID_LENGTH },
 		title: { type: "string", minLength: 1, maxLength: MAX_PLAN_TASK_TITLE_LENGTH },
 		note: { type: "string", minLength: 1, maxLength: MAX_PLAN_TASK_NOTE_LENGTH, description: "Optional note stored with this tick; trimmed before storage." },
+		commit: { type: "string", pattern: "^[0-9a-fA-F]{7,64}$", description: "Optional SHA of the task's commit; Pi verifies it is a commit in this repository and stores the full SHA." },
 	},
 	oneOf: [{ required: ["taskId"] }, { required: ["title"] }],
 	additionalProperties: false,
@@ -564,6 +587,7 @@ function currentWorkflowPlanTasks(requestedPlanId?: string): WorkflowPlanTasksRe
 		planId: currentPlanId,
 		tasks: currentPlanTasks,
 		completedTaskIds: currentPlanCompletedTaskIds,
+		ticks: Object.fromEntries([...currentPlanTicks].map(([taskId, tick]) => [taskId, tickDetails(tick)])),
 		progress: currentPlanProgress,
 		...(currentPlanNextTask ? { nextTask: currentPlanNextTask } : {}),
 	};
@@ -679,7 +703,7 @@ Saved-plan task orchestration:
 - Tracker tasks preserve stable ids, titles, and nested metadata from unchecked top-level Section 4 checkbox lines; Section 5 Definition of Done items never seed tracker.
 - Ignore prose, headings, numbered lists, and checked Section 4 items when seeding or selecting tasks.
 - Do not mutate saved plan or mark checkboxes as checked. Track progress through workflow_plan_tick branch entries, commits, chat reports, and discussion_notes.
-- After completing and verifying exactly one next tracker task, call workflow_plan_tick once with its taskId. Repeated same-task ticks are safe no-ops; never tick multiple tasks for one confirmation.
+- After completing and verifying exactly one next tracker task, call workflow_plan_tick once with its taskId and the task's commit SHA as commit. Repeated same-task ticks are safe no-ops; never tick multiple tasks for one confirmation.
 
 Confirmation gates:
 - Before starting task 1 from a saved tracker queue, summarize the plan title or feature if available, total tracker tasks, and the first task. Then ask: \"Ready to start on task 1?\"
@@ -722,7 +746,7 @@ Verification:
 Checkpoint and commit:
 - Commit after each successfully verified task before advancing to the next task.
 - Use a task-specific commit message when possible.
-- Report the commit hash.
+- Report the commit hash and pass it as commit to workflow_plan_tick.
 - If commit fails, stop and ask the user how to proceed. Do not advance unless explicitly authorized.
 
 Recall memory:
@@ -833,10 +857,10 @@ export default function (pi: ExtensionAPI) {
 			"Pass exactly one of taskId or the task title copied verbatim from the current tracker; never edit the saved plan file.",
 		],
 		parameters: PLAN_TASK_TICK_PARAMETERS as never,
-		async execute(_toolCallId, params: { taskId?: string; title?: string; note?: string }, _signal, _onUpdate, ctx) {
-			const result = await tickWorkflowPlanTask(pi, ctx, params);
+		async execute(_toolCallId, params: { taskId?: string; title?: string; note?: string; commit?: string }, _signal, _onUpdate, ctx) {
+			const result = await tickWorkflowPlanTask(pi, ctx, params, "pi");
 			const orderNote = result.outOfOrder ? ` (out of order; ${result.nextTask ? `${result.nextTask.id} still open` : "earlier task still open"})` : "";
-			const tickNote = result.note ? ` Note: ${JSON.stringify(result.note)}` : "";
+			const tickNote = `${result.note ? ` Note: ${JSON.stringify(result.note)}` : ""}${result.commit ? ` Commit: ${result.commit.slice(0, 12)}` : ""}`;
 			return {
 				content: [{ type: "text", text: `Ticked ${result.taskId}${orderNote}: ${result.progress.done}/${result.progress.total} task${result.progress.total === 1 ? "" : "s"} complete${result.idempotent ? " (already ticked)" : ""}.${tickNote}` }],
 				details: result,
@@ -901,7 +925,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.events.on("workflow-modes:tick-plan-task", async (data: unknown) => {
-		const request = data && typeof data === "object" ? data as { requestId?: unknown; planId?: unknown; taskId?: unknown; title?: unknown; note?: unknown } : {};
+		const request = data && typeof data === "object" ? data as { requestId?: unknown; planId?: unknown; taskId?: unknown; title?: unknown; note?: unknown; commit?: unknown; by?: unknown } : {};
 		const requestId = typeof request.requestId === "string" ? request.requestId : undefined;
 		const emitResult = (result: Record<string, unknown>) => pi.events.emit("workflow-modes:tick-plan-task-result", { requestId, ...result });
 		if (!requestId) return emitResult({ ok: false, error: "workflow-modes task tick requestId is required" });
@@ -914,8 +938,10 @@ export default function (pi: ExtensionAPI) {
 			const reference = {
 				...(hasTaskId ? { taskId: request.taskId } : { title: request.title }),
 				...(request.note !== undefined ? { note: request.note } : {}),
+				...(request.commit !== undefined ? { commit: request.commit } : {}),
 			};
-			const result = await tickWorkflowPlanTask(pi, latestContext, reference);
+			// The bridge stamps `by` from the host-verified peer; a missing or malformed author is rejected.
+			const result = await tickWorkflowPlanTask(pi, latestContext, reference, request.by as string);
 			emitResult({ ok: true, ...result });
 		} catch (error) {
 			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });

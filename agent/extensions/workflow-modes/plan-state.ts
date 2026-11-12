@@ -26,6 +26,15 @@ interface PlanEventData {
 	tasks?: unknown;
 	taskId?: unknown;
 	note?: unknown;
+	commit?: unknown;
+	by?: unknown;
+}
+
+// First tick wins: later re-ticks never change a task's note, commit, or author.
+export interface PlanTaskTick {
+	note?: string;
+	commit?: string;
+	by?: string;
 }
 
 interface VersionedPlan extends SavedPlan {
@@ -41,18 +50,22 @@ export interface SavedPlanTaskState {
 	tasks: PlanTask[];
 	completedTaskIds: string[];
 	tickNotes: ReadonlyMap<string, string>;
+	ticks: ReadonlyMap<string, PlanTaskTick>;
 	progress: { done: number; total: number };
 	nextTask?: { id: string; title: string };
 	seeded: boolean;
 }
 
 export const MAX_PLAN_TASK_NOTE_LENGTH = 500;
+export const TICK_AUTHOR = /^(?:pi|(?:claude|cursor|opencode|codex):[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/;
+const FULL_COMMIT = /^[0-9a-f]{40,64}$/;
 
 export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planId: string, fallbackTasks: readonly PlanTask[] = [], customType = "workflow-plan"): SavedPlanTaskState {
 	let tasks: PlanTask[] | undefined;
 	let cleared = false;
 	const completed = new Set<string>();
 	const tickNotes = new Map<string, string>();
+	const ticks = new Map<string, PlanTaskTick>();
 
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== customType) continue;
@@ -65,6 +78,7 @@ export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planI
 			cleared = false;
 			completed.clear();
 			tickNotes.clear();
+			ticks.clear();
 			continue;
 		}
 		if (data.event === "clear") {
@@ -72,6 +86,7 @@ export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planI
 			cleared = true;
 			completed.clear();
 			tickNotes.clear();
+			ticks.clear();
 			continue;
 		}
 		if (data.event !== "tick" || !tasks) continue;
@@ -80,6 +95,9 @@ export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planI
 		if (!completed.has(taskId)) {
 			const note = normalizeTickNote(data.note);
 			if (note) tickNotes.set(taskId, note);
+			const commit = typeof data.commit === "string" && FULL_COMMIT.test(data.commit) ? data.commit : undefined;
+			const by = typeof data.by === "string" && TICK_AUTHOR.test(data.by) ? data.by : undefined;
+			ticks.set(taskId, { ...(note ? { note } : {}), ...(commit ? { commit } : {}), ...(by ? { by } : {}) });
 		}
 		completed.add(taskId);
 	}
@@ -92,6 +110,7 @@ export function resolveSavedPlanTaskState(entries: readonly BranchEntry[], planI
 		tasks: resolvedTasks,
 		completedTaskIds,
 		tickNotes,
+		ticks,
 		progress: { done: completedTaskIds.length, total: resolvedTasks.length },
 		...(nextTask ? { nextTask: { id: nextTask.id, title: nextTask.title } } : {}),
 		seeded,

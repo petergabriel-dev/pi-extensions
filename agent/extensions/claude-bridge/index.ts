@@ -122,8 +122,8 @@ interface ReadPlanTasksPayload {
 }
 
 type TickPlanTaskPayload =
-	| { taskId: string; planId?: string; note?: string }
-	| { title: string; planId?: string; note?: string };
+	| { taskId: string; planId?: string; note?: string; commit?: string }
+	| { title: string; planId?: string; note?: string; commit?: string };
 
 interface RecallEntryPayload {
 	slug: string;
@@ -627,19 +627,22 @@ function normalizeTickPlanTaskNote(value: unknown): string {
 }
 
 function normalizeTickPlanTaskPayload(payload: Record<string, unknown>): TickPlanTaskPayload {
-	if (Object.keys(payload).some((key) => !["taskId", "title", "planId", "note"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, planId, and note.");
+	if (Object.keys(payload).some((key) => !["taskId", "title", "planId", "note", "commit"].includes(key))) throw new Error("tick_plan_task accepts only taskId, title, planId, note, and commit.");
 	const hasTaskId = Object.prototype.hasOwnProperty.call(payload, "taskId");
 	const hasTitle = Object.prototype.hasOwnProperty.call(payload, "title");
 	if (hasTaskId === hasTitle) throw new Error("tick_plan_task requires exactly one of taskId or title.");
 	if (payload.planId !== undefined && (typeof payload.planId !== "string" || payload.planId.trim().length === 0)) throw new Error("tick_plan_task planId must be a non-empty string when provided.");
 	const planId = typeof payload.planId === "string" ? payload.planId.trim() : undefined;
 	const note = payload.note === undefined ? undefined : normalizeTickPlanTaskNote(payload.note);
+	if (payload.commit !== undefined && (typeof payload.commit !== "string" || !/^[0-9a-f]{7,64}$/i.test(payload.commit.trim()))) throw new Error("tick_plan_task commit must be a 7-64 character hexadecimal SHA.");
+	const commit = typeof payload.commit === "string" ? payload.commit.trim() : undefined;
+	const extras = { ...(planId ? { planId } : {}), ...(note ? { note } : {}), ...(commit ? { commit } : {}) };
 	if (hasTaskId) {
 		if (typeof payload.taskId !== "string" || payload.taskId.trim().length === 0 || payload.taskId.length > 128) throw new Error("tick_plan_task requires taskId string of at most 128 characters.");
-		return { taskId: payload.taskId.trim(), ...(planId ? { planId } : {}), ...(note ? { note } : {}) };
+		return { taskId: payload.taskId.trim(), ...extras };
 	}
 	if (typeof payload.title !== "string" || payload.title.trim().length === 0 || payload.title.length > 512) throw new Error("tick_plan_task requires title string of at most 512 characters.");
-	return { title: payload.title, ...(planId ? { planId } : {}), ...(note ? { note } : {}) };
+	return { title: payload.title, ...extras };
 }
 
 function normalizeRecallEntryPayload(payload: Record<string, unknown>): RecallEntryPayload {
@@ -724,7 +727,8 @@ function requestWorkflowPlanTasks(pi: ExtensionAPI, requestId: string, payload: 
 	});
 }
 
-function requestWorkflowPlanTaskTick(pi: ExtensionAPI, requestId: string, payload: TickPlanTaskPayload): Promise<Record<string, unknown>> {
+// `by` is the host-stamped peer identity; the harness payload can never set it.
+function requestWorkflowPlanTaskTick(pi: ExtensionAPI, requestId: string, payload: TickPlanTaskPayload, by: string): Promise<Record<string, unknown>> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
 			pendingPlanTaskTicks.delete(requestId);
@@ -732,7 +736,7 @@ function requestWorkflowPlanTaskTick(pi: ExtensionAPI, requestId: string, payloa
 		}, 1_500);
 		timer.unref?.();
 		pendingPlanTaskTicks.set(requestId, { resolve, reject, timer });
-		pi.events.emit("workflow-modes:tick-plan-task", { requestId, ...payload });
+		pi.events.emit("workflow-modes:tick-plan-task", { requestId, ...payload, by });
 	});
 }
 
@@ -814,7 +818,9 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 	if (writerBlocker) return errorResponse(request.id, "build_lease_held", projectWriterHeldMessage(writerBlocker));
 	try {
 		const payload = normalizeTickPlanTaskPayload(request.payload);
-		const result = await requestWorkflowPlanTaskTick(pi, request.id, payload);
+		// canTickPlanTask above already required a peer matching the lease holder.
+		const by = `${request.peer!.harness}:${request.peer!.id}`;
+		const result = await requestWorkflowPlanTaskTick(pi, request.id, payload, by);
 		if (result.ok !== true) return errorResponse(request.id, "tick_plan_task_failed", typeof result.error === "string" ? result.error : "workflow-modes task tick failed.");
 		return {
 			id: request.id,
@@ -828,6 +834,8 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 				idempotent: result.idempotent === true,
 				outOfOrder: result.outOfOrder === true,
 				...(typeof result.note === "string" ? { note: result.note } : {}),
+				...(typeof result.commit === "string" ? { commit: result.commit } : {}),
+				...(typeof result.by === "string" ? { by: result.by } : {}),
 			},
 		};
 	} catch (error) {

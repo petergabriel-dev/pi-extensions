@@ -599,6 +599,7 @@ const tools = [
 				title: { type: "string" },
 				planId: { type: "string", description: "Optional active plan id." },
 				note: { type: "string", minLength: 1, maxLength: 500, description: "Optional 1-500 character note stored with this tick; trimmed before storage." },
+				commit: { type: "string", pattern: "^[0-9a-fA-F]{7,64}$", description: "Optional SHA of the task's commit; Pi verifies it and stores the full SHA. Commit before ticking." },
 				cwd: { type: "string" }
 			},
 			oneOf: [{ required: ["taskId"] }, { required: ["title"] }]
@@ -654,7 +655,7 @@ async function callTool(name, args) {
 	if (name === "validate_docs_tags") return toolResult(name, await bridgeRequest("validate_tags", { planText: args.planText }, { cwd, identity }));
 	if (name === "save_plan") return toolResult(name, await bridgeRequest("save_plan", { planText: args.planText, planId: args.planId, confirmed: args.confirmed === true }, { cwd, identity }));
 	if (name === "read_plan_tasks") return toolResult(name, await bridgeRequest("read_plan_tasks", { planId: args.planId }, { cwd, identity }));
-	if (name === "tick_plan_task") return toolResult(name, await bridgeRequest("tick_plan_task", { taskId: args.taskId, title: args.title, planId: args.planId, note: args.note }, { cwd, identity }));
+	if (name === "tick_plan_task") return toolResult(name, await bridgeRequest("tick_plan_task", { taskId: args.taskId, title: args.title, planId: args.planId, note: args.note, commit: args.commit }, { cwd, identity }));
 	if (name === "send_message") return toolResult(name, await bridgeRequest("send_message", { text: args.text }, { cwd, identity }));
 	if (name === "read_messages") {
 		const read = await bridgeRequest("read_messages", {}, { cwd, identity });
