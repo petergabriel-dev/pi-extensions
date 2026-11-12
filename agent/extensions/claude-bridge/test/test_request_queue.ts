@@ -290,9 +290,21 @@ async function main(): Promise<void> {
 		assert.equal(health.entries[2].reqBytes, MAX_REQUEST_BYTES + 1);
 		// Free text never lands in the ring.
 		health.record({ type: "../secret plan text", outcome: "Pi said: hello", ms: 5 });
-		const keys = ["ts", "type", "outcome", "ms", "reqBytes", "resBytes", "replay"];
+		const keys = ["ts", "type", "outcome", "ms", "reqBytes", "resBytes", "replay", "retry"];
 		for (const entry of health.entries) assert.deepEqual(Object.keys(entry), keys);
 		assert.deepEqual({ type: health.entries[3].type, outcome: health.entries[3].outcome }, { type: "unknown", outcome: "unknown" });
+		// A client re-send is flagged only by an envelope `retry` of literal true.
+		for (const retry of [true, "yes", 1]) {
+			const retryId = randomUUID();
+			writeRequest(paths.requests, retryId, JSON.stringify({ id: retryId, type: "recall", payload: {}, ts: 1, retry }));
+			await scanRequests(healthQueue);
+		}
+		assert.deepEqual(health.entries.slice(-3).map(({ type, retry }) => ({ type, retry })), [
+			{ type: "recall", retry: true },
+			{ type: "recall", retry: false },
+			{ type: "recall", retry: false },
+		]);
+		assert.ok(health.entries.slice(0, -3).every((entry) => entry.retry === false), "first sends, replays and rejections are never retries");
 		const fileText = fs.readFileSync(paths.health, "utf8");
 		assert.ok(!fileText.includes("secret") && !fileText.includes(id), "health file must hold no payload text or ids");
 		assert.equal(fs.statSync(paths.health).mode & 0o777, 0o600);
@@ -305,18 +317,20 @@ async function main(): Promise<void> {
 		// Ring capped at HEALTH_RING_SIZE, file included; a restart reloads it and drops bad lines.
 		for (let index = 0; index < HEALTH_RING_SIZE + 10; index++) health.record({ type: "recall", outcome: "ok", ms: index % 100 });
 		assert.equal(health.entries.length, HEALTH_RING_SIZE);
-		fs.appendFileSync(paths.health, "not json\n{\"ts\":1,\"type\":\"recall\",\"extra\":true}\n");
+		// The last line has the pre-`retry` key shape: an upgrade drops it once (accepted).
+		fs.appendFileSync(paths.health, "not json\n{\"ts\":1,\"type\":\"recall\",\"extra\":true}\n{\"ts\":1,\"type\":\"recall\",\"outcome\":\"ok\",\"ms\":1,\"reqBytes\":0,\"resBytes\":0,\"replay\":false}\n");
 		const reloaded = new BridgeHealth(paths.health, () => true);
 		assert.deepEqual(reloaded.entries, health.entries);
 		// Summary: nearest-rank p50/p95 per type, plus counters.
 		const seeded = new BridgeHealth(path.join(paths.processed, "seeded.jsonl"), () => false);
 		for (let ms = 10; ms <= 100; ms += 10) seeded.record({ type: "recall", outcome: "ok", ms, resBytes: 2_048 });
 		seeded.record({ type: "tick_plan_task", outcome: OUTCOME_UNKNOWN, ms: 7 });
+		seeded.record({ type: "read_plan_tasks", outcome: "ok", ms: 3, retry: true });
 		seeded.counters.withdrawn = 2;
 		const summary = seeded.summary();
 		assert.match(summary, /recall\s+n=10\s+p50 50ms\s+p95 100ms\s+res p95 2\.0KB\s+errors 0/);
 		assert.match(summary, /tick_plan_task\s+n=1\s+p50 7ms\s+p95 7ms\s+res p95 0\.0KB\s+errors 1/);
-		assert.match(summary, /not_delivered \(withdrawn\) 2 · outcome_unknown 1 · replays 0 · restart conversions 0 · slow completions 0/);
+		assert.match(summary, /not_delivered \(withdrawn\) 2 · outcome_unknown 1 · replays 0 · restart conversions 0 · slow completions 0 · retries 1$/);
 		assert.equal(fs.existsSync(path.join(paths.processed, "seeded.jsonl")), false, "no write when the namespace is not private");
 		assert.equal(new BridgeHealth(path.join(paths.processed, "none.jsonl"), () => true).summary(), "Bridge health: no requests recorded yet.");
 	}
@@ -376,6 +390,52 @@ async function main(): Promise<void> {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		idle();
 		assert.deepEqual(fs.readdirSync(paths.requests), [`${after}.json`]);
+	}
+
+	// Burst: 50 simultaneous requests, overlapping scans plus the poll, every handler held
+	// open. At the client's pickup deadline everything still unclaimed is withdrawn (the
+	// client's own rename). Each request ends answered or withdrawn, never both; no handler
+	// runs twice or for a withdrawn request; requests/, inflight/ and withdrawn/ end empty.
+	{
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const { paths, queue, calls } = setup("burst", async (fileId) => {
+			await gate;
+			return { id: fileId, ok: true, result: {} };
+		});
+		const health = new BridgeHealth(paths.health, () => true);
+		const burstQueue = { ...queue, health };
+		const waitFor = async (check: () => boolean, ms = 3_000) => {
+			const deadline = Date.now() + ms;
+			while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+			return check();
+		};
+		const ids = Array.from({ length: 50 }, () => randomUUID());
+		for (const id of ids) writeRequest(paths.requests, id);
+		const scans = Array.from({ length: 4 }, () => scanRequests(burstQueue));
+		const stop = startPolling(burstQueue, () => { void scanRequests(burstQueue); }, { intervalMs: 20 });
+		// Overlapping scans each claim one more request while the earlier handlers are held.
+		assert.ok(await waitFor(() => calls.length >= 6), "overlapping scans must run several handlers at once");
+		const withdrawn = new Set<string>();
+		for (const name of fs.readdirSync(paths.requests)) {
+			fs.renameSync(path.join(paths.requests, name), path.join(paths.withdrawn, name));
+			withdrawn.add(name.slice(0, -".json".length));
+		}
+		release();
+		await Promise.all(scans);
+		const answeredIds = () => fs.readdirSync(paths.responses).map((name) => name.slice(0, -".json".length));
+		assert.ok(await waitFor(() => answeredIds().length === calls.length && fs.readdirSync(paths.inflight).length === 0 && fs.readdirSync(paths.withdrawn).length === 0), "claimed requests must be answered and the poll must clear withdrawn/");
+		stop();
+		const answered = new Set(answeredIds());
+		const ran = calls.map((call) => call.fileId);
+		assert.equal(new Set(ran).size, ran.length, "no request may run twice");
+		assert.deepEqual(new Set(ran), answered);
+		assert.ok(ran.every((id) => !withdrawn.has(id)), "a withdrawn request must never run");
+		assert.ok(answered.size >= 6 && withdrawn.size > 0, "the burst must exercise both outcomes");
+		assert.equal(answered.size + withdrawn.size, ids.length);
+		assert.deepEqual(new Set([...answered, ...withdrawn]), new Set(ids), "every request ends answered or withdrawn, never both");
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+		assert.equal(health.counters.withdrawn, withdrawn.size);
 	}
 
 	// Retention: answers older than RETENTION_MS are pruned, fresh ones kept.

@@ -681,6 +681,9 @@ async function main() {
 		assert.equal(responder.requests.length, 2);
 		assert.notEqual(responder.requests[0].id, responder.requests[1].id);
 		assert.equal(result.requestId, responder.requests[1].id);
+		// Only the re-send is flagged, so Pi can count it in bridge health.
+		assert.equal(responder.requests[0].retry, undefined);
+		assert.equal(responder.requests[1].retry, true);
 	}, (cwd) => startClaimingResponder(cwd, (request, count) => count === 1
 		? { id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } }
 		: { id: request.id, ok: true, result: { type: request.type } }));
@@ -700,6 +703,7 @@ async function main() {
 			(error) => error.code === "outcome_unknown" && error.message === "Pi stopped mid-request.",
 		);
 		assert.equal(responder.requests.length, 1);
+		assert.equal(responder.requests[0].retry, undefined);
 	}, (cwd) => startClaimingResponder(cwd, (request) => ({ id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } })));
 
 	await test("recall_memory is text-only compact JSON; other tools keep structuredContent", async (cwd) => {
