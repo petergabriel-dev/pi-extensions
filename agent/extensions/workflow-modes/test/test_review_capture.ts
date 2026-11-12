@@ -245,10 +245,117 @@ assert.equal(restartBundle.baseline, ${JSON.stringify(head)}, "baseline is infer
 });
 `;
 
+// Attribution: the first captured call waits (at most 1 s) for its baseline, and a bridge
+// tick never takes Pi's attempt. A git wrapper slows only `rev-parse --verify --quiet HEAD`.
+const raceRepo = join(root, "race-repo");
+await mkdir(raceRepo, { recursive: true });
+execFileSync("git", ["-C", raceRepo, "init", "-q"]);
+await writeFile(join(raceRepo, "a.txt"), "a\n");
+execFileSync("git", ["-C", raceRepo, "add", "a.txt"]);
+execFileSync("git", ["-C", raceRepo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a"]);
+const raceHead = execFileSync("git", ["-C", raceRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const wrapperDir = join(root, "slow-head-git");
+await mkdir(wrapperDir);
+const delayFile = join(wrapperDir, "delay");
+await writeFile(delayFile, "0.3\n");
+const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+await writeFile(join(wrapperDir, "git"), `#!/bin/sh\ncase " $* " in *" rev-parse --verify --quiet HEAD "*) sleep "$(cat ${JSON.stringify(delayFile)})";; esac\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+const raceAgentDir = join(root, "race-agent");
+const raceSession = join(raceAgentDir, "plans", "session-race");
+
+const raceSource = `
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import workflowModesExtension, { flushReviewCapture } from "./index.ts";
+
+const branch = [];
+const listeners = new Map();
+const events = {
+	on(name, handler) { listeners.set(name, [...(listeners.get(name) ?? []), handler]); },
+	emit(name, payload) { for (const handler of listeners.get(name) ?? []) handler(payload); },
+};
+const handlers = new Map();
+const tools = new Map();
+const commands = new Map();
+const pi = { events, on(name, handler) { handlers.set(name, handler); }, registerCommand(name, command) { commands.set(name, command); }, registerTool(tool) { tools.set(tool.name, tool); }, appendEntry(type, data) { branch.push({ type: "custom", customType: type, data }); }, sendUserMessage() {}, sendMessage() {} };
+workflowModesExtension(pi);
+const REPO = ${JSON.stringify(raceRepo)};
+const ctx = { cwd: REPO, hasUI: false, sessionManager: { getBranch: () => branch, getSessionId: () => "session-race" }, ui: { setStatus() {}, notify() {} } };
+const request = (name, payload) => new Promise((resolve) => {
+	events.on(name + "-result", (result) => { if (result.requestId === payload.requestId) resolve(result); });
+	events.emit(name, payload);
+});
+const git = (...args) => execFileSync("git", ["-C", REPO, ...args], { encoding: "utf8" }).trim();
+const commit = (file) => { writeFileSync(REPO + "/" + file, file + "\\n"); git("add", file); git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", file); return git("rev-parse", "HEAD"); };
+const call = (id, command) => handlers.get("tool_call")({ toolCallId: id, toolName: "bash", input: { command } }, ctx);
+const result = (id, command, text) => handlers.get("tool_result")({ toolCallId: id, toolName: "bash", input: { command }, content: [{ type: "text", text }], isError: false }, ctx);
+const logEvents = () => readFileSync(${JSON.stringify(join(raceSession, "reviews.jsonl"))}, "utf8").trim().split("\\n").map((line) => JSON.parse(line));
+const bundle = (id) => JSON.parse(readFileSync(${JSON.stringify(join(raceSession, "evidence"))} + "/" + id + ".json", "utf8"));
+
+(async () => {
+await handlers.get("session_start")({}, ctx);
+await request("workflow-modes:save-plan", { requestId: "s", planId: "plan-race", plan: "# P\\n\\n## Section 4 — Tasks\\n- [ ] Race\\n- [ ] Bridge\\n" });
+await commands.get("mode").handler("build", ctx);
+
+// The first captured call is the commit itself: the tool runs only after tool_call returns.
+assert.equal(await call("c1", "git commit -am race"), undefined);
+const raceCommit = commit("race.txt");
+await result("c1", "git commit -am race", "ok");
+await new Promise((resolve) => setTimeout(resolve, 500)); // any background baseline lookup has finished
+const raceTask =(await request("workflow-modes:get-plan-tasks", { requestId: "r1" })).nextTask;
+const raceTick = await tools.get("workflow_plan_tick").execute("t1", { taskId: raceTask.id, commit: raceCommit }, undefined, undefined, ctx);
+await flushReviewCapture();
+const raceBundle = bundle(raceTick.details.bundle.id);
+assert.match(raceBundle.attemptId ?? "", /./, "the bundle uses the attempt");
+assert.ok(!raceBundle.warnings.includes("baseline inferred as the commit's parent"), "the attempt's own baseline is used");
+assert.equal(raceBundle.baseline, ${JSON.stringify(raceHead)}, "baseline is HEAD from before the first captured call ran");
+assert.deepEqual(raceBundle.files.map((file) => file.path), ["race.txt"]);
+assert.ok(!raceBundle.warnings.some((warning) => warning.startsWith("incomplete: baseline equals")), "no false incomplete warning");
+
+// The wait is bounded: a hung rev-parse delays the first call by about 1 s, later calls not at all.
+writeFileSync(${JSON.stringify(delayFile)}, "1.6\\n");
+let started = Date.now();
+assert.equal(await call("c2", "echo bridge-work-1"), undefined);
+const firstWait = Date.now() - started;
+assert.ok(firstWait >= 900 && firstWait < 1500, "first captured call waited " + firstWait + " ms");
+await result("c2", "echo bridge-work-1", "bridge-work-1");
+started = Date.now();
+assert.equal(await call("c3", "echo bridge-work-2"), undefined);
+assert.ok(Date.now() - started < 200, "later calls add no wait");
+await result("c3", "echo bridge-work-2", "bridge-work-2");
+writeFileSync(${JSON.stringify(delayFile)}, "0\\n");
+
+// A harness ticks the task Pi was working on: its bundle is git-only and Pi's attempt is
+// abandoned with counts only, never attributed to the harness.
+const bridgeTask = (await request("workflow-modes:get-plan-tasks", { requestId: "r2" })).nextTask;
+const bridgeCommit = commit("bridge.txt");
+const bridgeTick = await request("workflow-modes:tick-plan-task", { requestId: "t2", taskId: bridgeTask.id, commit: bridgeCommit, by: "claude:builder" });
+assert.equal(bridgeTick.ok, true, bridgeTick.error);
+await new Promise((resolve) => setTimeout(resolve, 1800));
+await flushReviewCapture();
+const bridgeCreated = logEvents().filter((event) => event.ev === "bundle_created" && event.taskId === bridgeTask.id);
+assert.equal(bridgeCreated.length, 1);
+const bridgeBundle = bundle(bridgeCreated[0].bundleId);
+assert.deepEqual(bridgeBundle.commands, [], "no Pi commands in a harness-built bundle");
+assert.equal(bridgeBundle.attemptId, undefined);
+assert.ok(bridgeBundle.warnings.some((warning) => warning.startsWith("unavailable: harness build commands")), "the bundle says harness commands are unavailable");
+assert.deepEqual(logEvents().filter((event) => event.ev === "attempt_abandoned").map((event) => [event.reason, event.taskId, event.commands]), [["bridge tick", bridgeTask.id, 2]]);
+assert.ok(!readFileSync(${JSON.stringify(join(raceSession, "reviews.jsonl"))}, "utf8").includes("bridge-work"), "abandon events never store command text");
+})().catch((error) => {
+	console.error(error);
+	process.exit(1);
+});
+`;
+
 try {
 	await execFileAsync("./node_modules/.bin/tsx", ["-e", source], {
 		cwd: new URL("..", import.meta.url),
 		env: { ...process.env, NODE_PATH: stubs, PI_CODING_AGENT_DIR: agentDir },
+	});
+	await execFileAsync("./node_modules/.bin/tsx", ["-e", raceSource], {
+		cwd: new URL("..", import.meta.url),
+		env: { ...process.env, NODE_PATH: stubs, PI_CODING_AGENT_DIR: raceAgentDir, PATH: `${wrapperDir}:${process.env.PATH}` },
 	});
 } finally {
 	await rm(root, { recursive: true, force: true });

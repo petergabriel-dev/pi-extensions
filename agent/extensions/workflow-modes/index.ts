@@ -76,6 +76,10 @@ export const BRIDGE_BUNDLE_WAIT_MS = 300;
 // attempt. Any other tool, notably workflow_plan_tick itself, would otherwise open one
 // whose baseline is the already-committed task, and its bundle would show no changes.
 const CAPTURE_TOOLS: ReadonlySet<string> = new Set(["bash", "edit", "write", "subagent"]);
+// Captured calls wait for their attempt's baseline lookup, bounded so a hung git cannot
+// stall a tool for long; once settled or timed out, the wait is a resolved promise.
+const BASELINE_WAIT_MS = 1_000;
+const baselineReady = new WeakMap<CaptureAttempt, Promise<void>>();
 let pendingPlanSave = false;
 let planSaveToolCalled = false;
 
@@ -166,12 +170,16 @@ function ensureCaptureAttempt(ctx: ExtensionContext): CaptureAttempt | undefined
 	}
 	const attempt = openAttempt({ attemptId: randomUUID(), sessionId, planId: currentPlanId, taskId: currentPlanNextTask.id, startedAt: Date.now() });
 	captureAttempt = attempt;
-	// Baseline = HEAD before this attempt's work, resolved off the tool-call path.
+	// Baseline = HEAD before this attempt's work. Captured calls wait for it, at most
+	// BASELINE_WAIT_MS in total, so the first call (say `git commit`) cannot move HEAD first.
 	if (typeof ctx.cwd === "string") {
-		void runGit(ctx.cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).then((result) => {
+		const resolved = runGit(ctx.cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).then((result) => {
 			const sha = result.stdout.trim();
 			if (result.ok && /^[0-9a-f]{40,64}$/.test(sha)) attempt.baseline = sha;
 		}).catch(() => undefined);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, BASELINE_WAIT_MS); });
+		baselineReady.set(attempt, Promise.race([resolved, bound]).finally(() => clearTimeout(timer)));
 	}
 	return attempt;
 }
@@ -849,8 +857,14 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
 	let attempt: CaptureAttempt | undefined;
 	if (captureAttempt && captureAttempt.planId === planId && captureAttempt.taskId === taskId) {
-		attempt = captureAttempt;
-		captureAttempt = undefined;
+		// Only Pi's own tick carries Pi's capture. A harness tick stays git-only, so Pi's
+		// attempt for that task is abandoned (counts only) instead of misattributed.
+		if (by === "pi") {
+			attempt = captureAttempt;
+			captureAttempt = undefined;
+		} else {
+			abandonCaptureAttempt("bridge tick");
+		}
 	}
 	const nextState = resolveSavedPlanTaskState(readBranch(ctx), planId);
 	currentPlanTasks = nextState.tasks;
@@ -1471,7 +1485,10 @@ export default function (pi: ExtensionAPI) {
 			if (!blockedBy) {
 				if (CAPTURE_TOOLS.has(event.toolName)) {
 					const attempt = ensureCaptureAttempt(ctx);
-					if (attempt) recordToolCall(attempt, event, Date.now(), process.env);
+					if (attempt) {
+						await baselineReady.get(attempt);
+						recordToolCall(attempt, event, Date.now(), process.env);
+					}
 				}
 				return;
 			}
