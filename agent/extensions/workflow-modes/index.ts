@@ -8,12 +8,13 @@ import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithA
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
 import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, noSandboxDecision } from "./policy.js";
-import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
+import { gcEvidenceFiles, gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
 import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
-import { appendReviewEvent } from "./review-store.js";
+import { appendReviewEvent, readReviewLog } from "./review-store.js";
+import { citedBundleIds, foldFindings } from "./review-state.js";
 import { buildEvidenceBundle, writeEvidenceBundle } from "./review-bundle.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -720,7 +721,14 @@ function planSelectItems(plans: readonly SavedPlan[], activePlanId: string | und
 
 async function gcSessionPlans(ctx: ExtensionContext): Promise<void> {
 	const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
-	await gcPlanFiles(getAgentDir(), sessionIdFromContext(ctx), state.plans.map((plan) => ({ planId: plan.planId })));
+	const agentDir = getAgentDir();
+	const sessionId = sessionIdFromContext(ctx);
+	await gcPlanFiles(agentDir, sessionId, state.plans.map((plan) => ({ planId: plan.planId })));
+	// Evidence GC needs a fully readable review log: an unreadable log throws here, and a
+	// log with skipped lines may hide a citation, so either case keeps every bundle.
+	const log = await readReviewLog(agentDir, sessionId);
+	if (log.warnings.length > 0) return;
+	await gcEvidenceFiles(agentDir, sessionId, citedBundleIds(foldFindings(log.events).values()));
 }
 
 async function selectPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext, requestedPlanId?: string): Promise<void> {

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { runGit } from "./git.js";
 import { attemptWarnings, type CaptureAttempt, type CommandRecord, type RunSummary } from "./review-capture.js";
@@ -262,4 +264,27 @@ export async function writeEvidenceBundle(agentDir: string, sessionId: string, b
 		await appendReviewEvent(agentDir, sessionId, { ev: "bundle_created", planId: bundle.planId, taskId: bundle.taskId, bundleId, ...(bundle.commit ? { commit: bundle.commit } : {}), ...(bundle.attemptId ? { attemptId: bundle.attemptId } : {}) });
 	}
 	return { bundleId, path, written: outcome === "written" };
+}
+
+export const BUNDLE_ID = /^[0-9a-f]{64}$/;
+
+// Reads a stored bundle without following symlinks; undefined when it does not exist.
+export async function readEvidenceBundle(agentDir: string, sessionId: string, bundleId: string): Promise<EvidenceBundle | undefined> {
+	if (!BUNDLE_ID.test(bundleId)) return undefined;
+	let handle;
+	try {
+		handle = await open(join(evidenceDir(agentDir, sessionId), `${bundleId}.json`), constants.O_RDONLY | constants.O_NOFOLLOW);
+	} catch (error) {
+		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+		if (code === "ENOENT" || code === "ELOOP") return undefined;
+		throw error;
+	}
+	try {
+		const info = await handle.stat();
+		if (!info.isFile() || info.size > MAX_BUNDLE_BYTES) return undefined;
+		const value = JSON.parse((await handle.readFile()).toString("utf8")) as EvidenceBundle;
+		return value && typeof value === "object" && value.version === 1 ? value : undefined;
+	} finally {
+		await handle.close();
+	}
 }

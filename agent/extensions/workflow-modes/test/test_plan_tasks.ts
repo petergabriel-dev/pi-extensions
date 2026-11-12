@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { parsePlanTasks, resolvePlanTaskReference } from "../plan-tasks.js";
+import { parseFindingIds, parsePlanTasks, resolvePlanTaskReference } from "../plan-tasks.js";
 
 console.log("Running test_plan_tasks...");
 
@@ -54,5 +54,14 @@ const duplicateTitles = parsePlanTasks(`## Section 4 — Tasks
 - [ ] Duplicate task
 `);
 assert.deepEqual(resolvePlanTaskReference(duplicateTitles, { title: "Duplicate task" }), { ok: false, reason: "ambiguous" }, "duplicate title rejects");
+
+// Rework citations: **Findings:** metadata parses to finding ids and never changes task ids.
+const withoutFindings = parsePlanTasks("## Section 4 — Tasks\n- [ ] Fix review findings\n");
+const withFindings = parsePlanTasks("## Section 4 — Tasks\n- [ ] Fix review findings\n  - **Findings:** F1, F3, F3 and F12\n  - **Files:** a.ts\n");
+assert.equal(withFindings[0]?.metadata.findings, "F1, F3, F3 and F12");
+assert.equal(withFindings[0]?.id, withoutFindings[0]?.id, "Findings metadata must not change the task id");
+assert.deepEqual(parseFindingIds(withFindings[0]?.metadata.findings), ["F1", "F3", "F12"]);
+assert.deepEqual(parseFindingIds("F0, FF1, xF2, F1x"), [], "only whole F<n> ids with n >= 1");
+assert.deepEqual(parseFindingIds(undefined), []);
 
 console.log(`test_plan_tasks passed (${parsed.length} tasks)`);
