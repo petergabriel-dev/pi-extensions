@@ -18,7 +18,8 @@ supersedes: ADR-0021
 - Store each saved plan body at `<agentDir>/plans/<sessionId>/<planId>.md`. `sessionId` and `planId` are host-owned, path-safe identifiers; the file is bounded to 256 KiB and written with fsync plus atomic rename.
 - Treat the plan file as the immutable specification during Build. `/plan save` writes a new body, parses top-level unchecked Section 4 tasks, and appends a `workflow-plan` pointer before activating the plan. `/plan save --last` remains the deterministic fallback when an agent-driven save tool call is missed.
 - Store plan visibility and active selection as `workflow-plan` `set`, `activate`, and `clear` entries in selected Pi session ancestry. Store completed task ids as `tick` entries. Reconstruct these entries from `getBranch()` on session start and tree navigation; forks inherit only their selected ancestry.
-- Make the tracker, not plan-file checkboxes, the Build task queue. `workflow_plan_tick` completes one seeded task per confirmation and is idempotent for repeated task ids. The plan body is never rewritten to record progress.
+- Make the tracker, not plan-file checkboxes, the Build task queue. `workflow_plan_tick` completes one seeded task per confirmation and is idempotent for repeated task ids. The plan body is never rewritten to record progress. A tick may carry a git-verified `commit` (stored as its full SHA) and records a host-derived `by` (`pi`, or `<harness>:<id>` from the bridge's stamped peer); the first tick's note, commit, and author win (ADR-0055).
+- Rework tasks cite approved review findings with `**Findings:** F1, F3` metadata; parsing it never changes task ids, which derive from titles only (ADR-0055).
 - Reread the active plan body before each agent turn. Inject its body into the workflow prompt and carry only plan id, path, savedAt, progress counts, and next task in the hidden per-turn marker. Missing or unreadable bodies degrade to no active plan with one notice.
 - Route bridge `save_plan`, `read_plan_tasks`, and `tick_plan_task` through live `workflow-modes` events. MCP clients never read plan files directly and never cache plan state. UUID request replay remains idempotent.
 - Run age-based GC only for unreferenced files in the current session directory; never delete a referenced plan body. A plan file may remain after `/plan clear` until retention GC.
@@ -71,6 +72,10 @@ Code:
 - changing Section 4 task parsing, Build task queue, or `workflow_plan_tick`
 - changing workflow per-turn marker details or hand-edited plan rereads
 - changing bridge `save_plan`, `read_plan_tasks`, `tick_plan_task`, or MCP plan access
+
+## Extended by
+
+- ADR-0055
 
 ## Supersedes
 
