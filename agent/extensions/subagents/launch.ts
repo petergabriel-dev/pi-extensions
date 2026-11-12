@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CAVEMAN_PROMPT } from "../workflow-modes/caveman.ts";
+import { contentText as reviewContentText, parseExitCode } from "../workflow-modes/review-capture.ts";
+import { redactText } from "../workflow-modes/review-redact.ts";
 import {
 	createSubagentDiagnostics,
 	MAX_SUBAGENT_TAIL_BYTES,
@@ -37,6 +39,11 @@ export const MAX_SUBAGENT_ITEMS = 200;
 export const MAX_SUBAGENT_ITEM_BYTES = 2 * 1024;
 const MAX_SUBAGENT_ITEM_HISTORY_RUNS = 100;
 const MAX_SUBAGENT_TOOL_ARGS_BYTES = 384;
+export const MAX_RUN_EVIDENCE_FILES = 50;
+export const MAX_RUN_EVIDENCE_FAILED_COMMANDS = 10;
+const MAX_RUN_EVIDENCE_TEXT_BYTES = 2 * 1024;
+const MAX_RUN_EVIDENCE_PENDING = 200;
+const RUN_EVIDENCE_OUTPUT_WINDOW_BYTES = 64 * 1024;
 const RPC_PROMPT_TIMEOUT_MS = 30_000;
 const RUNTIME_DIR_MODE = 0o700;
 const LOADOUT_MODE = 0o600;
@@ -165,6 +172,22 @@ interface PendingQuestion {
 	reject: (error: Error) => void;
 }
 
+// Per-run review evidence: redacted with the run token and secret patterns while the
+// run is live, retained after release so the parent can summarize any terminal path.
+export interface SubagentRunEvidence {
+	tools: Record<string, number>;
+	files: string[];
+	failedCommands: Array<{ cmd: string; exit: number | null; tail: string }>;
+	droppedFiles: number;
+	droppedFailedCommands: number;
+}
+
+interface PendingEvidenceCall {
+	name: string;
+	cmd?: string;
+	path?: string;
+}
+
 export type SubagentItemKind = "text" | "thinking" | "tool" | "user" | "question" | "status";
 
 export interface SubagentItem {
@@ -214,6 +237,8 @@ interface RunState {
 	tail: string;
 	tailPending: string;
 	itemBuffer: RunItemBuffer;
+	evidence: SubagentRunEvidence;
+	evidencePending: Map<string, PendingEvidenceCall>;
 }
 
 export function truncateSubagentResult(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
@@ -440,10 +465,78 @@ function validateToolCallId(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_RPC_TOOL_CALL_ID_BYTES;
 }
 
+function copyRunEvidence(evidence: SubagentRunEvidence): SubagentRunEvidence {
+	return {
+		tools: { ...evidence.tools },
+		files: [...evidence.files],
+		failedCommands: evidence.failedCommands.map((command) => ({ ...command })),
+		droppedFiles: evidence.droppedFiles,
+		droppedFailedCommands: evidence.droppedFailedCommands,
+	};
+}
+
+function redactRunEvidenceText(run: RunState, text: string): string {
+	return redactText(redactSubagentText(text, run.ipcToken), process.env).text;
+}
+
+function boundedTailBytes(text: string, max: number): string {
+	const bytes = Buffer.from(text, "utf8");
+	return bytes.length <= max ? text : bytes.subarray(bytes.length - max).toString("utf8");
+}
+
+function evidenceArg(args: unknown, field: string): string | undefined {
+	const value = args && typeof args === "object" ? (args as Record<string, unknown>)[field] : undefined;
+	return typeof value === "string" ? value : undefined;
+}
+
+function recordRunEvidence(run: RunState, event: SubagentRpcEvent): void {
+	if ((event.type !== "tool_execution_start" && event.type !== "tool_execution_end") || !validateToolCallId(event.toolCallId)) return;
+	const evidence = run.evidence;
+	if (event.type === "tool_execution_start") {
+		const rawName = typeof event.toolName === "string" ? event.toolName : "";
+		const name = /^[A-Za-z0-9_.:-]{1,64}$/.test(rawName) ? rawName : "tool";
+		evidence.tools[name] = (evidence.tools[name] ?? 0) + 1;
+		const pending: PendingEvidenceCall = { name };
+		if (name === "bash") {
+			const command = evidenceArg(event.args, "command");
+			if (command !== undefined) pending.cmd = Buffer.from(redactRunEvidenceText(run, command), "utf8").subarray(0, MAX_RUN_EVIDENCE_TEXT_BYTES).toString("utf8");
+		} else if (name === "edit" || name === "write") {
+			const filePath = evidenceArg(event.args, "path");
+			if (filePath !== undefined) pending.path = redactRunEvidenceText(run, filePath).slice(0, 512);
+		} else {
+			return;
+		}
+		if (run.evidencePending.size >= MAX_RUN_EVIDENCE_PENDING) {
+			const oldest = run.evidencePending.keys().next().value;
+			if (oldest !== undefined) run.evidencePending.delete(oldest);
+		}
+		run.evidencePending.set(event.toolCallId, pending);
+		return;
+	}
+	const pending = run.evidencePending.get(event.toolCallId);
+	if (!pending) return;
+	run.evidencePending.delete(event.toolCallId);
+	const failed = event.isError === true;
+	if (pending.path !== undefined && !failed && !evidence.files.includes(pending.path)) {
+		if (evidence.files.length >= MAX_RUN_EVIDENCE_FILES) evidence.droppedFiles += 1;
+		else evidence.files.push(pending.path);
+	}
+	if (pending.name === "bash" && failed) {
+		if (evidence.failedCommands.length >= MAX_RUN_EVIDENCE_FAILED_COMMANDS) {
+			evidence.droppedFailedCommands += 1;
+			return;
+		}
+		const result = event.result && typeof event.result === "object" && "content" in event.result ? (event.result as { content: unknown }).content : event.result;
+		const text = redactRunEvidenceText(run, boundedTailBytes(reviewContentText(result), RUN_EVIDENCE_OUTPUT_WINDOW_BYTES));
+		evidence.failedCommands.push({ cmd: pending.cmd ?? "", exit: parseExitCode(text), tail: boundedTailBytes(text, MAX_RUN_EVIDENCE_TEXT_BYTES) });
+	}
+}
+
 export class SubagentLaunchHost {
 	readonly server: SubagentIpcServer;
 	private readonly runs = new Map<string, RunState>();
 	private readonly itemHistory = new Map<string, SubagentItem[]>();
+	private readonly evidenceHistory = new Map<string, SubagentRunEvidence>();
 	private readonly spawnProcess: SubagentSpawnProcess | undefined;
 	private readonly ownership = new OwnershipLockManager();
 	private closed = false;
@@ -559,6 +652,11 @@ export class SubagentLaunchHost {
 		return output || undefined;
 	}
 
+	readRunEvidence(owner: string): SubagentRunEvidence | undefined {
+		const evidence = this.runs.get(owner)?.evidence ?? this.evidenceHistory.get(owner);
+		return evidence ? copyRunEvidence(evidence) : undefined;
+	}
+
 	readItems(owner: string): SubagentItem[] {
 		if (this.closed) return [];
 		const items = this.runs.get(owner)?.itemBuffer.items ?? this.itemHistory.get(owner) ?? [];
@@ -590,6 +688,7 @@ export class SubagentLaunchHost {
 			await this.server.closeOwner(loadout.owner);
 			await existing.rpc?.stop();
 			this.retainItemHistory(loadout.owner, existing.itemBuffer.items);
+			this.retainEvidenceHistory(loadout.owner, existing.evidence);
 			existing.itemBuffer.listeners.clear();
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
@@ -658,12 +757,15 @@ export class SubagentLaunchHost {
 			tail: "",
 			tailPending: "",
 			itemBuffer: { items: [], listeners: new Set(), contentItems: new Map(), toolItems: new Map() },
+			evidence: { tools: Object.create(null), files: [], failedCommands: [], droppedFiles: 0, droppedFailedCommands: 0 },
+			evidencePending: new Map(),
 		};
 		this.runs.set(loadout.owner, run);
 		const releaseRun = () => {
 			run.removeAbortListener?.();
 			if (this.runs.get(loadout.owner) !== run) return;
 			this.retainItemHistory(loadout.owner, run.itemBuffer.items);
+			this.retainEvidenceHistory(loadout.owner, run.evidence);
 			run.itemBuffer.listeners.clear();
 			this.runs.delete(loadout.owner);
 			this.ownership.release(loadout.owner);
@@ -782,6 +884,7 @@ export class SubagentLaunchHost {
 		await Promise.all(runs.map(([, run]) => run.finalizePromise).filter((promise): promise is Promise<void> => promise !== undefined));
 		await this.server.close();
 		this.itemHistory.clear();
+		this.evidenceHistory.clear();
 	}
 
 	private async readSessionFile(run: RunState): Promise<void> {
@@ -810,6 +913,7 @@ export class SubagentLaunchHost {
 		run.watchdog?.touch();
 		appendRunTail(run, summarizeRpcEvent(event));
 		this.recordItemEvent(run, event);
+		recordRunEvidence(run, event);
 		if (event.type === "tool_execution_start" && validateToolCallId(event.toolCallId)) run.watchdog?.toolStarted(event.toolCallId);
 		if (event.type === "tool_execution_end" && validateToolCallId(event.toolCallId)) run.watchdog?.toolEnded(event.toolCallId);
 		if (event.type === "agent_settled") void this.settleRun(run, owner);
@@ -822,6 +926,16 @@ export class SubagentLaunchHost {
 
 	private notifyItemBuffer(buffer: RunItemBuffer): void {
 		for (const listener of [...buffer.listeners]) this.notifyItemListener(listener, buffer.items);
+	}
+
+	private retainEvidenceHistory(owner: string, evidence: SubagentRunEvidence): void {
+		this.evidenceHistory.delete(owner);
+		this.evidenceHistory.set(owner, copyRunEvidence(evidence));
+		while (this.evidenceHistory.size > MAX_SUBAGENT_ITEM_HISTORY_RUNS) {
+			const oldest = this.evidenceHistory.keys().next().value;
+			if (oldest === undefined) break;
+			this.evidenceHistory.delete(oldest);
+		}
 	}
 
 	private retainItemHistory(owner: string, items: readonly SubagentItem[]): void {

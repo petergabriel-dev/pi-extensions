@@ -12,7 +12,7 @@ import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
-import { abandonedSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
+import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
 import { appendReviewEvent } from "./review-store.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -1188,6 +1188,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
 		const attempt = captureAttempt;
 		if (attempt) recordToolResult(attempt, event, Date.now(), process.env);
+	});
+
+	pi.events.on("subagents:run-summary", (data: unknown) => {
+		const attempt = captureAttempt;
+		if (!attempt) return;
+		const summary = normalizeRunSummary(data, process.env);
+		if (summary) attachRunSummary(attempt, summary);
 	});
 
 	pi.registerCommand("caveman", {

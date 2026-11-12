@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
 	abandonedSummary,
+	attachRunSummary,
 	attemptWarnings,
+	MAX_ATTEMPT_SUBAGENTS,
+	normalizeRunSummary,
 	MAX_COMMAND_RECORDS,
 	MAX_PENDING_TOOL_CALLS,
 	MAX_RECORD_TEXT_BYTES,
@@ -102,6 +105,23 @@ const text = (value: string) => [{ type: "text", text: value }];
 	assert.deepEqual(Object.keys(summary).sort(), ["attemptId", "commands", "ev", "paths", "planId", "reason", "taskId", "unmatched"], "abandon summary is counts only");
 }
 
+// Subagent run summaries: validated, bounded, re-redacted; only runs started in the attempt; capped.
+{
+	const base = { owner: "w1", agentName: "worker", status: "done", startedAt: 10, finishedAt: 20, tools: { bash: 2, "bad name!": 1 }, files: ["src/a.ts"], failedCommands: [{ cmd: "npm test", exit: 1, tail: `fail supersecretvalue123 sk-${"B".repeat(30)}` }] };
+	for (const bad of [null, [], { ...base, owner: 5 }, { ...base, startedAt: Number.NaN }, { ...base, finishedAt: "x" }]) assert.equal(normalizeRunSummary(bad, env), undefined);
+	const summary = normalizeRunSummary({ ...base, files: Array.from({ length: 80 }, (_, index) => `f${index}`), failedCommands: Array.from({ length: 15 }, () => base.failedCommands[0]) }, env)!;
+	assert.deepEqual(summary.tools, { bash: 2 }, "invalid tool names are dropped");
+	assert.equal(summary.files.length, 50);
+	assert.equal(summary.failedCommands.length, 10);
+	assert.ok(!JSON.stringify(summary).includes("supersecretvalue123") && !JSON.stringify(summary).includes("B".repeat(30)), "summary text is re-redacted");
+	const attempt = openAttempt({ attemptId: "a2", sessionId: "s1", planId: "p1", taskId: "t1", startedAt: 100 });
+	attachRunSummary(attempt, { ...summary, startedAt: 50 });
+	assert.equal(attempt.subagents.length, 0, "runs started before the attempt are not attached");
+	for (let index = 0; index <= MAX_ATTEMPT_SUBAGENTS; index += 1) attachRunSummary(attempt, { ...summary, owner: `w${index}`, startedAt: 100 + index });
+	assert.equal(attempt.subagents.length, MAX_ATTEMPT_SUBAGENTS);
+	assert.ok(attemptWarnings(attempt).some((warning) => warning.startsWith("truncated: 1 subagent run summary")));
+}
+
 // Wiring through the real extension: Build-only capture, tick hand-off, abandon paths.
 const execFileAsync = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "review-capture-"));
@@ -169,6 +189,10 @@ await bash("echo off-mode");
 // Build: first tool event opens the attempt; the tick hands it to the bundle step.
 await mode("build");
 await bash("echo one", "one");
+const runSummary = (owner, startedAt) => ({ owner, agentName: "worker", status: "done", startedAt, finishedAt: Date.now(), tools: { edit: 1 }, files: ["src/a.ts"], failedCommands: [], droppedFiles: 0, droppedFailedCommands: 0 });
+events.emit("subagents:run-summary", runSummary("before-attempt", 0));
+events.emit("subagents:run-summary", runSummary("inside-attempt", Date.now()));
+events.emit("subagents:run-summary", { owner: "malformed" });
 await new Promise((resolve) => setTimeout(resolve, 300));
 const tasks = await request("workflow-modes:get-plan-tasks", { requestId: "r1" });
 await tools.get("workflow_plan_tick").execute("tick-1", { taskId: tasks.nextTask.id }, undefined, undefined, ctx);
@@ -179,6 +203,7 @@ assert.equal(ticked.taskId, tasks.nextTask.id);
 assert.equal(ticked.planId, "plan-cap");
 assert.equal(ticked.baseline, ${JSON.stringify(head)}, "baseline is HEAD at attempt open");
 assert.deepEqual(ticked.commands.map((record) => [record.cmd, record.exit, record.tail]), [["echo one", 0, "one"]], "Off-mode command not captured");
+assert.deepEqual(ticked.subagents.map((summary) => summary.owner), ["inside-attempt"], "only valid summaries for runs inside the attempt attach");
 
 // Abandon paths log counts only.
 await bash("echo secret-command-text-1");

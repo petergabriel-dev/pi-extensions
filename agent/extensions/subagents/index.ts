@@ -148,6 +148,7 @@ interface SubagentRecord {
 	deliveryRedelivered?: boolean;
 	deliveryEditorOwned?: boolean;
 	progress?: ProgressHandle;
+	summaryEmitted?: boolean;
 }
 
 interface QuestionRelay {
@@ -685,6 +686,27 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	// One redacted summary per run, on whichever terminal path it reaches first.
+	const emitRunSummary = (record: SubagentRecord, status: "done" | "failed" | "stopped" | "launch_failed"): void => {
+		if (record.summaryEmitted) return;
+		record.summaryEmitted = true;
+		const evidence = host?.readRunEvidence(record.owner);
+		try {
+			pi.events.emit("subagents:run-summary", {
+				owner: record.owner,
+				agentName: record.agentName,
+				status,
+				startedAt: record.startedAt,
+				finishedAt: record.finishedAt ?? Date.now(),
+				tools: evidence?.tools ?? {},
+				files: evidence?.files ?? [],
+				failedCommands: evidence?.failedCommands ?? [],
+				droppedFiles: evidence?.droppedFiles ?? 0,
+				droppedFailedCommands: evidence?.droppedFailedCommands ?? 0,
+			});
+		} catch { /* summary listeners must not affect subagent results */ }
+	};
+
 	const attachHandle = (record: SubagentRecord, handle: SubagentLaunchHandle, steerToParent = true): void => {
 		record.handle = handle;
 		record.childSessionId = handle.childSessionId;
@@ -703,6 +725,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			if (steerToParent && !record.deliveryText) steerResult(pi, record, result.text);
 			record.status = "done";
 			record.progress?.finish(record.status === "done" ? "done" : "failed");
+			emitRunSummary(record, "done");
 		}).catch((error: unknown) => {
 			clearQuestionRelays(record.owner);
 			record.question = undefined;
@@ -716,6 +739,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			}
 			record.progress?.setFailure(record.error);
 			record.progress?.finish("failed");
+			emitRunSummary(record, error instanceof SubagentFailureError && error.info.kind === "stopped" ? "stopped" : "failed");
 			if (steerToParent && !shuttingDown) steerFailure(pi, record);
 		});
 	};
@@ -816,6 +840,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			record.finishedAt = Date.now();
 			record.error = error instanceof Error ? error.message : String(error);
 			record.progress?.finish("failed");
+			if (!record.handle) emitRunSummary(record, "launch_failed");
 			throw error;
 		}
 	}
@@ -1101,6 +1126,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				record.finishedAt = Date.now();
 				record.error = error instanceof Error ? error.message : String(error);
 				progress.finish("failed");
+				if (!record.handle) emitRunSummary(record, "launch_failed");
 				return { content: [{ type: "text", text: `Subagent launch failed: ${record.error}` }], details: { ok: false, owner, error: record.error } };
 			}
 		},

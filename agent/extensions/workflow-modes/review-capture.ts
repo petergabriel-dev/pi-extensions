@@ -6,6 +6,7 @@ import { redactText } from "./review-redact.js";
 export const MAX_PENDING_TOOL_CALLS = 200;
 export const MAX_COMMAND_RECORDS = 50;
 export const MAX_ATTEMPT_PATHS = 200;
+export const MAX_ATTEMPT_SUBAGENTS = 20;
 export const MAX_RECORD_TEXT_BYTES = 2048;
 const MAX_PATH_LENGTH = 512;
 const OUTPUT_WINDOW_BYTES = 64 * 1024;
@@ -28,6 +29,19 @@ interface PendingCall {
 	startedAt: number;
 }
 
+export interface RunSummary {
+	owner: string;
+	agentName: string;
+	status: string;
+	startedAt: number;
+	finishedAt: number;
+	tools: Record<string, number>;
+	files: string[];
+	failedCommands: Array<{ cmd: string; exit: number | null; tail: string }>;
+	droppedFiles: number;
+	droppedFailedCommands: number;
+}
+
 export interface CaptureAttempt {
 	attemptId: string;
 	sessionId: string;
@@ -37,13 +51,14 @@ export interface CaptureAttempt {
 	baseline?: string;
 	commands: CommandRecord[];
 	paths: string[];
-	subagents: unknown[];
+	subagents: RunSummary[];
 	pending: Map<string, PendingCall>;
 	redactions: number;
 	droppedCommands: number;
 	droppedPending: number;
 	droppedPaths: number;
 	unknownExits: number;
+	droppedSubagents: number;
 }
 
 export interface ToolCallLike {
@@ -59,7 +74,7 @@ export interface ToolResultLike {
 }
 
 export function openAttempt(fields: { attemptId: string; sessionId: string; planId: string; taskId: string; startedAt: number }): CaptureAttempt {
-	return { ...fields, commands: [], paths: [], subagents: [], pending: new Map(), redactions: 0, droppedCommands: 0, droppedPending: 0, droppedPaths: 0, unknownExits: 0 };
+	return { ...fields, commands: [], paths: [], subagents: [], pending: new Map(), redactions: 0, droppedCommands: 0, droppedPending: 0, droppedPaths: 0, unknownExits: 0, droppedSubagents: 0 };
 }
 
 function headBytes(text: string, max: number): string {
@@ -154,6 +169,7 @@ export function attemptWarnings(attempt: CaptureAttempt): string[] {
 	const warnings: string[] = [];
 	if (attempt.droppedCommands > 0) warnings.push(`truncated: ${attempt.droppedCommands} command record(s) beyond ${MAX_COMMAND_RECORDS} not kept`);
 	if (attempt.droppedPaths > 0) warnings.push(`truncated: ${attempt.droppedPaths} changed path(s) beyond ${MAX_ATTEMPT_PATHS} not kept`);
+	if (attempt.droppedSubagents > 0) warnings.push(`truncated: ${attempt.droppedSubagents} subagent run summar${attempt.droppedSubagents === 1 ? "y" : "ies"} beyond ${MAX_ATTEMPT_SUBAGENTS} not kept`);
 	if (attempt.unknownExits > 0) warnings.push(`unavailable: exit code for ${attempt.unknownExits} failed command(s); recorded as null`);
 	const unmatched = attempt.pending.size + attempt.droppedPending;
 	if (unmatched > 0) warnings.push(`incomplete: ${unmatched} tool call(s) had no matching result`);
@@ -172,4 +188,53 @@ export function abandonedSummary(attempt: CaptureAttempt, reason: string): Recor
 		paths: attempt.paths.length + attempt.droppedPaths,
 		unmatched: attempt.pending.size + attempt.droppedPending,
 	};
+}
+
+const SHORT_TEXT = 128;
+const SUMMARY_TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+function boundedString(value: unknown, maxBytes: number): string | undefined {
+	return typeof value === "string" ? headBytes(value, maxBytes) : undefined;
+}
+
+function count(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+// Validates and bounds a subagents:run-summary payload at the event-bus boundary.
+// Text is already redacted by the subagents host; it is redacted again here so the
+// review evidence never depends on another extension's redaction.
+export function normalizeRunSummary(value: unknown, env: Env): RunSummary | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const raw = value as Record<string, unknown>;
+	const owner = boundedString(raw.owner, SHORT_TEXT);
+	const agentName = boundedString(raw.agentName, SHORT_TEXT);
+	const status = boundedString(raw.status, 32);
+	if (!owner || !agentName || !status || !Number.isFinite(raw.startedAt) || !Number.isFinite(raw.finishedAt)) return undefined;
+	const tools: Record<string, number> = {};
+	if (raw.tools && typeof raw.tools === "object" && !Array.isArray(raw.tools)) {
+		for (const [name, uses] of Object.entries(raw.tools).slice(0, 50)) if (SUMMARY_TOOL_NAME.test(name)) tools[name] = count(uses);
+	}
+	const files = Array.isArray(raw.files) ? raw.files.filter((file): file is string => typeof file === "string").slice(0, 50).map((file) => redactText(file, env).text.slice(0, MAX_PATH_LENGTH)) : [];
+	const failedCommands = Array.isArray(raw.failedCommands) ? raw.failedCommands.slice(0, 10).flatMap((entry) => {
+		if (!entry || typeof entry !== "object") return [];
+		const command = entry as Record<string, unknown>;
+		const exit = typeof command.exit === "number" && Number.isSafeInteger(command.exit) ? command.exit : null;
+		return [{
+			cmd: headBytes(redactText(typeof command.cmd === "string" ? command.cmd : "", env).text, MAX_RECORD_TEXT_BYTES),
+			exit,
+			tail: tailBytes(redactText(typeof command.tail === "string" ? tailBytes(command.tail, OUTPUT_WINDOW_BYTES) : "", env).text, MAX_RECORD_TEXT_BYTES),
+		}];
+	}) : [];
+	return { owner, agentName, status, startedAt: Number(raw.startedAt), finishedAt: Number(raw.finishedAt), tools, files, failedCommands, droppedFiles: count(raw.droppedFiles), droppedFailedCommands: count(raw.droppedFailedCommands) };
+}
+
+// Only runs that started inside this attempt belong to it.
+export function attachRunSummary(attempt: CaptureAttempt, summary: RunSummary): void {
+	if (summary.startedAt < attempt.startedAt) return;
+	if (attempt.subagents.length >= MAX_ATTEMPT_SUBAGENTS) {
+		attempt.droppedSubagents += 1;
+		return;
+	}
+	attempt.subagents.push(summary);
 }
