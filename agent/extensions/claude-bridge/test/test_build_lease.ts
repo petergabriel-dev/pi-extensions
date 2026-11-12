@@ -218,8 +218,8 @@ assert.equal(pruneBuildLeaseRequests(entries, workflow, () => false).size, 0);
 assert.equal(buildLeaseHolderLabel(activeLease), "claude:claude-session");
 assert.equal(buildLeaseHolderLabel(null), null);
 
-// Discuss/Plan recall releases only the holder's lease.
-for (const mode of ["discuss", "plan"]) {
+// Discuss/Plan/Review recall releases only the holder's lease.
+for (const mode of ["discuss", "plan", "review"]) {
 	assert.equal(releaseBuildLeaseOnRecall(activeLease, claude, mode), null);
 	assert.equal(releaseBuildLeaseOnRecall(activeLease, cursor, mode), activeLease);
 }

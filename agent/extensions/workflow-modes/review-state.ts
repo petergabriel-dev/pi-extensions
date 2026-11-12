@@ -1,6 +1,8 @@
 import { resolveCommit, runGit } from "./git.js";
 import { BUNDLE_ID, readEvidenceBundle } from "./review-bundle.js";
 import type { ReviewEvent } from "./review-store.js";
+import { parseFindingIds, type PlanTask } from "./plan-tasks.js";
+import type { PlanTaskTick } from "./plan-state.js";
 
 // Review findings and per-task review state. Validation runs at the trust boundary;
 // state is derived from the review log, ticks, and plans, never stored.
@@ -231,4 +233,83 @@ export function deriveTaskReviewState(input: ReviewStateInput): TaskReviewSummar
 	}
 	if (findings.length > 0 || reviewStarted) return summary("in_review");
 	return summary("ready");
+}
+
+export const MAX_REVIEW_OVERVIEW_BYTES = 16 * 1024;
+const MAX_OVERVIEW_TASKS = 50;
+const MAX_OVERVIEW_FINDINGS = 30;
+
+export interface OverviewPlan {
+	planId: string;
+	active: boolean;
+	tasks: readonly PlanTask[];
+	completedTaskIds: readonly string[];
+	ticks: ReadonlyMap<string, PlanTaskTick>;
+}
+
+export interface ReviewOverview {
+	tasks: Array<{ planId: string; taskId: string; title: string; state: TaskReviewState; rounds: number; findings: string[]; bundleId?: string; commit?: string; by?: string; note?: string }>;
+	findings: Array<{ id: string; planId: string; taskId: string; status: FindingStatus; classification: string; severity: Severity; file?: string; line?: number; text: string; by?: string }>;
+	omitted: { tasks: number; findings: number };
+	warnings: string[];
+}
+
+function clip(text: string, max: number): string {
+	return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+// Pure and bounded: ticked tasks (active plan first) with derived review state, plus
+// unresolved findings, trimmed to MAX_REVIEW_OVERVIEW_BYTES.
+export function buildReviewOverview(plans: readonly OverviewPlan[], events: readonly ReviewEvent[], warnings: readonly string[] = []): ReviewOverview {
+	const planViews = plans.map((plan) => ({
+		planId: plan.planId,
+		tasks: plan.tasks.map((task) => ({ id: task.id, ticked: plan.completedTaskIds.includes(task.id), findings: parseFindingIds(task.metadata.findings) })),
+	}));
+	const ordered = [...plans].sort((a, b) => Number(b.active) - Number(a.active));
+	const tasks: ReviewOverview["tasks"] = [];
+	let omittedTasks = 0;
+	for (const plan of ordered) {
+		for (const task of plan.tasks) {
+			if (!plan.completedTaskIds.includes(task.id)) continue;
+			if (tasks.length >= MAX_OVERVIEW_TASKS) {
+				omittedTasks += 1;
+				continue;
+			}
+			const summary = deriveTaskReviewState({ planId: plan.planId, taskId: task.id, ticked: true, events, plans: planViews });
+			const tick = plan.ticks.get(task.id);
+			tasks.push({
+				planId: plan.planId,
+				taskId: task.id,
+				title: clip(task.title, 200),
+				state: summary.state,
+				rounds: summary.rounds,
+				findings: summary.findings,
+				...(summary.bundleId ? { bundleId: summary.bundleId } : {}),
+				...(tick?.commit ? { commit: tick.commit } : {}),
+				...(tick?.by ? { by: tick.by } : {}),
+				...(tick?.note ? { note: clip(tick.note, 200) } : {}),
+			});
+		}
+	}
+	const unresolved = [...foldFindings(events).values()].filter(isUnresolved);
+	const findings: ReviewOverview["findings"] = unresolved.slice(0, MAX_OVERVIEW_FINDINGS).map((finding) => ({
+		id: finding.id,
+		planId: finding.planId,
+		taskId: finding.taskId,
+		status: finding.status,
+		classification: finding.classification,
+		severity: finding.severity,
+		...(finding.file ? { file: finding.file } : {}),
+		...(finding.line ? { line: finding.line } : {}),
+		text: clip(finding.text, 300),
+		...(finding.by ? { by: finding.by } : {}),
+	}));
+	const overview: ReviewOverview = { tasks, findings, omitted: { tasks: omittedTasks, findings: unresolved.length - findings.length }, warnings: warnings.slice(0, 5).map((warning) => clip(warning, 200)) };
+	while (Buffer.byteLength(JSON.stringify(overview), "utf8") > MAX_REVIEW_OVERVIEW_BYTES) {
+		if (overview.findings.length > 0) { overview.findings.pop(); overview.omitted.findings += 1; continue; }
+		if (overview.tasks.length > 0) { overview.tasks.pop(); overview.omitted.tasks += 1; continue; }
+		overview.warnings = [];
+		break;
+	}
+	return overview;
 }

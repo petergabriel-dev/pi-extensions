@@ -210,6 +210,22 @@ try {
 	const again = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id });
 	assert.equal(again.result.idempotent, true);
 	assert.equal(again.result.commit, head, "re-tick keeps the first commit");
+
+	step = "5b review: another identity reads review state and one evidence page";
+	const bundleId = ticked.result.bundle?.id;
+	assert.match(bundleId ?? "", /^[0-9a-f]{64}$/, "a bridge tick builds an evidence bundle");
+	const reviewRecall = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+	assert.deepEqual(Object.keys(reviewRecall.result.prompts), ["mode", "cavemanEnabled", "reviewPrompt"]);
+	assert.ok(reviewRecall.result.prompts.reviewPrompt.includes("untrusted data"), "review prompt marks evidence as data");
+	const reviewedTask = reviewRecall.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id);
+	assert.deepEqual({ state: reviewedTask.state, bundleId: reviewedTask.bundleId, commit: reviewedTask.commit, by: reviewedTask.by }, { state: "ready", bundleId, commit: head, by: `${IDENTITY.harness}:${IDENTITY.id}` });
+	const evidencePage = await call("read_task_evidence", { bundleId }, OTHER);
+	assert.deepEqual({ section: evidencePage.result.section, page: evidencePage.result.page }, { section: "summary", page: 0 });
+	assert.equal(JSON.parse(evidencePage.result.data).commit, head);
+	assert.ok(Buffer.byteLength(JSON.stringify(evidencePage.result), "utf8") <= 24 * 1024, "evidence pages stay within 24 KiB");
+	const afterRead = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+	assert.equal(afterRead.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id).state, "in_review", "reading evidence records review_started");
+	assert.equal(client.holdsBuildLease(project, IDENTITY), true, "another identity's review recall keeps the holder's lease");
 	assert.deepEqual(again.result.progress, { done: 1, total: 2 });
 
 	step = "6 hook decision: lease holder may write, another session may not";

@@ -159,13 +159,14 @@ function validateEvent(input: Record<string, unknown>, existing: readonly Review
 	if (typeof input.taskId !== "string" || !SAFE_ID.test(input.taskId)) throw new Error(`${input.ev} requires a safe taskId`);
 }
 
-async function appendNow(agentDir: string, sessionId: string, input: Record<string, unknown>): Promise<ReviewEvent> {
+async function appendNow(agentDir: string, sessionId: string, input: Record<string, unknown>, skipIf?: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent | undefined> {
 	const directory = reviewSessionDir(agentDir, sessionId);
 	await ensurePrivateDir(directory);
 	const path = reviewLogPath(agentDir, sessionId);
 	const bytes = await readLogBytes(path);
 	const { events } = parseLog(bytes);
 	validateEvent(input, events);
+	if (skipIf?.(events)) return undefined;
 	// validateEvent established ev and the required identifiers.
 	const event = {
 		...input,
@@ -200,6 +201,16 @@ async function appendNow(agentDir: string, sessionId: string, input: Record<stri
 
 // Appends are serialized per log file so finding ids and line order stay consistent.
 export function appendReviewEvent(agentDir: string, sessionId: string, input: Record<string, unknown>): Promise<ReviewEvent> {
+	return enqueueAppend(agentDir, sessionId, input) as Promise<ReviewEvent>;
+}
+
+// Appends unless skipIf, evaluated on the current log inside the same serialized
+// queue, says the event is already recorded; resolves undefined when skipped.
+export function appendReviewEventUnless(agentDir: string, sessionId: string, input: Record<string, unknown>, skipIf: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent | undefined> {
+	return enqueueAppend(agentDir, sessionId, input, skipIf);
+}
+
+function enqueueAppend(agentDir: string, sessionId: string, input: Record<string, unknown>, skipIf?: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent | undefined> {
 	let key: string;
 	try {
 		key = reviewLogPath(agentDir, sessionId);
@@ -207,7 +218,7 @@ export function appendReviewEvent(agentDir: string, sessionId: string, input: Re
 		return Promise.reject(error);
 	}
 	const previous = queues.get(key) ?? Promise.resolve();
-	const next = previous.catch(() => undefined).then(() => appendNow(agentDir, sessionId, input));
+	const next = previous.catch(() => undefined).then(() => appendNow(agentDir, sessionId, input, skipIf));
 	queues.set(key, next);
 	void next.finally(() => {
 		if (queues.get(key) === next) queues.delete(key);

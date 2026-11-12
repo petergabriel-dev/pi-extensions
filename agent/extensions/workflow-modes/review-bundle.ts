@@ -288,3 +288,58 @@ export async function readEvidenceBundle(agentDir: string, sessionId: string, bu
 		await handle.close();
 	}
 }
+
+export const EVIDENCE_SECTIONS = ["summary", "files", "hunks", "commands", "subagents", "warnings"] as const;
+export type EvidenceSection = typeof EVIDENCE_SECTIONS[number];
+// Budget for one page's data string once JSON-escaped, leaving room for the envelope
+// so a whole page response stays within 24 KiB.
+export const EVIDENCE_PAGE_DATA_BYTES = 22 * 1024;
+
+export interface EvidencePage {
+	bundleId: string;
+	planId: string;
+	taskId: string;
+	section: EvidenceSection;
+	page: number;
+	pages: number;
+	data: string;
+}
+
+function sectionValue(bundle: EvidenceBundle, section: EvidenceSection): unknown {
+	if (section !== "summary") return bundle[section] ?? [];
+	return {
+		planId: bundle.planId,
+		taskId: bundle.taskId,
+		tickedBy: bundle.tickedBy,
+		attemptId: bundle.attemptId,
+		baseline: bundle.baseline,
+		commit: bundle.commit,
+		redactions: bundle.redactions,
+		counts: { files: bundle.files.length, hunks: bundle.hunks.length, commands: bundle.commands.length, subagents: bundle.subagents.length, warnings: bundle.warnings.length },
+	};
+}
+
+// Splits by escaped UTF-8 size, never inside a code point, so every page is valid text.
+function paginate(text: string, budget: number): string[] {
+	const pages: string[] = [];
+	let current = "";
+	let size = 0;
+	for (const char of text) {
+		const cost = Buffer.byteLength(JSON.stringify(char), "utf8") - 2;
+		if (size + cost > budget && current.length > 0) {
+			pages.push(current);
+			current = "";
+			size = 0;
+		}
+		current += char;
+		size += cost;
+	}
+	if (current.length > 0 || pages.length === 0) pages.push(current);
+	return pages;
+}
+
+export function evidencePage(bundleId: string, bundle: EvidenceBundle, section: EvidenceSection, page: number): EvidencePage {
+	const pages = paginate(JSON.stringify(sectionValue(bundle, section), null, 1), EVIDENCE_PAGE_DATA_BYTES);
+	if (!Number.isInteger(page) || page < 0 || page >= pages.length) throw new Error(`evidence ${section} has ${pages.length} page(s); page ${page} does not exist`);
+	return { bundleId, planId: bundle.planId, taskId: bundle.taskId, section, page, pages: pages.length, data: pages[page] };
+}

@@ -304,6 +304,11 @@ async function main() {
 	const tickSchema = client.tools.find((tool) => tool.name === "tick_plan_task").inputSchema;
 	assert.equal(tickSchema.properties.commit.pattern, "^[0-9a-fA-F]{7,64}$", "tick_plan_task must accept an optional commit SHA");
 	assert.equal(tickSchema.properties.by, undefined, "tick author must never be a payload field");
+	assert.deepEqual(client.tools.find((tool) => tool.name === "recall_memory").inputSchema.properties.mode.enum, ["discuss", "plan", "build", "review"]);
+	const evidenceSchema = client.tools.find((tool) => tool.name === "read_task_evidence")?.inputSchema;
+	assert.ok(evidenceSchema, "read_task_evidence missing from MCP tool list");
+	assert.deepEqual(evidenceSchema.required, ["bundleId"]);
+	assert.equal(evidenceSchema.properties.reviewer, undefined, "reviewer identity must never be a payload field");
 	const resolved = client.resolveHarnessIdentity({ sessionId: "primary-id", claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" });
 	assert.deepEqual(resolved, { harness: "claude", id: "primary-id" });
 	assert.deepEqual(client.resolveHarnessIdentity({ sessionId: OPENCODE.id, harness: OPENCODE.harness }, {}), OPENCODE);
@@ -686,6 +691,17 @@ async function main() {
 		assert.equal(result.requestId, responder.requests[1].id);
 		// Only the re-send is flagged, so Pi can count it in bridge health.
 		assert.equal(responder.requests[0].retry, undefined);
+		assert.equal(responder.requests[1].retry, true);
+	}, (cwd) => startClaimingResponder(cwd, (request, count) => count === 1
+		? { id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } }
+		: { id: request.id, ok: true, result: { type: request.type } }));
+
+	await test("read_task_evidence answered outcome_unknown is re-sent once", async (cwd, responder) => {
+		addModernSession(cwd, "pi-modern", [HARNESS]);
+		const [session] = client.liveSessions(cwd);
+		const result = await client.sendRequestToSession(cwd, session, "read_task_evidence", { bundleId: "a".repeat(64) }, HARNESS);
+		assert.equal(result.result.type, "read_task_evidence");
+		assert.equal(responder.requests.length, 2);
 		assert.equal(responder.requests[1].retry, true);
 	}, (cwd) => startClaimingResponder(cwd, (request, count) => count === 1
 		? { id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } }

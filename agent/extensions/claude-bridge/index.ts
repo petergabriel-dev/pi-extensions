@@ -13,8 +13,10 @@ import { BridgeHealth, cachePaths, failureCode, OutcomeUnknownError, recoverInfl
 import { DEFAULT_RECALL_BUDGET_BYTES, rankRecall } from "./recall-rank.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
+import { normalizeReadTaskEvidencePayload, reviewerIdentity } from "./review-payloads.js";
+
 const EXTENSION_ID = "claude-bridge";
-const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
+const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "read_task_evidence", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
 const PEER_BLOCK_BUDGET_CHARS = 16_000;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
@@ -77,7 +79,7 @@ interface BridgeResponse {
 
 interface RecallPayload {
 	query?: string;
-	mode?: "discuss" | "plan" | "build";
+	mode?: "discuss" | "plan" | "build" | "review";
 }
 
 type CaptureNoteType = "requirement" | "decision" | "constraint" | "action" | "question" | "preference" | "implementation" | "lesson";
@@ -171,6 +173,7 @@ const pendingSavePlans = new Map<string, PendingEventResult>();
 const pendingPlanTaskReads = new Map<string, PendingEventResult>();
 const pendingPlanTaskTicks = new Map<string, PendingEventResult>();
 const pendingDiscussionNotes = new Map<string, PendingEventResult>();
+const pendingReviewRequests = new Map<string, PendingEventResult>();
 
 const SCAN_COALESCE_MS = 50; // coalesce rapid watcher events into one scan per window.
 let scanScheduled = false;
@@ -514,7 +517,7 @@ function validateRequest(fileId: string, raw: unknown): BridgeRequest {
 	if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) throw new Error("Request payload must be an object.");
 	const peer = record.peer === undefined ? undefined : normalizePeer(record.peer);
 	if (record.peer !== undefined && !peer) throw new Error("Request peer must contain valid harness and id.");
-	if (["pair", "unpair", "send_message", "read_messages", "ack_messages"].includes(record.type as string) && !peer) throw new Error(`${record.type} request requires peer identity.`);
+	if (["pair", "unpair", "send_message", "read_messages", "ack_messages", "read_task_evidence"].includes(record.type as string) && !peer) throw new Error(`${record.type} request requires peer identity.`);
 	return {
 		id: record.id,
 		type: record.type,
@@ -568,7 +571,7 @@ function recallBudgetBytes(env: NodeJS.ProcessEnv = process.env): number {
 
 function normalizeRecallPayload(payload: Record<string, unknown>): RecallPayload {
 	const query = typeof payload.query === "string" ? payload.query : "";
-	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" ? payload.mode : "plan";
+	const mode = payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "build" || payload.mode === "review" ? payload.mode : "plan";
 	return { query, mode };
 }
 
@@ -728,6 +731,32 @@ function requestWorkflowPlanTasks(pi: ExtensionAPI, requestId: string, payload: 
 }
 
 // `by` is the host-stamped peer identity; the harness payload can never set it.
+// Review reads and writes go to workflow-modes with a correlation id and a bounded wait.
+function requestWorkflowReview(pi: ExtensionAPI, eventName: string, requestId: string, payload: Record<string, unknown>, isWrite = false): Promise<Record<string, unknown>> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			pendingReviewRequests.delete(requestId);
+			reject(isWrite ? new OutcomeUnknownError(`${eventName} timed out; the change may or may not have been recorded.`) : new Error(`${eventName} timed out.`));
+		}, 1_500);
+		timer.unref?.();
+		pendingReviewRequests.set(requestId, { resolve, reject, timer });
+		pi.events.emit(eventName, { requestId, ...payload });
+	});
+}
+
+async function handleReadTaskEvidence(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeReadTaskEvidencePayload(request.payload);
+		const reviewer = reviewerIdentity(request.peer);
+		const result = await requestWorkflowReview(pi, "workflow-modes:review-read-evidence", request.id, { ...payload, reviewer });
+		if (result.ok !== true) return errorResponse(request.id, "read_task_evidence_failed", typeof result.error === "string" ? result.error : "workflow-modes evidence read failed.");
+		const { ok: _ok, requestId: _requestId, ...page } = result;
+		return { id: request.id, ok: true, result: { requestId: request.id, ...page } };
+	} catch (error) {
+		return errorResponse(request.id, failureCode(error, "read_task_evidence_failed"), error instanceof Error ? error.message : String(error));
+	}
+}
+
 function requestWorkflowPlanTaskTick(pi: ExtensionAPI, requestId: string, payload: TickPlanTaskPayload, by: string): Promise<Record<string, unknown>> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
@@ -898,7 +927,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 				`Build lease pending for ${buildLeaseShortId(requested.entry.peer)}; approve it in Pi with /build-lease approve, then rerun /pi-build.`,
 			);
 		}
-	} else if (payload.mode === "discuss" || payload.mode === "plan") {
+	} else if (payload.mode === "discuss" || payload.mode === "plan" || payload.mode === "review") {
 		const nextLease = releaseBuildLeaseOnRecall(buildLease, request.peer, payload.mode);
 		if (nextLease !== buildLease) setBuildLease(nextLease, activeContext ?? undefined, "released");
 	}
@@ -916,6 +945,16 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 			...(workflowState.nextTask ? { nextTask: workflowState.nextTask } : {}),
 		}
 		: null;
+	let review: Record<string, unknown> | undefined;
+	if (payload.mode === "review") {
+		try {
+			const result = await requestWorkflowReview(pi, "workflow-modes:review-get", request.id, {});
+			if (result.ok !== true) return errorResponse(request.id, "review_state_unavailable", typeof result.error === "string" ? result.error : "workflow-modes review state is unavailable.");
+			review = result.overview && typeof result.overview === "object" ? result.overview as Record<string, unknown> : {};
+		} catch (error) {
+			return errorResponse(request.id, failureCode(error, "review_state_unavailable"), error instanceof Error ? error.message : String(error));
+		}
+	}
 	const memoryDir = resolveMemoryDir(getAgentDir());
 	await migrateFlatFile(memoryDir);
 	const personalIndex = await readMemoryIndex(memoryDir);
@@ -928,6 +967,7 @@ async function handleRecall(pi: ExtensionAPI, request: BridgeRequest): Promise<B
 		prompts: promptContextForMode(payload.mode, cavemanEnabled, projectRoot),
 		savedPlan,
 		buildLease: buildLease ? { ...buildLease } : null,
+		...(review ? { review } : {}),
 		memory: {
 			path: path.join(memoryDir, "MEMORY.md"),
 			loaded: Boolean(personalIndex),
@@ -1266,6 +1306,7 @@ async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	if (request.type === "save_plan") return handleSavePlan(pi, ctx, request);
 	if (request.type === "read_plan_tasks") return handleReadPlanTasks(pi, request);
 	if (request.type === "tick_plan_task") return handleTickPlanTask(pi, request);
+	if (request.type === "read_task_evidence") return handleReadTaskEvidence(pi, request);
 	if (request.type === "send_message") return handleSendMessage(ctx, request);
 	if (request.type === "read_messages") return handleReadMessages(request);
 	if (request.type === "ack_messages") return handleAckMessages(request);
@@ -1513,6 +1554,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 	for (const [eventName, pendingMap] of [
 		["workflow-modes:get-plan-tasks-result", pendingPlanTaskReads],
 		["workflow-modes:tick-plan-task-result", pendingPlanTaskTicks],
+		["workflow-modes:review-get-result", pendingReviewRequests],
+		["workflow-modes:review-read-evidence-result", pendingReviewRequests],
 	] as const) {
 		pi.events.on(eventName, (data: unknown) => {
 			const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
