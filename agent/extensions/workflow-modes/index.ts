@@ -69,6 +69,10 @@ let latestContext: ExtensionContext | null = null;
 let captureAttempt: CaptureAttempt | undefined;
 let captureWrites: Promise<unknown> = Promise.resolve();
 const BUNDLE_WAIT_MS = 1_000;
+// Only tools whose work capture records (or whose runs report summaries) open an
+// attempt. Any other tool, notably workflow_plan_tick itself, would otherwise open one
+// whose baseline is the already-committed task, and its bundle would show no changes.
+const CAPTURE_TOOLS: ReadonlySet<string> = new Set(["bash", "edit", "write", "subagent"]);
 let pendingPlanSave = false;
 let planSaveToolCalled = false;
 
@@ -1456,8 +1460,10 @@ export default function (pi: ExtensionAPI) {
 			if (BUILD_READ_ONLY_TOOLS.has(event.toolName)) return;
 			const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
 			if (!blockedBy) {
-				const attempt = ensureCaptureAttempt(ctx);
-				if (attempt) recordToolCall(attempt, event, Date.now(), process.env);
+				if (CAPTURE_TOOLS.has(event.toolName)) {
+					const attempt = ensureCaptureAttempt(ctx);
+					if (attempt) recordToolCall(attempt, event, Date.now(), process.env);
+				}
 				return;
 			}
 			return {

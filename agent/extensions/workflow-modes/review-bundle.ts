@@ -157,6 +157,8 @@ export async function buildEvidenceBundle(input: BundleInput): Promise<EvidenceB
 		}
 	}
 
+	if (commit && baseline === commit) warnings.push("incomplete: baseline equals the ticked commit; changes were not captured");
+
 	let files: BundleFile[] = [];
 	const hunks: Array<{ path: string; text: string }> = [];
 	if (commit) {

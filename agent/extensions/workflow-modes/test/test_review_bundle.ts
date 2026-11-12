@@ -94,6 +94,14 @@ try {
 	assert.deepEqual(bridge.commands, []);
 	assert.equal(bridge.files.length, 5, "git-only evidence still lists changes");
 
+	// A baseline equal to the ticked commit is never presented as a clean, empty task.
+	const sameAttempt = openAttempt({ attemptId: "attempt-same", sessionId: "s1", planId: "plan-1", taskId: "task-1", startedAt: 0 });
+	sameAttempt.baseline = head;
+	const same = await buildEvidenceBundle({ cwd: repo.dir, planId: "plan-1", taskId: "task-1", by: "pi", commit: head, attempt: sameAttempt, env });
+	assert.deepEqual(same.files, []);
+	assert.ok(same.warnings.includes("incomplete: baseline equals the ticked commit; changes were not captured"));
+	assert.ok(!bundle.warnings.some((warning) => warning.startsWith("incomplete: baseline equals")), "a real baseline carries no such warning");
+
 	// Pi tick with no attempt, no commit supplied: diff to HEAD, incomplete capture.
 	const noCommit = await buildEvidenceBundle({ cwd: repo.dir, planId: "plan-1", taskId: "task-1", by: "pi", env });
 	assert.equal(noCommit.commit, head);

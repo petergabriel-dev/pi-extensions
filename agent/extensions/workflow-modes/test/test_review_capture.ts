@@ -141,7 +141,8 @@ const agentDir = join(root, "agent");
 
 const source = `
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import workflowModesExtension, { flushReviewCapture, PLAN_ENTRY } from "./index.ts";
 
 const branch = [];
@@ -218,6 +219,26 @@ await flushReviewCapture();
 assert.deepEqual(abandoned().map((event) => [event.reason, event.commands]), [["mode change", 1], ["plan change", 1], ["session switch", 1]]);
 assert.ok(!logText().includes("secret-command-text"), "abandon events never store command text");
 assert.equal(logText().trim().split("\\n").map((line) => JSON.parse(line)).filter((event) => event.ev === "bundle_created").length, 1, "abandoned attempts never produce a bundle");
+
+// After a restart, the tick's own tool_call must not open an attempt: its baseline would be
+// the task commit and the bundle would show no changes without a warning.
+await mode("build");
+const REPO = ${JSON.stringify(repo)};
+writeFileSync(REPO + "/b.txt", "b\\n");
+execFileSync("git", ["-C", REPO, "add", "b.txt"]);
+execFileSync("git", ["-C", REPO, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "b"]);
+const taskCommit = execFileSync("git", ["-C", REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const onlyTask = (await request("workflow-modes:get-plan-tasks", { requestId: "r2" })).nextTask;
+const tickInput = { taskId: onlyTask.id, commit: taskCommit };
+assert.equal(await handlers.get("tool_call")({ toolCallId: "tick-call-2", toolName: "workflow_plan_tick", input: tickInput }, ctx), undefined);
+await new Promise((resolve) => setTimeout(resolve, 300));
+const restartTick = await tools.get("workflow_plan_tick").execute("tick-call-2", tickInput, undefined, undefined, ctx);
+await flushReviewCapture();
+const restartBundle = JSON.parse(readFileSync(${JSON.stringify(join(agentDir, "plans", "session-cap", "evidence"))} + "/" + restartTick.details.bundle.id + ".json", "utf8"));
+assert.equal(restartBundle.attemptId, undefined, "the tick itself opens no capture attempt");
+assert.ok(restartBundle.warnings.some((warning) => warning.startsWith("incomplete: no captured attempt")), "a missing attempt is reported");
+assert.deepEqual(restartBundle.files.map((file) => file.path), ["b.txt"], "the diff is not empty");
+assert.equal(restartBundle.baseline, ${JSON.stringify(head)}, "baseline is inferred as the commit's parent");
 })().catch((error) => {
 	console.error(error);
 	process.exit(1);
