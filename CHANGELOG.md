@@ -4,6 +4,35 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-12
+
+### Added
+
+- Bridge request lifecycle (ADR-0054): a request moves `requests/` → `inflight/` (Pi claims it by atomic rename, so overlapping scans never run one request twice) → `processed/` + `responses/`. A 500 ms poll backs up `fs.watch`, claimed files over 1 MiB are answered `payload_too_large` unread, and answers are kept 10 minutes so a repeated request ID is replayed, not re-run.
+- Two-stage client deadlines for Claude, Cursor, OpenCode, and Codex. Pi must claim a request within the pickup deadline (default 2 s, `PI_BRIDGE_PICKUP_TIMEOUT_MS`), or the client withdraws it and reports `not_delivered`. A claimed request with no answer by the completion deadline (default 30 s, `PI_BRIDGE_COMPLETION_TIMEOUT_MS`) is `outcome_unknown`, never bridge-down. Pi also answers `outcome_unknown` for requests a crash left in flight (never re-run) and for timed-out write-side waits. Reads answered `outcome_unknown` are re-sent once; writes never are.
+- Budgeted, query-ranked recall. `recall` returns the requested mode's prompt, the saved plan and lease, a one-line doc index, and the best-matching doc sections and personal-memory entries (BM25) within a 32 KB default budget (`PI_BRIDGE_RECALL_BUDGET_BYTES`). Sections carry `path` and a line range for follow-up reads. `recall_memory` returns compact text only. Recall in this repository drops from about 723 KB to about 32 KB.
+- Bridge health: a 500-entry `health.jsonl` ring (codes, timings, sizes, and `replay`/`retry` flags only; no payloads or ids) and `/bridge-health`, which prints p50/p95 latency and response size per request type plus withdrawn, `outcome_unknown`, replay, restart-conversion, slow-completion, and client read-retry counts.
+- Cross-process bridge e2e (`test:bridge-e2e`) in CI: a real headless Pi in RPC mode, driven through the real MCP client, with a Build lease approved through Pi's own confirm dialog and injected faults.
+
+### Changed
+
+- An identical bridge `save_plan` returns the active plan with `idempotent: true` instead of writing a second plan, unless the caller names a different `planId`. Pi-native saves are unchanged.
+
+### Fixed
+
+- The doc index no longer starves ranked recall. A build-mode recall with a large saved plan returned no doc sections; packing now reserves room for sections before the index. A query that matches nothing falls back to the `invariants.md` sections.
+- Request-queue claim edge cases: a same-ID duplicate waits and is replayed instead of running twice, a scan with a stale listing writes nothing, and a request file that is not a regular `0600` file is answered `invalid_request` instead of being dropped silently.
+- The bwrap sandbox mounts a fresh `/dev`, so login-shell profiles and sandboxed git reads no longer fail on `/dev/null` with "Permission denied" on current Ubuntu runners. The root stays read-only.
+
+### Known issues
+
+- Plan state saved and ticked through the bridge stays in memory until the Pi session's first assistant message, because Pi writes no session file before then. Restarting such a session loses it; git commits remain the record.
+
+### Upgrade
+
+- Installs pinned to a version need `pi install npm:@lopezpetergabriel/pi-extensions@0.14.0`.
+- Restart Pi, and any open Claude, Cursor, OpenCode, or Codex session, so both the bridge and its clients load the new code. Until Pi restarts, its namespace has no `inflight/`, so clients fall back to legacy mode (one 2 s deadline, no withdraw) and recall stays unbudgeted.
+
 ## [0.13.0] - 2026-11-05
 
 ### Added

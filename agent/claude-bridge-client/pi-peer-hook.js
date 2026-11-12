@@ -5,6 +5,8 @@ const client = require("./pi-bridge-mcp.js");
 
 const PEER_HOOK_BUDGET_CHARS = 9_000;
 const MAX_HOOK_INPUT_CHARS = 1_048_576;
+// Keep prompt submit fast when Pi hangs: these requests are at-least-once and the hook fails open.
+const HOOK_TIMEOUTS = { pickupTimeoutMs: 1_000, completionTimeoutMs: 1_000 };
 
 async function readHookInput() {
 	process.stdin.setEncoding("utf8");
@@ -40,7 +42,7 @@ async function handleHookInput(input, output = process.stdout) {
 			const projectRoot = projectRootForInput(input);
 			const paired = client.findPairedLiveSessions(projectRoot, identity);
 			await Promise.all(paired.map(async (session) => {
-				try { await client.sendRequestToSession(projectRoot, session, "unpair", {}, identity); }
+				try { await client.sendRequestToSession(projectRoot, session, "unpair", {}, identity, HOOK_TIMEOUTS); }
 				catch { /* SessionEnd cleanup is best-effort. */ }
 			}));
 		} catch { /* Fail open; lifecycle cleanup must not affect Claude. */ }
@@ -64,7 +66,7 @@ async function handleHookInput(input, output = process.stdout) {
 
 	let formatted;
 	try {
-		const response = await client.sendRequestToSession(projectRoot, session, "read_messages", {}, identity);
+		const response = await client.sendRequestToSession(projectRoot, session, "read_messages", {}, identity, HOOK_TIMEOUTS);
 		const messages = response.result && response.result.messages;
 		if (!Array.isArray(messages) || messages.length === 0) return;
 		formatted = client.formatPeerBlock(messages, PEER_HOOK_BUDGET_CHARS);
@@ -81,7 +83,7 @@ async function handleHookInput(input, output = process.stdout) {
 
 	// Output is flushed before ack. Failed ack leaves same ids pending for at-least-once delivery.
 	try {
-		await client.sendRequestToSession(projectRoot, session, "ack_messages", { ids: formatted.includedIds }, identity);
+		await client.sendRequestToSession(projectRoot, session, "ack_messages", { ids: formatted.includedIds }, identity, HOOK_TIMEOUTS);
 	} catch { /* Keep already-emitted context; unacked ids may redeliver unchanged. */ }
 }
 
