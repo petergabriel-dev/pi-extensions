@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { openAttempt } from "../review-capture.js";
-import { buildEvidenceBundle, evidenceDir, MAX_BUNDLE_BYTES, MAX_BUNDLE_HUNK_BYTES, outsideTaskFiles, writeEvidenceBundle } from "../review-bundle.js";
+import { buildEvidenceBundle, evidenceDir, MAX_BUNDLE_BYTES, MAX_BUNDLE_HUNK_BYTES, outsideTaskFiles, parseFilesHint, writeEvidenceBundle } from "../review-bundle.js";
 import { readReviewLog } from "../review-store.js";
 
 console.log("Running test_review_bundle...");
@@ -35,6 +35,20 @@ try {
 	assert.deepEqual(outsideTaskFiles("a.txt, src/, docs/**/*.md, lib/*.ts", ["a.txt", "src/x/y.ts", "docs/a/b.md", "lib/k.ts", "lib/deep/k.ts", "other.ts"]), ["lib/deep/k.ts", "other.ts"]);
 	assert.deepEqual(outsideTaskFiles(undefined, ["anything"]), []);
 	assert.deepEqual(outsideTaskFiles("agent/extensions/workflow-modes", ["agent/extensions/workflow-modes/index.ts"]), [], "bare directory pattern covers its files");
+
+	// Real saved-plan Files hint shapes: backticks, braces with commas, [slug] folders,
+	// trailing notes, globs, and "none".
+	assert.deepEqual(parseFilesHint("`docs/engineering/{architecture,conventions,invariants,traps}.md`"), ["docs/engineering/architecture.md", "docs/engineering/conventions.md", "docs/engineering/invariants.md", "docs/engineering/traps.md"]);
+	assert.deepEqual(outsideTaskFiles("`docs/engineering/{architecture,conventions,invariants,traps}.md`", ["docs/engineering/traps.md", "docs/engineering/other.md"]), ["docs/engineering/other.md"]);
+	assert.deepEqual(outsideTaskFiles("`src/app/residential/listings/[slug]/photos/page.tsx`, `src/components/photo-viewer.tsx`", ["src/app/residential/listings/[slug]/photos/page.tsx", "src/components/photo-viewer.tsx"]), [], "backticked paths and literal [slug] folders match");
+	assert.deepEqual(outsideTaskFiles("`config/fortify.php`, `tests/Feature/Auth/RegistrationTest.php`, `resources/js/pages/auth/login.tsx` (only if link not already gated)", ["resources/js/pages/auth/login.tsx", "config/fortify.php"]), [], "notes outside backticks are ignored");
+	assert.deepEqual(outsideTaskFiles("agent/harness-commands/**, .cursor/commands/pi-*.md, scripts/check-package.mjs", ["agent/harness-commands/codex/pi-review/SKILL.md", ".cursor/commands/pi-review.md", "scripts/check-package.mjs", "README.md"]), ["README.md"]);
+	assert.deepEqual(outsideTaskFiles("src/{a,b}.ts (generated), lib/c.ts", ["src/a.ts", "src/b.ts", "lib/c.ts", "src/c.ts"]), ["src/c.ts"], "unbackticked braces keep their commas and notes drop");
+	assert.deepEqual(outsideTaskFiles("`src/**`, `docs/design/**`", ["src/app/deep/page.tsx", "docs/design/tokens.css", "package.json"]), ["package.json"]);
+	for (const hint of ["none", "none (acceptance only; record findings for docs tasks)", "", "`none`"]) {
+		assert.deepEqual(outsideTaskFiles(hint, ["anything.ts"]), [], `hint ${JSON.stringify(hint)} lists no files`);
+	}
+	assert.equal(parseFilesHint(`\`${"{a,b}/".repeat(10)}x.ts\``).length, 100, "brace expansion is capped");
 
 	const repo = makeRepo("repo");
 	await fs.writeFile(path.join(repo.dir, "a.txt"), "one\n");

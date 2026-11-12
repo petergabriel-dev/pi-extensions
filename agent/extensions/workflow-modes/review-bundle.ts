@@ -96,9 +96,64 @@ function globToRegExp(pattern: string): RegExp {
 	return new RegExp(`^${source}$`);
 }
 
+const MAX_FILES_HINT_PATTERNS = 100;
+const MAX_FILES_HINT_CHARS = 4096;
+
+// Expands one level of {a,b} alternatives per group, left to right, within the cap.
+function expandBraces(pattern: string, cap: number): string[] {
+	const match = /\{([^{}]*)\}/.exec(pattern);
+	if (!match) return [pattern];
+	const results: string[] = [];
+	for (const option of match[1].split(",")) {
+		for (const expanded of expandBraces(pattern.slice(0, match.index) + option + pattern.slice(match.index + match[0].length), cap - results.length)) {
+			if (results.length >= cap) return results;
+			results.push(expanded);
+		}
+	}
+	return results;
+}
+
+// Splits on commas outside {...}.
+function splitTopLevel(text: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let current = "";
+	for (const char of text) {
+		if (char === "{") depth += 1;
+		if (char === "}") depth = Math.max(0, depth - 1);
+		if (char === "," && depth === 0) {
+			parts.push(current);
+			current = "";
+		} else {
+			current += char;
+		}
+	}
+	parts.push(current);
+	return parts;
+}
+
+// Plan Files hints are free text: often backticked paths (only those count), else
+// comma-separated paths that may carry a "(note)". Braces expand; "none" lists nothing.
+export function parseFilesHint(hint: string | undefined): string[] {
+	if (!hint) return [];
+	const text = hint.slice(0, MAX_FILES_HINT_CHARS);
+	const entries = text.includes("`")
+		? [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1])
+		: splitTopLevel(text).map((entry) => entry.replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0] ?? "");
+	const patterns: string[] = [];
+	for (const entry of entries) {
+		const path = entry.trim().replace(/^\.\//, "");
+		if (!path || !/[/.*]/.test(path)) continue;
+		for (const expanded of expandBraces(path, MAX_FILES_HINT_PATTERNS - patterns.length)) {
+			if (patterns.length >= MAX_FILES_HINT_PATTERNS) return patterns;
+			patterns.push(expanded);
+		}
+	}
+	return patterns;
+}
+
 export function outsideTaskFiles(taskFiles: string | undefined, paths: readonly string[]): string[] {
-	if (!taskFiles || taskFiles.trim().length === 0) return [];
-	const patterns = taskFiles.split(",").map((entry) => entry.trim().replace(/^\.\//, "")).filter(Boolean);
+	const patterns = parseFilesHint(taskFiles);
 	if (patterns.length === 0) return [];
 	const matchers = patterns.map((pattern) => (pattern.endsWith("/") ? (path: string) => path.startsWith(pattern) : (path: string) => globToRegExp(pattern).test(path) || path.startsWith(`${pattern}/`)));
 	return paths.filter((path) => !matchers.some((matches) => matches(path)));
