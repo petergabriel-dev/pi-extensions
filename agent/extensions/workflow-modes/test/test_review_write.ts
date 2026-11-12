@@ -34,10 +34,16 @@ await fs.mkdir(path.join(stubs, "@earendil-works/pi-tui"), { recursive: true });
 await fs.writeFile(path.join(stubs, "@earendil-works/pi-coding-agent/index.js"), "exports.DynamicBorder = class {}; exports.getAgentDir = () => process.env.PI_CODING_AGENT_DIR;\n");
 await fs.writeFile(path.join(stubs, "@earendil-works/pi-tui/index.js"), "exports.Container = class {}; exports.matchesKey = () => false; exports.SelectList = class {}; exports.Text = class {}; exports.truncateToWidth = value => value; exports.wrapTextWithAnsi = value => [value];\n");
 const agentDir = path.join(root, "agent");
+// A logging git wrapper first on PATH counts the git calls a submit makes.
+const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+const wrapperDir = path.join(root, "git-log");
+const gitLog = path.join(root, "git-calls.log");
+await fs.mkdir(wrapperDir);
+await fs.writeFile(path.join(wrapperDir, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(gitLog)}\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
 
 const source = `
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import workflowModesExtension, { flushReviewCapture } from "./index.ts";
 import { appendReviewEvent } from "./review-store.ts";
 const TASK = ${JSON.stringify(taskCommit)};
@@ -139,13 +145,37 @@ const approve = (findingId) => appendReviewEvent(AGENT, "session-w", { ev: "find
 	assert.equal((await resolve("F2", PI_FIX, "cursor:rev")).ok, true, "an external reviewer may resolve a Pi-built fix");
 	assert.equal((await resolve("F1", FIX, "codex:checker")).code, "finding_not_approved");
 	assert.deepEqual(log().filter((event) => event.ev === "finding_resolved").map((event) => [event.id, event.by]), [["F1", "codex:checker"], ["F2", "cursor:rev"]]);
+
+	// Each distinct commit, file, and line count is checked once per submit.
+	const gitCalls = () => { try { return readFileSync(${JSON.stringify(gitLog)}, "utf8").trim().split("\\n").filter(Boolean); } catch { return []; } };
+	const callsBefore = gitCalls().length;
+	const many = Array.from({ length: 20 }, (_, index) => ({ ...valid, commit: TASK, line: 1 + (index % 2), text: "repeat " + index, evidenceRefs: [TASK + ":src.ts:1", TASK + ":src.ts:2"] }));
+	const manyResult = await submit(many);
+	assert.equal(manyResult.ok, true, manyResult.error);
+	assert.equal(manyResult.ids.length, 20);
+	assert.deepEqual(manyResult.ids, Array.from({ length: 20 }, (_, index) => "F" + (index + 4)), "a batch gets consecutive ids");
+	const submitCalls = gitCalls().slice(callsBefore);
+	assert.equal(submitCalls.filter((call) => call.includes("rev-parse")).length, 1, "the shared commit is resolved once: " + submitCalls.join(" | "));
+	assert.equal(submitCalls.filter((call) => call.startsWith("-C") && call.includes("cat-file -e")).length, 1, "the shared file is checked once");
+	assert.equal(submitCalls.filter((call) => call.includes("cat-file blob")).length, 1, "the shared file is read once");
+
+	// A batch that would cross the review-log cap stores nothing.
+	const logFile = AGENT + "/plans/session-w/reviews.jsonl";
+	const size = readFileSync(logFile).length;
+	const filler = 1024 * 1024 - size - 900;
+	writeFileSync(logFile, " ".repeat(filler) + "\\n", { flag: "a" });
+	const sizeBefore = readFileSync(logFile).length;
+	const full = await submit([{ ...valid, text: "fits alone" }, { ...valid, text: "second" }, { ...valid, text: "third" }]);
+	assert.deepEqual({ ok: full.ok, code: full.code }, { ok: false, code: "review_log_full" }, full.error);
+	assert.match(full.error, /no finding in this batch was recorded/);
+	assert.equal(readFileSync(logFile).length, sizeBefore, "nothing from the batch was written");
 })().catch((error) => { console.error(error); process.exit(1); });
 `;
 
 try {
 	await promisify(execFile)("./node_modules/.bin/tsx", ["-e", source], {
 		cwd: new URL("..", import.meta.url),
-		env: { ...process.env, NODE_PATH: stubs, PI_CODING_AGENT_DIR: agentDir },
+		env: { ...process.env, NODE_PATH: stubs, PI_CODING_AGENT_DIR: agentDir, PATH: `${wrapperDir}:${process.env.PATH}` },
 	});
 } finally {
 	await fs.rm(root, { recursive: true, force: true });

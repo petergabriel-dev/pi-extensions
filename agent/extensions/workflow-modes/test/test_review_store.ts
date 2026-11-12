@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	appendReviewEvent,
+	appendReviewEvents,
 	ensurePrivateDir,
 	MAX_REVIEW_LINE_BYTES,
 	MAX_REVIEW_LOG_BYTES,
@@ -95,6 +96,33 @@ try {
 	await ensurePrivateDir(path.dirname(seqPath));
 	await fs.writeFile(seqPath, `${JSON.stringify({ ev: "finding_submitted", id: "F7", at: 1, planId: "p", taskId: "t" })}\n`, { mode: 0o600 });
 	assert.equal((await submit("s-seq")).id, "F8");
+
+	// Batch append: one write, consecutive ids, all or nothing, serialized with single appends.
+	const batch = await appendReviewEvents(agentDir, "s-batch", [
+		{ ev: "finding_submitted", planId: "p", taskId: "t", text: "one" },
+		{ ev: "finding_submitted", planId: "p", taskId: "t", text: "two" },
+		{ ev: "finding_submitted", planId: "p", taskId: "t", text: "three" },
+	]);
+	assert.deepEqual(batch.map((event) => event.id), ["F1", "F2", "F3"]);
+	await assert.rejects(() => appendReviewEvents(agentDir, "s-batch", [
+		{ ev: "finding_submitted", planId: "p", taskId: "t", text: "valid" },
+		{ ev: "made_up", planId: "p", taskId: "t" },
+	]), /unknown review event type/);
+	assert.equal((await readReviewLog(agentDir, "s-batch")).events.length, 3, "an invalid event rejects the whole batch");
+	const [mixedBatch, single] = await Promise.all([
+		appendReviewEvents(agentDir, "s-batch", [{ ev: "finding_submitted", planId: "p", taskId: "t" }, { ev: "finding_submitted", planId: "p", taskId: "t" }]),
+		submit("s-batch"),
+	]);
+	assert.deepEqual([...mixedBatch.map((event) => event.id), single.id], ["F4", "F5", "F6"], "batch ids stay consecutive beside a concurrent single append");
+	const batchCapPath = reviewLogPath(agentDir, "s-batch-cap");
+	await ensurePrivateDir(path.dirname(batchCapPath));
+	const oneLine = JSON.stringify({ ev: "finding_submitted", planId: "p", taskId: "t", text: "x", id: "F1", at: Date.now() }).length + 1;
+	await fs.writeFile(batchCapPath, `${" ".repeat(MAX_REVIEW_LOG_BYTES - oneLine * 2 - 1)}\n`, { mode: 0o600 });
+	const capSize = (await fs.stat(batchCapPath)).size;
+	await assert.rejects(() => appendReviewEvents(agentDir, "s-batch-cap", Array.from({ length: 3 }, () => ({ ev: "finding_submitted", planId: "p", taskId: "t", text: "x" }))), /review log is full/);
+	assert.equal((await fs.stat(batchCapPath)).size, capSize, "a batch that would cross the cap writes nothing, even though one event would fit");
+	assert.equal((await submit("s-batch-cap", { text: "x" })).id, "F1", "a single event that fits still lands");
+	await assert.rejects(() => appendReviewEvents(agentDir, "s-batch", []), /empty/);
 
 	// writeOnce0600: writes once with 0600, never overwrites, refuses symlinks.
 	const bundlePath = path.join(agentDir, "once.json");

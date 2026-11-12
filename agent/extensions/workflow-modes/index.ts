@@ -13,8 +13,8 @@ import { parseFindingIds, parsePlanTasks, resolvePlanTaskReference, type PlanTas
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
 import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
-import { appendReviewEvent, appendReviewEventUnless, readReviewLog, type ReviewEvent } from "./review-store.js";
-import { buildReviewOverview, citedBundleIds, deriveTaskReviewState, foldFindings, isUnresolved, MAX_FINDINGS_PER_SUBMIT, validateFindingInput, validateFindingReferences, type FindingInput, type FindingState, type OverviewPlan, type PlanTaskView, type ReviewOverview } from "./review-state.js";
+import { appendReviewEvent, appendReviewEvents, appendReviewEventUnless, readReviewLog, type ReviewEvent } from "./review-store.js";
+import { buildReviewOverview, citedBundleIds, createReferenceCache, deriveTaskReviewState, foldFindings, isUnresolved, MAX_FINDINGS_PER_SUBMIT, validateFindingInput, validateFindingReferences, type FindingInput, type FindingState, type OverviewPlan, type PlanTaskView, type ReviewOverview } from "./review-state.js";
 import { BUNDLE_ID, buildEvidenceBundle, EVIDENCE_SECTIONS, evidencePage, readEvidenceBundle, writeEvidenceBundle, type EvidencePage, type EvidenceSection } from "./review-bundle.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -229,21 +229,26 @@ async function submitFindings(ctx: ExtensionContext, rawFindings: unknown, revie
 	const agentDir = getAgentDir();
 	const sessionId = sessionIdFromContext(ctx);
 	const validated: FindingInput[] = [];
+	// One cache per submit: each distinct commit, file, and bundle is checked once.
+	const cache = createReferenceCache();
 	for (const [index, raw] of rawFindings.entries()) {
 		try {
 			const finding = validateFindingInput(raw);
 			if (!plans.get(finding.planId)?.has(finding.taskId)) throw new Error(`task ${finding.taskId} is not in saved plan ${finding.planId} in this Pi session`);
-			validated.push(await validateFindingReferences(finding, { cwd: ctx.cwd, agentDir, sessionId }));
+			validated.push(await validateFindingReferences(finding, { cwd: ctx.cwd, agentDir, sessionId }, cache));
 		} catch (error) {
 			throw new ReviewWriteError("invalid_finding", `finding ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	const ids: string[] = [];
-	for (const finding of validated) {
-		const stored = await appendReviewEvent(agentDir, sessionId, { ev: "finding_submitted", ...finding, by: reviewer });
-		ids.push(stored.id!);
+	// One write for the whole batch: every finding is stored with consecutive ids, or none.
+	let stored: ReviewEvent[];
+	try {
+		stored = await appendReviewEvents(agentDir, sessionId, validated.map((finding) => ({ ev: "finding_submitted", ...finding, by: reviewer })));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw /review log is full/.test(message) ? new ReviewWriteError("review_log_full", `${message}; no finding in this batch was recorded`) : error;
 	}
-	return { ids };
+	return { ids: stored.map((event) => event.id!) };
 }
 
 // Resolve needs an approved finding and a ticked fix commit. It is refused to the

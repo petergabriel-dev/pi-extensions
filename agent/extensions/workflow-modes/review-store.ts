@@ -159,26 +159,38 @@ function validateEvent(input: Record<string, unknown>, existing: readonly Review
 	if (typeof input.taskId !== "string" || !SAFE_ID.test(input.taskId)) throw new Error(`${input.ev} requires a safe taskId`);
 }
 
-async function appendNow(agentDir: string, sessionId: string, input: Record<string, unknown>, skipIf?: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent | undefined> {
+// Validates and writes a batch in one append: every event is checked (later events see
+// earlier ones, so finding ids are consecutive) and the size caps are checked before
+// anything is written, so the batch lands whole or not at all.
+async function appendBatchNow(agentDir: string, sessionId: string, inputs: readonly Record<string, unknown>[], skipIf?: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent[] | undefined> {
+	if (inputs.length === 0) throw new Error("review event batch is empty");
 	const directory = reviewSessionDir(agentDir, sessionId);
 	await ensurePrivateDir(directory);
 	const path = reviewLogPath(agentDir, sessionId);
 	const bytes = await readLogBytes(path);
 	const { events } = parseLog(bytes);
-	validateEvent(input, events);
+	const staged: ReviewEvent[] = [];
+	const lines: string[] = [];
+	for (const input of inputs) {
+		const known = [...events, ...staged];
+		validateEvent(input, known);
+		// validateEvent established ev and the required identifiers.
+		const event = {
+			...input,
+			...(input.ev === "finding_submitted" ? { id: nextFindingId(known) } : {}),
+			at: Date.now(),
+		} as ReviewEvent;
+		const line = `${JSON.stringify(event)}\n`;
+		if (Buffer.byteLength(line, "utf8") > MAX_REVIEW_LINE_BYTES) throw new Error(`review event exceeds ${MAX_REVIEW_LINE_BYTES} bytes`);
+		staged.push(event);
+		lines.push(line);
+	}
+	// Validation runs first, as for a single append; then an already-recorded event is skipped.
 	if (skipIf?.(events)) return undefined;
-	// validateEvent established ev and the required identifiers.
-	const event = {
-		...input,
-		...(input.ev === "finding_submitted" ? { id: nextFindingId(events) } : {}),
-		at: Date.now(),
-	} as ReviewEvent;
-	// A torn last line stays its own (skipped) line; the new event starts fresh.
+	// A torn last line stays its own (skipped) line; the new events start fresh.
 	const separator = bytes && bytes.length > 0 && bytes[bytes.length - 1] !== 0x0a ? "\n" : "";
-	const line = `${separator}${JSON.stringify(event)}\n`;
-	const lineBytes = Buffer.byteLength(line, "utf8");
-	if (lineBytes > MAX_REVIEW_LINE_BYTES) throw new Error(`review event exceeds ${MAX_REVIEW_LINE_BYTES} bytes`);
-	if ((bytes?.length ?? 0) + lineBytes > MAX_REVIEW_LOG_BYTES) throw new Error(`review log is full (${MAX_REVIEW_LOG_BYTES} bytes); no further review events can be recorded this session`);
+	const text = separator + lines.join("");
+	if ((bytes?.length ?? 0) + Buffer.byteLength(text, "utf8") > MAX_REVIEW_LOG_BYTES) throw new Error(`review log is full (${MAX_REVIEW_LOG_BYTES} bytes); no further review events can be recorded this session`);
 
 	let handle;
 	try {
@@ -191,26 +203,31 @@ async function appendNow(agentDir: string, sessionId: string, input: Record<stri
 		const info = await handle.stat();
 		if (!info.isFile()) throw new Error("review log is not a regular file");
 		if ((info.mode & 0o777) !== PRIVATE_FILE_MODE) await handle.chmod(PRIVATE_FILE_MODE);
-		await handle.writeFile(line, "utf8");
+		await handle.writeFile(text, "utf8");
 		await handle.sync();
 	} finally {
 		await handle.close();
 	}
-	return event;
+	return staged;
 }
 
 // Appends are serialized per log file so finding ids and line order stay consistent.
 export function appendReviewEvent(agentDir: string, sessionId: string, input: Record<string, unknown>): Promise<ReviewEvent> {
-	return enqueueAppend(agentDir, sessionId, input) as Promise<ReviewEvent>;
+	return enqueueAppend(agentDir, sessionId, [input]).then((events) => events![0]);
 }
 
 // Appends unless skipIf, evaluated on the current log inside the same serialized
 // queue, says the event is already recorded; resolves undefined when skipped.
 export function appendReviewEventUnless(agentDir: string, sessionId: string, input: Record<string, unknown>, skipIf: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent | undefined> {
-	return enqueueAppend(agentDir, sessionId, input, skipIf);
+	return enqueueAppend(agentDir, sessionId, [input], skipIf).then((events) => events?.[0]);
 }
 
-function enqueueAppend(agentDir: string, sessionId: string, input: Record<string, unknown>, skipIf?: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent | undefined> {
+// Appends several events in one write: all of them or none.
+export function appendReviewEvents(agentDir: string, sessionId: string, inputs: readonly Record<string, unknown>[]): Promise<ReviewEvent[]> {
+	return enqueueAppend(agentDir, sessionId, inputs) as Promise<ReviewEvent[]>;
+}
+
+function enqueueAppend(agentDir: string, sessionId: string, inputs: readonly Record<string, unknown>[], skipIf?: (events: readonly ReviewEvent[]) => boolean): Promise<ReviewEvent[] | undefined> {
 	let key: string;
 	try {
 		key = reviewLogPath(agentDir, sessionId);
@@ -218,7 +235,7 @@ function enqueueAppend(agentDir: string, sessionId: string, input: Record<string
 		return Promise.reject(error);
 	}
 	const previous = queues.get(key) ?? Promise.resolve();
-	const next = previous.catch(() => undefined).then(() => appendNow(agentDir, sessionId, input, skipIf));
+	const next = previous.catch(() => undefined).then(() => appendBatchNow(agentDir, sessionId, inputs, skipIf));
 	queues.set(key, next);
 	void next.finally(() => {
 		if (queues.get(key) === next) queues.delete(key);

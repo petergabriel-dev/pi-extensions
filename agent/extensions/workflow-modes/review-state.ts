@@ -1,5 +1,5 @@
 import { resolveCommit, runGit } from "./git.js";
-import { BUNDLE_ID, readEvidenceBundle } from "./review-bundle.js";
+import { BUNDLE_ID, readEvidenceBundle, type EvidenceBundle } from "./review-bundle.js";
 import type { ReviewEvent } from "./review-store.js";
 import { parseFindingIds, type PlanTask } from "./plan-tasks.js";
 import type { PlanTaskTick } from "./plan-state.js";
@@ -90,27 +90,59 @@ export function validateFindingInput(raw: unknown): FindingInput {
 	};
 }
 
-async function verifyCodeLocation(cwd: string, commit: string, file: string, line: number | undefined): Promise<void> {
+// Per-submit memo so each distinct commit, file, line count, and bundle is resolved
+// once however many findings or references repeat it. Values are promises, so
+// concurrent lookups share one git call.
+export interface ReferenceCache {
+	commits: Map<string, Promise<string>>;
+	files: Map<string, Promise<boolean>>;
+	lineCounts: Map<string, Promise<number | undefined>>;
+	bundles: Map<string, Promise<EvidenceBundle | undefined>>;
+}
+
+export function createReferenceCache(): ReferenceCache {
+	return { commits: new Map(), files: new Map(), lineCounts: new Map(), bundles: new Map() };
+}
+
+function memo<T>(map: Map<string, Promise<T>>, key: string, load: () => Promise<T>): Promise<T> {
+	let value = map.get(key);
+	if (!value) {
+		value = load();
+		map.set(key, value);
+	}
+	return value;
+}
+
+// Reads a file at a commit up to MAX_VERIFY_FILE_BYTES; undefined when it cannot be read.
+export async function readFileAtCommit(cwd: string, commit: string, file: string): Promise<string | undefined> {
+	const blob = await runGit(cwd, ["cat-file", "blob", `${commit}:${file}`], MAX_VERIFY_FILE_BYTES);
+	return blob.ok ? blob.stdout : undefined;
+}
+
+async function verifyCodeLocation(cwd: string, commit: string, file: string, line: number | undefined, cache: ReferenceCache): Promise<void> {
 	const object = `${commit}:${file}`;
-	const exists = await runGit(cwd, ["cat-file", "-e", object]);
-	if (!exists.ok) throw new Error(`file ${file} does not exist at commit ${commit.slice(0, 12)}`);
+	const exists = await memo(cache.files, object, async () => (await runGit(cwd, ["cat-file", "-e", object])).ok);
+	if (!exists) throw new Error(`file ${file} does not exist at commit ${commit.slice(0, 12)}`);
 	if (line === undefined) return;
-	const blob = await runGit(cwd, ["cat-file", "blob", object], MAX_VERIFY_FILE_BYTES);
-	if (!blob.ok) throw new Error(`file ${file} at ${commit.slice(0, 12)} cannot be read to verify line ${line}`);
-	const text = blob.stdout;
-	const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+	const lines = await memo(cache.lineCounts, object, async () => {
+		const text = await readFileAtCommit(cwd, commit, file);
+		if (text === undefined) return undefined;
+		return text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+	});
+	if (lines === undefined) throw new Error(`file ${file} at ${commit.slice(0, 12)} cannot be read to verify line ${line}`);
 	if (line > lines) throw new Error(`line ${line} is beyond the end of ${file} (${lines} lines) at ${commit.slice(0, 12)}`);
 }
 
 // Resolves the commit to its full SHA and checks every reference. Bundle references
 // must point at an existing record of a bundle for the same plan task.
-export async function validateFindingReferences(finding: FindingInput, context: { cwd: string; agentDir: string; sessionId: string }): Promise<FindingInput> {
-	const commit = await resolveCommit(context.cwd, finding.commit);
-	if (finding.file !== undefined) await verifyCodeLocation(context.cwd, commit, finding.file, finding.line);
+export async function validateFindingReferences(finding: FindingInput, context: { cwd: string; agentDir: string; sessionId: string }, cache: ReferenceCache = createReferenceCache()): Promise<FindingInput> {
+	const resolve = (sha: string) => memo(cache.commits, sha.toLowerCase(), () => resolveCommit(context.cwd, sha));
+	const commit = await resolve(finding.commit);
+	if (finding.file !== undefined) await verifyCodeLocation(context.cwd, commit, finding.file, finding.line, cache);
 	for (const ref of finding.evidenceRefs) {
 		const bundleRef = BUNDLE_REF.exec(ref);
 		if (bundleRef) {
-			const bundle = await readEvidenceBundle(context.agentDir, context.sessionId, bundleRef[1]);
+			const bundle = await memo(cache.bundles, bundleRef[1], () => readEvidenceBundle(context.agentDir, context.sessionId, bundleRef[1]));
 			if (!bundle) throw new Error(`evidence bundle ${bundleRef[1].slice(0, 12)} does not exist`);
 			if (bundle.planId !== finding.planId || bundle.taskId !== finding.taskId) throw new Error(`evidence bundle ${bundleRef[1].slice(0, 12)} belongs to a different task`);
 			const records = (bundle as unknown as Record<string, unknown>)[bundleRef[2]];
@@ -119,8 +151,8 @@ export async function validateFindingReferences(finding: FindingInput, context: 
 		}
 		const codeRef = CODE_REF.exec(ref);
 		if (codeRef && isSafeRepoPath(codeRef[2])) {
-			const refCommit = await resolveCommit(context.cwd, codeRef[1]);
-			await verifyCodeLocation(context.cwd, refCommit, codeRef[2], Number(codeRef[3]));
+			const refCommit = await resolve(codeRef[1]);
+			await verifyCodeLocation(context.cwd, refCommit, codeRef[2], Number(codeRef[3]), cache);
 			continue;
 		}
 		throw new Error(`evidence reference ${JSON.stringify(ref.slice(0, 80))} must be <bundleId>#<section>/<index> or <commit>:<path>:<line>`);
