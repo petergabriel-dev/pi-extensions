@@ -836,6 +836,7 @@ async function handleTickPlanTask(pi: ExtensionAPI, request: BridgeRequest): Pro
 				...(typeof result.note === "string" ? { note: result.note } : {}),
 				...(typeof result.commit === "string" ? { commit: result.commit } : {}),
 				...(typeof result.by === "string" ? { by: result.by } : {}),
+				...(result.bundle && typeof result.bundle === "object" ? { bundle: result.bundle } : {}),
 			},
 		};
 	} catch (error) {

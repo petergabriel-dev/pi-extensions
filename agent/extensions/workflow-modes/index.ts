@@ -14,6 +14,7 @@ import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskS
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
 import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
 import { appendReviewEvent } from "./review-store.js";
+import { buildEvidenceBundle, writeEvidenceBundle } from "./review-bundle.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build" | "review";
@@ -61,10 +62,10 @@ let currentPlanNextTask: WorkflowPlanMarker["nextTask"] | undefined;
 let planReadNoticeKey: string | undefined;
 let latestContext: ExtensionContext | null = null;
 // Build evidence capture (in memory only): the open attempt for the tracker's next
-// task, and the attempt closed by its tick, awaiting the bundle step.
+// task. Its tick hands it to the bundle step; review writes chain on captureWrites.
 let captureAttempt: CaptureAttempt | undefined;
-let tickedAttempt: CaptureAttempt | undefined;
 let captureWrites: Promise<unknown> = Promise.resolve();
+const BUNDLE_WAIT_MS = 1_000;
 let pendingPlanSave = false;
 let planSaveToolCalled = false;
 
@@ -165,15 +166,47 @@ function ensureCaptureAttempt(ctx: ExtensionContext): CaptureAttempt | undefined
 	return attempt;
 }
 
-// The bundle step takes the attempt its tick closed (at most once).
-export function takeTickedAttempt(): CaptureAttempt | undefined {
-	const attempt = tickedAttempt;
-	tickedAttempt = undefined;
-	return attempt;
-}
-
 export function flushReviewCapture(): Promise<unknown> {
 	return captureWrites;
+}
+
+export interface TickBundleOutcome {
+	id?: string;
+	warnings?: number;
+	pending?: boolean;
+	warning?: string;
+}
+
+// Runs after the durable tick and never fails it: any error becomes a warning. The
+// tick waits at most BUNDLE_WAIT_MS (the bridge tick deadline is 1.5 s); a slower
+// bundle finishes in the background and reports pending.
+async function runBundleStep(ctx: ExtensionContext, input: { planId: string; taskId: string; by: string; commit?: string; attempt?: CaptureAttempt; taskFiles?: string }): Promise<TickBundleOutcome> {
+	let sessionId: string;
+	try {
+		sessionId = sessionIdFromContext(ctx);
+	} catch {
+		return { warning: "evidence bundle skipped: Pi session id unavailable" };
+	}
+	let returnedPending = false;
+	const work: Promise<TickBundleOutcome> = (async () => {
+		const bundle = await buildEvidenceBundle({ cwd: ctx.cwd, ...input, env: process.env });
+		const written = await writeEvidenceBundle(getAgentDir(), sessionId, bundle);
+		return { id: written.bundleId, warnings: bundle.warnings.length };
+	})().catch((error: unknown) => ({ warning: `evidence bundle failed: ${error instanceof Error ? error.message : String(error)}` }));
+	captureWrites = captureWrites.then(() => work);
+	void work.then((outcome) => {
+		if (!returnedPending || !outcome.warning) return;
+		try { ctx.ui.notify(outcome.warning, "warning"); } catch { /* best-effort */ }
+	});
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const pending = new Promise<TickBundleOutcome>((resolve) => {
+		timer = setTimeout(() => resolve({ pending: true }), BUNDLE_WAIT_MS);
+		timer.unref?.();
+	});
+	const outcome = await Promise.race([work, pending]);
+	if (timer) clearTimeout(timer);
+	if (outcome.pending) returnedPending = true;
+	return outcome;
 }
 
 // Session branch entries. A branch with any non-object (corrupt or partial) entry
@@ -462,6 +495,7 @@ export interface WorkflowPlanTaskTickResult {
 	nextTask?: { id: string; title: string };
 	idempotent: boolean;
 	outOfOrder: boolean;
+	bundle?: TickBundleOutcome;
 }
 
 export interface WorkflowPlanTasksResult {
@@ -546,8 +580,9 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	const commit = commitInput === undefined ? undefined : await resolveCommit(ctx.cwd, commitInput);
 	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, ...(note ? { note } : {}), ...(commit ? { commit } : {}), by, at: Date.now() };
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
+	let attempt: CaptureAttempt | undefined;
 	if (captureAttempt && captureAttempt.planId === planId && captureAttempt.taskId === taskId) {
-		tickedAttempt = captureAttempt;
+		attempt = captureAttempt;
 		captureAttempt = undefined;
 	}
 	const nextState = resolveSavedPlanTaskState(readBranch(ctx), planId);
@@ -558,7 +593,8 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanNextTask = nextState.nextTask;
 	updateStatus(ctx);
 	emitModeChanged(pi);
-	return { planId, taskId, ...tickDetails(nextState.ticks.get(taskId)), progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
+	const bundle = await runBundleStep(ctx, { planId, taskId, by, ...(commit ? { commit } : {}), ...(attempt ? { attempt } : {}), ...(resolution.task.metadata.files ? { taskFiles: resolution.task.metadata.files } : {}) });
+	return { planId, taskId, ...tickDetails(nextState.ticks.get(taskId)), bundle, progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
 }
 
 function normalizeTaskTickReference(rawReference: unknown): { reference: PlanTaskReference; note?: string; commit?: string } {
@@ -929,7 +965,8 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params: { taskId?: string; title?: string; note?: string; commit?: string }, _signal, _onUpdate, ctx) {
 			const result = await tickWorkflowPlanTask(pi, ctx, params, "pi");
 			const orderNote = result.outOfOrder ? ` (out of order; ${result.nextTask ? `${result.nextTask.id} still open` : "earlier task still open"})` : "";
-			const tickNote = `${result.note ? ` Note: ${JSON.stringify(result.note)}` : ""}${result.commit ? ` Commit: ${result.commit.slice(0, 12)}` : ""}`;
+			const evidence = result.bundle?.id ? ` Evidence: ${result.bundle.id.slice(0, 12)}${result.bundle.warnings ? ` (${result.bundle.warnings} warning${result.bundle.warnings === 1 ? "" : "s"})` : ""}` : result.bundle?.pending ? " Evidence: pending" : result.bundle?.warning ? ` Evidence: ${result.bundle.warning}` : "";
+			const tickNote = `${result.note ? ` Note: ${JSON.stringify(result.note)}` : ""}${result.commit ? ` Commit: ${result.commit.slice(0, 12)}` : ""}${evidence}`;
 			return {
 				content: [{ type: "text", text: `Ticked ${result.taskId}${orderNote}: ${result.progress.done}/${result.progress.total} task${result.progress.total === 1 ? "" : "s"} complete${result.idempotent ? " (already ticked)" : ""}.${tickNote}` }],
 				details: result,

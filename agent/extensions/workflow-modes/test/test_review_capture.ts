@@ -142,7 +142,7 @@ const agentDir = join(root, "agent");
 const source = `
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import workflowModesExtension, { flushReviewCapture, PLAN_ENTRY, takeTickedAttempt } from "./index.ts";
+import workflowModesExtension, { flushReviewCapture, PLAN_ENTRY } from "./index.ts";
 
 const branch = [];
 const listeners = new Map();
@@ -195,10 +195,11 @@ events.emit("subagents:run-summary", runSummary("inside-attempt", Date.now()));
 events.emit("subagents:run-summary", { owner: "malformed" });
 await new Promise((resolve) => setTimeout(resolve, 300));
 const tasks = await request("workflow-modes:get-plan-tasks", { requestId: "r1" });
-await tools.get("workflow_plan_tick").execute("tick-1", { taskId: tasks.nextTask.id }, undefined, undefined, ctx);
-const ticked = takeTickedAttempt();
-assert.ok(ticked, "tick hands the attempt to the bundle step");
-assert.equal(takeTickedAttempt(), undefined, "a ticked attempt is taken once");
+const tickResult = await tools.get("workflow_plan_tick").execute("tick-1", { taskId: tasks.nextTask.id }, undefined, undefined, ctx);
+await flushReviewCapture();
+const bundleId = tickResult.details.bundle?.id;
+assert.match(bundleId ?? "", /^[0-9a-f]{64}$/, "tick hands the attempt to the bundle step");
+const ticked = JSON.parse(readFileSync(${JSON.stringify(join(agentDir, "plans", "session-cap", "evidence"))} + "/" + bundleId + ".json", "utf8"));
 assert.equal(ticked.taskId, tasks.nextTask.id);
 assert.equal(ticked.planId, "plan-cap");
 assert.equal(ticked.baseline, ${JSON.stringify(head)}, "baseline is HEAD at attempt open");
@@ -216,7 +217,7 @@ await handlers.get("session_start")({}, ctx);
 await flushReviewCapture();
 assert.deepEqual(abandoned().map((event) => [event.reason, event.commands]), [["mode change", 1], ["plan change", 1], ["session switch", 1]]);
 assert.ok(!logText().includes("secret-command-text"), "abandon events never store command text");
-assert.equal(takeTickedAttempt(), undefined, "abandoned attempts are never handed to the bundle step");
+assert.equal(logText().trim().split("\\n").map((line) => JSON.parse(line)).filter((event) => event.ev === "bundle_created").length, 1, "abandoned attempts never produce a bundle");
 })().catch((error) => {
 	console.error(error);
 	process.exit(1);
