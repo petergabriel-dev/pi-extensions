@@ -14,7 +14,7 @@ import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskS
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
 import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
 import { appendReviewEvent, appendReviewEvents, appendReviewEventUnless, readReviewLog, type ReviewEvent } from "./review-store.js";
-import { buildReviewOverview, citedBundleIds, createReferenceCache, deriveTaskReviewState, foldFindings, isUnresolved, MAX_FINDINGS_PER_SUBMIT, validateFindingInput, validateFindingReferences, type FindingInput, type FindingState, type OverviewPlan, type PlanTaskView, type ReviewOverview } from "./review-state.js";
+import { buildReviewOverview, citedBundleIds, createReferenceCache, deriveTaskReviewState, foldFindings, isUnresolved, MAX_FINDINGS_PER_SUBMIT, readFileAtCommit, validateFindingInput, validateFindingReferences, type FindingInput, type FindingState, type OverviewPlan, type PlanTaskView, type ReviewOverview } from "./review-state.js";
 import { BUNDLE_ID, buildEvidenceBundle, EVIDENCE_SECTIONS, evidencePage, readEvidenceBundle, writeEvidenceBundle, type EvidencePage, type EvidenceSection } from "./review-bundle.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -338,9 +338,10 @@ async function findingExcerpt(ctx: ExtensionContext, snapshot: ReviewSnapshot, f
 		if (hunk) return hunk.text.split("\n").slice(0, 20).join("\n");
 	}
 	if (finding.file && finding.line) {
-		const blob = await runGit(ctx.cwd, ["cat-file", "blob", `${finding.commit}:${finding.file}`]);
-		if (blob.ok) {
-			const lines = blob.stdout.split("\n");
+		// Same reader and size limit as validation, so every accepted location has an excerpt.
+		const text = await readFileAtCommit(ctx.cwd, finding.commit, finding.file);
+		if (text !== undefined) {
+			const lines = text.split("\n");
 			const start = Math.max(0, finding.line - 4);
 			return lines.slice(start, finding.line + 3).map((line, index) => `${start + index + 1}: ${line}`).join("\n");
 		}

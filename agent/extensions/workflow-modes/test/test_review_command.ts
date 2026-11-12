@@ -15,6 +15,8 @@ await fs.mkdir(repo);
 const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
 git("init", "-q");
 await fs.writeFile(path.join(repo, "src.ts"), "one\n");
+// Larger than git's default 512 KiB read buffer, smaller than the 4 MiB validation limit.
+await fs.writeFile(path.join(repo, "big.ts"), Array.from({ length: 20000 }, (_, index) => `export const v${index + 1} = "${"x".repeat(30)}";\n`).join(""));
 git("add", "-A");
 git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "base");
 await fs.writeFile(path.join(repo, "src.ts"), "one\ntwo\nthree\n");
@@ -168,6 +170,14 @@ const lastNote = () => notes.at(-1)?.message ?? "";
 	assert.match(lastNote(), /already approved/);
 	await review("approve-task task-nope");
 	assert.match(lastNote(), /No ticked task/);
+
+	// A location validation accepts in a file over 512 KiB still gets an excerpt.
+	const [bigId] = (await submit([{ ...base, text: "deep in a big file", file: "big.ts", line: 15000 }])).ids;
+	confirmAnswer = false;
+	await review("reject " + bigId);
+	confirmAnswer = true;
+	assert.match(dialogs.at(-1).body, /Excerpt:\\n14997: export const v14997 [\\s\\S]*15000: export const v15000 [\\s\\S]*15003: export const v15003 /, "large-file excerpt shown");
+	assert.equal(status(bigId).status, "open");
 
 	// List works headless and writes nothing.
 	const before = log().length;
