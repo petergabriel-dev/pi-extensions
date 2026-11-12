@@ -392,6 +392,52 @@ async function main(): Promise<void> {
 		assert.deepEqual(fs.readdirSync(paths.requests), [`${after}.json`]);
 	}
 
+	// Burst: 50 simultaneous requests, overlapping scans plus the poll, every handler held
+	// open. At the client's pickup deadline everything still unclaimed is withdrawn (the
+	// client's own rename). Each request ends answered or withdrawn, never both; no handler
+	// runs twice or for a withdrawn request; requests/, inflight/ and withdrawn/ end empty.
+	{
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const { paths, queue, calls } = setup("burst", async (fileId) => {
+			await gate;
+			return { id: fileId, ok: true, result: {} };
+		});
+		const health = new BridgeHealth(paths.health, () => true);
+		const burstQueue = { ...queue, health };
+		const waitFor = async (check: () => boolean, ms = 3_000) => {
+			const deadline = Date.now() + ms;
+			while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+			return check();
+		};
+		const ids = Array.from({ length: 50 }, () => randomUUID());
+		for (const id of ids) writeRequest(paths.requests, id);
+		const scans = Array.from({ length: 4 }, () => scanRequests(burstQueue));
+		const stop = startPolling(burstQueue, () => { void scanRequests(burstQueue); }, { intervalMs: 20 });
+		// Overlapping scans each claim one more request while the earlier handlers are held.
+		assert.ok(await waitFor(() => calls.length >= 6), "overlapping scans must run several handlers at once");
+		const withdrawn = new Set<string>();
+		for (const name of fs.readdirSync(paths.requests)) {
+			fs.renameSync(path.join(paths.requests, name), path.join(paths.withdrawn, name));
+			withdrawn.add(name.slice(0, -".json".length));
+		}
+		release();
+		await Promise.all(scans);
+		const answeredIds = () => fs.readdirSync(paths.responses).map((name) => name.slice(0, -".json".length));
+		assert.ok(await waitFor(() => answeredIds().length === calls.length && fs.readdirSync(paths.inflight).length === 0 && fs.readdirSync(paths.withdrawn).length === 0), "claimed requests must be answered and the poll must clear withdrawn/");
+		stop();
+		const answered = new Set(answeredIds());
+		const ran = calls.map((call) => call.fileId);
+		assert.equal(new Set(ran).size, ran.length, "no request may run twice");
+		assert.deepEqual(new Set(ran), answered);
+		assert.ok(ran.every((id) => !withdrawn.has(id)), "a withdrawn request must never run");
+		assert.ok(answered.size >= 6 && withdrawn.size > 0, "the burst must exercise both outcomes");
+		assert.equal(answered.size + withdrawn.size, ids.length);
+		assert.deepEqual(new Set([...answered, ...withdrawn]), new Set(ids), "every request ends answered or withdrawn, never both");
+		assert.deepEqual(fs.readdirSync(paths.requests), []);
+		assert.equal(health.counters.withdrawn, withdrawn.size);
+	}
+
 	// Retention: answers older than RETENTION_MS are pruned, fresh ones kept.
 	{
 		const { paths, queue } = setup("retention");
