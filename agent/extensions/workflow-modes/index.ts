@@ -11,7 +11,9 @@ import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedI
 import { gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
-import { normalizeCommitInput, resolveCommit } from "./git.js";
+import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
+import { abandonedSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
+import { appendReviewEvent } from "./review-store.js";
 import { wrapCommand } from "./sandbox.js";
 
 export type Mode = "off" | "discuss" | "plan" | "build" | "review";
@@ -58,6 +60,11 @@ let currentPlanTicks: ReadonlyMap<string, PlanTaskTick> = new Map();
 let currentPlanNextTask: WorkflowPlanMarker["nextTask"] | undefined;
 let planReadNoticeKey: string | undefined;
 let latestContext: ExtensionContext | null = null;
+// Build evidence capture (in memory only): the open attempt for the tracker's next
+// task, and the attempt closed by its tick, awaiting the bundle step.
+let captureAttempt: CaptureAttempt | undefined;
+let tickedAttempt: CaptureAttempt | undefined;
+let captureWrites: Promise<unknown> = Promise.resolve();
 let pendingPlanSave = false;
 let planSaveToolCalled = false;
 
@@ -108,7 +115,65 @@ function getLastAssistantText(ctx: ExtensionContext): string | undefined {
 // The one place workflow-modes:changed is emitted. hasPlan follows the active plan
 // ID, as workflow-modes:state does; the plan text is file-backed.
 function emitModeChanged(pi: ExtensionAPI): void {
+	syncCaptureAttempt();
 	pi.events.emit("workflow-modes:changed", { mode: currentMode, hasPlan: currentPlanId !== undefined });
+}
+
+// Logs counts only (never command text, output, or paths); best-effort.
+function abandonCaptureAttempt(reason: string): void {
+	const attempt = captureAttempt;
+	if (!attempt) return;
+	captureAttempt = undefined;
+	let write: Promise<unknown>;
+	try {
+		write = appendReviewEvent(getAgentDir(), attempt.sessionId, abandonedSummary(attempt, reason)).catch(() => undefined);
+	} catch {
+		write = Promise.resolve();
+	}
+	captureWrites = captureWrites.then(() => write);
+}
+
+// An open attempt is abandoned as soon as it no longer matches Build, the active
+// plan, or the tracker's next task.
+function syncCaptureAttempt(): void {
+	const attempt = captureAttempt;
+	if (!attempt) return;
+	if (currentMode !== "build") return abandonCaptureAttempt("mode change");
+	if (attempt.planId !== currentPlanId) return abandonCaptureAttempt("plan change");
+	if (attempt.taskId !== currentPlanNextTask?.id) abandonCaptureAttempt("task change");
+}
+
+function ensureCaptureAttempt(ctx: ExtensionContext): CaptureAttempt | undefined {
+	syncCaptureAttempt();
+	if (currentMode !== "build" || !currentPlanId || !currentPlanNextTask) return undefined;
+	if (captureAttempt) return captureAttempt;
+	let sessionId: string;
+	try {
+		sessionId = sessionIdFromContext(ctx);
+	} catch {
+		return undefined;
+	}
+	const attempt = openAttempt({ attemptId: randomUUID(), sessionId, planId: currentPlanId, taskId: currentPlanNextTask.id, startedAt: Date.now() });
+	captureAttempt = attempt;
+	// Baseline = HEAD before this attempt's work, resolved off the tool-call path.
+	if (typeof ctx.cwd === "string") {
+		void runGit(ctx.cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).then((result) => {
+			const sha = result.stdout.trim();
+			if (result.ok && /^[0-9a-f]{40,64}$/.test(sha)) attempt.baseline = sha;
+		}).catch(() => undefined);
+	}
+	return attempt;
+}
+
+// The bundle step takes the attempt its tick closed (at most once).
+export function takeTickedAttempt(): CaptureAttempt | undefined {
+	const attempt = tickedAttempt;
+	tickedAttempt = undefined;
+	return attempt;
+}
+
+export function flushReviewCapture(): Promise<unknown> {
+	return captureWrites;
 }
 
 // Session branch entries. A branch with any non-object (corrupt or partial) entry
@@ -481,6 +546,10 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	const commit = commitInput === undefined ? undefined : await resolveCommit(ctx.cwd, commitInput);
 	const entry: WorkflowPlanTaskTickEntry = { event: "tick", planId, taskId, ...(note ? { note } : {}), ...(commit ? { commit } : {}), by, at: Date.now() };
 	await Promise.resolve(pi.appendEntry(PLAN_ENTRY, entry));
+	if (captureAttempt && captureAttempt.planId === planId && captureAttempt.taskId === taskId) {
+		tickedAttempt = captureAttempt;
+		captureAttempt = undefined;
+	}
 	const nextState = resolveSavedPlanTaskState(readBranch(ctx), planId);
 	currentPlanTasks = nextState.tasks;
 	currentPlanCompletedTaskIds = nextState.completedTaskIds;
@@ -982,6 +1051,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		abandonCaptureAttempt("session switch");
 		latestContext = ctx;
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
@@ -994,6 +1064,7 @@ export default function (pi: ExtensionAPI) {
 		emitModeChanged(pi);
 	});
 	pi.on("session_tree", async (_event, ctx) => {
+		abandonCaptureAttempt("session switch");
 		latestContext = ctx;
 		pendingPlanSave = false;
 		planSaveToolCalled = false;
@@ -1037,7 +1108,11 @@ export default function (pi: ExtensionAPI) {
 			// race) blocks writes, subagents, and unknown tools here. Pi Off stays unguarded.
 			if (BUILD_READ_ONLY_TOOLS.has(event.toolName)) return;
 			const blockedBy = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
-			if (!blockedBy) return;
+			if (!blockedBy) {
+				const attempt = ensureCaptureAttempt(ctx);
+				if (attempt) recordToolCall(attempt, event, Date.now(), process.env);
+				return;
+			}
 			return {
 				block: true,
 				reason: `${event.toolName} was blocked: project writer blocked by ${blockedBy}. Do not retry until that is resolved.`,
@@ -1108,6 +1183,11 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 		if (wrappedCommand !== undefined) (event.input as { command?: string }).command = wrappedCommand;
+	});
+
+	pi.on("tool_result", async (event) => {
+		const attempt = captureAttempt;
+		if (attempt) recordToolResult(attempt, event, Date.now(), process.env);
 	});
 
 	pi.registerCommand("caveman", {
