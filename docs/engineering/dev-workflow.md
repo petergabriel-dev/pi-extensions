@@ -214,7 +214,7 @@ This runs:
 3. Configured TypeScript checks.
 4. Cursor read-only hook and neutral Cursor-kit tests.
 
-`test:bridge-e2e` (`agent/claude-bridge-client/test-bridge-e2e.mjs`, ~16 s) starts the bootstrap-installed Pi CLI in RPC mode in a temp project and drives it through the real MCP client: pairing, plan save and task reads, a Build lease approved through Pi's own confirm dialog, ticks, the read-only hook decision, duplicates, `/bridge-health`, and injected faults (paused Pi, oversized request, crash with a claimed request). It needs `npm run bootstrap` and fails if a model is called. Apart from that headless Pi, the gate does not call a model, run the live interactive bridge protocol test, exercise file-change rollback interactively, or verify terminal notification rendering.
+`test:bridge-e2e` (`agent/claude-bridge-client/test-bridge-e2e.mjs`, ~16 s) starts the bootstrap-installed Pi CLI in RPC mode in a temp project and drives it through the real MCP client: pairing, plan save and task reads, a Build lease approved through Pi's own confirm dialog, ticks, the read-only hook decision, duplicates, `/bridge-health`, and injected faults (paused Pi, oversized request, crash with a claimed request, after which the Build lease must be released). It does not check that the saved plan survives the crash restart: with no model calls Pi never writes the session file (see traps). It needs `npm run bootstrap` and fails if a model is called. Apart from that headless Pi, the gate does not call a model, run the live interactive bridge protocol test, exercise file-change rollback interactively, or verify terminal notification rendering.
 
 ## Security corpus regression test
 
@@ -305,7 +305,7 @@ Optional environment settings; invalid values fall back to the defaults:
 | `PI_BRIDGE_COMPLETION_TIMEOUT_MS` | harness client; Pi (slow-completion counter) | 30000 | How long a claimed request may run before the client reports `outcome_unknown` |
 | `PI_BRIDGE_RECALL_BUDGET_BYTES` | Pi | 32768 | Recall size budget; ranked content always gets at least 8 KB |
 
-In Pi, `/bridge-health` prints p50/p95 latency and response size per request type plus counts of withdrawn requests, `outcome_unknown` answers, replays, restart conversions, and slow completions, from the 500-entry `health.jsonl` ring. After upgrading, restart Pi: until then its namespace has no `inflight/`, and clients fall back to the old single 2 s deadline.
+In Pi, `/bridge-health` prints p50/p95 latency and response size per request type plus counts of withdrawn requests, `outcome_unknown` answers, replays, restart conversions, slow completions, and client read retries, from the 500-entry `health.jsonl` ring. After upgrading, restart Pi: until then its namespace has no `inflight/`, and clients fall back to the old single 2 s deadline.
 
 ## Isolated live bridge protocol test
 
