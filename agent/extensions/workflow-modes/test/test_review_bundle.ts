@@ -45,10 +45,22 @@ try {
 	assert.deepEqual(outsideTaskFiles("agent/harness-commands/**, .cursor/commands/pi-*.md, scripts/check-package.mjs", ["agent/harness-commands/codex/pi-review/SKILL.md", ".cursor/commands/pi-review.md", "scripts/check-package.mjs", "README.md"]), ["README.md"]);
 	assert.deepEqual(outsideTaskFiles("src/{a,b}.ts (generated), lib/c.ts", ["src/a.ts", "src/b.ts", "lib/c.ts", "src/c.ts"]), ["src/c.ts"], "unbackticked braces keep their commas and notes drop");
 	assert.deepEqual(outsideTaskFiles("`src/**`, `docs/design/**`", ["src/app/deep/page.tsx", "docs/design/tokens.css", "package.json"]), ["package.json"]);
-	for (const hint of ["none", "none (acceptance only; record findings for docs tasks)", "", "`none`"]) {
-		assert.deepEqual(outsideTaskFiles(hint, ["anything.ts"]), [], `hint ${JSON.stringify(hint)} lists no files`);
+	for (const hint of ["none", "none (acceptance only; record findings for docs tasks)", "", "`none`", "n/a", "TBD", "all files under src", "See Section 1"]) {
+		assert.deepEqual(parseFilesHint(hint), [], `hint ${JSON.stringify(hint)} lists no files`);
 	}
 	assert.equal(parseFilesHint(`\`${"{a,b}/".repeat(10)}x.ts\``).length, 100, "brace expansion is capped");
+
+	// Every listed entry counts: bare names, multi-path spans, mixed hints, literal
+	// {id} folders, and route groups.
+	assert.deepEqual(parseFilesHint("Makefile, src/app.ts"), ["Makefile", "src/app.ts"], "a bare file name is kept");
+	assert.deepEqual(parseFilesHint("Makefile (build entry), Dockerfile"), ["Makefile", "Dockerfile"], "a bare name with a note is kept");
+	assert.deepEqual(outsideTaskFiles("scripts", ["scripts/x.sh", "lib/y.ts"]), ["lib/y.ts"], "a bare directory name covers its files");
+	assert.deepEqual(parseFilesHint("`src/a.ts, src/b.ts`"), ["src/a.ts", "src/b.ts"], "one backtick span may list several paths");
+	assert.deepEqual(parseFilesHint("`src/a.ts (new)`"), ["src/a.ts"], "a note inside backticks drops");
+	assert.deepEqual(parseFilesHint("`src/a.ts`, src/b.ts, docs/x.md"), ["src/a.ts", "src/b.ts", "docs/x.md"], "plain entries beside backticked ones count");
+	assert.deepEqual(outsideTaskFiles("src/routes/{id}/page.ts", ["src/routes/{id}/page.ts", "src/routes/id/page.ts"]), ["src/routes/id/page.ts"], "braces without a comma are literal");
+	assert.deepEqual(outsideTaskFiles("app/(marketing)/page.tsx, lib/x.ts", ["app/(marketing)/page.tsx", "app/admin/secret.ts", "lib/x.ts"]), ["app/admin/secret.ts"], "route groups stay part of the path");
+	assert.deepEqual(parseFilesHint("`a.ts` (new, optional), b.ts"), ["a.ts", "b.ts"], "commas inside a note do not split entries");
 
 	const repo = makeRepo("repo");
 	await fs.writeFile(path.join(repo.dir, "a.txt"), "one\n");

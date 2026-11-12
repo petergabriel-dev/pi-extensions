@@ -99,9 +99,10 @@ function globToRegExp(pattern: string): RegExp {
 const MAX_FILES_HINT_PATTERNS = 100;
 const MAX_FILES_HINT_CHARS = 4096;
 
-// Expands one level of {a,b} alternatives per group, left to right, within the cap.
+// Expands {a,b} alternatives left to right, within the cap. A group without a comma
+// (a literal {id} folder) stays as written, as in a shell.
 function expandBraces(pattern: string, cap: number): string[] {
-	const match = /\{([^{}]*)\}/.exec(pattern);
+	const match = /\{([^{}]*,[^{}]*)\}/.exec(pattern);
 	if (!match) return [pattern];
 	const results: string[] = [];
 	for (const option of match[1].split(",")) {
@@ -113,15 +114,18 @@ function expandBraces(pattern: string, cap: number): string[] {
 	return results;
 }
 
-// Splits on commas outside {...}.
+// Splits on commas outside {...} and (...), so brace lists and notes stay whole.
 function splitTopLevel(text: string): string[] {
 	const parts: string[] = [];
-	let depth = 0;
+	let braces = 0;
+	let parens = 0;
 	let current = "";
 	for (const char of text) {
-		if (char === "{") depth += 1;
-		if (char === "}") depth = Math.max(0, depth - 1);
-		if (char === "," && depth === 0) {
+		if (char === "{") braces += 1;
+		else if (char === "}") braces = Math.max(0, braces - 1);
+		else if (char === "(") parens += 1;
+		else if (char === ")") parens = Math.max(0, parens - 1);
+		if (char === "," && braces === 0 && parens === 0) {
 			parts.push(current);
 			current = "";
 		} else {
@@ -132,18 +136,20 @@ function splitTopLevel(text: string): string[] {
 	return parts;
 }
 
-// Plan Files hints are free text: often backticked paths (only those count), else
-// comma-separated paths that may carry a "(note)". Braces expand; "none" lists nothing.
+const NO_FILES = new Set(["none", "n/a", "tbd"]);
+
+// Plan Files hints are free text: comma-separated paths, backticked or not, each
+// optionally followed by a "(note)". Each entry's first word is its path, so a note
+// after whitespace drops while a route group like app/(marketing)/ stays. A bare word
+// is a file or directory only when nothing but a note follows it; otherwise it is prose.
 export function parseFilesHint(hint: string | undefined): string[] {
 	if (!hint) return [];
-	const text = hint.slice(0, MAX_FILES_HINT_CHARS);
-	const entries = text.includes("`")
-		? [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1])
-		: splitTopLevel(text).map((entry) => entry.replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0] ?? "");
 	const patterns: string[] = [];
-	for (const entry of entries) {
-		const path = entry.trim().replace(/^\.\//, "");
-		if (!path || !/[/.*]/.test(path)) continue;
+	for (const entry of splitTopLevel(hint.slice(0, MAX_FILES_HINT_CHARS))) {
+		const [first = "", ...rest] = entry.replace(/`/g, " ").trim().split(/\s+/);
+		const path = first.replace(/^\.\//, "");
+		if (!path || NO_FILES.has(path.toLowerCase())) continue;
+		if (!/[/.*]/.test(path) && rest.length > 0 && !rest[0].startsWith("(")) continue;
 		for (const expanded of expandBraces(path, MAX_FILES_HINT_PATTERNS - patterns.length)) {
 			if (patterns.length >= MAX_FILES_HINT_PATTERNS) return patterns;
 			patterns.push(expanded);
