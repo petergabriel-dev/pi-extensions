@@ -18,11 +18,11 @@ extends: ADR-0001, ADR-0019, ADR-0026, ADR-0045, ADR-0047
 
 - **Scope.** The full proposal is built, adapted to the existing bridge, tracker, and git: Pi-captured evidence, write-once bundles, structured findings with Pi-controlled classification, derived review states, human decisions, and harness review commands. It supersedes the thin slice chosen first in the same discussion (tick commit plus findings only).
 - **Snapshot.** A git commit is the code snapshot. `workflow_plan_tick` and bridge `tick_plan_task` take an optional commit, verified by git and stored as the full SHA, and record a host-derived author: `pi`, or `<harness>:<id>` from the bridge's stamped peer. The first tick's note, commit, and author win.
-- **Capture.** Only Pi Build is captured: tool events attach to the tracker's next task as one attempt (baseline = HEAD at its first tool call), and each subagent run emits one redacted summary that attaches when the run started inside the attempt. Harness-lease builds get git-only bundles with an explicit unavailable warning. Abandoned attempts log counts only.
-- **Bundles.** After every durable tick, Pi writes a content-addressed (`sha256`), write-once JSON bundle with redacted, bounded, copied hunks (128 KiB, bundle 256 KiB), captured commands, subagent runs, and a warning for every gap. Copying the diff keeps evidence valid after rebase, squash, or GC. The tick waits at most 1 s and never fails or reverts because of the bundle.
+- **Capture.** Only Pi Build is captured: `bash`, `edit`, `write`, and `subagent` calls attach to the tracker's next task as one attempt (baseline = HEAD at the first of them; reads and the tick never open one), and each subagent run emits one redacted summary that attaches when the run started inside the attempt. Harness-lease builds get git-only bundles with an explicit unavailable warning. Abandoned attempts log counts only.
+- **Bundles.** After every durable tick, Pi writes a content-addressed (`sha256`), write-once JSON bundle with redacted, bounded, copied hunks (128 KiB, bundle 256 KiB), captured commands, subagent runs, and a warning for every gap, including `incomplete` when the baseline equals the ticked commit. Copying the diff keeps evidence valid after rebase, squash, or GC. A Pi tick waits at most 1 s for the bundle and a bridge tick at most 300 ms; a slower bundle reports `pending` and finishes in the background. No tick fails or reverts because of the bundle.
 - **Redaction.** Before any write: values of secret-named env vars, known token shapes, and private-key blocks; hunks for sensitive paths (`.env*`, `*.pem`, `*.key`, `id_*`) are dropped with their path kept.
 - **Store.** An append-only, session-scoped `reviews.jsonl` beside the plan bodies holds every review event; finding ids are store-assigned.
-- **Findings.** Any paired peer or Pi may submit; every finding and reference is validated against git or a bundle record of the same task before any is written, and is recorded as suspected. A finding becomes verified only when a human approves it as verified and it has a reference that checks out then.
+- **Findings.** Any paired peer or Pi may submit; every finding and reference is validated against git or a bundle record of the same task, then the whole submit is appended in one write, so it records all its findings or none; each is recorded as suspected. A finding becomes verified only when a human approves it as verified and it has a reference that checks out then.
 - **Authority.** Approve, reject, and task approval happen only in interactive Pi `/review` with a literal-true confirm; no bridge operation can make them. Resolve requires an approved finding and a fix commit ticked on a task whose `**Findings:**` metadata cites it, and is refused to the active Build lease holder and to any identity that ticked a task with that commit.
 - **Rework and state.** Rework runs as follow-up plans whose tasks cite findings; plan bodies stay immutable. Review state is derived from ticks, bundles, and the log, never stored; `/review` warns from the third rework round.
 - **Retention.** Evidence older than 30 days is deleted unless an unresolved finding cites it, and never while the log has unreadable lines; `reviews.jsonl` is never deleted.
@@ -33,6 +33,8 @@ extends: ADR-0001, ADR-0019, ADR-0026, ADR-0045, ADR-0047
 - A reviewer in another harness had only tick notes and the implementer's word; evidence Pi captured itself, tied to a verified commit, is checkable.
 - Git already pins code, so a separate snapshot store would duplicate it; copying the hunks into the bundle covers rewritten history.
 - Hooks pass every bridge tool by name, so authority has to be enforced inside Pi from host-stamped identity.
+- A bridge tick shares the bridge's fixed 1.5 s wait with commit validation and the durable tick, so a 1 s bundle wait could time out a tick that had already been recorded.
+- A submit that wrote finding by finding could stop partway at the log cap and leave part of a batch recorded.
 - Rejected: the thin slice (tick commit plus findings only), superseded by the user's choice of full scope.
 - Rejected: reopening tasks through a tracker overlay or auto-revised plans with tick carry-over; both change tracker semantics that follow-up plans leave alone.
 - Rejected: findings in session branch entries (branch navigation would hide review history) or a project-level store (it crosses the session-scoped plan model).
@@ -67,6 +69,7 @@ Code:
 - Bad/risk: redaction misses secrets that match no pattern and no secret-named env var.
 - Bad/risk: events are credited to the tracker's next task; off-task work only produces an outside-Files warning.
 - Bad/risk: harness-lease builds have no command evidence; findings and evidence are visible only in the Pi session that recorded them.
+- Bad/risk: in a slow repository a bridge tick reports `pending` with no bundle id; reviewers get the id from the review overview.
 - Bad/risk: a running Pi uses its installed package, so these features appear only after Pi loads this code.
 - Bad/risk: live acceptance (Claude plans, Pi builds, Cursor reviews the seeded fixture; pass at two of three defects) is deferred and not yet run.
 
