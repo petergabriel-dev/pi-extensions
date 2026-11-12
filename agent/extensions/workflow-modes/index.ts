@@ -69,6 +69,9 @@ let latestContext: ExtensionContext | null = null;
 let captureAttempt: CaptureAttempt | undefined;
 let captureWrites: Promise<unknown> = Promise.resolve();
 const BUNDLE_WAIT_MS = 1_000;
+// A bridge tick shares the bridge's 1.5 s deadline with commit validation and the
+// durable tick, so it waits much less and reports pending sooner.
+export const BRIDGE_BUNDLE_WAIT_MS = 300;
 // Only tools whose work capture records (or whose runs report summaries) open an
 // attempt. Any other tool, notably workflow_plan_tick itself, would otherwise open one
 // whose baseline is the already-committed task, and its bundle would show no changes.
@@ -436,9 +439,9 @@ export interface TickBundleOutcome {
 }
 
 // Runs after the durable tick and never fails it: any error becomes a warning. The
-// tick waits at most BUNDLE_WAIT_MS (the bridge tick deadline is 1.5 s); a slower
-// bundle finishes in the background and reports pending.
-async function runBundleStep(ctx: ExtensionContext, input: { planId: string; taskId: string; by: string; commit?: string; attempt?: CaptureAttempt; taskFiles?: string }): Promise<TickBundleOutcome> {
+// tick waits at most waitMs (BUNDLE_WAIT_MS for Pi's own tick, BRIDGE_BUNDLE_WAIT_MS
+// for a bridge tick); a slower bundle finishes in the background and reports pending.
+async function runBundleStep(ctx: ExtensionContext, input: { planId: string; taskId: string; by: string; commit?: string; attempt?: CaptureAttempt; taskFiles?: string }, waitMs = BUNDLE_WAIT_MS): Promise<TickBundleOutcome> {
 	let sessionId: string;
 	try {
 		sessionId = sessionIdFromContext(ctx);
@@ -458,7 +461,7 @@ async function runBundleStep(ctx: ExtensionContext, input: { planId: string; tas
 	});
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const pending = new Promise<TickBundleOutcome>((resolve) => {
-		timer = setTimeout(() => resolve({ pending: true }), BUNDLE_WAIT_MS);
+		timer = setTimeout(() => resolve({ pending: true }), waitMs);
 		timer.unref?.();
 	});
 	const outcome = await Promise.race([work, pending]);
@@ -812,7 +815,7 @@ export async function setSavedWorkflowPlan(pi: ExtensionAPI, ctx: ExtensionConte
 
 // `by` is host-derived: "pi" for the Pi tool, "<harness>:<id>" from the bridge's
 // stamped peer. It is never read from a tool or bridge payload.
-export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawReference: unknown, by: string): Promise<WorkflowPlanTaskTickResult> {
+export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionContext, rawReference: unknown, by: string, bundleWaitMs = BUNDLE_WAIT_MS): Promise<WorkflowPlanTaskTickResult> {
 	if (typeof by !== "string" || !TICK_AUTHOR.test(by)) throw new Error("tick author is invalid");
 	const { reference, note, commit: commitInput } = normalizeTaskTickReference(rawReference);
 	const state = resolveSavedPlanState(readBranch(ctx), PLAN_ENTRY);
@@ -851,7 +854,7 @@ export async function tickWorkflowPlanTask(pi: ExtensionAPI, ctx: ExtensionConte
 	currentPlanNextTask = nextState.nextTask;
 	updateStatus(ctx);
 	emitModeChanged(pi);
-	const bundle = await runBundleStep(ctx, { planId, taskId, by, ...(commit ? { commit } : {}), ...(attempt ? { attempt } : {}), ...(resolution.task.metadata.files ? { taskFiles: resolution.task.metadata.files } : {}) });
+	const bundle = await runBundleStep(ctx, { planId, taskId, by, ...(commit ? { commit } : {}), ...(attempt ? { attempt } : {}), ...(resolution.task.metadata.files ? { taskFiles: resolution.task.metadata.files } : {}) }, bundleWaitMs);
 	return { planId, taskId, ...tickDetails(nextState.ticks.get(taskId)), bundle, progress: nextState.progress, ...(nextState.nextTask ? { nextTask: nextState.nextTask } : {}), idempotent: false, outOfOrder };
 }
 
@@ -1361,7 +1364,7 @@ export default function (pi: ExtensionAPI) {
 				...(request.commit !== undefined ? { commit: request.commit } : {}),
 			};
 			// The bridge stamps `by` from the host-verified peer; a missing or malformed author is rejected.
-			const result = await tickWorkflowPlanTask(pi, latestContext, reference, request.by as string);
+			const result = await tickWorkflowPlanTask(pi, latestContext, reference, request.by as string, BRIDGE_BUNDLE_WAIT_MS);
 			emitResult({ ok: true, ...result });
 		} catch (error) {
 			emitResult({ ok: false, error: error instanceof Error ? error.message : String(error) });

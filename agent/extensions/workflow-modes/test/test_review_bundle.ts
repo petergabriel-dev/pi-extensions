@@ -194,6 +194,54 @@ const ctx = { cwd: ${JSON.stringify(tickRepo.dir)}, hasUI: false, sessionManager
 		cwd: new URL("..", import.meta.url),
 		env: { ...process.env, NODE_PATH: stubs, PI_CODING_AGENT_DIR: tickAgentDir },
 	});
+
+	// A slow bundle (git wrapper adds 400 ms to each per-file diff): a bridge tick returns
+	// pending within the bridge deadline, the bundle still lands, and Pi's own tick keeps
+	// its longer wait.
+	const slowRepo = makeRepo("slow-repo");
+	await fs.writeFile(path.join(slowRepo.dir, "one.txt"), "one\n");
+	const slowFirst = slowRepo.commit("one");
+	await fs.writeFile(path.join(slowRepo.dir, "two.txt"), "two\n");
+	const slowSecond = slowRepo.commit("two");
+	const wrapperDir = path.join(root, "slow-git");
+	await fs.mkdir(wrapperDir);
+	const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+	await fs.writeFile(path.join(wrapperDir, "git"), `#!/bin/sh\nfor arg in "$@"; do if [ "$arg" = "-U3" ]; then sleep 0.4; fi; done\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+	const slowAgentDir = path.join(root, "slow-agent");
+	const slowSource = `
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import workflowModesExtension, { BRIDGE_BUNDLE_WAIT_MS, flushReviewCapture } from "./index.ts";
+const branch = [];
+const listeners = new Map();
+const events = { on(name, handler) { listeners.set(name, [...(listeners.get(name) ?? []), handler]); }, emit(name, payload) { for (const handler of listeners.get(name) ?? []) handler(payload); } };
+const handlers = new Map();
+const tools = new Map();
+const pi = { events, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool(tool) { tools.set(tool.name, tool); }, appendEntry(type, data) { branch.push({ type: "custom", customType: type, data }); }, sendUserMessage() {}, sendMessage() {} };
+workflowModesExtension(pi);
+const ctx = { cwd: ${JSON.stringify(slowRepo.dir)}, hasUI: false, sessionManager: { getBranch: () => branch, getSessionId: () => "session-slow" }, ui: { setStatus() {}, notify() {} } };
+const request = (name, payload) => new Promise((resolve) => { events.on(name + "-result", (result) => { if (result.requestId === payload.requestId) resolve(result); }); events.emit(name, payload); });
+(async () => {
+	assert.equal(BRIDGE_BUNDLE_WAIT_MS, 300);
+	await handlers.get("session_start")({}, ctx);
+	await request("workflow-modes:save-plan", { requestId: "s", planId: "plan-slow", plan: "# P\\n\\n## Section 4 — Tasks\\n- [ ] Bridge task\\n- [ ] Pi task\\n" });
+	const started = Date.now();
+	const bridgeTick = await request("workflow-modes:tick-plan-task", { requestId: "t1", title: "Bridge task", commit: ${JSON.stringify(slowFirst)}, by: "claude:builder" });
+	const elapsed = Date.now() - started;
+	assert.equal(bridgeTick.ok, true, bridgeTick.error);
+	assert.deepEqual(bridgeTick.bundle, { pending: true }, "a slow bundle is reported pending on the bridge path");
+	assert.ok(elapsed < 1500, "bridge tick answered within the bridge deadline (" + elapsed + " ms)");
+	await flushReviewCapture();
+	const created = readFileSync(${JSON.stringify(path.join(slowAgentDir, "plans", "session-slow", "reviews.jsonl"))}, "utf8").trim().split("\\n").map((line) => JSON.parse(line)).filter((event) => event.ev === "bundle_created");
+	assert.equal(created.length, 1, "the pending bundle still lands");
+	const piTick = await tools.get("workflow_plan_tick").execute("t2", { title: "Pi task", commit: ${JSON.stringify(slowSecond)} }, undefined, undefined, ctx);
+	assert.match(piTick.details.bundle.id ?? "", /^[0-9a-f]{64}$/, "Pi's own tick keeps its 1 s wait");
+})().catch((error) => { console.error(error); process.exit(1); });
+`;
+	await promisify(execFile)("./node_modules/.bin/tsx", ["-e", slowSource], {
+		cwd: new URL("..", import.meta.url),
+		env: { ...process.env, NODE_PATH: stubs, PI_CODING_AGENT_DIR: slowAgentDir, PATH: `${wrapperDir}:${process.env.PATH}` },
+	});
 } finally {
 	await fs.rm(root, { recursive: true, force: true });
 }

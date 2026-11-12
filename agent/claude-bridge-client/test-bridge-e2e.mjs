@@ -212,7 +212,17 @@ try {
 	assert.equal(again.result.commit, head, "re-tick keeps the first commit");
 
 	step = "5b review: another identity reads review state and one evidence page";
-	const bundleId = ticked.result.bundle?.id;
+	// A bridge tick waits at most 300 ms for its bundle; a slower one reports pending and
+	// appears in the review overview once written.
+	let bundleId = ticked.result.bundle?.id;
+	if (!bundleId) {
+		assert.deepEqual(ticked.result.bundle, { pending: true }, "a bridge tick reports the bundle id or pending");
+		for (let poll = 0; poll < 50 && !bundleId; poll += 1) {
+			await sleep(100);
+			const overview = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+			bundleId = overview.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id)?.bundleId;
+		}
+	}
 	assert.match(bundleId ?? "", /^[0-9a-f]{64}$/, "a bridge tick builds an evidence bundle");
 	const reviewRecall = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
 	assert.deepEqual(Object.keys(reviewRecall.result.prompts), ["mode", "cavemanEnabled", "reviewPrompt"]);
