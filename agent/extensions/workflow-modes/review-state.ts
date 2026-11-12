@@ -191,6 +191,7 @@ export interface ReviewStateInput {
 export interface TaskReviewSummary {
 	state: TaskReviewState;
 	rounds: number;
+	reworkPlans: string[];
 	findings: string[];
 	bundleId?: string;
 }
@@ -220,7 +221,7 @@ export function deriveTaskReviewState(input: ReviewStateInput): TaskReviewSummar
 			citing.push(task);
 		}
 	}
-	const summary = (state: TaskReviewState): TaskReviewSummary => ({ state, rounds: reworkPlans.size, findings: findings.map((finding) => finding.id), ...(bundleId ? { bundleId } : {}) });
+	const summary = (state: TaskReviewState): TaskReviewSummary => ({ state, rounds: reworkPlans.size, reworkPlans: [...reworkPlans], findings: findings.map((finding) => finding.id), ...(bundleId ? { bundleId } : {}) });
 	if (!input.ticked) return summary("not_ready");
 	const unresolved = findings.filter(isUnresolved);
 	const approvedOpen = unresolved.filter((finding) => finding.status === "approved");

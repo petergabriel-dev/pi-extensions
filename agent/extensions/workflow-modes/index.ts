@@ -7,14 +7,14 @@ import { fileURLToPath } from "node:url";
 import { Container, matchesKey, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { DESIGN_DIR, DESIGN_MANIFEST_FILE } from "../engineering-docs/design.js";
 import { CAVEMAN_ENTRY, CAVEMAN_PROMPT, composeModeMarker, composeWorkflowPrompt as composePrompt, MODE_LABELS, NORMAL_MODE_PROMPT, resolveCavemanEnabled, type WorkflowPlanMarker } from "./caveman.js";
-import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, noSandboxDecision } from "./policy.js";
+import { confirmCommand, confirmReviewPost, getBuildGuardBlocker, isBashAllowedInMode, isReviewPostingCommand, noSandboxDecision, sanitizeReviewCommand } from "./policy.js";
 import { gcEvidenceFiles, gcPlanFiles, MAX_PLAN_BYTES, readPlanFile, writePlanFile } from "./plan-file.js";
 import { parseFindingIds, parsePlanTasks, resolvePlanTaskReference, type PlanTask, type PlanTaskReference } from "./plan-tasks.js";
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
 import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
-import { appendReviewEvent, appendReviewEventUnless, readReviewLog } from "./review-store.js";
-import { buildReviewOverview, citedBundleIds, foldFindings, MAX_FINDINGS_PER_SUBMIT, validateFindingInput, validateFindingReferences, type FindingInput, type OverviewPlan, type ReviewOverview } from "./review-state.js";
+import { appendReviewEvent, appendReviewEventUnless, readReviewLog, type ReviewEvent } from "./review-store.js";
+import { buildReviewOverview, citedBundleIds, deriveTaskReviewState, foldFindings, isUnresolved, MAX_FINDINGS_PER_SUBMIT, validateFindingInput, validateFindingReferences, type FindingInput, type FindingState, type OverviewPlan, type PlanTaskView, type ReviewOverview } from "./review-state.js";
 import { BUNDLE_ID, buildEvidenceBundle, EVIDENCE_SECTIONS, evidencePage, readEvidenceBundle, writeEvidenceBundle, type EvidencePage, type EvidenceSection } from "./review-bundle.js";
 import { wrapCommand } from "./sandbox.js";
 
@@ -274,6 +274,150 @@ async function resolveFinding(ctx: ExtensionContext, request: { id?: unknown; co
 
 function reviewErrorResult(error: unknown): Record<string, unknown> {
 	return { ok: false, ...(error instanceof ReviewWriteError ? { code: error.code } : {}), error: error instanceof Error ? error.message : String(error) };
+}
+
+// --- /review: human-only decisions -------------------------------------------------
+
+const REVIEW_DISPLAY_CHARS = 1500;
+
+// Finding text, references, and excerpts are untrusted: hidden and bidi characters are
+// escaped and long text is clipped before it reaches a confirm dialog.
+function displayText(text: string, max = REVIEW_DISPLAY_CHARS): string {
+	return sanitizeReviewCommand(text.length > max ? `${text.slice(0, max)}…` : text);
+}
+
+// Only a literal true from a live confirm dialog approves; headless, decline, cancel,
+// or a dialog error never do.
+async function confirmReviewDecision(ctx: ExtensionContext, title: string, body: string): Promise<boolean> {
+	if (ctx.hasUI !== true) return false;
+	try {
+		return (await ctx.ui.confirm(title, body)) === true;
+	} catch {
+		return false;
+	}
+}
+
+interface ReviewSnapshot {
+	agentDir: string;
+	sessionId: string;
+	events: ReviewEvent[];
+	findings: Map<string, FindingState>;
+	planViews: Array<{ planId: string; tasks: PlanTaskView[] }>;
+}
+
+async function reviewSnapshot(ctx: ExtensionContext): Promise<ReviewSnapshot> {
+	const agentDir = getAgentDir();
+	const sessionId = sessionIdFromContext(ctx);
+	const events = (await readReviewLog(agentDir, sessionId)).events;
+	const branch = readBranch(ctx);
+	const planViews = resolveSavedPlanState(branch, PLAN_ENTRY).plans.map((plan) => {
+		const taskState = resolveSavedPlanTaskState(branch, plan.planId);
+		return { planId: plan.planId, tasks: taskState.tasks.map((task) => ({ id: task.id, ticked: taskState.completedTaskIds.includes(task.id), findings: parseFindingIds(task.metadata.findings) })) };
+	});
+	return { agentDir, sessionId, events, findings: foldFindings(events), planViews };
+}
+
+async function findingExcerpt(ctx: ExtensionContext, snapshot: ReviewSnapshot, finding: FindingState): Promise<string | undefined> {
+	for (const ref of finding.evidenceRefs) {
+		const match = /^([0-9a-f]{64})#hunks\/(\d{1,4})$/.exec(ref);
+		if (!match) continue;
+		const bundle = await readEvidenceBundle(snapshot.agentDir, snapshot.sessionId, match[1]).catch(() => undefined);
+		const hunk = bundle?.hunks[Number(match[2])];
+		if (hunk) return hunk.text.split("\n").slice(0, 20).join("\n");
+	}
+	if (finding.file && finding.line) {
+		const blob = await runGit(ctx.cwd, ["cat-file", "blob", `${finding.commit}:${finding.file}`]);
+		if (blob.ok) {
+			const lines = blob.stdout.split("\n");
+			const start = Math.max(0, finding.line - 4);
+			return lines.slice(start, finding.line + 3).map((line, index) => `${start + index + 1}: ${line}`).join("\n");
+		}
+	}
+	return undefined;
+}
+
+function describeFinding(finding: FindingState): string[] {
+	return [
+		`${finding.id} [${finding.severity}] ${finding.planId} / ${finding.taskId}`,
+		`Reported by ${finding.by ?? "unknown"} at ${finding.commit.slice(0, 12)}${finding.file ? `, ${displayText(finding.file, 200)}${finding.line ? `:${finding.line}` : ""}` : ""}`,
+		"",
+		displayText(finding.text),
+		...(finding.fix ? ["", `Fix: ${displayText(finding.fix)}`] : []),
+		...(finding.repro ? ["", `Repro: ${displayText(finding.repro)}`] : []),
+		...(finding.evidenceRefs.length > 0 ? ["", "References:", ...finding.evidenceRefs.map((ref) => `  ${displayText(ref, 200)}`)] : []),
+	];
+}
+
+async function reviewDecideFinding(ctx: ExtensionContext, action: "approve" | "reject", rawId: string | undefined): Promise<void> {
+	if (ctx.hasUI !== true) return ctx.ui.notify(`/review ${action} requires interactive Pi; nothing was recorded.`, "warning");
+	const id = rawId?.trim().toUpperCase();
+	if (!id || !/^F[1-9][0-9]{0,8}$/.test(id)) return ctx.ui.notify(`Usage: /review ${action} <finding id, e.g. F3>`, "warning");
+	const snapshot = await reviewSnapshot(ctx);
+	const finding = snapshot.findings.get(id);
+	if (!finding) return ctx.ui.notify(`Finding ${id} does not exist.`, "warning");
+	if (finding.status !== "open") return ctx.ui.notify(`Finding ${id} is ${finding.status}; only open findings can be ${action === "approve" ? "approved" : "rejected"}.`, "warning");
+
+	let classification: "verified" | "suspected" = "suspected";
+	const lines = describeFinding(finding);
+	if (action === "approve") {
+		const verifiable = finding.evidenceRefs.length > 0 && await validateFindingReferences(finding, { cwd: ctx.cwd, agentDir: snapshot.agentDir, sessionId: snapshot.sessionId }).then(() => true, () => false);
+		const options = verifiable ? ["Approve as verified", "Approve as suspected"] : ["Approve as suspected"];
+		if (!verifiable) lines.push("", "Approve as verified is unavailable: the finding has no evidence reference that checks out now.");
+		const choice = await ctx.ui.select(`Approve ${id}`, options);
+		if (!choice || !options.includes(choice)) return ctx.ui.notify(`${id} was not approved.`, "info");
+		classification = choice === "Approve as verified" ? "verified" : "suspected";
+		const summary = deriveTaskReviewState({ planId: finding.planId, taskId: finding.taskId, ticked: true, events: snapshot.events, plans: snapshot.planViews });
+		if (summary.rounds + 1 >= 3) lines.push("", `! Rework round ${summary.rounds + 1} for ${finding.taskId} (earlier rework plans: ${summary.reworkPlans.join(", ")}).`);
+	}
+	const excerpt = await findingExcerpt(ctx, snapshot, finding).catch(() => undefined);
+	if (excerpt) lines.push("", "Excerpt:", displayText(excerpt));
+	const title = action === "approve" ? `Approve ${id} as ${classification}?` : `Reject ${id}?`;
+	if (!await confirmReviewDecision(ctx, title, lines.join("\n"))) return ctx.ui.notify(`${id} was not ${action === "approve" ? "approved" : "rejected"}.`, "info");
+
+	// Re-check after the human confirms: anything changed means nothing is recorded.
+	const current = (await reviewSnapshot(ctx)).findings.get(id);
+	if (current?.status !== "open") return ctx.ui.notify(`${id} changed while you were confirming (now ${current?.status ?? "missing"}); nothing was recorded.`, "warning");
+	await appendReviewEvent(snapshot.agentDir, snapshot.sessionId, action === "approve" ? { ev: "finding_approved", id, classification, by: "human" } : { ev: "finding_rejected", id, by: "human" });
+	ctx.ui.notify(action === "approve" ? `${id} approved as ${classification}. Plan rework with a **Findings:** ${id} line on the fixing task.` : `${id} rejected.`, "info");
+}
+
+async function reviewApproveTask(ctx: ExtensionContext, rawTask: string | undefined): Promise<void> {
+	if (ctx.hasUI !== true) return ctx.ui.notify("/review approve-task requires interactive Pi; nothing was recorded.", "warning");
+	const arg = rawTask?.trim() ?? "";
+	if (!arg) return ctx.ui.notify("Usage: /review approve-task <taskId> or <planId>/<taskId>", "warning");
+	const [planPart, taskPart] = arg.includes("/") ? arg.split("/", 2) : [undefined, arg];
+	const snapshot = await reviewSnapshot(ctx);
+	const candidates = snapshot.planViews.filter((plan) => (!planPart || plan.planId === planPart) && plan.tasks.some((task) => task.id === taskPart && task.ticked));
+	if (candidates.length === 0) return ctx.ui.notify(`No ticked task ${arg} in this session's plans.`, "warning");
+	if (candidates.length > 1) return ctx.ui.notify(`Task ${taskPart} is ticked in several plans (${candidates.map((plan) => plan.planId).join(", ")}); use /review approve-task <planId>/<taskId>.`, "warning");
+	const planId = candidates[0].planId;
+	const taskId = taskPart;
+	const pending = (snap: ReviewSnapshot) => [...snap.findings.values()].filter((finding) => finding.planId === planId && finding.taskId === taskId && isUnresolved(finding));
+	const summary = deriveTaskReviewState({ planId, taskId, ticked: true, events: snapshot.events, plans: snapshot.planViews });
+	if (summary.state === "approved") return ctx.ui.notify(`${planId}/${taskId} is already approved.`, "info");
+	const unsettled = pending(snapshot);
+	if (unsettled.length > 0) return ctx.ui.notify(`${planId}/${taskId} still has unsettled findings: ${unsettled.map((finding) => `${finding.id} (${finding.status})`).join(", ")}.`, "warning");
+	const findings = [...snapshot.findings.values()].filter((finding) => finding.planId === planId && finding.taskId === taskId);
+	const body = [`${planId} / ${taskId}`, `State: ${summary.state}; rework rounds: ${summary.rounds}`, findings.length > 0 ? `Findings: ${findings.map((finding) => `${finding.id} ${finding.status}`).join(", ")}` : "No findings were submitted for this task."].join("\n");
+	if (!await confirmReviewDecision(ctx, `Approve task ${taskId}?`, body)) return ctx.ui.notify(`${taskId} was not approved.`, "info");
+	const current = await reviewSnapshot(ctx);
+	if (pending(current).length > 0 || deriveTaskReviewState({ planId, taskId, ticked: true, events: current.events, plans: current.planViews }).state === "approved") {
+		return ctx.ui.notify(`${planId}/${taskId} changed while you were confirming; nothing was recorded.`, "warning");
+	}
+	await appendReviewEvent(current.agentDir, current.sessionId, { ev: "task_approved", planId, taskId, by: "human" });
+	ctx.ui.notify(`${planId}/${taskId} approved.`, "info");
+}
+
+async function reviewList(ctx: ExtensionContext): Promise<void> {
+	const overview = await reviewOverview(ctx);
+	const lines = [
+		"Tasks:",
+		...(overview.tasks.length > 0 ? overview.tasks.map((task) => `  ${task.planId}/${task.taskId} ${task.state}${task.rounds > 0 ? ` (rework rounds ${task.rounds})` : ""}${task.findings.length > 0 ? ` ${task.findings.join(", ")}` : ""}`) : ["  (no ticked tasks)"]),
+		"Unresolved findings:",
+		...(overview.findings.length > 0 ? overview.findings.map((finding) => `  ${finding.id} [${finding.severity}] ${finding.status}/${finding.classification} ${finding.taskId}: ${displayText(finding.text, 120)}`) : ["  (none)"]),
+		"Decide with /review approve <F#>, /review reject <F#>, or /review approve-task <taskId>.",
+	];
+	ctx.ui.notify(lines.join("\n"), "info");
 }
 
 export function flushReviewCapture(): Promise<unknown> {
@@ -942,7 +1086,7 @@ export const PLAN_DESIGN_DIRECTION_PROMPT = `Redesign or open visual work (UI/UX
 
 export const DISCUSS_PROMPT = `Workflow mode: Discuss. Behave like a relentless grilling session for the idea or feature. Ask one main question at a time and provide your recommended answer. If a question can be answered by lightly inspecting the codebase, inspect it instead. Prefer ccc_search for semantic discovery; use read plus light read-only Bash discovery (pwd, ls, find, rg, grep) for exact lookup or fallback. Without a sandbox, Discuss runs no bash; use the read tool and any active search tool instead. When \`subagent\` is available, use it sparingly with \`agent: "explorer"\` for genuine multi-file or multi-symbol sweeps; keep quick lookups inline. The main agent remains synthesizer and decision-maker. Do not run tests/builds unless the user explicitly asks. Focus on user value, feature boundaries, terminology, edge cases, and how the idea fits existing behavior. Capture durable requirements, decisions, constraints, open questions, and lessons learned from failures with discussion_notes automatically. A lesson must pair a failure with its resolution. Do not implement or produce detailed code-level plans. Do not claim facts are confirmed unless backed by tool evidence or user-provided evidence. Use recall_memory when prior cross-session memory may be relevant. When the idea is shaped enough, softly suggest switching to Plan mode with /mode plan. Ponytail lazy-senior-dev reflex governs code, wiring, dependencies, and structure, not visual design: favor minimalism. Question whether the request itself matches the actual need (YAGNI), separate required behavior from nice-to-haves, and prefer the smallest approach: deletion over addition, boring over clever, fewest files possible. Never trade away input validation at trust boundaries, error handling that prevents data loss, security, accessibility, explicitly requested features, or fidelity to a confirmed design target. When the user asks for a redesign, restyle, or new design, or supplies design files for in-scope screens, confirm once whether to treat those inputs as the redesign target; never question a confirmed redesign's need or visual scope. Critique shared designs with \`impeccable\` (${IMPECCABLE_SKILL_PATH}).`;
 
-const PLAN_BASE_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When \`subagent\` is available, default to it with \`agent: "explorer"\` for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Without a sandbox, every bash command needs the user's approval and headless runs cannot approve, so prefer read tools there. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown governs code, wiring, dependencies, and structure, not visual design: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal; never merge away or drop design spec/token tasks. Keep input validation, error handling that prevents data loss, security, accessibility, explicitly requested features, and fidelity to a confirmed design target non-negotiable.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
+const PLAN_BASE_PROMPT = `Workflow mode: Plan. Behave like a relentless implementation-planning session. Investigate before planning. When \`subagent\` is available, default to it with \`agent: "explorer"\` for multi-file, multi-symbol, or fan-out discovery; use direct reads mainly to verify surfaced paths or inspect focused evidence. The main agent remains synthesizer, planner, and decision-maker. Use codebase discovery instead of asking when possible: pwd/ls for repo shape, ccc_search for semantic discovery, rg/find/grep for exact files/symbols, then read verified paths. If ccc_search times out, retry once with a narrower query, then fall back to rg/find/read. Verify paths before reading; do not guess paths into ENOENT loops. Run tests/builds/checks/lint/typecheck when useful to reproduce or localize failures; normal caches/artifacts are OK, but source/config/data mutations are not. Without a sandbox, every bash command needs the user's approval and headless runs cannot approve, so prefer read tools there. Automatically write discussion_notes for confirmed durable requirements, decisions, constraints, open questions, important implementation facts, and lessons learned from failures encountered during investigation. A lesson note must include both what failed and the correct approach. Confidence is evidence-gated: say "confirmed" only with successful tool evidence or user-provided evidence; otherwise say likely/hypothesis. Do not give a recommended fix until at least one code location/symbol/file is verified. Use recall_memory when prior cross-session memory may be relevant. Final plans must include a short Evidence section with path/line refs or test/build output, Target files, Plan steps, Open questions if any, and "Switch /mode build to apply." Ask product questions after discovery and before final plan if the answer changes target behavior. Do not modify files or create repo docs. Even for tiny obvious fixes, stop before edits. Ponytail lazy-senior-dev reflex during investigation and task breakdown governs code, wiring, dependencies, and structure, not visual design: climb the ladder — is it necessary (YAGNI)? does the stdlib, a native platform feature, or an already-installed dependency cover it? Prefer deletion over addition, boring over clever, fewest files possible, and fold redundant work into existing tasks so the plan stays minimal; never merge away or drop design spec/token tasks. Keep input validation, error handling that prevents data loss, security, accessibility, explicitly requested features, and fidelity to a confirmed design target non-negotiable. When planning rework for approved review findings (listed by /review or recall_memory mode review), give each rework task a \`**Findings:** F1, F3\` metadata line naming the findings it fixes; resolving a finding requires a ticked task that cites it.\n\nWhen the user confirms the approach and asks you to produce the final plan, read ${PLAN_TEMPLATE_PATH} and follow its structure exactly.`;
 
 export const PLAN_PROMPT = `${PLAN_BASE_PROMPT}
 
@@ -1524,6 +1668,22 @@ export default function (pi: ExtensionAPI) {
 			const mode = normalizeMode(arg);
 			if (!mode) return ctx.ui.notify("Unknown mode. Use off, discuss, plan, build, or review.", "warning");
 			await setMode(pi, ctx, mode);
+		},
+	});
+
+	pi.registerCommand("review", {
+		description: "List review state, or approve/reject findings and approve tasks (human only)",
+		handler: async (args, ctx) => {
+			const [action, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			try {
+				if (!action || action === "list") return await reviewList(ctx);
+				if (action === "approve") return await reviewDecideFinding(ctx, "approve", rest[0]);
+				if (action === "reject") return await reviewDecideFinding(ctx, "reject", rest[0]);
+				if (action === "approve-task") return await reviewApproveTask(ctx, rest[0]);
+				ctx.ui.notify("Unknown /review action. Use list, approve <F#>, reject <F#>, or approve-task <taskId>.", "warning");
+			} catch (error) {
+				ctx.ui.notify(`/review failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
 		},
 	});
 

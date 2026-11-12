@@ -118,12 +118,12 @@ try {
 	const bundled = ev({ ev: "bundle_created", bundleId });
 	const rework = (planId: string, ticked: boolean, findings: string[]) => ({ planId, tasks: [{ id: `${planId}-t`, ticked, findings }] });
 	assert.equal(state({ ticked: false, events: [bundled] }).state, "not_ready");
-	assert.deepEqual(state({ events: [bundled] }), { state: "ready", rounds: 0, findings: [], bundleId });
+	assert.deepEqual(state({ events: [bundled] }), { state: "ready", rounds: 0, reworkPlans: [], findings: [], bundleId });
 	assert.equal(state({ events: [bundled, ev({ ev: "review_started" })] }).state, "in_review");
 	assert.equal(state({ events: [bundled, submitted("F1")] }).state, "in_review");
 	const approvedF1 = [bundled, submitted("F1"), ev({ ev: "finding_approved", id: "F1" })];
 	assert.equal(state({ events: approvedF1 }).state, "changes_requested");
-	assert.deepEqual(state({ events: approvedF1, plans: [rework("plan-2", false, ["F1"])] }), { state: "rework_in_progress", rounds: 1, findings: ["F1"], bundleId });
+	assert.deepEqual(state({ events: approvedF1, plans: [rework("plan-2", false, ["F1"])] }), { state: "rework_in_progress", rounds: 1, reworkPlans: ["plan-2"], findings: ["F1"], bundleId });
 	assert.equal(state({ events: approvedF1, plans: [rework("plan-2", true, ["F1"])] }).state, "re_review_required");
 	const resolved = [...approvedF1, ev({ ev: "finding_resolved", id: "F1" })];
 	assert.equal(state({ events: resolved, plans: [rework("plan-2", true, ["F1"])] }).state, "in_review", "resolved but not yet human-approved");

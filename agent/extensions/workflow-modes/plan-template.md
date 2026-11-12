@@ -67,9 +67,10 @@ Unchecked top-level task checkboxes seed workflow task tracker when plan is save
   - **Verification Gate:** [what must be manually confirmed before proceeding to the next task]
   - **Checkpoint:** Commit before starting the next task — do not batch commits across tasks
   - **Files:** [target files/globs — advisory hint for Build slicing; omit if unknown]
+  - **Findings:** [rework tasks only: the approved review finding ids this task fixes, e.g. F1, F3]
 ```
 
-The Files hint is advisory input for Build slicing, never ownership.
+The Files hint is advisory input for Build slicing, never ownership. A **Findings** line links a rework task to the approved review findings it fixes; a finding can be resolved only by a commit ticked on a task that cites it.
 
 Prefix a task title with `[LOAD-BEARING]` (before any docs tags) when a mistake would break a must-not-break invariant, a security or data-safety boundary, or behavior later tasks build on. Build restates its invariants before editing, runs the full suite, and verifies each invariant before commit.
 
