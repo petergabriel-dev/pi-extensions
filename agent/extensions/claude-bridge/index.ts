@@ -13,10 +13,10 @@ import { BridgeHealth, cachePaths, failureCode, OutcomeUnknownError, recoverInfl
 import { DEFAULT_RECALL_BUDGET_BYTES, rankRecall } from "./recall-rank.js";
 import { BUILD_LEASE_TTL_MS, SELF_PRESENCE_STALE_BLOCKER, approveBuildLease, passiveBridgeBlocker, buildLeaseHolderLabel, canTickPlanTask, describeWriterBlocker, isBuildLeaseActive, otherWriterClaims, ownLeaseBlocker, parseBuildLease, projectWriterHeldMessage, unverifiedWriterBlocker, pruneBuildLeaseRequests, releaseBuildLeaseOnRecall, releaseBuildLeaseOnWorkflowChange, requestBuildLease, type BuildLease, type BuildLeaseRequest, type BuildLeaseWorkflowState, type WriterClaim } from "./build-lease.js";
 
-import { normalizeReadTaskEvidencePayload, reviewerIdentity } from "./review-payloads.js";
+import { normalizeReadTaskEvidencePayload, normalizeResolveFindingPayload, normalizeSubmitFindingsPayload, reviewerIdentity } from "./review-payloads.js";
 
 const EXTENSION_ID = "claude-bridge";
-const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "read_task_evidence", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
+const REQUEST_TYPES = new Set(["recall", "recall_entry", "save_memory", "capture", "validate_tags", "save_plan", "read_plan_tasks", "tick_plan_task", "read_task_evidence", "submit_review_findings", "resolve_review_finding", "pair", "unpair", "send_message", "read_messages", "ack_messages"]);
 const PEER_BLOCK_BUDGET_CHARS = 16_000;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEARTBEAT_MS = 2_000;
@@ -517,7 +517,7 @@ function validateRequest(fileId: string, raw: unknown): BridgeRequest {
 	if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) throw new Error("Request payload must be an object.");
 	const peer = record.peer === undefined ? undefined : normalizePeer(record.peer);
 	if (record.peer !== undefined && !peer) throw new Error("Request peer must contain valid harness and id.");
-	if (["pair", "unpair", "send_message", "read_messages", "ack_messages", "read_task_evidence"].includes(record.type as string) && !peer) throw new Error(`${record.type} request requires peer identity.`);
+	if (["pair", "unpair", "send_message", "read_messages", "ack_messages", "read_task_evidence", "submit_review_findings", "resolve_review_finding"].includes(record.type as string) && !peer) throw new Error(`${record.type} request requires peer identity.`);
 	return {
 		id: record.id,
 		type: record.type,
@@ -754,6 +754,32 @@ async function handleReadTaskEvidence(pi: ExtensionAPI, request: BridgeRequest):
 		return { id: request.id, ok: true, result: { requestId: request.id, ...page } };
 	} catch (error) {
 		return errorResponse(request.id, failureCode(error, "read_task_evidence_failed"), error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleSubmitFindings(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeSubmitFindingsPayload(request.payload);
+		const reviewer = reviewerIdentity(request.peer);
+		const result = await requestWorkflowReview(pi, "workflow-modes:review-submit", request.id, { ...payload, reviewer }, true);
+		if (result.ok !== true) return errorResponse(request.id, typeof result.code === "string" ? result.code : "submit_review_findings_failed", typeof result.error === "string" ? result.error : "workflow-modes finding submit failed.");
+		return { id: request.id, ok: true, result: { requestId: request.id, ids: Array.isArray(result.ids) ? result.ids : [], status: "suspected" } };
+	} catch (error) {
+		return errorResponse(request.id, failureCode(error, "submit_review_findings_failed"), error instanceof Error ? error.message : String(error));
+	}
+}
+
+// The lease holder comes from this session's live lease, never from the request.
+async function handleResolveFinding(pi: ExtensionAPI, request: BridgeRequest): Promise<BridgeResponse> {
+	try {
+		const payload = normalizeResolveFindingPayload(request.payload);
+		const resolver = reviewerIdentity(request.peer);
+		const leaseHolder = buildLease && isBuildLeaseActive(buildLease, Date.now()) ? `${buildLease.harness}:${buildLease.id}` : undefined;
+		const result = await requestWorkflowReview(pi, "workflow-modes:review-resolve", request.id, { ...payload, resolver, ...(leaseHolder ? { leaseHolder } : {}) }, true);
+		if (result.ok !== true) return errorResponse(request.id, typeof result.code === "string" ? result.code : "resolve_review_finding_failed", typeof result.error === "string" ? result.error : "workflow-modes finding resolve failed.");
+		return { id: request.id, ok: true, result: { requestId: request.id, id: result.id, commit: result.commit, status: "resolved" } };
+	} catch (error) {
+		return errorResponse(request.id, failureCode(error, "resolve_review_finding_failed"), error instanceof Error ? error.message : String(error));
 	}
 }
 
@@ -1307,6 +1333,8 @@ async function handleRequest(pi: ExtensionAPI, ctx: ExtensionContext, request: B
 	if (request.type === "read_plan_tasks") return handleReadPlanTasks(pi, request);
 	if (request.type === "tick_plan_task") return handleTickPlanTask(pi, request);
 	if (request.type === "read_task_evidence") return handleReadTaskEvidence(pi, request);
+	if (request.type === "submit_review_findings") return handleSubmitFindings(pi, request);
+	if (request.type === "resolve_review_finding") return handleResolveFinding(pi, request);
 	if (request.type === "send_message") return handleSendMessage(ctx, request);
 	if (request.type === "read_messages") return handleReadMessages(request);
 	if (request.type === "ack_messages") return handleAckMessages(request);
@@ -1556,6 +1584,8 @@ export default function claudeBridge(pi: ExtensionAPI) {
 		["workflow-modes:tick-plan-task-result", pendingPlanTaskTicks],
 		["workflow-modes:review-get-result", pendingReviewRequests],
 		["workflow-modes:review-read-evidence-result", pendingReviewRequests],
+		["workflow-modes:review-submit-result", pendingReviewRequests],
+		["workflow-modes:review-resolve-result", pendingReviewRequests],
 	] as const) {
 		pi.events.on(eventName, (data: unknown) => {
 			const result = data && typeof data === "object" ? data as Record<string, unknown> : {};

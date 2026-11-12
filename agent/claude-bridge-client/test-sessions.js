@@ -309,6 +309,11 @@ async function main() {
 	assert.ok(evidenceSchema, "read_task_evidence missing from MCP tool list");
 	assert.deepEqual(evidenceSchema.required, ["bundleId"]);
 	assert.equal(evidenceSchema.properties.reviewer, undefined, "reviewer identity must never be a payload field");
+	const submitSchema = client.tools.find((tool) => tool.name === "submit_review_findings")?.inputSchema;
+	const resolveSchema = client.tools.find((tool) => tool.name === "resolve_review_finding")?.inputSchema;
+	assert.ok(submitSchema && resolveSchema, "review write tools missing from MCP tool list");
+	assert.equal(submitSchema.properties.findings.items.properties.by, undefined, "finding author must never be a payload field");
+	for (const field of ["resolver", "leaseHolder", "by"]) assert.equal(resolveSchema.properties[field], undefined, `resolve must not take ${field}`);
 	const resolved = client.resolveHarnessIdentity({ sessionId: "primary-id", claudeSessionId: "legacy-id" }, { CLAUDE_CODE_SESSION_ID: "env-id" });
 	assert.deepEqual(resolved, { harness: "claude", id: "primary-id" });
 	assert.deepEqual(client.resolveHarnessIdentity({ sessionId: OPENCODE.id, harness: OPENCODE.harness }, {}), OPENCODE);
@@ -706,6 +711,15 @@ async function main() {
 	}, (cwd) => startClaimingResponder(cwd, (request, count) => count === 1
 		? { id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } }
 		: { id: request.id, ok: true, result: { type: request.type } }));
+
+	for (const type of ["submit_review_findings", "resolve_review_finding"]) {
+		await test(`${type} answered outcome_unknown is never re-sent`, async (cwd, responder) => {
+			addModernSession(cwd, "pi-modern", [HARNESS]);
+			const [session] = client.liveSessions(cwd);
+			await assert.rejects(client.sendRequestToSession(cwd, session, type, {}, HARNESS), (error) => error.code === "outcome_unknown");
+			assert.equal(responder.requests.length, 1, "review writes are never re-sent");
+		}, (cwd) => startClaimingResponder(cwd, (request) => ({ id: request.id, ok: false, error: { code: "outcome_unknown", message: "Pi stopped mid-request." } })));
+	}
 
 	await test("read re-send happens at most once", async (cwd, responder) => {
 		addModernSession(cwd, "pi-modern", [HARNESS]);

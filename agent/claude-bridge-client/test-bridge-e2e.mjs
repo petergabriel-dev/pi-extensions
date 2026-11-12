@@ -226,6 +226,15 @@ try {
 	const afterRead = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
 	assert.equal(afterRead.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id).state, "in_review", "reading evidence records review_started");
 	assert.equal(client.holdsBuildLease(project, IDENTITY), true, "another identity's review recall keeps the holder's lease");
+
+	step = "5c review: another identity submits one finding citing the evidence";
+	const submitted = await call("submit_review_findings", { findings: [{ planId: "e2e-plan", taskId: tasks.result.tasks[0].id, commit: head, file: "task.txt", line: 1, severity: "low", text: "e2e finding", evidenceRefs: [`${bundleId}#files/0`] }] }, OTHER);
+	assert.deepEqual(submitted.result.ids, ["F1"]);
+	assert.equal(submitted.result.status, "suspected");
+	const withFinding = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+	assert.deepEqual(withFinding.result.review.findings.map((finding) => [finding.id, finding.status, finding.classification, finding.by]), [["F1", "open", "suspected", `${OTHER.harness}:${OTHER.id}`]]);
+	const forgedSubmit = await callError("submit_review_findings", { findings: [{ planId: "e2e-plan", taskId: tasks.result.tasks[0].id, commit: head, severity: "low", text: "forged", by: "codex:forged" }] }, OTHER);
+	assert.match(forgedSubmit.message, /unsupported field/);
 	assert.deepEqual(again.result.progress, { done: 1, total: 2 });
 
 	step = "6 hook decision: lease holder may write, another session may not";

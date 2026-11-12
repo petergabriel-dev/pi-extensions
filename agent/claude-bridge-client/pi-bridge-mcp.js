@@ -620,6 +620,51 @@ const tools = [
 		}
 	},
 	{
+		name: "submit_review_findings",
+		description: "Submit 1-20 structured review findings for ticked plan tasks through the live Pi bridge. Pi checks every reference against git and evidence bundles and records each finding as suspected; only a human approves. Never re-sent automatically.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				findings: {
+					type: "array",
+					minItems: 1,
+					maxItems: 20,
+					items: {
+						type: "object",
+						properties: {
+							planId: { type: "string" },
+							taskId: { type: "string" },
+							commit: { type: "string", pattern: "^[0-9a-fA-F]{7,64}$" },
+							file: { type: "string", description: "Repository-relative path at commit." },
+							line: { type: "integer", minimum: 1 },
+							severity: { type: "string", enum: ["high", "medium", "low"] },
+							text: { type: "string", minLength: 1, maxLength: 2000 },
+							fix: { type: "string", minLength: 1, maxLength: 2000 },
+							repro: { type: "string", minLength: 1, maxLength: 2000 },
+							evidenceRefs: { type: "array", maxItems: 10, items: { type: "string" }, description: "<bundleId>#<section>/<index> or <commit>:<path>:<line>." }
+						},
+						required: ["planId", "taskId", "commit", "severity", "text"]
+					}
+				},
+				cwd: { type: "string" }
+			},
+			required: ["findings"]
+		}
+	},
+	{
+		name: "resolve_review_finding",
+		description: "Resolve an approved finding with the ticked commit that fixed it, after re-checking the fix. Refused to the active Build lease holder and to whoever ticked the fix commit. Never re-sent automatically.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				id: { type: "string", pattern: "^F[1-9][0-9]{0,8}$" },
+				commit: { type: "string", pattern: "^[0-9a-fA-F]{7,64}$" },
+				cwd: { type: "string" }
+			},
+			required: ["id", "commit"]
+		}
+	},
+	{
 		name: "send_message",
 		description: "Send untrusted advisory text to the paired Pi session through the live bridge.",
 		inputSchema: {
@@ -671,6 +716,8 @@ async function callTool(name, args) {
 	if (name === "read_plan_tasks") return toolResult(name, await bridgeRequest("read_plan_tasks", { planId: args.planId }, { cwd, identity }));
 	if (name === "tick_plan_task") return toolResult(name, await bridgeRequest("tick_plan_task", { taskId: args.taskId, title: args.title, planId: args.planId, note: args.note, commit: args.commit }, { cwd, identity }));
 	if (name === "read_task_evidence") return toolResult(name, await bridgeRequest("read_task_evidence", { bundleId: args.bundleId, section: args.section, page: args.page }, { cwd, identity }));
+	if (name === "submit_review_findings") return toolResult(name, await bridgeRequest("submit_review_findings", { findings: args.findings }, { cwd, identity }));
+	if (name === "resolve_review_finding") return toolResult(name, await bridgeRequest("resolve_review_finding", { id: args.id, commit: args.commit }, { cwd, identity }));
 	if (name === "send_message") return toolResult(name, await bridgeRequest("send_message", { text: args.text }, { cwd, identity }));
 	if (name === "read_messages") {
 		const read = await bridgeRequest("read_messages", {}, { cwd, identity });
