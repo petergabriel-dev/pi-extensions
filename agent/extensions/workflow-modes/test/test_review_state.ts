@@ -66,9 +66,11 @@ try {
 	const bundle = await buildEvidenceBundle({ cwd: repo, planId: "plan-1", taskId: "task-1", by: "pi", commit: head, attempt, env: {} });
 	const { bundleId } = await writeEvidenceBundle(agentDir, "s1", bundle);
 	const otherTask = await writeEvidenceBundle(agentDir, "s1", { ...bundle, taskId: "task-2" });
+	const warned = await writeEvidenceBundle(agentDir, "s1", { ...bundle, warnings: ["truncated: hunks for src.ts"] });
 	const context = { cwd: repo, agentDir, sessionId: "s1" };
 	const ok = await validateFindingReferences(validateFindingInput({ ...valid, evidenceRefs: [`${bundleId}#commands/0`, `${bundleId}#hunks/0`, `${head.slice(0, 8)}:src.ts:4`] }), context);
 	assert.equal(ok.commit, head, "commit resolves to the full SHA");
+	await validateFindingReferences(validateFindingInput({ ...valid, evidenceRefs: [`${warned.bundleId}#warnings/0`] }), context);
 	for (const [label, change, message] of [
 		["unknown commit", { commit: "deadbeefdeadbeef" }, /not a commit/],
 		["missing file", { file: "nope.ts" }, /does not exist/],
@@ -76,6 +78,7 @@ try {
 		["line valid only at head", { commit: base, line: 4 }, /beyond the end/],
 		["missing bundle", { evidenceRefs: [`${"0".repeat(64)}#commands/0`] }, /does not exist/],
 		["missing record", { evidenceRefs: [`${bundleId}#commands/3`] }, /record commands\/3 does not exist/],
+		["missing warning", { evidenceRefs: [`${warned.bundleId}#warnings/1`] }, /record warnings\/1 does not exist/],
 		["other task bundle", { evidenceRefs: [`${otherTask.bundleId}#commands/0`] }, /different task/],
 		["code ref bad line", { evidenceRefs: [`${head}:src.ts:99`] }, /beyond the end/],
 		["code ref traversal", { evidenceRefs: [`${head}:../x:1`] }, /must be/],
