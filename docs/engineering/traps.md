@@ -133,6 +133,17 @@
 - **One-shot custom messages do not survive compaction reliably.** `@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js#findValidCutPoints` treats `custom_message` entries as valid cut points, so active-mode authority must be regenerated per turn; reserve one-shot announcements for Off transitions.
 - **Seatbelt profile remains allow-default.** The generated profile is `(allow default)` plus network/write denials, not a read allowlist; a LaunchServices escape remains unproven. Treat this as an accepted limit, not a fixed issue (`agent/extensions/workflow-modes/sandbox.ts:45-61`; `agent/claude-bridge-client/pi-readonly-hook.js:71-86`). `ADR-0045` F8.
 
+## Execution-aware review
+
+- **Exit codes come from Pi's error text.** Pi's bash `tool_result` has no exit code in `details`; a non-zero exit throws with `Command exited with code N`. Capture parses that phrase and records `exit: null` with a warning when it is missing; a Pi wording change would silently degrade every failure to `null`. `test_review_capture.ts` pins the phrase against every installed Pi copy.
+- **Parent hooks never see subagent tools.** Children launch with `--no-extensions`, so per-run evidence comes from the launch host's RPC events. Redact inside `launch.ts` while the run is live: `host.redactText` returns text unchanged once the run is released.
+- **A blocked `tool_call` may never get a `tool_result`.** Pending captures are capped at 200 and reported as `incomplete`; never assume every call pairs with a result.
+- **Redaction is pattern- and env-name-based.** A secret that matches no token shape and is not the value of a secret-named env var is kept. Read a bundle's `redactions` count and `warnings` before trusting it.
+- **Harness-lease builds leave thin evidence.** A bridge tick has no Pi attempt, so its bundle is git-only and warns `unavailable: harness build commands`.
+- **Size pages in escaped UTF-8 bytes.** Evidence pages sized by character count overflowed 24 KiB on CJK and emoji text.
+- **Review recall releases the caller's lease.** Run review calls as a different identity from the implementer; the bridge e2e uses a second identity for review steps.
+- **A running Pi uses its installed package.** Checkout changes to tick or review fields are invisible until Pi loads the new code; a tick reply without `by` means the old code answered.
+
 ## Engineering docs
 
 - **Root spokes contain mixed ownership.** Generator may replace only managed `pi-docs` marker block in `AGENTS.md`/`CLAUDE.md`; surrounding bytes are user-owned.
