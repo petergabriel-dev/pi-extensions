@@ -125,8 +125,17 @@ try {
 	sameAttempt.baseline = head;
 	const same = await buildEvidenceBundle({ cwd: repo.dir, planId: "plan-1", taskId: "task-1", by: "pi", commit: head, attempt: sameAttempt, env });
 	assert.deepEqual(same.files, []);
-	assert.ok(same.warnings.includes("incomplete: baseline equals the ticked commit; changes were not captured"));
+	assert.ok(same.warnings.includes("incomplete: baseline equals the ticked commit; changes committed before capture began are not shown"));
 	assert.ok(!bundle.warnings.some((warning) => warning.startsWith("incomplete: baseline equals")), "a real baseline carries no such warning");
+
+	// No commit supplied and nothing committed since the attempt began: the empty diff says
+	// uncommitted work is missing, not that capture failed.
+	const uncommittedAttempt = openAttempt({ attemptId: "attempt-uncommitted", sessionId: "s1", planId: "plan-1", taskId: "task-1", startedAt: 0 });
+	uncommittedAttempt.baseline = head;
+	const uncommitted = await buildEvidenceBundle({ cwd: repo.dir, planId: "plan-1", taskId: "task-1", by: "pi", attempt: uncommittedAttempt, env });
+	assert.deepEqual(uncommitted.files, []);
+	assert.ok(uncommitted.warnings.includes("incomplete: nothing was committed after the attempt began; uncommitted changes are not in the diff"));
+	assert.ok(!uncommitted.warnings.some((warning) => warning.startsWith("incomplete: baseline equals")), "the supplied-commit wording is not used");
 
 	// Pi tick with no attempt, no commit supplied: diff to HEAD, incomplete capture.
 	const noCommit = await buildEvidenceBundle({ cwd: repo.dir, planId: "plan-1", taskId: "task-1", by: "pi", env });

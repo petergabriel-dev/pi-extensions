@@ -13,7 +13,7 @@ import { parseFindingIds, parsePlanTasks, resolvePlanTaskReference, type PlanTas
 import { MAX_PLAN_TASK_NOTE_LENGTH, resolveSavedPlanState, resolveSavedPlanTaskState, TICK_AUTHOR, type PlanTaskTick, type SavedPlan } from "./plan-state.js";
 import { normalizeCommitInput, resolveCommit, runGit } from "./git.js";
 import { abandonedSummary, attachRunSummary, normalizeRunSummary, openAttempt, recordToolCall, recordToolResult, type CaptureAttempt } from "./review-capture.js";
-import { appendReviewEvent, appendReviewEvents, appendReviewEventUnless, readReviewLog, type ReviewEvent } from "./review-store.js";
+import { appendReviewEvent, appendReviewEvents, appendReviewEventUnless, readReviewLog, ReviewLogFullError, type ReviewEvent } from "./review-store.js";
 import { buildReviewOverview, citedBundleIds, createReferenceCache, deriveTaskReviewState, foldFindings, isUnresolved, MAX_FINDINGS_PER_SUBMIT, readFileAtCommit, validateFindingInput, validateFindingReferences, type FindingInput, type FindingState, type OverviewPlan, type PlanTaskView, type ReviewOverview } from "./review-state.js";
 import { BUNDLE_ID, buildEvidenceBundle, EVIDENCE_SECTIONS, evidencePage, readEvidenceBundle, writeEvidenceBundle, type EvidencePage, type EvidenceSection } from "./review-bundle.js";
 import { wrapCommand } from "./sandbox.js";
@@ -253,8 +253,7 @@ async function submitFindings(ctx: ExtensionContext, rawFindings: unknown, revie
 	try {
 		stored = await appendReviewEvents(agentDir, sessionId, validated.map((finding) => ({ ev: "finding_submitted", ...finding, by: reviewer })));
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw /review log is full/.test(message) ? new ReviewWriteError("review_log_full", `${message}; no finding in this batch was recorded`) : error;
+		throw error instanceof ReviewLogFullError ? new ReviewWriteError("review_log_full", `${error.message}; no finding in this batch was recorded`) : error;
 	}
 	return { ids: stored.map((event) => event.id!) };
 }

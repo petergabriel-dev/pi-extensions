@@ -9,6 +9,7 @@ import {
 	MAX_REVIEW_LINE_BYTES,
 	MAX_REVIEW_LOG_BYTES,
 	readReviewLog,
+	ReviewLogFullError,
 	reviewLogPath,
 	writeOnce0600,
 } from "../review-store.js";
@@ -73,7 +74,7 @@ try {
 	await ensurePrivateDir(path.dirname(capPath));
 	await fs.writeFile(capPath, `${" ".repeat(MAX_REVIEW_LOG_BYTES - 50)}\n`, { mode: 0o600 });
 	const capBefore = (await fs.stat(capPath)).size;
-	await assert.rejects(() => submit("s-cap"), /review log is full/);
+	await assert.rejects(() => submit("s-cap"), (error) => error instanceof ReviewLogFullError && /review log is full/.test(error.message));
 	assert.equal((await fs.stat(capPath)).size, capBefore);
 
 	// Existing log with loose permissions is tightened on append.
@@ -119,7 +120,7 @@ try {
 	const oneLine = JSON.stringify({ ev: "finding_submitted", planId: "p", taskId: "t", text: "x", id: "F1", at: Date.now() }).length + 1;
 	await fs.writeFile(batchCapPath, `${" ".repeat(MAX_REVIEW_LOG_BYTES - oneLine * 2 - 1)}\n`, { mode: 0o600 });
 	const capSize = (await fs.stat(batchCapPath)).size;
-	await assert.rejects(() => appendReviewEvents(agentDir, "s-batch-cap", Array.from({ length: 3 }, () => ({ ev: "finding_submitted", planId: "p", taskId: "t", text: "x" }))), /review log is full/);
+	await assert.rejects(() => appendReviewEvents(agentDir, "s-batch-cap", Array.from({ length: 3 }, () => ({ ev: "finding_submitted", planId: "p", taskId: "t", text: "x" }))), ReviewLogFullError);
 	assert.equal((await fs.stat(batchCapPath)).size, capSize, "a batch that would cross the cap writes nothing, even though one event would fit");
 	assert.equal((await submit("s-batch-cap", { text: "x" })).id, "F1", "a single event that fits still lands");
 	await assert.rejects(() => appendReviewEvents(agentDir, "s-batch", []), /empty/);

@@ -203,6 +203,7 @@ export async function buildEvidenceBundle(input: BundleInput): Promise<EvidenceB
 	}
 
 	let commit = input.commit && FULL_SHA.test(input.commit) ? input.commit : undefined;
+	const commitSupplied = commit !== undefined;
 	if (!commit) {
 		commit = await revParse(input.cwd, "HEAD");
 		warnings.push(commit ? "commit not supplied; diffed to HEAD at tick" : "unavailable: git (no commit or HEAD)");
@@ -218,7 +219,12 @@ export async function buildEvidenceBundle(input: BundleInput): Promise<EvidenceB
 		}
 	}
 
-	if (commit && baseline === commit) warnings.push("incomplete: baseline equals the ticked commit; changes were not captured");
+	// An empty diff states what is missing, never a guessed cause.
+	if (commit && baseline === commit) {
+		warnings.push(commitSupplied
+			? "incomplete: baseline equals the ticked commit; changes committed before capture began are not shown"
+			: "incomplete: nothing was committed after the attempt began; uncommitted changes are not in the diff");
+	}
 
 	let files: BundleFile[] = [];
 	const hunks: Array<{ path: string; text: string }> = [];

@@ -8,6 +8,14 @@ import { join } from "node:path";
 export const REVIEW_LOG_NAME = "reviews.jsonl";
 export const MAX_REVIEW_LOG_BYTES = 1024 * 1024;
 export const MAX_REVIEW_LINE_BYTES = 16 * 1024;
+
+// Thrown when an append would pass MAX_REVIEW_LOG_BYTES; nothing from it was written.
+export class ReviewLogFullError extends Error {
+	constructor() {
+		super(`review log is full (${MAX_REVIEW_LOG_BYTES} bytes); no further review events can be recorded this session`);
+		this.name = "ReviewLogFullError";
+	}
+}
 export const PRIVATE_DIR_MODE = 0o700;
 export const PRIVATE_FILE_MODE = 0o600;
 
@@ -190,7 +198,7 @@ async function appendBatchNow(agentDir: string, sessionId: string, inputs: reado
 	// A torn last line stays its own (skipped) line; the new events start fresh.
 	const separator = bytes && bytes.length > 0 && bytes[bytes.length - 1] !== 0x0a ? "\n" : "";
 	const text = separator + lines.join("");
-	if ((bytes?.length ?? 0) + Buffer.byteLength(text, "utf8") > MAX_REVIEW_LOG_BYTES) throw new Error(`review log is full (${MAX_REVIEW_LOG_BYTES} bytes); no further review events can be recorded this session`);
+	if ((bytes?.length ?? 0) + Buffer.byteLength(text, "utf8") > MAX_REVIEW_LOG_BYTES) throw new ReviewLogFullError();
 
 	let handle;
 	try {
