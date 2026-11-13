@@ -6,7 +6,7 @@ date: 2026-11-12
 decision: Pi records execution evidence for each ticked saved-plan task (verified commit, captured Build commands, subagent run summaries, redacted copied diff) in write-once bundles; reviewers in any paired harness read it and submit structured findings through the bridge; findings stay suspected until a human decides in interactive Pi /review; rework runs as follow-up plans citing the findings, and only a non-author may resolve a finding.
 why: A reviewer in another harness had only the implementer's claims and free-text tick notes, findings had no home, and nothing stopped an implementer from signing off its own fix.
 affects: agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/git.ts, agent/extensions/workflow-modes/plan-state.ts, agent/extensions/workflow-modes/plan-tasks.ts, agent/extensions/workflow-modes/plan-file.ts, agent/extensions/workflow-modes/review-redact.ts, agent/extensions/workflow-modes/review-store.ts, agent/extensions/workflow-modes/review-capture.ts, agent/extensions/workflow-modes/review-bundle.ts, agent/extensions/workflow-modes/review-state.ts, agent/extensions/workflow-modes/plan-template.md, agent/extensions/subagents/launch.ts, agent/extensions/subagents/index.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/review-payloads.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/harness-commands, agent/extensions/harness-setup/manifest.ts, scripts/security-corpus.json, docs/engineering/architecture.md, docs/engineering/invariants.md, docs/engineering/traps.md, docs/engineering/dev-workflow.md
-consequences: Reviewers can see what changed, how it was tested, and why changes were requested, with references Pi checks; decisions are human-only and an implementer cannot resolve its own fix; evidence is bounded and redacted. Exit codes depend on Pi's error wording, redaction is pattern-based, harness builds leave git-only evidence, findings are session-scoped, and the live seeded-defect acceptance is deferred.
+consequences: Reviewers can see what changed, how it was tested, and why changes were requested, with references Pi checks; decisions are human-only and an implementer cannot resolve its own fix; evidence is bounded and redacted. Exit codes depend on Pi's error wording, redaction is pattern-based, harness builds leave git-only evidence, findings are session-scoped, references are checked for existence rather than relevance, and live acceptance passed with Cursor's identity supplied by hand.
 readWhen: changing tick commit or author fields, Build evidence capture, subagent run summaries, evidence bundles or their GC, redaction, reviews.jsonl, finding validation, review states, the /review command, the review bridge operations or recall mode, or the pi-review harness templates
 supersedes: None
 extends: ADR-0001, ADR-0019, ADR-0026, ADR-0045, ADR-0047
@@ -66,6 +66,7 @@ Code:
 - Good: for any ticked task a reviewer can see the diff, the commands and exit codes, subagent activity, and every gap, and Pi rejects references it cannot check.
 - Good: decisions are human-only, findings start suspected, and an implementer cannot resolve its own fix even after its lease ends.
 - Good: evidence and logs are bounded, redacted before they are written, write-once or append-only, and covered by a deterministic seeded-defect fixture and 24 corpus cases.
+- Good: live acceptance passed on 2026-11-13: Cursor found all three seeded defects with references Pi accepted, redaction hid the fixture secrets, and a non-author resolved the rework. Cursor's `conversation_id` had to be supplied by hand, and Pi's tick note told the reviewer the test failure was expected.
 - Bad/risk: exit codes are parsed from Pi's `Command exited with code N`; a wording change degrades them to `null` (a test pins the phrase).
 - Bad/risk: redaction misses secrets that match no pattern and no secret-named env var.
 - Bad/risk: events are credited to the tracker's next task; off-task work only produces an outside-Files warning.
@@ -73,7 +74,7 @@ Code:
 - Bad/risk: in a slow repository a bridge tick reports `pending` with no bundle id; reviewers get the id from the review overview.
 - Bad/risk: the first captured call of each attempt can wait up to 1 s for git.
 - Bad/risk: a running Pi uses its installed package, so these features appear only after Pi loads this code.
-- Bad/risk: live acceptance (Claude plans, Pi builds, Cursor reviews the seeded fixture; pass at two of three defects) is deferred and not yet run.
+- Bad/risk: references are checked for existence, not relevance; `/review` has no outcome for a correct finding that needs no fix, and reviewers never see rejected findings, so a rejected issue can return under a new id.
 
 ## Read when
 
