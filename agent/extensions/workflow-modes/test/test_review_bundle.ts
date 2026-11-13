@@ -62,6 +62,17 @@ try {
 	assert.deepEqual(outsideTaskFiles("app/(marketing)/page.tsx, lib/x.ts", ["app/(marketing)/page.tsx", "app/admin/secret.ts", "lib/x.ts"]), ["app/admin/secret.ts"], "route groups stay part of the path");
 	assert.deepEqual(parseFilesHint("`a.ts` (new, optional), b.ts"), ["a.ts", "b.ts"], "commas inside a note do not split entries");
 
+	// Backticked spans are the paths of their entry, wherever they sit; an unclosed note
+	// cannot swallow later entries; placeholders list nothing.
+	assert.deepEqual(parseFilesHint("Update `src/a.ts`"), ["src/a.ts"], "a backticked path after prose counts");
+	assert.deepEqual(parseFilesHint("New: `src/x.ts`, `src/y.ts`"), ["src/x.ts", "src/y.ts"], "a label before the first span does not drop it");
+	assert.deepEqual(parseFilesHint("`src/a.ts` and `src/b.ts`"), ["src/a.ts", "src/b.ts"], "every span in an entry counts");
+	assert.deepEqual(parseFilesHint("`docs/My Notes.md`"), ["docs/My Notes.md"], "a backticked path keeps its spaces");
+	assert.deepEqual(parseFilesHint("src/a.ts (WIP, see review, src/b.ts, src/c.ts"), ["src/a.ts", "src/b.ts", "src/c.ts"], "an unclosed note does not swallow later entries");
+	for (const hint of ["TBD.", "None.", "—"]) {
+		assert.deepEqual(parseFilesHint(hint), [], `placeholder ${JSON.stringify(hint)} lists no files`);
+	}
+
 	const repo = makeRepo("repo");
 	await fs.writeFile(path.join(repo.dir, "a.txt"), "one\n");
 	await fs.writeFile(path.join(repo.dir, "old.txt"), "rename me please, this content is long enough to be detected\n");

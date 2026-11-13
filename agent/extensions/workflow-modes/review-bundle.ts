@@ -114,8 +114,10 @@ function expandBraces(pattern: string, cap: number): string[] {
 	return results;
 }
 
-// Splits on commas outside {...} and (...), so brace lists and notes stay whole.
-function splitTopLevel(text: string): string[] {
+// Splits on commas outside {...} and (...), so brace lists and notes stay whole. If the
+// parentheses never balance (an unclosed note), they are ignored, so one stray "(" cannot
+// swallow every later entry.
+function splitTopLevel(text: string, countParens = true): string[] {
 	const parts: string[] = [];
 	let braces = 0;
 	let parens = 0;
@@ -123,8 +125,8 @@ function splitTopLevel(text: string): string[] {
 	for (const char of text) {
 		if (char === "{") braces += 1;
 		else if (char === "}") braces = Math.max(0, braces - 1);
-		else if (char === "(") parens += 1;
-		else if (char === ")") parens = Math.max(0, parens - 1);
+		else if (countParens && char === "(") parens += 1;
+		else if (countParens && char === ")") parens = Math.max(0, parens - 1);
 		if (char === "," && braces === 0 && parens === 0) {
 			parts.push(current);
 			current = "";
@@ -133,26 +135,38 @@ function splitTopLevel(text: string): string[] {
 		}
 	}
 	parts.push(current);
-	return parts;
+	return parens > 0 ? splitTopLevel(text, false) : parts;
 }
 
 const NO_FILES = new Set(["none", "n/a", "tbd"]);
+const isPlaceholder = (word: string) => NO_FILES.has(word.replace(/[.,;:]+$/, "").toLowerCase()) || /^[-–—]+$/.test(word);
 
 // Plan Files hints are free text: comma-separated paths, backticked or not, each
-// optionally followed by a "(note)". Each entry's first word is its path, so a note
-// after whitespace drops while a route group like app/(marketing)/ stays. A bare word
-// is a file or directory only when nothing but a note follows it; otherwise it is prose.
+// optionally followed by a "(note)". An entry's backticked spans are its paths, wherever
+// they sit and spaces included; a trailing "(note)" inside a span drops. Without a
+// complete span, the entry's first word is its path, so a note after whitespace drops
+// while a route group like app/(marketing)/ stays; a bare word is a file or directory
+// only when nothing but a note follows it, otherwise it is prose.
 export function parseFilesHint(hint: string | undefined): string[] {
 	if (!hint) return [];
 	const patterns: string[] = [];
 	for (const entry of splitTopLevel(hint.slice(0, MAX_FILES_HINT_CHARS))) {
-		const [first = "", ...rest] = entry.replace(/`/g, " ").trim().split(/\s+/);
-		const path = first.replace(/^\.\//, "");
-		if (!path || NO_FILES.has(path.toLowerCase())) continue;
-		if (!/[/.*]/.test(path) && rest.length > 0 && !rest[0].startsWith("(")) continue;
-		for (const expanded of expandBraces(path, MAX_FILES_HINT_PATTERNS - patterns.length)) {
-			if (patterns.length >= MAX_FILES_HINT_PATTERNS) return patterns;
-			patterns.push(expanded);
+		const spans = [...entry.matchAll(/`([^`]+)`/g)].map((match) => match[1].replace(/\s+\([^()]*\)\s*$/, "").trim());
+		let paths: string[];
+		if (spans.length > 0) {
+			paths = spans;
+		} else {
+			const [first = "", ...rest] = entry.replace(/`/g, " ").trim().split(/\s+/);
+			if (!/[/.*]/.test(first) && rest.length > 0 && !rest[0].startsWith("(")) continue;
+			paths = [first];
+		}
+		for (const raw of paths) {
+			const path = raw.replace(/^\.\//, "");
+			if (!path || isPlaceholder(path)) continue;
+			for (const expanded of expandBraces(path, MAX_FILES_HINT_PATTERNS - patterns.length)) {
+				if (patterns.length >= MAX_FILES_HINT_PATTERNS) return patterns;
+				patterns.push(expanded);
+			}
 		}
 	}
 	return patterns;
