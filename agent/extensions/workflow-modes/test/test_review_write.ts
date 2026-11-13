@@ -159,6 +159,12 @@ const approve = (findingId) => appendReviewEvent(AGENT, "session-w", { ev: "find
 	assert.equal(submitCalls.filter((call) => call.startsWith("-C") && call.includes("cat-file -e")).length, 1, "the shared file is checked once");
 	assert.equal(submitCalls.filter((call) => call.includes("cat-file blob")).length, 1, "the shared file is read once");
 
+	// An approved finding with a ticked, unresolved fix, for the full-log resolve below.
+	await approve("F3");
+	assert.equal((await save("plan-d", "# D\\n\\n## Section 4 — Tasks\\n- [ ] Fix F3\\n  - **Findings:** F3\\n")).ok, true);
+	assert.equal((await tick("Fix F3", FIX, "claude:builder")).ok, true);
+	await flushReviewCapture();
+
 	// A batch that would cross the review-log cap stores nothing.
 	const logFile = AGENT + "/plans/session-w/reviews.jsonl";
 	const size = readFileSync(logFile).length;
@@ -169,6 +175,12 @@ const approve = (findingId) => appendReviewEvent(AGENT, "session-w", { ev: "find
 	assert.deepEqual({ ok: full.ok, code: full.code }, { ok: false, code: "review_log_full" }, full.error);
 	assert.match(full.error, /no finding in this batch was recorded/);
 	assert.equal(readFileSync(logFile).length, sizeBefore, "nothing from the batch was written");
+
+	// Every review write reports a full log the same way: a resolve gets review_log_full too.
+	writeFileSync(logFile, " ".repeat(1024 * 1024 - readFileSync(logFile).length - 10) + "\\n", { flag: "a" });
+	const fullResolve = await resolve("F3", FIX, "codex:checker");
+	assert.deepEqual({ ok: fullResolve.ok, code: fullResolve.code }, { ok: false, code: "review_log_full" }, fullResolve.error);
+	assert.match(fullResolve.error, /review log is full/);
 })().catch((error) => { console.error(error); process.exit(1); });
 `;
 

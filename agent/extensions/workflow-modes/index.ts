@@ -294,8 +294,10 @@ async function resolveFinding(ctx: ExtensionContext, request: { id?: unknown; co
 	return { id: request.id, commit };
 }
 
+// Every review bridge write reports a full log as review_log_full, matched by type.
 function reviewErrorResult(error: unknown): Record<string, unknown> {
-	return { ok: false, ...(error instanceof ReviewWriteError ? { code: error.code } : {}), error: error instanceof Error ? error.message : String(error) };
+	const code = error instanceof ReviewWriteError ? error.code : error instanceof ReviewLogFullError ? "review_log_full" : undefined;
+	return { ok: false, ...(code ? { code } : {}), error: error instanceof Error ? error.message : String(error) };
 }
 
 // --- /review: human-only decisions -------------------------------------------------
