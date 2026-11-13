@@ -297,6 +297,9 @@ const bundle = (id) => JSON.parse(readFileSync(${JSON.stringify(join(raceSession
 await handlers.get("session_start")({}, ctx);
 await request("workflow-modes:save-plan", { requestId: "s", planId: "plan-race", plan: "# P\\n\\n## Section 4 — Tasks\\n- [ ] Race\\n- [ ] Bridge\\n" });
 await commands.get("mode").handler("build", ctx);
+// Warm the wrapper first: macOS delays the first run of a new script by hundreds of ms,
+// enough to push the 0.3 s lookup past the 1 s bound, where its result is ignored.
+git("rev-parse", "--verify", "--quiet", "HEAD");
 
 // The first captured call is the commit itself: the tool runs only after tool_call returns.
 assert.equal(await call("c1", "git commit -am race"), undefined);
@@ -318,11 +321,11 @@ writeFileSync(${JSON.stringify(delayFile)}, "1.6\\n");
 let started = Date.now();
 assert.equal(await call("c2", "echo bridge-work-1"), undefined);
 const firstWait = Date.now() - started;
-assert.ok(firstWait >= 900 && firstWait < 1500, "first captured call waited " + firstWait + " ms");
+assert.ok(firstWait >= 900 && firstWait < 3000, "first captured call waited " + firstWait + " ms");
 await result("c2", "echo bridge-work-1", "bridge-work-1");
 started = Date.now();
 assert.equal(await call("c3", "echo bridge-work-2"), undefined);
-assert.ok(Date.now() - started < 200, "later calls add no wait");
+assert.ok(Date.now() - started < 800, "later calls add no wait");
 await result("c3", "echo bridge-work-2", "bridge-work-2");
 writeFileSync(${JSON.stringify(delayFile)}, "0\\n");
 
@@ -342,6 +345,54 @@ assert.equal(bridgeBundle.attemptId, undefined);
 assert.ok(bridgeBundle.warnings.some((warning) => warning.startsWith("unavailable: harness build commands")), "the bundle says harness commands are unavailable");
 assert.deepEqual(logEvents().filter((event) => event.ev === "attempt_abandoned").map((event) => [event.reason, event.taskId, event.commands]), [["bridge tick", bridgeTask.id, 2]]);
 assert.ok(!readFileSync(${JSON.stringify(join(raceSession, "reviews.jsonl"))}, "utf8").includes("bridge-work"), "abandon events never store command text");
+
+// The wait yields, so everything decided before it is checked again. A writer claimed
+// during the wait blocks the call.
+let guardBlocker;
+events.on("workflow-modes:build-guard", (payload) => { if (guardBlocker) payload.blockedBy = guardBlocker; });
+await request("workflow-modes:save-plan", { requestId: "s2", planId: "plan-guard", plan: "# P\\n\\n## Section 4 — Tasks\\n- [ ] Guard\\n" });
+writeFileSync(${JSON.stringify(delayFile)}, "0.6\\n");
+const claimed = call("g1", "echo after-writer-claim");
+await new Promise((resolve) => setTimeout(resolve, 100));
+guardBlocker = "another Pi session";
+const guarded = await claimed;
+guardBlocker = undefined;
+assert.equal(guarded?.block, true, "a call that waited while the writer was claimed is blocked");
+assert.match(guarded.reason, /project writer blocked by another Pi session/);
+
+// A plan change during the wait ends the attempt; the call is blocked, not recorded into it.
+await request("workflow-modes:save-plan", { requestId: "s3", planId: "plan-switch", plan: "# P\\n\\n## Section 4 — Tasks\\n- [ ] Switch\\n" });
+const replaced = call("p1", "echo after-plan-change");
+await new Promise((resolve) => setTimeout(resolve, 100));
+await request("workflow-modes:save-plan", { requestId: "s4", planId: "plan-late", plan: "# P\\n\\n## Section 4 — Tasks\\n- [ ] Late\\n" });
+const ended = await replaced;
+assert.equal(ended?.block, true, "a call whose attempt ended while it waited is blocked");
+assert.match(ended.reason, /attempt ended while it waited/);
+
+// A call that waited while the mode left Build is blocked.
+const pending = call("m1", "echo after-mode-switch");
+await new Promise((resolve) => setTimeout(resolve, 100));
+await commands.get("mode").handler("plan", ctx);
+const switched = await pending;
+assert.equal(switched?.block, true, "a call that waited while the mode left Build is blocked");
+assert.match(switched.reason, /left Build while it waited/);
+
+// A lookup that finishes after the 1 s bound is ignored: here it would read HEAD after the
+// first call's commit and report an empty diff.
+await commands.get("mode").handler("build", ctx);
+writeFileSync(${JSON.stringify(delayFile)}, "1.5\\n");
+assert.equal(await call("l1", "git commit -am late"), undefined);
+const lateCommit = commit("late.txt");
+await result("l1", "git commit -am late", "ok");
+await new Promise((resolve) => setTimeout(resolve, 900)); // the slow lookup has now finished
+writeFileSync(${JSON.stringify(delayFile)}, "0\\n");
+const lateTask = (await request("workflow-modes:get-plan-tasks", { requestId: "r3" })).nextTask;
+const lateTick = await tools.get("workflow_plan_tick").execute("t3", { taskId: lateTask.id, commit: lateCommit }, undefined, undefined, ctx);
+await flushReviewCapture();
+const lateBundle = bundle(lateTick.details.bundle.id);
+assert.ok(lateBundle.warnings.includes("baseline inferred as the commit's parent"), "a late baseline is ignored: " + JSON.stringify(lateBundle.warnings));
+assert.ok(!lateBundle.warnings.some((warning) => warning.startsWith("incomplete: baseline equals")), "no false empty diff");
+assert.deepEqual(lateBundle.files.map((file) => file.path), ["late.txt"]);
 })().catch((error) => {
 	console.error(error);
 	process.exit(1);

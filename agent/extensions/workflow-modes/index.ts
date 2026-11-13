@@ -172,13 +172,16 @@ function ensureCaptureAttempt(ctx: ExtensionContext): CaptureAttempt | undefined
 	captureAttempt = attempt;
 	// Baseline = HEAD before this attempt's work. Captured calls wait for it, at most
 	// BASELINE_WAIT_MS in total, so the first call (say `git commit`) cannot move HEAD first.
+	// A lookup that finishes after the bound is ignored: the first call may already have
+	// moved HEAD, and the bundle then infers the commit's parent instead.
 	if (typeof ctx.cwd === "string") {
+		let timedOut = false;
 		const resolved = runGit(ctx.cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).then((result) => {
 			const sha = result.stdout.trim();
-			if (result.ok && /^[0-9a-f]{40,64}$/.test(sha)) attempt.baseline = sha;
+			if (!timedOut && result.ok && /^[0-9a-f]{40,64}$/.test(sha)) attempt.baseline = sha;
 		}).catch(() => undefined);
 		let timer: ReturnType<typeof setTimeout> | undefined;
-		const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, BASELINE_WAIT_MS); });
+		const bound = new Promise<void>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(); }, BASELINE_WAIT_MS); });
 		baselineReady.set(attempt, Promise.race([resolved, bound]).finally(() => clearTimeout(timer)));
 	}
 	return attempt;
@@ -1485,7 +1488,16 @@ export default function (pi: ExtensionAPI) {
 				if (CAPTURE_TOOLS.has(event.toolName)) {
 					const attempt = ensureCaptureAttempt(ctx);
 					if (attempt) {
-						await baselineReady.get(attempt);
+						const wait = baselineReady.get(attempt);
+						if (wait) {
+							await wait;
+							// The wait yields, so everything decided before it is checked again.
+							if (currentMode === undefined) return { block: true, reason: `Unknown workflow mode was restored; ${event.toolName} was blocked. Select a supported mode with /mode before continuing.` };
+							if (currentMode !== "build") return { block: true, reason: formatModeBlockReason(currentMode, `${event.toolName} was blocked: the mode left Build while it waited.`) };
+							const lateBlocker = getBuildGuardBlocker((payload) => pi.events.emit("workflow-modes:build-guard", payload));
+							if (lateBlocker) return { block: true, reason: `${event.toolName} was blocked: project writer blocked by ${lateBlocker}. Do not retry until that is resolved.` };
+							if (captureAttempt !== attempt) return { block: true, reason: `${event.toolName} was blocked: its Build attempt ended while it waited (plan, task, or session changed). Retry the call.` };
+						}
 						recordToolCall(attempt, event, Date.now(), process.env);
 					}
 				}
