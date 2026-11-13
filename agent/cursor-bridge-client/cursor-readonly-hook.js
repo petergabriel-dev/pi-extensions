@@ -329,15 +329,19 @@ function classifyBridgeMcp(input) {
 	if (!bridgeClient.isSafeId(conversationId)) {
 		return { permission: "deny", reason: "Pi bridge MCP call requires a valid Cursor conversation_id." };
 	}
+	// A Cursor model cannot see its own conversation_id. The id passed isSafeId and belongs
+	// to the calling conversation, so an identity refusal names it: the model learns only its
+	// own identity and retries. Decisions are unchanged; the hook never stamps the id.
+	const retry = ` Use sessionId "${conversationId}" and harness "cursor", then retry.`;
 	const args = parseMcpToolInput(input);
 	if (!args) {
-		return { permission: "deny", reason: "Pi bridge MCP arguments are missing or unparseable." };
+		return { permission: "deny", reason: `Pi bridge MCP arguments are missing or unparseable.${retry}` };
 	}
 	if (args.sessionId !== conversationId) {
-		return { permission: "deny", reason: "Pi bridge MCP sessionId does not match Cursor conversation_id." };
+		return { permission: "deny", reason: `Pi bridge MCP sessionId does not match Cursor conversation_id.${retry}` };
 	}
 	if (args.harness !== "cursor") {
-		return { permission: "deny", reason: "Pi bridge MCP harness must be cursor." };
+		return { permission: "deny", reason: `Pi bridge MCP harness must be cursor.${retry}` };
 	}
 	return { permission: "allow" };
 }

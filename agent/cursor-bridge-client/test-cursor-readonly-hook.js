@@ -223,18 +223,29 @@ test("bridge MCP identity binds to Cursor conversation_id", () => {
 	});
 	assertPermission(call(), "allow");
 	assertPermission(call({ tool_input: JSON.stringify({ sessionId: CURSOR.id, harness: "cursor" }) }), "allow");
+	// An identity refusal names the calling conversation's own (safe) id so its model can
+	// retry; the decision itself never changes.
+	const hint = `Use sessionId "${CURSOR.id}" and harness "cursor", then retry.`;
 	for (const [label, overrides] of [
 		["missing sessionId", { tool_input: { harness: "cursor" } }],
+		["probe sessionId", { tool_input: { sessionId: "unknown", harness: "cursor" } }],
 		["mismatched sessionId", { tool_input: { sessionId: "other-conversation", harness: "cursor" } }],
 		["wrong harness", { tool_input: { sessionId: CURSOR.id, harness: "claude" } }],
 		["unparseable args", { tool_input: "{not json" }],
 		["array args", { tool_input: "[]" }],
-		["invalid conversation_id", { conversation_id: "../bad" }],
 	]) {
 		const result = call(overrides);
 		assertPermission(result, "deny");
 		assert.match(result.user_message, /Pi bridge MCP/, label);
+		assert.ok(result.user_message.includes(hint), `${label}: user_message names the id`);
+		assert.ok(result.agent_message.includes(hint), `${label}: agent_message names the id`);
 	}
+	// An unsafe conversation_id is never echoed.
+	const unsafe = call({ conversation_id: "../bad" });
+	assertPermission(unsafe, "deny");
+	assert.match(unsafe.user_message, /Pi bridge MCP/);
+	assert.ok(!unsafe.user_message.includes("../bad") && !unsafe.agent_message.includes("../bad"), "an unsafe id is not echoed");
+	assert.ok(!unsafe.agent_message.includes("Use sessionId"), "no retry hint without a safe id");
 });
 
 test("preToolUse denies Write before bytes reach disk", () => {
