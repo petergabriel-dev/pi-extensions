@@ -282,7 +282,7 @@ export function releaseBuildLeaseOnRecall(
 	peer: BuildLeasePeer | null | undefined,
 	mode: string,
 ): BuildLease | null {
-	if (!lease || !peer || (mode !== "discuss" && mode !== "plan")) return lease;
+	if (!lease || !peer || (mode !== "discuss" && mode !== "plan" && mode !== "review")) return lease;
 	return lease.harness === peer.harness && lease.id === peer.id ? null : lease;
 }
 

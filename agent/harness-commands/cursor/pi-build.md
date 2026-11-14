@@ -7,10 +7,7 @@ Use this command to run an approved Pi saved plan through Cursor's Pi build leas
 Check whether the current working directory or any ancestor contains `.pi/`. Pi's global agent dir `~/.pi` does not mark a project.
 
 - Outside a Pi project: do not call Pi bridge tools. Use the generic build loop below.
-- Inside a Pi project: require Cursor `conversation_id` before any bridge call. If unavailable, stop and say exactly:
-  > Cursor session identity is required to use Pi bridge.
-
-Every bridge call must include `sessionId: conversation_id`, `harness: "cursor"`, and `cwd` when the current workspace is available.
+- Inside a Pi project: every bridge call must include `sessionId: conversation_id`, `harness: "cursor"`, and `cwd` when the current workspace is available. If you do not know your Cursor `conversation_id`, make your first bridge call `pi-claude-bridge.read_messages` with `sessionId: "unknown"`, `harness: "cursor"`, and `cwd`; the Pi hook refuses it, and its message gives your `conversation_id`. Use exactly that id for every later call; never guess one or reuse one from another chat. If the refusal gives no id, make no further bridge calls and explain: `Cursor session identity is required to use Pi bridge.`
 
 ## Pi branch
 
@@ -27,7 +24,7 @@ Every bridge call must include `sessionId: conversation_id`, `harness: "cursor"`
    - `workflow_plan_tick` → `pi-claude-bridge.tick_plan_task`
    Recover tracker state only when missing or after compaction. Work exactly one next task at a time.
 7. Load that task's context package, implement only its scope, then run its Verification Gate and targeted checks. If a check fails, stop without committing or ticking.
-8. On success, inspect the diff and commit the task before calling `tick_plan_task` once for that task. Never tick before commit or edit the saved plan to mark progress.
+8. On success, inspect the diff and commit the task before calling `tick_plan_task` once for that task, passing the commit SHA as `commit`. Never tick before commit or edit the saved plan to mark progress.
 9. Report task, commit, verification, deviations, and next tracker task. Stop for user confirmation before advancing.
 
 ## Build lease refusals

@@ -82,7 +82,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			dest: "~/.claude.json#mcpServers.pi-claude-bridge",
 			ownerExtension: bridgeOwner,
 		},
-		...(["discuss", "plan", "build"] as const).map((command): HarnessEntry => ({
+		...(["discuss", "plan", "review", "build"] as const).map((command): HarnessEntry => ({
 			kind: "command",
 			script: `agent/harness-commands/claude/pi-${command}.md`,
 			dest: `commands/pi-${command}.md`,
@@ -106,7 +106,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			dest: "mcp.json#mcpServers.pi-claude-bridge",
 			ownerExtension: bridgeOwner,
 		},
-		...(["discuss", "plan", "build"] as const).map((command): HarnessEntry => ({
+		...(["discuss", "plan", "review", "build"] as const).map((command): HarnessEntry => ({
 			kind: "command",
 			script: `agent/harness-commands/cursor/pi-${command}.md`,
 			dest: `commands/pi-${command}.md`,
@@ -121,7 +121,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			dest: "plugins/pi-opencode-build-lease.js",
 			ownerExtension: bridgeOwner,
 		},
-		...(["discuss", "plan", "build"] as const).map((command): HarnessEntry => ({
+		...(["discuss", "plan", "review", "build"] as const).map((command): HarnessEntry => ({
 			kind: "command",
 			script: `agent/harness-commands/opencode/pi-${command}.md`,
 			dest: `commands/pi-${command}.md`,
@@ -150,7 +150,7 @@ export const HARNESS_MANIFEST: Record<Harness, HarnessEntry[]> = {
 			ownerExtension: bridgeOwner,
 		},
 		// Codex has no command files; the Pi workflows ship as explicit-only skill directories.
-		...(["discuss", "plan", "build"] as const).map((command): HarnessEntry => ({
+		...(["discuss", "plan", "review", "build"] as const).map((command): HarnessEntry => ({
 			kind: "skill",
 			script: `agent/harness-commands/codex/pi-${command}`,
 			dest: `skills/pi-${command}`,
