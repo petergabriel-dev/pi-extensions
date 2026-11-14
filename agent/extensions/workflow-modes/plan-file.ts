@@ -145,3 +145,34 @@ export async function gcPlanFiles(agentDir: string, sessionId: string, reference
 	}
 	return deleted;
 }
+
+const EVIDENCE_FILE = /^[0-9a-f]{64}\.json$/;
+
+// Deletes evidence bundles older than the retention period unless a caller-supplied
+// set (bundles cited by unresolved findings) keeps them. Only regular <sha256>.json
+// files directly under evidence/ are considered; reviews.jsonl is never touched.
+export async function gcEvidenceFiles(agentDir: string, sessionId: string, keep: ReadonlySet<string>, now = Date.now()): Promise<string[]> {
+	if (!Number.isFinite(now)) throw new Error("now must be a finite timestamp");
+	const directory = join(plansDirectory(agentDir), validateSegment(sessionId, "sessionId"), "evidence");
+	let files;
+	try {
+		const info = await lstat(directory);
+		if (!info.isDirectory() || info.isSymbolicLink()) return [];
+		files = await readdir(directory, { withFileTypes: true });
+	} catch (error) {
+		if (isMissing(error)) return [];
+		throw error;
+	}
+	const deleted: string[] = [];
+	const cutoff = now - PLAN_RETENTION_MS;
+	for (const file of files) {
+		if (!file.isFile() || !EVIDENCE_FILE.test(file.name)) continue;
+		if (keep.has(file.name.slice(0, -5))) continue;
+		const filePath = join(directory, file.name);
+		const fileInfo = await lstat(filePath);
+		if (!fileInfo.isFile() || fileInfo.mtimeMs >= cutoff) continue;
+		await unlink(filePath);
+		deleted.push(filePath);
+	}
+	return deleted;
+}

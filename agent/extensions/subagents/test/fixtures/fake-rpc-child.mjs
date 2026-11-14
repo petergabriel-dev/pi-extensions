@@ -177,6 +177,30 @@ function handleCommand(command) {
 			sendRecord({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: token.slice(32) } });
 			return;
 		}
+		if (mode === "evidence" || mode === "evidence-exit" || mode === "evidence-cap") {
+			const token = process.env.PI_SUBAGENT_TOKEN;
+			const tool = (id, toolName, args, isError, text) => {
+				sendRecord({ type: "tool_execution_start", toolCallId: id, toolName, args });
+				sendRecord({ type: "tool_execution_end", toolCallId: id, toolName, isError, result: { content: text === undefined ? [] : [{ type: "text", text }] } });
+			};
+			if (mode === "evidence-cap") {
+				for (let index = 0; index < 60; index += 1) tool(`edit-${index}`, "edit", { path: `src/f${index}.ts` }, false);
+				for (let index = 0; index < 15; index += 1) tool(`bash-${index}`, "bash", { command: `false ${index}` }, true, "fail\n\nCommand exited with code 1");
+				finishRun();
+				return;
+			}
+			tool("bash-fail", "bash", { command: `npm test --token ${token}` }, true, `${"x".repeat(5000)} leaked ${token} ghp_${"a1".repeat(18)}\n\nCommand exited with code 3`);
+			tool("bash-ok", "bash", { command: "echo ok" }, false, "ok");
+			tool("edit-ok", "edit", { path: "src/a.ts" }, false);
+			tool("write-fail", "write", { path: "src/b.ts" }, true, "denied");
+			tool("read-1", "read", { path: "README.md" }, false, "readme");
+			if (mode === "evidence-exit") {
+				void outputQueue.then(() => setTimeout(() => process.exit(23), 25));
+				return;
+			}
+			finishRun();
+			return;
+		}
 		if (mode === "launch") {
 			sendRecord({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read" });
 			sendRecord({ type: "tool_execution_end", toolCallId: "tool-1", toolName: "read" });

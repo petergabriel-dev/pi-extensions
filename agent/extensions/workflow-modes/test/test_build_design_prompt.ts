@@ -262,7 +262,7 @@ Promise.resolve(handlers.get("session_start")?.({}, context)).then(async () => {
 	} catch (error) {
 		extraKeyError = error instanceof Error ? error.message : String(error);
 	}
-	if (!extraKeyError.includes("only taskId, title, and note")) throw new Error("unknown tick key was not rejected clearly");
+	if (!extraKeyError.includes("only taskId, title, note, and commit")) throw new Error("unknown tick key was not rejected clearly");
 	const tickedTurn = await handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }, context) as { message?: { details?: { progress?: { done: number; total: number }; nextTask?: unknown } } };
 	if (tickedTurn.message?.details?.progress?.done !== 1 || tickedTurn.message?.details?.progress?.total !== 1 || tickedTurn.message?.details?.nextTask !== undefined) throw new Error("task tick did not survive marker refresh");
 	const tickedBranch = [...branchEntries];

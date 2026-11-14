@@ -107,20 +107,26 @@ const seeded = entry("seeded", "root", {
 	savedAt: timestamp(2),
 	tasks: seededTasks,
 });
-const tick = entry("tick", "seeded", { event: "tick", planId: "plan-tasks", taskId: "task-1", note: "  unverified: first reason  " });
-const duplicateTick = entry("duplicate-tick", "tick", { event: "tick", planId: "plan-tasks", taskId: "task-1", note: "replacement reason" });
+const FIRST_SHA = "a".repeat(40);
+const tick = entry("tick", "seeded", { event: "tick", planId: "plan-tasks", taskId: "task-1", note: "  unverified: first reason  ", commit: FIRST_SHA, by: "claude:peer-1" });
+const duplicateTick = entry("duplicate-tick", "tick", { event: "tick", planId: "plan-tasks", taskId: "task-1", note: "replacement reason", commit: "b".repeat(40), by: "codex:other" });
 assert.deepEqual(resolveSavedPlanTaskState(branch([root, seeded, tick, duplicateTick], duplicateTick.id), "plan-tasks"), {
 	tasks: seededTasks,
 	completedTaskIds: ["task-1"],
 	tickNotes: new Map([["task-1", "unverified: first reason"]]),
+	ticks: new Map([["task-1", { note: "unverified: first reason", commit: FIRST_SHA, by: "claude:peer-1" }]]),
 	progress: { done: 1, total: 2 },
 	nextTask: { id: "task-2", title: "Second" },
 	seeded: true,
-}, "ticks must be durable and idempotent, preserving first note");
+}, "ticks must be durable and idempotent, preserving first note, commit, and author");
+// Malformed stored commit/author values are dropped on reconstruction, never trusted.
+const malformedTick = entry("malformed-tick", "seeded", { event: "tick", planId: "plan-tasks", taskId: "task-1", commit: "not-a-sha", by: "claude:" });
+assert.deepEqual(resolveSavedPlanTaskState(branch([root, seeded, malformedTick], malformedTick.id), "plan-tasks").ticks.get("task-1"), {}, "malformed commit and author are not reconstructed");
 assert.deepEqual(resolveSavedPlanTaskState([root], "legacy-plan", seededTasks), {
 	tasks: seededTasks,
 	completedTaskIds: [],
 	tickNotes: new Map(),
+	ticks: new Map(),
 	progress: { done: 0, total: 2 },
 	nextTask: { id: "task-1", title: "First" },
 	seeded: false,

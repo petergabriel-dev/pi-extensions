@@ -1,0 +1,3 @@
+# Explicit $pi-review only: an implicit Review recall would release a held Pi Build lease.
+policy:
+  allow_implicit_invocation: false

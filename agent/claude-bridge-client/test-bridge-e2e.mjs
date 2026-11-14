@@ -6,7 +6,7 @@
  * No model is called; a loopback endpoint fails the test if one is.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -191,11 +191,67 @@ try {
 	assert.ok(recall.result.meta.bytes > 0 && typeof recall.result.meta.budgetExceeded === "boolean");
 
 	step = "5 tick_plan_task, then the same task again";
-	const ticked = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id });
+	const git = (...args) => execFileSync("git", ["-C", project, ...args], { encoding: "utf8" }).trim();
+	git("init", "-q");
+	writeFileSync(path.join(project, "task.txt"), "task one\n");
+	git("add", "task.txt");
+	git("-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "task one");
+	const head = git("rev-parse", "HEAD");
+	const [tickSession] = client.liveSessions(project);
+	// The author is host-stamped: a payload `by` is rejected and nothing is recorded.
+	const forged = await client.sendRequestToSession(project, tickSession, "tick_plan_task", { taskId: tasks.result.tasks[0].id, by: "codex:forged" }, IDENTITY).catch((error) => error);
+	assert.ok(forged instanceof Error && /only taskId, title, planId, note, and commit/.test(forged.message), "payload by must be rejected");
+	assert.deepEqual((await call("read_plan_tasks")).result.progress, { done: 0, total: 2 });
+	const ticked = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id, commit: head.slice(0, 8) });
 	assert.deepEqual(ticked.result.progress, { done: 1, total: 2 });
 	assert.equal(ticked.result.idempotent, false);
+	assert.equal(ticked.result.commit, head, "short SHA resolves to the full commit");
+	assert.equal(ticked.result.by, `${IDENTITY.harness}:${IDENTITY.id}`, "author comes from the host-stamped peer");
 	const again = await call("tick_plan_task", { taskId: tasks.result.tasks[0].id });
 	assert.equal(again.result.idempotent, true);
+	assert.equal(again.result.commit, head, "re-tick keeps the first commit");
+
+	step = "5b review: another identity reads review state and one evidence page";
+	// A bridge tick waits at most 300 ms for its bundle; a slower one reports pending and
+	// appears in the review overview once written.
+	let bundleId = ticked.result.bundle?.id;
+	if (!bundleId) {
+		assert.deepEqual(ticked.result.bundle, { pending: true }, "a bridge tick reports the bundle id or pending");
+		for (let poll = 0; poll < 50 && !bundleId; poll += 1) {
+			await sleep(100);
+			const overview = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+			bundleId = overview.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id)?.bundleId;
+		}
+	}
+	assert.match(bundleId ?? "", /^[0-9a-f]{64}$/, "a bridge tick builds an evidence bundle");
+	const reviewRecall = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+	assert.deepEqual(Object.keys(reviewRecall.result.prompts), ["mode", "cavemanEnabled", "reviewPrompt"]);
+	assert.ok(reviewRecall.result.prompts.reviewPrompt.includes("untrusted data"), "review prompt marks evidence as data");
+	const reviewedTask = reviewRecall.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id);
+	assert.deepEqual({ state: reviewedTask.state, bundleId: reviewedTask.bundleId, commit: reviewedTask.commit, by: reviewedTask.by }, { state: "ready", bundleId, commit: head, by: `${IDENTITY.harness}:${IDENTITY.id}` });
+	const evidencePage = await call("read_task_evidence", { bundleId }, OTHER);
+	assert.deepEqual({ section: evidencePage.result.section, page: evidencePage.result.page }, { section: "summary", page: 0 });
+	assert.equal(JSON.parse(evidencePage.result.data).commit, head);
+	assert.ok(Buffer.byteLength(JSON.stringify(evidencePage.result), "utf8") <= 24 * 1024, "evidence pages stay within 24 KiB");
+	const afterRead = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+	assert.equal(afterRead.result.review.tasks.find((task) => task.taskId === tasks.result.tasks[0].id).state, "in_review", "reading evidence records review_started");
+	assert.equal(client.holdsBuildLease(project, IDENTITY), true, "another identity's review recall keeps the holder's lease");
+
+	step = "5c review: another identity submits one finding citing the evidence";
+	const submitted = await call("submit_review_findings", { findings: [{ planId: "e2e-plan", taskId: tasks.result.tasks[0].id, commit: head, file: "task.txt", line: 1, severity: "low", text: "e2e finding", evidenceRefs: [`${bundleId}#files/0`] }] }, OTHER);
+	assert.deepEqual(submitted.result.ids, ["F1"]);
+	assert.equal(submitted.result.status, "suspected");
+	const withFinding = await call("recall_memory", { mode: "review", query: "review evidence" }, OTHER);
+	assert.deepEqual(withFinding.result.review.findings.map((finding) => [finding.id, finding.status, finding.classification, finding.by]), [["F1", "open", "suspected", `${OTHER.harness}:${OTHER.id}`]]);
+	const forgedSubmit = await callError("submit_review_findings", { findings: [{ planId: "e2e-plan", taskId: tasks.result.tasks[0].id, commit: head, severity: "low", text: "forged", by: "codex:forged" }] }, OTHER);
+	assert.match(forgedSubmit.message, /unsupported field/);
+
+	step = "5d resolve: the bridge stamps the live lease holder, which Pi refuses first";
+	const holderResolve = await callError("resolve_review_finding", { id: "F1", commit: head }, IDENTITY);
+	assert.match(holderResolve.message, /Build lease holder cannot resolve/, "the holder is refused before any other check");
+	const reviewerResolve = await callError("resolve_review_finding", { id: "F1", commit: head }, OTHER);
+	assert.match(reviewerResolve.message, /only approved findings can be resolved/, "a non-holder passes the holder check");
+	assert.equal(client.holdsBuildLease(project, IDENTITY), true, "resolve attempts leave the lease in place");
 	assert.deepEqual(again.result.progress, { done: 1, total: 2 });
 
 	step = "6 hook decision: lease holder may write, another session may not";

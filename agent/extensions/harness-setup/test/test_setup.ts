@@ -132,7 +132,7 @@ try {
 	const commandEntries = (harness: Harness) => HARNESS_MANIFEST[harness].filter(({ kind }) => kind === "command");
 	for (const harness of ["claude", "cursor", "opencode"] as const) {
 		assert.deepEqual(commandEntries(harness).map(({ script, dest }) => [script, dest]), [
-			...["discuss", "plan", "build"].map((name) => [`agent/harness-commands/${harness}/pi-${name}.md`, `commands/pi-${name}.md`]),
+			...["discuss", "plan", "review", "build"].map((name) => [`agent/harness-commands/${harness}/pi-${name}.md`, `commands/pi-${name}.md`]),
 		]);
 	}
 	assert.equal(HARNESS_MANIFEST.claude.find(({ kind }) => kind === "statusline")?.script, "agent/claude-bridge-client/pi-statusline.js");
@@ -624,7 +624,7 @@ try {
 	const rootSwitchAgent = path.join(rootSwitchBase, "agent-dir");
 	const rootSwitchPlan = await planInstall("claude", { pkgRoot: rootSwitchPkgB, roots: rootSwitchRoots, agentDir: rootSwitchAgent });
 	const rootSwitchEntries = HARNESS_MANIFEST.claude.filter(({ kind }) => kind === "command" || kind === "skill");
-	assert.equal(rootSwitchEntries.length, 3 + PACKAGE_SKILL_NAMES.length);
+	assert.equal(rootSwitchEntries.length, 4 + PACKAGE_SKILL_NAMES.length);
 	for (const entry of rootSwitchEntries) {
 		const file = path.join(rootSwitchRoots.claude, entry.dest);
 		const change = rootSwitchPlan.changes.find(({ path: changePath }) => changePath === file);
@@ -1083,7 +1083,7 @@ try {
 	assert.deepEqual(HARNESS_MANIFEST.codex.filter(({ kind }) => kind === "hook").map(({ event, script, dest }) => [event, script, dest]), [["PreToolUse", codexHook, "hooks.json#/hooks/PreToolUse"]]);
 	assert.equal(HARNESS_MANIFEST.codex.find(({ kind }) => kind === "mcp")?.dest, "config.toml#mcp_servers.pi-claude-bridge");
 	assert.deepEqual(HARNESS_MANIFEST.codex.filter(({ kind }) => kind === "skill").map(({ script, dest }) => [script, dest]), [
-		...["discuss", "plan", "build"].map((name) => [`agent/harness-commands/codex/pi-${name}`, `skills/pi-${name}`]),
+		...["discuss", "plan", "review", "build"].map((name) => [`agent/harness-commands/codex/pi-${name}`, `skills/pi-${name}`]),
 		...PACKAGE_SKILL_NAMES.map((name) => [`agent/skills/${name}`, `skills/${name}`]),
 	]);
 	assert.equal(HARNESS_MANIFEST.codex.some(({ kind }) => kind === "command"), false, "Codex ships skills, never command files");
@@ -1107,7 +1107,7 @@ try {
 	const codexToml = path.join(codexFreshRoots.codex, "config.toml");
 	const codexHooksFile = path.join(codexFreshRoots.codex, "hooks.json");
 	assert.deepEqual(codexFreshPlan.changes.find(({ path: file }) => file === codexToml), { path: codexToml, kind: "toml", before: null, after: codexBlock(codexFreshPkg) });
-	assert.equal(codexFreshPlan.changes.filter(({ kind }) => kind === "symlink").length, 3 + PACKAGE_SKILL_NAMES.length);
+	assert.equal(codexFreshPlan.changes.filter(({ kind }) => kind === "symlink").length, 4 + PACKAGE_SKILL_NAMES.length);
 	assert.equal(codexHookTrustNotice("codex", codexFreshPlan.changes.map(({ path: file }) => file)), CODEX_HOOK_TRUST_NOTICE);
 	assert.equal(codexHookTrustNotice("claude", [codexHooksFile]), undefined);
 	assert.ok((await applyPlan(codexFreshPlan)).every(({ applied }) => applied));

@@ -10,6 +10,7 @@ export interface PlanTaskMetadata {
 	verificationGate?: string;
 	checkpoint?: string;
 	files?: string;
+	findings?: string;
 }
 
 export interface PlanTask {
@@ -45,7 +46,9 @@ const SECTION_4_HEADING = /^##\s+Section\s+4(?:\s*[—-].*)?\s*$/i;
 const SECTION_HEADING = /^##\s+/;
 const FENCE = /^\s*(`{3,}|~{3,})/;
 const CHECKBOX = /^-\s+\[([ xX])\](?:\s+(.+?))?\s*$/;
-const METADATA = /^\s+-\s+\*\*(Given|When|Then|NFRs|Verification Gate|Checkpoint|Files):?\*\*\s*(.*)$/i;
+const METADATA = /^\s+-\s+\*\*(Given|When|Then|NFRs|Verification Gate|Checkpoint|Files|Findings):?\*\*\s*(.*)$/i;
+const FINDING_ID = /\bF[1-9][0-9]{0,8}\b/g;
+const MAX_TASK_FINDINGS = 50;
 
 export function parsePlanTasks(planText: string): PlanTask[] {
 	if (typeof planText !== "string" || planText.length === 0) return [];
@@ -137,5 +140,11 @@ function metadataKey(label: string): keyof PlanTaskMetadata {
 	if (normalized === "nfrs") return "nfrs";
 	if (normalized === "verification gate") return "verificationGate";
 	if (normalized === "files") return "files";
-	return normalized as "given" | "when" | "then" | "checkpoint";
+	return normalized as "given" | "when" | "then" | "checkpoint" | "findings";
+}
+
+// Rework tasks cite the findings they address: "**Findings:** F1, F3".
+export function parseFindingIds(value: string | undefined): string[] {
+	if (!value) return [];
+	return [...new Set(value.match(FINDING_ID) ?? [])].slice(0, MAX_TASK_FINDINGS);
 }

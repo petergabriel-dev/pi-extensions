@@ -37,7 +37,7 @@ The plugin overwrites `sessionId` and `harness` from OpenCode's host `sessionID`
    - `workflow_plan_tick` → `tick_plan_task`
    Recover tracker state only when missing or after compaction. Work exactly one next task at a time.
 5. Load that task's context package, implement only its scope, then run its Verification Gate and targeted checks. If a check fails, stop without committing or ticking.
-6. On success, inspect the diff and commit the task before calling `tick_plan_task` once. Never tick before commit or edit the saved plan to mark progress.
+6. On success, inspect the diff and commit the task before calling `tick_plan_task` once, passing the commit SHA as `commit`. Never tick before commit or edit the saved plan to mark progress.
 7. Report task, commit, verification, deviations, and next tracker task. Stop for user confirmation before advancing.
 
 ## Build lease refusals
