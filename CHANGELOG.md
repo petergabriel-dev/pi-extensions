@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-14
+
+### Added
+
+- Execution-aware review of saved-plan tasks (ADR-0055). `workflow_plan_tick` and bridge `tick_plan_task` take an optional git-verified `commit` and record a host-derived author (`pi` or `<harness>:<id>`). Pi Build records each task attempt's bash commands (exit code, duration, redacted output tail), edit/write paths, and subagent run summaries, and every tick writes a write-once, content-addressed, redacted evidence bundle with copied diff hunks and a warning for every gap.
+- Review findings. Reviewers in any paired harness read evidence with bridge `read_task_evidence` and submit structured findings with `submit_review_findings`; a submit records all of its findings or none, and every finding starts as suspected. Only interactive Pi `/review` approves, rejects, or approves a task. Rework tasks cite findings with a `**Findings:** F1, F3` line, and `resolve_review_finding` is refused to the Build lease holder and to whoever ticked the fix.
+- `/pi-review` for Claude Code, Cursor, and OpenCode, and `$pi-review` for Codex, plus `recall` with `mode: "review"`.
+
+### Fixed
+
+- Cursor `/pi-*` commands no longer stop in an interactive `cursor-agent` session, whose model cannot see its own `conversation_id`. When the hook refuses a bridge call for identity, the refusal now names the calling conversation's own id (only after it passes `isSafeId`), and the commands make their first bridge call with `sessionId: "unknown"`, so the manual `create-chat` / `--resume` step is no longer needed. Allow and deny decisions are unchanged.
+
+### Known issues
+
+- The Cursor id probe has not yet been run live in `cursor-agent`. If a refusal does not name the id, use the old workaround: `cursor-agent create-chat`, `cursor-agent --resume <id>`, then give the model the id.
+- Evidence references are checked for existence, not relevance; `/review` has no outcome for a correct finding that needs no fix, and reviewers never see rejected findings.
+- A chained shell command records only its final exit status, and exit codes are parsed from Pi's error text.
+- Harness-lease builds leave git-only evidence, and findings and evidence are visible only in the Pi session that recorded them.
+
+### Upgrade
+
+- Installs pinned to a version need `pi install npm:@lopezpetergabriel/pi-extensions@0.15.0`.
+- Run `/harness` and Install / repair each harness you use, so its global hooks and commands, including the new `pi-review`, come from 0.15.0. Then restart Pi and any open Claude, Cursor, OpenCode, or Codex session.
+
 ## [0.14.0] - 2026-11-12
 
 ### Added
