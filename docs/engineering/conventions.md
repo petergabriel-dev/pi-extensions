@@ -60,4 +60,5 @@
 - Prefer Node standard library for bridge clients, hooks, launchers, and integrity checks when it meets requirements.
 - Non-trivial policy/state logic keeps one focused runnable test. Focused tests may run from a root npm script without a nested manifest; `agent/extensions/ask-user-question/test/test_queue.ts` is reached through `npm run test:ask-user-question`. Root checks aggregate package tests/typechecks without duplicating their assertions.
 - Tests for delimiter-safe JSON prompts extract the delimited payload, parse it as JSON, assert semantic values, and verify a single closing delimiter; do not assert raw escaped bytes.
+- For exact source replacements, choose an anchor unique to the intended branch or operation and verify it occurs exactly once before replacing; generic conditions can match an earlier, unrelated guard.
 - Tests must isolate temporary runtime state and remove spawned processes/files when complete.

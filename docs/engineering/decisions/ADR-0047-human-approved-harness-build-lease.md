@@ -5,7 +5,7 @@ status: Active
 date: 2026-10-21
 decision: A harness Build request becomes a four-hour identity-bound lease only after explicit Pi TUI approval; only its active holder may tick plan tasks.
 why: A bridge request is agent-controlled, so lease authorization must come from a human event at Pi while host-supplied identity and bounded expiry constrain its authority.
-affects: agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/test/test_build_lease.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/harness-commands/claude/pi-build.md, agent/harness-commands/cursor/pi-build.md, agent/harness-commands/opencode/pi-build.md, .cursor/commands/pi-build.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/ADR-0047-human-approved-harness-build-lease.md, docs/engineering/decisions/README.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md
+affects: agent/extensions/claude-bridge/build-lease.ts, agent/extensions/claude-bridge/index.ts, agent/extensions/claude-bridge/test/test_build_lease.ts, agent/claude-bridge-client/pi-bridge-mcp.js, agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/claude-bridge-client/test-core-protocol.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/harness-commands/claude/pi-build.md, agent/harness-commands/cursor/pi-build.md, agent/harness-commands/cursor/pi-discuss.md, agent/harness-commands/cursor/pi-plan.md, agent/harness-commands/cursor/pi-review.md, agent/harness-commands/opencode/pi-build.md, .cursor/commands/pi-build.md, docs/engineering/decisions/ADR-0043-harness-build-lease-and-opencode-harness.md, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/ADR-0047-human-approved-harness-build-lease.md, docs/engineering/decisions/README.md, docs/engineering/architecture.md, docs/engineering/dev-workflow.md, docs/engineering/invariants.md, docs/engineering/traps.md
 consequences: Human approval adds a round trip and leases can expire mid-build; headless requests fail closed; TUI trust is verified for the probed read-only input-isolation states; this is not OS-level enforcement.
 readWhen: changing bridge Build authorization, lease expiry or revocation, harness identity binding, holder-only task ticks, Pi approval UI, or TUI input-isolation assumptions
 supersedes: None
@@ -35,7 +35,7 @@ ADR-0043 introduced a Pi-owned Build lease, but lease requests could grant thems
 ### Harness identity
 
 - Claude's PreToolUse hook requires a safe harness `session_id`; it rejects mismatched `sessionId`, `claudeSessionId`, or `harness`, then stamps `sessionId` and `harness: "claude"` before the lease-holder allow path.
-- Cursor's bridge MCP hook parses object or JSON-string arguments and requires safe `conversation_id`, matching `sessionId`, and `harness: "cursor"`; missing, malformed, or mismatched input denies.
+- Cursor's bridge MCP hook parses object or JSON-string arguments and requires safe `conversation_id`, matching `sessionId`, and `harness: "cursor"`; missing, malformed, or mismatched input denies. Because a Cursor model cannot see its own `conversation_id`, an identity refusal names the calling conversation's own id once it passes `isSafeId`, and the Cursor commands probe with `sessionId: "unknown"`; the hook never stamps the id.
 - OpenCode continues to overwrite bridge identity from host `sessionID` and `harness: "opencode"`.
 - Phase 2 allowlists, Seatbelt wrapping, catch-all deny, and Claude exit-2 guard remain unchanged.
 
@@ -55,6 +55,7 @@ Rejected alternatives:
 - **MCP-server backstop:** agent-facing MCP arguments cannot establish human intent; only Pi's TUI approval is the grant event.
 - **Configurable TTL:** adds policy configuration and divergent expiry behavior; one fixed four-hour maximum is easier to audit.
 - **OS-level authentication:** adds platform-specific machinery outside this phase and would still not replace lease ownership and lifecycle rules.
+- **Cursor id through `sessionStart` `additional_context` or `preToolUse` `updated_input`:** Cursor's docs do not say `sessionStart` runs in the CLI, it would need a new installed hook event, and `updated_input` is undocumented for local MCP tools. Naming the id in the existing refusal needs neither and costs one refused call; it tells a conversation only its own id, which the hook already requires it to send.
 
 ## Live acceptance
 
@@ -100,6 +101,9 @@ Code and harness surfaces:
 - `agent/opencode-bridge-client/test-opencode-plugin.js`
 - `agent/harness-commands/claude/pi-build.md`
 - `agent/harness-commands/cursor/pi-build.md`
+- `agent/harness-commands/cursor/pi-discuss.md`
+- `agent/harness-commands/cursor/pi-plan.md`
+- `agent/harness-commands/cursor/pi-review.md`
 - `agent/harness-commands/opencode/pi-build.md`
 - `.cursor/commands/pi-build.md`
 
@@ -108,6 +112,7 @@ Code and harness surfaces:
 - Good: no bridge request self-grants; Pi owns approval, lease state, and task progress; identity is bound at each harness boundary; expired authority fails closed.
 - Bad/risk: approval adds a round trip, four hours may expire mid-build, and requesters must stop and ask for re-approval. Human intent depends on the TUI trust assumption; P11 verified it for the probed read-only states only.
 - Bad/risk: if a harness disappears without unpairing, the lease remains until another lifecycle event or expiry; `/build-lease release` remains the operator escape hatch.
+- Bad/risk: a Cursor session's first bridge call is refused once so the model can learn its id; the probe has not been run live in `cursor-agent` yet (deferred).
 - Follow-up: per-session leases alone did not ensure one writer per project (ADR-0045 F10); ADR-0051 adds the cross-session check without changing this approval flow.
 
 ## Read when
