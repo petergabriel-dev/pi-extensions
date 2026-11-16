@@ -436,17 +436,39 @@ function claudeToolOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResul
 	return claudeDecision(parseHookOutput(captured.result.stdout));
 }
 
-function cursorOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
+// cursor-agent 2026.11.13 sends cwd "" (shell, preToolUse) or no cwd (MCP), names the
+// workspace only in workspace_roots, and starts user-level hooks from ~/.cursor. Every
+// Cursor shell and tool/MCP case runs in that shape too and must get the same verdict.
+type CursorShape = "cwd" | "workspace_roots";
+
+function applyCursorShape(input: Record<string, unknown>, shape: CursorShape, ctx: RunnerContext): string {
+	if (shape === "cwd") {
+		input.cwd = ctx.repo;
+		return ctx.repo;
+	}
+	if (input.hook_event_name !== "beforeMCPExecution") input.cwd = "";
+	input.workspace_roots = [ctx.repo];
+	return path.join(ctx.home, ".cursor");
+}
+
+function cursorInBothShapes(run: (shape: CursorShape) => RunResult): RunResult {
+	const legacy = run("cwd");
+	const cli = run("workspace_roots");
+	if (legacy.outcome === cli.outcome) return legacy;
+	return { outcome: "throw", detail: `Cursor input shapes disagree: cwd ${legacy.outcome}, workspace_roots ${cli.outcome}` };
+}
+
+function cursorOutcome(testCase: SecurityCase, ctx: RunnerContext, shape: CursorShape): RunResult {
 	const command = testCase.command ?? "";
-	const input = JSON.stringify({
+	const fields: Record<string, unknown> = {
 		hook_event_name: "beforeShellExecution",
-		cwd: ctx.repo,
 		conversation_id: "cursor-security-seed",
 		command,
-	});
+	};
+	const spawnCwd = applyCursorShape(fields, shape, ctx);
 	const hook = ctx.cursorCommands.beforeShellExecution;
 	if (!hook) fail("installed Cursor beforeShellExecution hook is missing");
-	const captured = spawnCaptured(hook, input, ctx.repo, ctx.env);
+	const captured = spawnCaptured(hook, JSON.stringify(fields), spawnCwd, ctx.env);
 	if (captured.error) return hookFailure(captured.error, captured.result);
 	if (captured.result.status !== 0) return hookFailure(captured.result.error, captured.result);
 	const parsed = parseHookOutput(captured.result.stdout);
@@ -473,13 +495,11 @@ async function opencodeOutcome(testCase: SecurityCase, ctx: RunnerContext): Prom
 	return { outcome: "allow", command };
 }
 
-function cursorToolOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResult {
+function cursorToolOutcome(testCase: SecurityCase, ctx: RunnerContext, shape: CursorShape): RunResult {
 	const identity = testCase.identity === undefined ? "cursor-security-seed" : testCase.identity;
 	const event = testCase.kind === "mcp" ? "beforeMCPExecution" : "preToolUse";
-	const input: Record<string, unknown> = {
-		hook_event_name: event,
-		cwd: ctx.repo,
-	};
+	const input: Record<string, unknown> = { hook_event_name: event };
+	const spawnCwd = applyCursorShape(input, shape, ctx);
 	if (identity !== null) input.conversation_id = identity;
 	if (event === "beforeMCPExecution") {
 		input.mcp_server_name = testCase.server ?? "";
@@ -490,7 +510,7 @@ function cursorToolOutcome(testCase: SecurityCase, ctx: RunnerContext): RunResul
 	if (testCase.input !== undefined && testCase.input !== null) input.tool_input = testCase.input;
 	const hook = ctx.cursorCommands[event];
 	if (!hook) fail(`installed Cursor ${event} hook is missing`);
-	const captured = spawnCaptured(hook, JSON.stringify(input), ctx.repo, ctx.env);
+	const captured = spawnCaptured(hook, JSON.stringify(input), spawnCwd, ctx.env);
 	if (captured.error) return hookFailure(captured.error, captured.result);
 	if (captured.result.status !== 0) return hookFailure(captured.result.error, captured.result);
 	const parsed = parseHookOutput(captured.result.stdout);
@@ -648,13 +668,13 @@ async function runColumn(testCase: SecurityCase, column: Column, ctx: RunnerCont
 	}
 	if (testCase.kind === "shell") {
 		if (column === "claude") return claudeOutcome(testCase, ctx);
-		if (column === "cursor") return cursorOutcome(testCase, ctx);
+		if (column === "cursor") return cursorInBothShapes((shape) => cursorOutcome(testCase, ctx, shape));
 		if (column === "codex") return codexOutcome(testCase, ctx);
 		return opencodeOutcome(testCase, ctx);
 	}
 	if (testCase.kind === "tool" || testCase.kind === "mcp") {
 		if (column === "claude") return claudeToolOutcome(testCase, ctx);
-		if (column === "cursor") return cursorToolOutcome(testCase, ctx);
+		if (column === "cursor") return cursorInBothShapes((shape) => cursorToolOutcome(testCase, ctx, shape));
 		if (column === "codex") return codexToolOutcome(testCase, ctx);
 		return opencodeToolOutcome(testCase, ctx);
 	}
