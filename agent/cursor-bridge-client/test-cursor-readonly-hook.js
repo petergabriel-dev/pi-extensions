@@ -44,8 +44,8 @@ function addLeasePresence(root, { paired = true, heartbeatAt = new Date().toISOS
 	return paths;
 }
 
-function run(input, raw, env = process.env) {
-	const out = cp.spawnSync("node", [hook], { input: raw ?? JSON.stringify(input), encoding: "utf8", env });
+function run(input, raw, env = process.env, cwd = undefined) {
+	const out = cp.spawnSync("node", [hook], { input: raw ?? JSON.stringify(input), encoding: "utf8", env, cwd });
 	assert.equal(out.status, 0, out.stderr);
 	return JSON.parse(out.stdout || "{}");
 }
@@ -437,6 +437,122 @@ test("target lease allows but a cwd lease does not cross projects", () => {
 		assert.match(denied.user_message, /target is in Pi project/);
 	} finally {
 		for (const dir of [outside, leasedTarget, other, cwdProject]) fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// cursor-agent 2026.11.13 sends cwd "" (shell, preToolUse) or no cwd (MCP), names the
+// workspace only in workspace_roots, and runs user-level hooks from ~/.cursor. Replay
+// that shape with the hook started outside any Pi project.
+function cursorCliShape(roots, fields) {
+	const spawnCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-dotcursor-"));
+	try {
+		return run({ conversation_id: CURSOR.id, workspace_roots: roots, ...fields }, undefined, process.env, spawnCwd);
+	} finally {
+		fs.rmSync(spawnCwd, { recursive: true, force: true });
+	}
+}
+
+const shellCall = (command) => ({ hook_event_name: "beforeShellExecution", cwd: "", command, sandbox: false });
+const preToolCall = (tool_name, tool_input) => ({ hook_event_name: "preToolUse", cwd: "", tool_name, tool_input });
+const preMcpCall = (tool) => ({ hook_event_name: "preToolUse", tool_name: `MCP:${tool}`, tool_input: { sessionId: CURSOR.id, harness: "cursor" } });
+const bridgeCall = (sessionId) => ({
+	hook_event_name: "beforeMCPExecution",
+	command: "node pi-bridge-mcp.js",
+	mcp_server_name: "pi-claude-bridge",
+	tool_name: "recall_memory",
+	tool_input: JSON.stringify({ query: "test", sessionId, harness: "cursor" }),
+});
+
+test("cursor-agent 2026.11.13 shape: Pi project without lease stays read-only", () => {
+	const root = tempPiProject();
+	try {
+		assertPermission(cursorCliShape([root], shellCall("touch /tmp/pi-hook-probe-shell")), "deny");
+		assertPermission(cursorCliShape([root], shellCall("ls")), "allow");
+		assertPermission(cursorCliShape([root], preToolCall("Shell", { command: "ls" })), "allow");
+		assertPermission(cursorCliShape([root], preToolCall("Read", { path: path.join(root, "a.txt") })), "allow");
+		for (const tool of ["Write", "Edit"]) {
+			assertPermission(cursorCliShape([root], preToolCall(tool, { path: path.join(root, "a.txt"), content: "x" })), "deny");
+			assertPermission(cursorCliShape([root], preToolCall(tool, { path: "/tmp/pi-hook-probe-edit.txt", content: "x" })), "deny");
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("cursor-agent 2026.11.13 shape: bridge identity and MCP passthrough", () => {
+	const root = tempPiProject();
+	try {
+		assertPermission(cursorCliShape([root], preMcpCall("recall_memory")), "allow");
+		assertPermission(cursorCliShape([root], bridgeCall(CURSOR.id)), "allow");
+		const probe = cursorCliShape([root], bridgeCall("unknown"));
+		assertPermission(probe, "deny");
+		assert.ok(probe.agent_message.includes(`Use sessionId "${CURSOR.id}" and harness "cursor"`), probe.agent_message);
+		assertPermission(cursorCliShape([root], { ...bridgeCall(CURSOR.id), mcp_server_name: "filesystem", tool_name: "write_file" }), "deny");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("cursor-agent 2026.11.13 shape: lease holder may write", () => {
+	const root = tempPiProject();
+	addLeasePresence(root);
+	try {
+		assertPermission(cursorCliShape([root], shellCall("touch note.txt")), "allow");
+		assertPermission(cursorCliShape([root], preToolCall("Write", { path: path.join(root, "note.txt"), content: "x" })), "allow");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("cursor-agent 2026.11.13 shape: non-Pi workspace is unaffected", () => {
+	const plain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-plain-"));
+	try {
+		assertPermission(cursorCliShape([plain], shellCall("touch note.txt")), "allow");
+		assertPermission(cursorCliShape([plain], preToolCall("Write", { path: path.join(plain, "note.txt"), content: "x" })), "allow");
+		assertPermission(cursorCliShape([plain], preMcpCall("anything")), "allow");
+		assertPermission(cursorCliShape([plain], { ...bridgeCall(CURSOR.id), mcp_server_name: "filesystem", tool_name: "write_file" }), "allow");
+	} finally {
+		fs.rmSync(plain, { recursive: true, force: true });
+	}
+});
+
+test("no usable workspace location fails closed", () => {
+	for (const [label, roots] of [["missing", undefined], ["empty", []], ["blank", [""]], ["relative", ["proj"]]]) {
+		const result = cursorCliShape(roots, preToolCall("Read", { path: "a.txt" }));
+		assertPermission(result, "deny");
+		assert.match(result.user_message, /workspace_roots/, label);
+		assert.match(result.user_message, /\/harness/, label);
+	}
+	assertPermission(run({ hook_event_name: "preToolUse", tool_name: "Read" }, undefined, process.env, os.tmpdir()), "deny");
+});
+
+test("workspace roots: one Pi project wins, several deny", () => {
+	const plain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-plain-"));
+	const projectA = tempPiProject();
+	const projectB = tempPiProject();
+	try {
+		assertPermission(cursorCliShape([plain, projectA], preToolCall("Write", { path: path.join(plain, "x.txt"), content: "x" })), "deny");
+		assertPermission(cursorCliShape([plain, projectA], shellCall("touch x.txt")), "deny");
+		assertPermission(cursorCliShape([plain, path.join(projectA, "sub")], shellCall("ls")), "allow");
+		const several = cursorCliShape([projectA, projectB], preToolCall("Read", { path: "a.txt" }));
+		assertPermission(several, "deny");
+		assert.match(several.user_message, /several Pi projects/);
+	} finally {
+		for (const dir of [plain, projectA, projectB]) fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("relative edit target is checked against every non-Pi root", () => {
+	const plainA = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-plain-"));
+	const plainB = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cursor-plain-"));
+	fs.mkdirSync(path.join(plainB, "proj", ".pi"), { recursive: true });
+	try {
+		const denied = cursorCliShape([plainA, plainB], preToolCall("Write", { path: "proj/note.txt", content: "x" }));
+		assertPermission(denied, "deny");
+		assert.match(denied.user_message, /target is in Pi project/);
+		assertPermission(cursorCliShape([plainA, plainB], preToolCall("Write", { path: "note.txt", content: "x" })), "allow");
+	} finally {
+		for (const dir of [plainA, plainB]) fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 
