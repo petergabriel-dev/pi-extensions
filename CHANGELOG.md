@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-16
+
+### Security
+
+- Cursor's read-only hook did not protect Pi projects on cursor-agent 2026.11.13-eacade1 (observed 2026-11-16; the first affected cursor-agent version is unknown). Cursor sends an empty or missing `cwd`, names the workspace only in `workspace_roots`, and starts user-level hooks from `~/.cursor`, so the hook found no Pi project and allowed every call: without a Build lease, a Cursor chat in a Pi project could run mutating shell commands, write files, and claim any bridge identity. The hook now locates the workspace from an absolute `cwd`, else `workspace_roots`, never its own working directory, and denies when it cannot tell or when the roots span two or more Pi projects (ADR-0046).
+
+### Fixed
+
+- Cursor `preToolUse` calls named `MCP:<tool>`, which cursor-agent 2026.11.13 sends before `beforeMCPExecution`, pass through so `beforeMCPExecution` still decides bridge identity and foreign MCP.
+- The Cursor id probe from 0.15.0 now works: on cursor-agent 2026.11.13 the `sessionId: "unknown"` call is refused with the chat's own id, and `/pi-discuss` runs without `create-chat` (verified live on 2026-11-16).
+
+### Changed
+
+- The security corpus runs every Cursor shell and tool/MCP case in both the old input shape and the cursor-agent 2026.11.13 shape, and fails when their verdicts differ.
+
+### Known issues
+
+- Verified on the cursor-agent 2026.11.13-eacade1 CLI only; Cursor IDE hook payloads are unverified.
+- If a future Cursor sends neither a usable `cwd` nor `workspace_roots`, the hook denies every Cursor tool call in every workspace. Update the package, or remove the hook with `/harness` → Cursor → Uninstall.
+
+### Upgrade
+
+- Installs pinned to a version need `pi install npm:@lopezpetergabriel/pi-extensions@0.15.1`. Then restart Pi and any open Cursor session. Cursor's installed hooks point at the package path, so the new hook takes effect without `/harness` repair; `/harness` shows Cursor's status.
+- Until you upgrade, treat Cursor as able to write in Pi projects.
+
 ## [0.15.0] - 2026-11-14
 
 ### Added
