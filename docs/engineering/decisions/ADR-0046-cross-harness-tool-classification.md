@@ -3,10 +3,10 @@ id: ADR-0046
 title: Cross-harness tool classification and deny-unknown policy
 status: Active
 date: 2026-10-21
-decision: Apply one parity rule to Claude, Cursor, and OpenCode. Known read tools and Pi bridge MCP tools allow, sandboxed shell keeps its existing policy, and every unknown or foreign tool asks or denies instead of passing silently; Cursor classifies shell by allowlisted segments, Claude fails closed on hook errors and installs an exit-2 guard, and OpenCode throws on unlisted tools. Follow-up: Pi's no-sandbox fallback never auto-runs bash (Discuss denies it; Plan and Review need fresh per-command human confirmation for every single-line command and deny multi-line and deny-listed ones) (F9, F12), and Cursor allows `rg`, `sort`, `uniq`, `find`, `tree`, and `git` only with per-command safe flags and asks on unquoted globs (F13).
+decision: Apply one parity rule to Claude, Cursor, and OpenCode. Known read tools and Pi bridge MCP tools allow, sandboxed shell keeps its existing policy, and every unknown or foreign tool asks or denies instead of passing silently; Cursor classifies shell by allowlisted segments, Claude fails closed on hook errors and installs an exit-2 guard, and OpenCode throws on unlisted tools. Follow-up: Pi's no-sandbox fallback never auto-runs bash (Discuss denies it; Plan and Review need fresh per-command human confirmation for every single-line command and deny multi-line and deny-listed ones) (F9, F12), and Cursor allows `rg`, `sort`, `uniq`, `find`, `tree`, and `git` only with per-command safe flags and asks on unquoted globs (F13). Follow-up (2026-11-16): the Cursor hook locates the workspace from an absolute `cwd`, else `workspace_roots`, never its own process cwd, denies when it cannot or when the roots span several Pi projects, and passes `preToolUse` `MCP:<tool>` through.
 why: ADR-0045 proved each harness passed unknown tool names, foreign MCP servers, and chained shell shapes differently. Silent pass-through makes an injected tool name equivalent to an allowlisted read, so the harnesses need one rule with evidence-labeled behavior.
-affects: agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_policy.ts, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, scripts/security-corpus.json, scripts/check-workspace.mjs, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/README.md
-consequences: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance. Follow-up closes F9 and F12 in Pi's no-sandbox fallback. Read-only is still not enforced because Phase 3 has not closed F1/F2 self-escalation. Deny-unknown can temporarily block an unlisted read tool; the live allowlists matched observed names and need maintenance as harness tools change.
+affects: agent/claude-bridge-client/pi-readonly-hook.js, agent/claude-bridge-client/test-sessions.js, agent/cursor-bridge-client/cursor-readonly-hook.js, agent/cursor-bridge-client/test-cursor-readonly-hook.js, agent/opencode-bridge-client/pi-opencode-plugin.js, agent/opencode-bridge-client/test-opencode-plugin.js, agent/extensions/harness-setup/setup.ts, agent/extensions/harness-setup/test/test_setup.ts, agent/extensions/workflow-modes/policy.ts, agent/extensions/workflow-modes/index.ts, agent/extensions/workflow-modes/test/test_policy.ts, agent/extensions/workflow-modes/test/test_build_design_prompt.ts, scripts/security-corpus.json, scripts/test-security-corpus.ts, scripts/check-workspace.mjs, docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md, docs/engineering/decisions/README.md
+consequences: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance. Follow-up closes F9 and F12 in Pi's no-sandbox fallback. Read-only is still not enforced because Phase 3 has not closed F1/F2 self-escalation. Deny-unknown can temporarily block an unlisted read tool; the live allowlists matched observed names and need maintenance as harness tools change. Until the 2026-11-16 location follow-up, cursor-agent 2026.11.13 silently turned Cursor enforcement off; a future payload without a location now denies loudly.
 readWhen: changing harness read allowlists, Cursor shell classification, Claude PreToolUse registration or fail-closed behavior, foreign MCP gating, OpenCode execute-hook policy, or Pi's no-sandbox Discuss/Plan fallback
 supersedes: None
 extends: ADR-0045
@@ -97,8 +97,9 @@ Still `not-verified`:
 - Claude hook-timeout behavior.
 - OpenCode behavior when the plugin fails to load.
 - Cursor and OpenCode subagent identity and hook firing.
-- Whether Cursor also fires `preToolUse` for shell/MCP tool types; the dedicated events were used.
 - Seatbelt `(allow default)` escape through LaunchServices; not tested destructively.
+
+Answered since: Cursor does fire `preToolUse` for shell/MCP tool types (cursor-agent 2026.11.13, see the workspace-location follow-up).
 
 ## Follow-up: Pi no-sandbox fallback (F9, F12)
 
@@ -124,6 +125,15 @@ Applies only when Pi Discuss, Plan, or Review has no structural sandbox launcher
 - Limit: zsh with the non-default `EXTENDED_GLOB` option also expands `^`, `~`, and `#` patterns, which the hook allows **E**; abusing it also needs a planted flag-named file, so it is recorded, not fixed.
 - Evidence: `test-cursor-readonly-hook.js` asks on 23 writer/executor forms and allows 18 common safe forms **E**, and asks on 7 unquoted glob forms while allowing 5 quoted or escaped ones **E**; five `shell-*` corpus cases, including `shell-unquoted-glob-operands`, run on Claude, Cursor, and OpenCode in both lanes **E**.
 
+## Follow-up: Cursor workspace location (2026-11-16)
+
+- Cause: cursor-agent 2026.11.13-eacade1 sends `cwd: ""` on `beforeShellExecution` and shell `preToolUse`, omits `cwd` on MCP events, names the workspace only in `workspace_roots`, and starts user-level hooks from `~/.cursor`. The hook fell back to its process cwd, found no Pi project, and allowed every call, so Cursor was not read-only in Pi projects and bridge identity went unchecked. A logging wrapper confirmed the hook ran for every event and returned allow, in both Auto-review and Allowlist approval modes **E**.
+- Decision: `resolveLocation` uses an absolute `cwd`, else maps each absolute `workspace_roots` entry to its Pi root. One distinct Pi root applies its rules and lease to the session; no Pi root means non-Pi (allow); two or more Pi roots deny; no usable `cwd` or `workspace_roots` denies with the repair path. The hook process cwd is never used. Relative edit targets resolve against the session's Pi root, or against every root when there are several non-Pi roots, and any Pi target without a lease denies.
+- Decision: cursor-agent 2026.11.13 also fires `preToolUse` for shell and MCP as `Shell` and `MCP:<tool>` (no server name) before the dedicated event, so `preToolUse` passes `MCP:<tool>` through like `mcp` and `beforeMCPExecution` still decides bridge identity and foreign MCP.
+- Why deny on an unknown location: the hook is installed globally, and allowing when it cannot tell where it is made this failure silent for days. A loud deny in every workspace, with `/harness` → Cursor → Uninstall as the escape hatch, is preferred to silently losing Pi protection.
+- Rejected: keep the process-cwd fallback and only add `workspace_roots` (the next payload change would fail open again); ask instead of deny (Auto-review or Run Everything can approve an ask without a human); use the first root only (a Pi project opened as a later root would be unprotected).
+- Evidence: `test-cursor-readonly-hook.js` replays the 2026.11.13 shapes from a non-project spawn cwd, and five of its seven new tests fail on the previous hook **E**; the security corpus runs every Cursor shell and tool/MCP case in both shapes and fails on a verdict mismatch, which gives 67 Cursor failures on the previous hook and 95/95 passes with the fix **E**; live on cursor-agent 2026.11.13-eacade1 CLI with the hook from the development checkout, without a lease: `touch` and an edit-tool write were denied in a Pi project and allowed in a non-Pi folder, the `sessionId: "unknown"` probe was refused naming the chat id, and `/pi-discuss` worked with no chat id **E**. Cursor IDE payloads are **N**.
+
 ## Consequences
 
 - Good: F3, F4, and F6 close in code, tests, and live acceptance; F5 closes in code and tests, with the exit-2 guard installed during live acceptance.
@@ -133,13 +143,18 @@ Applies only when Pi Discuss, Plan, or Review has no structural sandbox launcher
 - Bad/risk: deny-unknown blocks unlisted read tools until the allowlist is updated. Live acceptance matched the current guesses but did not prove future harness releases.
 - Bad/risk: Claude asks on `Task`/`Agent`, which adds a prompt before subagent work.
 - Bad/risk: if the OpenCode plugin does not load, the policy is absent; that failure mode remains unverified.
+- Bad/risk: if a future Cursor sends neither a usable `cwd` nor `workspace_roots`, the hook denies every Cursor tool call in every workspace until the hook is updated or uninstalled.
 
 ## Affects
 
 Docs:
 
 - `docs/engineering/decisions/ADR-0045-cross-harness-permission-threat-model.md`
+- `docs/engineering/decisions/ADR-0047-human-approved-harness-build-lease.md`
 - `docs/engineering/decisions/README.md`
+- `docs/engineering/architecture.md`
+- `docs/engineering/invariants.md`
+- `docs/engineering/traps.md`
 
 Code and tests:
 
@@ -155,6 +170,7 @@ Code and tests:
 - `agent/extensions/workflow-modes/index.ts`
 - `agent/extensions/workflow-modes/test/test_policy.ts`
 - `scripts/security-corpus.json`
+- `scripts/test-security-corpus.ts`
 
 ## Read when
 

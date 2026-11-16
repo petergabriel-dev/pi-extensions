@@ -216,8 +216,9 @@ Verified Phase 2 items are in ADR-0046. These remain `not-verified`; do not stat
 - Does Claude enforce hook timeouts as deny?
 - What happens when the OpenCode plugin fails to load?
 - Do Cursor and OpenCode subagents receive the same hook or plugin policy?
-- Does Cursor fire `preToolUse` for shell/MCP tool types in addition to the dedicated events?
 - Can Seatbelt `(allow default)` be escaped through LaunchServices? Untested; never test destructively.
+
+Answered since: Cursor fires `preToolUse` for shell/MCP tool types in addition to the dedicated events (cursor-agent 2026.11.13, as `Shell` and `MCP:<tool>`); see ADR-0046's workspace-location follow-up.
 
 ## Extended by
 
