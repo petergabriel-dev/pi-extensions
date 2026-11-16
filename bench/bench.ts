@@ -9,6 +9,8 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as bridgeClient from "../agent/claude-bridge-client/pi-bridge-mcp.js";
 import { redactText } from "../agent/extensions/workflow-modes/review-redact.ts";
+import { foldFindings, validateFindingInput } from "../agent/extensions/workflow-modes/review-state.ts";
+import { readReviewLog } from "../agent/extensions/workflow-modes/review-store.ts";
 import { SCRIPT_MARKER, startFakeModel, type ScriptStep } from "./fake-model.ts";
 
 export const CAP_MINUTES = 90;
@@ -795,6 +797,175 @@ export async function reviewStop(runId: string): Promise<void> {
 	console.log(`Asked review-prepare (pid ${pid}) to stop Pi for ${runId}.`);
 }
 
+const REVIEW_TIMEOUT_MS = 20 * 60_000;
+const MAX_FINDING_TEXT_IN_ROW = 300;
+
+async function reviewPaths(runId: string) {
+	const match = REVIEW_RUN_ID.exec(runId);
+	if (!match) throw new Error(`review run id must look like r1-bundle-r1, got ${JSON.stringify(runId)}`);
+	const runDir = path.join(config().runsDir, runId);
+	if (!existsSync(path.join(runDir, "run.json"))) throw new Error(`review run ${runId} not found under ${config().runsDir}; run review-prepare first`);
+	const runJson = await readJson(path.join(runDir, "run.json"));
+	return { runDir, repo: path.join(runDir, "repo"), agentDir: path.join(runDir, "agent"), fixture: match[1], condition: match[2] as "bundle" | "diff", runJson };
+}
+
+// Same framing as diffPrompt, then Cursor's own /pi-review procedure from this repository.
+export function bundlePrompt(template: string): string {
+	return [
+		"Review the latest change in this repository. Do not modify any file and do not ask the user anything.",
+		"",
+		"The change was meant to implement SPEC.md. Look for defects: anything that makes the change wrong or incomplete against SPEC.md, or that breaks existing behavior. There is exactly one task to review. Submit every defect you find with submit_review_findings, giving file and line where you can.",
+		"",
+		"Follow this review procedure:",
+		"",
+		template.trim(),
+		"",
+	].join("\n");
+}
+
+export function cursorModelFor(requested?: string): string {
+	if (CURSOR_MODEL && requested && requested !== CURSOR_MODEL) throw new Error(`Cursor model is pinned to ${CURSOR_MODEL}; got --model ${requested}`);
+	const model = CURSOR_MODEL ?? requested;
+	if (!model) throw new Error("Cursor model is not pinned yet; pass --model <model> at shakedown, then set CURSOR_MODEL in bench/bench.ts (PROTOCOL.md Amendments)");
+	return model;
+}
+
+const isAlive = (pid: number) => {
+	try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+export async function reviewRun(runId: string, requestedModel?: string): Promise<void> {
+	const paths = await reviewPaths(runId);
+	const model = cursorModelFor(requestedModel);
+	if (existsSync(path.join(paths.runDir, "review-run.json"))) throw new Error(`run ${runId} was already reviewed; use a new rep id (PROTOCOL.md section 9)`);
+	const args = ["-p", "--output-format", "json", "--model", model];
+	let prompt: string;
+	if (paths.condition === "bundle") {
+		const pidFile = path.join(paths.runDir, "review.pid");
+		const pid = existsSync(pidFile) ? Number((await fs.readFile(pidFile, "utf8")).trim()) : NaN;
+		if (!Number.isInteger(pid) || !isAlive(pid)) throw new Error(`Pi is not running for ${runId}; start review-prepare for it and keep that terminal open`);
+		prompt = bundlePrompt(await fs.readFile(path.join(config().repoRoot, "agent", "harness-commands", "cursor", "pi-review.md"), "utf8"));
+		args.push("--approve-mcps");
+	} else {
+		prompt = await fs.readFile(path.join(paths.runDir, "prompt.md"), "utf8");
+	}
+	// Cursor keeps its own login; only Pi state and Git redirection are dropped.
+	const env: Env = {};
+	for (const [key, value] of Object.entries(process.env)) if (!/^(PI_|GIT_)/.test(key)) env[key] = value;
+	const startedAt = new Date().toISOString();
+	const result = await run("cursor-agent", [...args, prompt], { cwd: paths.repo, env, timeout: REVIEW_TIMEOUT_MS });
+	await fs.writeFile(path.join(paths.runDir, "review-output.txt"), result.stdout, { mode: 0o600 });
+	await fs.writeFile(path.join(paths.runDir, "review-stderr.txt"), result.stderr, { mode: 0o600 });
+	await fs.writeFile(path.join(paths.runDir, "review-run.json"), `${JSON.stringify({ model, mode: "headless", startedAt, finishedAt: new Date().toISOString(), exit: result.code }, null, 2)}\n`, { mode: 0o600 });
+	console.log(`${runId}: cursor-agent exited ${result.code ?? "abnormally"}. Next: npx --yes tsx bench/bench.ts review-score ${runId}`);
+}
+
+interface RawFinding { file?: string; line?: number; severity?: string; text: string; invalid?: string }
+export interface ScoredFinding extends RawFinding { outcome: "tp" | "fp" | "duplicate"; label?: number; reason?: string }
+
+// PROTOCOL.md section 9: same file and line within the label range ±3; first match wins.
+export function matchFindings(findings: RawFinding[], labels: Label[]) {
+	const matched = new Set<number>();
+	const scored: ScoredFinding[] = [];
+	for (const finding of findings) {
+		if (finding.invalid) {
+			scored.push({ ...finding, outcome: "fp", reason: finding.invalid });
+			continue;
+		}
+		const file = finding.file?.replace(/^\.\//, "");
+		const line = finding.line;
+		const hits = labels.map((label, index) => ({ label, index })).filter(({ label }) => file === label.file && line !== undefined && line >= label.lines[0] - 3 && line <= label.lines[1] + 3);
+		const fresh = hits.find(({ index }) => !matched.has(index));
+		if (fresh) {
+			matched.add(fresh.index);
+			scored.push({ ...finding, outcome: "tp", label: fresh.index });
+		} else if (hits.length > 0) {
+			scored.push({ ...finding, outcome: "duplicate", label: hits[0].index });
+		} else {
+			scored.push({ ...finding, outcome: "fp", reason: !file ? "no file" : line === undefined ? "no line" : "matches no label" });
+		}
+	}
+	const count = (outcome: ScoredFinding["outcome"]) => scored.filter((f) => f.outcome === outcome).length;
+	return { findings: scored, tp: count("tp"), fp: count("fp"), duplicates: count("duplicate"), fn: labels.length - matched.size };
+}
+
+// Diff-condition output: Cursor's JSON envelope (or raw text) holding one JSON array of findings.
+export function parseDiffFindings(output: string, commit: string): { findings: RawFinding[]; parseError?: string } {
+	let body = output.trim();
+	try {
+		const outer = JSON.parse(body);
+		if (Array.isArray(outer)) body = JSON.stringify(outer);
+		else if (outer && typeof outer.result === "string") body = outer.result;
+	} catch { /* not an envelope; search the raw text */ }
+	const start = body.indexOf("[");
+	const end = body.lastIndexOf("]");
+	if (start < 0 || end < start) return { findings: [], parseError: "no JSON array in reviewer output" };
+	let list: unknown;
+	try { list = JSON.parse(body.slice(start, end + 1)); } catch (error) { return { findings: [], parseError: `reviewer output is not valid JSON: ${(error as Error).message}` }; }
+	if (!Array.isArray(list)) return { findings: [], parseError: "reviewer output is not a JSON array" };
+	return {
+		findings: list.map((entry): RawFinding => {
+			try {
+				const valid = validateFindingInput({ ...(entry && typeof entry === "object" ? entry : { value: entry }), planId: "review", taskId: "diff", commit });
+				return { file: valid.file, line: valid.line, severity: valid.severity, text: valid.text };
+			} catch (error) {
+				const raw = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+				return { file: typeof raw.file === "string" ? raw.file : undefined, line: typeof raw.line === "number" ? raw.line : undefined, text: String(raw.text ?? JSON.stringify(entry)), invalid: (error as Error).message };
+			}
+		}),
+	};
+}
+
+export async function reviewScore(runId: string): Promise<Record<string, unknown>> {
+	const paths = await reviewPaths(runId);
+	const fixture = await loadReviewFixture(paths.fixture);
+	const runInfo = existsSync(path.join(paths.runDir, "review-run.json")) ? await readJson(path.join(paths.runDir, "review-run.json")) : null;
+	const output = existsSync(path.join(paths.runDir, "review-output.txt")) ? await fs.readFile(path.join(paths.runDir, "review-output.txt"), "utf8") : "";
+	let findings: RawFinding[] = [];
+	let valid = true;
+	let invalidReason: string | undefined;
+	let parseError: string | undefined;
+	if (paths.condition === "bundle") {
+		const log = await readReviewLog(paths.agentDir, paths.runJson.sessionId);
+		if (!log.events.some((event) => event.ev === "review_started")) {
+			valid = false;
+			invalidReason = "the reviewer never read the evidence (no review_started)";
+		}
+		findings = [...foldFindings(log.events).values()]
+			.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
+			.map((f) => ({ file: f.file, line: f.line, severity: f.severity, text: f.text }));
+	} else {
+		// Interactive fallback: the operator saves Cursor's reply as findings.json.
+		const manual = path.join(paths.runDir, "findings.json");
+		const source = existsSync(manual) ? await fs.readFile(manual, "utf8") : output;
+		({ findings, parseError } = parseDiffFindings(source, paths.runJson.implCommit));
+	}
+	const scored = matchFindings(findings, fixture.labels);
+	let usage: unknown = "unavailable";
+	try {
+		const envelope = JSON.parse(output);
+		if (envelope && typeof envelope.usage === "object" && envelope.usage) usage = envelope.usage;
+	} catch { /* no usage */ }
+
+	const results = path.join(config().resultsDir, "review.jsonl");
+	const prior = existsSync(results) ? (await fs.readFile(results, "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.runId === runId) : [];
+	const row = {
+		schema: 1, kind: "review", runId, fixture: paths.fixture, condition: paths.condition, rep: paths.runJson.rep,
+		scoredAt: new Date().toISOString(), ...(prior.length ? { rescoreOf: prior[prior.length - 1].scoredAt } : {}),
+		mode: runInfo ? runInfo.mode : "interactive", model: runInfo?.model ?? (CURSOR_MODEL ?? "unpinned"),
+		durationMs: runInfo ? Date.parse(runInfo.finishedAt) - Date.parse(runInfo.startedAt) : "unavailable",
+		valid, ...(invalidReason ? { invalidReason } : {}), ...(parseError ? { parseError: sanitize(parseError) } : {}),
+		labels: fixture.labels.length, tp: scored.tp, fp: scored.fp, fn: scored.fn, duplicates: scored.duplicates,
+		findings: scored.findings.map((f) => ({ file: f.file, line: f.line, severity: f.severity, outcome: f.outcome, ...(f.reason ? { reason: sanitize(f.reason) } : {}), text: sanitize(f.text).slice(0, MAX_FINDING_TEXT_IN_ROW) })),
+		usage, implTree: paths.runJson.implTree,
+	};
+	await fs.mkdir(config().resultsDir, { recursive: true });
+	await fs.appendFile(results, `${JSON.stringify(row)}\n`);
+	if (existsSync(path.join(paths.runDir, "review.pid"))) await reviewStop(runId);
+	console.log(`${runId}: ${valid ? "" : "INVALID; "}tp ${scored.tp}, fp ${scored.fp}, fn ${scored.fn}, duplicates ${scored.duplicates}${parseError ? `; ${parseError}` : ""}`);
+	return row;
+}
+
 const HELP = `bench.ts — benchmark pilot runner (rules: bench/PROTOCOL.md)
 
   prepare <task> <A|B|C> <rep>      Create run <task>-<wf>-r<rep> outside the repo and print launch steps
@@ -806,6 +977,10 @@ const HELP = `bench.ts — benchmark pilot runner (rules: bench/PROTOCOL.md)
   review-prepare <rN> <bundle|diff> <rep>
                                     Build review run <rN>-<condition>-r<rep>; bundle keeps Pi running
   review-stop <run>                 Stop the Pi that review-prepare keeps running for a bundle run
+  review-run <run> [--model <m>]    Run the Cursor reviewer headless (cursor-agent -p); --model only
+                                    before CURSOR_MODEL is pinned
+  review-score <run>                Match findings to hidden labels, append a review row, stop Pi.
+                                    Interactive fallback: diff runs read findings.json in the run dir
 
 Env: PI_BENCH_HOME (runs dir, default ~/.pi-bench/runs), PI_CODING_AGENT_DIR (host Pi dir for auth),
      CLAUDE_CONFIG_DIR (Claude Code dir for transcripts).`;
@@ -834,6 +1009,16 @@ export async function main(argv: string[]): Promise<number> {
 			case "review-stop":
 				if (args.length !== 1) throw new Error("usage: review-stop <run>");
 				await reviewStop(args[0]);
+				return 0;
+			case "review-run": {
+				const modelAt = args.indexOf("--model");
+				if (args.length !== 1 && !(args.length === 3 && modelAt === 1)) throw new Error("usage: review-run <run> [--model <m>]");
+				await reviewRun(args[0], modelAt === 1 ? args[2] : undefined);
+				return 0;
+			}
+			case "review-score":
+				if (args.length !== 1) throw new Error("usage: review-score <run>");
+				await reviewScore(args[0]);
 				return 0;
 			case undefined:
 			case "help":

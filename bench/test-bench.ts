@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as bridgeClient from "../agent/claude-bridge-client/pi-bridge-mcp.js";
-import { CAP_MINUTES, checkTasks, claudeSlug, config, estimateCost, loadReviewFixture, note, parseTap, prepare, REVIEW_TICK_NOTE, reviewPrepare, reviewStop, scrubEnv, score } from "./bench.ts";
+import { CAP_MINUTES, checkTasks, claudeSlug, config, cursorModelFor, estimateCost, loadReviewFixture, matchFindings, note, parseDiffFindings, parseTap, prepare, REVIEW_TICK_NOTE, reviewPrepare, reviewRun, reviewScore, reviewStop, scrubEnv, score } from "./bench.ts";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(BENCH_DIR, "..");
@@ -204,8 +204,11 @@ async function main() {
 		await fs.writeFile(path.join(t2, "hidden", "test", "t2-hidden.test.ts"), 'import { test } from "node:test";\nimport assert from "node:assert/strict";\ntest("R1 trivially", () => assert.ok(true));\ntest("R2 trivially", () => assert.ok(true));\n');
 		assert.equal(await checkTasks(), false, "hidden tests passing on start must fail check-tasks");
 
-		// Review fixtures: the real bench/review set, runs in a temp runs dir, scripted model only.
-		process.env.BENCH_ROOT = BENCH_DIR;
+		// Review fixtures: a temp copy of the real fixture app and bench/review set, so results
+		// stay out of the repository; runs in a temp runs dir; scripted model only.
+		const reviewRoot = path.join(root, "bench-review");
+		for (const dir of ["fixture", "review"]) await fs.cp(path.join(BENCH_DIR, dir), path.join(reviewRoot, dir), { recursive: true });
+		process.env.BENCH_ROOT = reviewRoot;
 		process.env.PI_BENCH_HOME = path.join(root, "review-runs");
 		const fixture = await loadReviewFixture("r1");
 		const first = await reviewPrepare("r1", "bundle", "1");
@@ -235,6 +238,70 @@ async function main() {
 		for (const label of fixture.labels) assert.ok(!prompt.includes(label.defect), "labels never enter the prompt");
 		assert.equal(gitIn(diff.repo, ["ls-files", "labels.json"]), "");
 		await reviewStop("r1-bundle-r1");
+
+		// Matching rule (PROTOCOL.md section 9).
+		const labelA = { file: "src/a.ts", lines: [10, 12] as [number, number], defect: "a" };
+		const matched = matchFindings([
+			{ file: "src/a.ts", line: 7, text: "edge of range, -3" },
+			{ file: "./src/a.ts", line: 15, text: "same label again, +3" },
+			{ file: "src/a.ts", line: 16, text: "just outside" },
+			{ file: "src/b.ts", line: 11, text: "other file" },
+			{ text: "no file" },
+			{ file: "src/a.ts", line: 11, text: "bad", invalid: "finding severity must be high, medium, or low" },
+		], [labelA, { file: "src/c.ts", lines: [1, 1], defect: "c" }]);
+		assert.deepEqual(matched.findings.map((f) => f.outcome), ["tp", "duplicate", "fp", "fp", "fp", "fp"]);
+		assert.deepEqual({ tp: matched.tp, fp: matched.fp, fn: matched.fn, duplicates: matched.duplicates }, { tp: 1, fp: 4, fn: 1, duplicates: 1 });
+		assert.equal(matched.findings[5].reason, "finding severity must be high, medium, or low");
+		assert.deepEqual(matchFindings([{ file: "src/a.ts", line: 3, severity: "low", text: "nit" }], []), { findings: [{ file: "src/a.ts", line: 3, severity: "low", text: "nit", outcome: "fp", reason: "matches no label" }], tp: 0, fp: 1, duplicates: 0, fn: 0 }, "any finding on a correct fixture is a false positive");
+
+		// Diff output parsing: Cursor's envelope, schema validation, and unusable output.
+		const parsed = parseDiffFindings(JSON.stringify({ type: "result", result: 'Here you go:\n[{"file":"src/a.ts","line":2,"severity":"high","text":"x"},{"file":"src/a.ts","severity":"high","text":"y","title":"extra"}]' }), "a".repeat(40));
+		assert.equal(parsed.findings.length, 2);
+		assert.equal(parsed.findings[0].invalid, undefined);
+		assert.match(parsed.findings[1].invalid ?? "", /unsupported field/);
+		assert.match(parseDiffFindings("I found nothing worth reporting.", "a".repeat(40)).parseError ?? "", /no JSON array/);
+		assert.throws(() => cursorModelFor(), /not pinned/);
+		assert.equal(cursorModelFor("some-model"), "some-model");
+
+		// Diff condition end to end through a stub cursor-agent.
+		const envelope = JSON.stringify({ type: "result", result: JSON.stringify([{ file: "src/ledger.ts", line: 37, severity: "high", text: "adds negative quantities" }, { file: "src/cli.ts", line: 5, severity: "low", text: "nit" }]), usage: { inputTokens: 12, outputTokens: 3 } });
+		await fs.writeFile(path.join(stubBin, "cursor-agent"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "cursor-agent stub 1.0"; exit 0; fi\ncat <<'EOF'\n${envelope}\nEOF\n`);
+		await reviewRun("r1-diff-r1", "stub-model");
+		await rejects(() => reviewRun("r1-diff-r1", "stub-model"), /already reviewed/);
+		const diffRow = await reviewScore("r1-diff-r1") as any;
+		assert.deepEqual({ mode: diffRow.mode, model: diffRow.model, valid: diffRow.valid, tp: diffRow.tp, fp: diffRow.fp, fn: diffRow.fn }, { mode: "headless", model: "stub-model", valid: true, tp: 1, fp: 1, fn: 0 });
+		assert.deepEqual(diffRow.usage, { inputTokens: 12, outputTokens: 3 });
+		await rejects(() => reviewRun("r1-bundle-r1", "stub-model"), /Pi is not running/);
+
+		// Bundle condition end to end over the real bridge: without reading evidence a review is
+		// invalid; after reading it, the finding at the labeled line is a true positive.
+		const reviewer = { sessionId: "bench-test-reviewer", harness: "cursor" };
+		for (const [rep, reads] of [["3", false], ["4", true]] as const) {
+			const handle = await reviewPrepare("r1", "bundle", rep);
+			try {
+				const ask = async (name: string, args: Record<string, unknown> = {}) => {
+					const result = await bridgeClient.callTool(name, { ...args, cwd: handle.repo, ...reviewer });
+					return result.structuredContent ?? JSON.parse(result.content[0].text);
+				};
+				const taskId = (await ask("read_plan_tasks")).result.tasks[0].id;
+				const commit = gitIn(handle.repo, ["rev-parse", "HEAD"]);
+				if (reads) await ask("read_task_evidence", { bundleId: handle.bundleId, section: "summary", page: 0 });
+				await ask("submit_review_findings", { findings: [
+					{ planId: "review", taskId, commit, file: "src/ledger.ts", line: 36, severity: "high", text: "Sums negative quantities, so the total is negative." },
+					{ planId: "review", taskId, commit, file: "src/ledger.ts", line: 30, severity: "low", text: "Doc comment could mention the filter." },
+				] });
+				const row = await reviewScore(handle.runId) as any;
+				assert.equal(row.mode, "interactive");
+				assert.equal(row.valid, reads, reads ? "a review that read evidence is valid" : "missing review_started makes the review invalid");
+				assert.deepEqual({ tp: row.tp, fp: row.fp, fn: row.fn }, { tp: 1, fp: 1, fn: 0 });
+			} finally {
+				await handle.stop();
+			}
+		}
+		const reviewRows = (await fs.readFile(path.join(reviewRoot, "results", "review.jsonl"), "utf8")).split("\n").filter(Boolean);
+		assert.equal(reviewRows.length, 3);
+		assert.ok(!reviewRows.join("\n").includes(homedir()), "review rows carry no home paths");
+		assert.equal(existsSync(path.join(BENCH_DIR, "results")), false, "the test never writes results into the repository");
 		console.log("test-bench passed");
 	} finally {
 		for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
