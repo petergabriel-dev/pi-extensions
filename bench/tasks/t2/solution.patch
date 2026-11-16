@@ -1,0 +1,96 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..b29a5e7 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -1,13 +1,14 @@
+ import { readFileSync } from "node:fs";
+ import { pathToFileURL } from "node:url";
+-import { balances, history, lowStock } from "./ledger.ts";
++import { balances, history, lowStock, monthlyTotals } from "./ledger.ts";
+ import { parseCsv } from "./parse.ts";
+ import { formatBalances, formatHistory } from "./report.ts";
+ 
+ const USAGE = `usage:
+   ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+   ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+-  ledger low <file> --threshold <n>`;
++  ledger low <file> --threshold <n>
++  ledger monthly <file> [--sku <sku>]`;
+ 
+ export interface CliResult {
+ 	code: number;
+@@ -54,6 +55,11 @@ export function runCli(args: string[], read: (file: string) => string = readFile
+ 			const lines = lowStock(totals, threshold).map((sku) => `${sku} (${formatQty(totals.get(sku) ?? 0)})`);
+ 			return { code: 0, stdout: lines.join("\n"), stderr: "" };
+ 		}
++		case "monthly": {
++			const sku = option(rest, "--sku");
++			const lines = monthlyTotals(movements, sku).map((t) => `${t.month}  +${formatQty(t.received)}  -${formatQty(t.shipped)}  ${formatQty(t.net)}`);
++			return { code: 0, stdout: lines.join("\n"), stderr: "" };
++		}
+ 		default:
+ 			return { code: 1, stdout: "", stderr: USAGE };
+ 	}
+diff --git a/src/ledger.ts b/src/ledger.ts
+index 52c8a0a..7c4edfe 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -26,3 +26,27 @@ export function history(movements: Movement[], sku: string, range: DateRange = {
+ export function lowStock(totals: Map<string, number>, threshold: number): string[] {
+ 	return [...totals.entries()].filter(([, qty]) => qty < threshold).map(([sku]) => sku);
+ }
++
++/** Received, shipped, and net quantities for one calendar month. */
++export interface MonthTotal {
++	month: string;
++	received: number;
++	shipped: number;
++	net: number;
++}
++
++/** Totals per calendar month, oldest first; only months with movements are listed. */
++export function monthlyTotals(movements: Movement[], sku?: string): MonthTotal[] {
++	const wanted = sku === undefined ? undefined : normalizeSku(sku);
++	const months = new Map<string, MonthTotal>();
++	for (const movement of movements) {
++		if (wanted !== undefined && movement.sku !== wanted) continue;
++		const month = movement.date.slice(0, 7);
++		const total = months.get(month) ?? { month, received: 0, shipped: 0, net: 0 };
++		if (movement.qty > 0) total.received += movement.qty;
++		else total.shipped -= movement.qty;
++		total.net = total.received - total.shipped;
++		months.set(month, total);
++	}
++	return [...months.values()].sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
++}
+diff --git a/test/monthly.test.ts b/test/monthly.test.ts
+new file mode 100644
+index 0000000..d5f51f4
+--- /dev/null
++++ b/test/monthly.test.ts
+@@ -0,0 +1,25 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { runCli } from "../src/cli.ts";
++import { monthlyTotals } from "../src/ledger.ts";
++import { parseCsv } from "../src/parse.ts";
++
++const csv = "date,sku,qty,note\n2026-02-03,A-1,-30,\n2026-01-02,A-1,40,\n2026-01-09,B-2,-3,\n";
++
++test("monthlyTotals sums each month, oldest first", () => {
++	assert.deepEqual(monthlyTotals(parseCsv(csv)), [
++		{ month: "2026-01", received: 40, shipped: 3, net: 37 },
++		{ month: "2026-02", received: 0, shipped: 30, net: -30 },
++	]);
++});
++
++test("monthlyTotals can filter by item code in any case", () => {
++	assert.deepEqual(monthlyTotals(parseCsv(csv), "b-2"), [{ month: "2026-01", received: 0, shipped: 3, net: -3 }]);
++});
++
++test("monthly command prints one line per month", () => {
++	const result = runCli(["monthly", "f.csv"], () => csv);
++	assert.equal(result.code, 0);
++	assert.equal(result.stdout, "2026-01  +40  -3  37\n2026-02  +0  -30  -30");
++	assert.equal(runCli(["monthly", "f.csv"], () => "date,sku,qty,note\n").stdout, "");
++});

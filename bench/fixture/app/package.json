@@ -1,0 +1,17 @@
+{
+  "name": "stock-ledger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiny stock ledger: reads movement CSV files and reports balances.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "ledger": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "ledger": "node src/cli.ts"
+  }
+}

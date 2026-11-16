@@ -1,0 +1,35 @@
+diff --git b/src/ledger.ts a/src/ledger.ts
+index 541f16e..52c8a0a 100644
+--- b/src/ledger.ts
++++ a/src/ledger.ts
+@@ -1,4 +1,5 @@
+ import { inRange } from "./dates.ts";
++import { normalizeSku } from "./parse.ts";
+ import type { DateRange, Movement } from "./types.ts";
+ 
+ const bySku = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+@@ -15,7 +16,7 @@ export function balances(movements: Movement[], range: DateRange = {}): Map<stri
+ 
+ /** Movements for one SKU inside the range, oldest first. */
+ export function history(movements: Movement[], sku: string, range: DateRange = {}): Movement[] {
+-	const wanted = sku.trim();
++	const wanted = normalizeSku(sku);
+ 	return movements
+ 		.filter((movement) => movement.sku === wanted && inRange(movement.date, range.from, range.to))
+ 		.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+diff --git b/src/parse.ts a/src/parse.ts
+index 35fc701..3c1fa99 100644
+--- b/src/parse.ts
++++ a/src/parse.ts
+@@ -2,9 +2,9 @@ import type { Movement } from "./types.ts";
+ 
+ const HEADER = "date,sku,qty,note";
+ 
+-/** Canonical form of an item code. */
++/** Canonical form of an item code: trimmed and upper-case. */
+ export function normalizeSku(sku: string): string {
+-	return sku.trim();
++	return sku.trim().toUpperCase();
+ }
+ 
+ /**
