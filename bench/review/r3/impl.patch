@@ -1,0 +1,45 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..d565160 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -5,7 +5,7 @@ import { parseCsv } from "./parse.ts";
+ import { formatBalances, formatHistory } from "./report.ts";
+ 
+ const USAGE = `usage:
+-  ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
++  ledger balance <file> [<file>...] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+   ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+   ledger low <file> --threshold <n>`;
+ 
+@@ -40,8 +40,12 @@ export function runCli(args: string[], read: (file: string) => string = readFile
+ 	const movements = parseCsv(text);
+ 	const range = { from: option(rest, "--from"), to: option(rest, "--to") };
+ 	switch (command) {
+-		case "balance":
+-			return { code: 0, stdout: formatBalances(balances(movements, range)), stderr: "" };
++		case "balance": {
++			const extraFiles = rest.filter((arg, index) => !arg.startsWith("--") && !rest[index - 1]?.startsWith("--"));
++			const all = [...movements];
++			for (const extra of extraFiles) all.push(...parseCsv(read(extra)));
++			return { code: 0, stdout: formatBalances(balances(all, range)), stderr: "" };
++		}
+ 		case "history": {
+ 			const sku = rest[0];
+ 			if (!sku || sku.startsWith("--")) return { code: 1, stdout: "", stderr: USAGE };
+diff --git a/test/cli.test.ts b/test/cli.test.ts
+index 369913a..c9d522f 100644
+--- a/test/cli.test.ts
++++ b/test/cli.test.ts
+@@ -11,6 +11,12 @@ test("balance prints the table", () => {
+ 	assert.equal(result.stdout, ["SKU    QTY", "A-1      3", "B-2  1,500"].join("\n"));
+ });
+ 
++test("balance combines several files", () => {
++	const files: Record<string, string> = { "a.csv": csv, "b.csv": "date,sku,qty,note\n2026-01-10,A-1,7,\n" };
++	const result = runCli(["balance", "a.csv", "b.csv", "--to", "2026-12-31"], (file) => files[file]);
++	assert.equal(result.stdout, ["SKU    QTY", "A-1     10", "B-2  1,500"].join("\n"));
++});
++
+ test("history prints one SKU", () => {
+ 	assert.equal(runCli(["history", "stock.csv", "A-1"], read).stdout, "2026-01-02  +4\n2026-01-09  -1  sold");
+ });

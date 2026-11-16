@@ -1,0 +1,43 @@
+diff --git a/src/ledger.ts b/src/ledger.ts
+index 52c8a0a..16ca6ce 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -26,3 +26,14 @@ export function history(movements: Movement[], sku: string, range: DateRange = {
+ export function lowStock(totals: Map<string, number>, threshold: number): string[] {
+ 	return [...totals.entries()].filter(([, qty]) => qty < threshold).map(([sku]) => sku);
+ }
++
++/** Total quantity shipped, as a positive number, optionally for one item. */
++export function totalShipped(movements: Movement[], sku?: string): number {
++	const wanted = sku === undefined ? undefined : normalizeSku(sku);
++	let total = 0;
++	for (const movement of movements) {
++		if (wanted !== undefined && movement.sku !== wanted) continue;
++		if (movement.qty < 0) total += movement.qty;
++	}
++	return total;
++}
+diff --git a/test/shipped.test.ts b/test/shipped.test.ts
+new file mode 100644
+index 0000000..700a42c
+--- /dev/null
++++ b/test/shipped.test.ts
+@@ -0,0 +1,18 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { totalShipped } from "../src/ledger.ts";
++import type { Movement } from "../src/types.ts";
++
++const movements: Movement[] = [
++	{ date: "2026-01-02", sku: "A-1", qty: 10, note: "" },
++	{ date: "2026-01-03", sku: "A-1", qty: -4, note: "" },
++	{ date: "2026-01-04", sku: "B-2", qty: -6, note: "" },
++];
++
++test("totalShipped sums shipments as a positive number", () => {
++	assert.equal(totalShipped(movements), 10);
++});
++
++test("totalShipped can filter by item code", () => {
++	assert.equal(totalShipped(movements, "a-1"), 4);
++});

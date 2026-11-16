@@ -1,0 +1,43 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..fd0f8dd 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -5,7 +5,7 @@ import { parseCsv } from "./parse.ts";
+ import { formatBalances, formatHistory } from "./report.ts";
+ 
+ const USAGE = `usage:
+-  ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
++  ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--sku <sku>]
+   ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+   ledger low <file> --threshold <n>`;
+ 
+@@ -40,8 +40,12 @@ export function runCli(args: string[], read: (file: string) => string = readFile
+ 	const movements = parseCsv(text);
+ 	const range = { from: option(rest, "--from"), to: option(rest, "--to") };
+ 	switch (command) {
+-		case "balance":
+-			return { code: 0, stdout: formatBalances(balances(movements, range)), stderr: "" };
++		case "balance": {
++			const sku = option(rest, "--sku");
++			const totals = balances(movements, range);
++			const shown = sku === undefined ? totals : new Map([...totals].filter(([code]) => code === sku.trim()));
++			return { code: 0, stdout: formatBalances(shown), stderr: "" };
++		}
+ 		case "history": {
+ 			const sku = rest[0];
+ 			if (!sku || sku.startsWith("--")) return { code: 1, stdout: "", stderr: USAGE };
+diff --git a/test/cli.test.ts b/test/cli.test.ts
+index 369913a..47a5dff 100644
+--- a/test/cli.test.ts
++++ b/test/cli.test.ts
+@@ -11,6 +11,10 @@ test("balance prints the table", () => {
+ 	assert.equal(result.stdout, ["SKU    QTY", "A-1      3", "B-2  1,500"].join("\n"));
+ });
+ 
++test("balance --sku shows one item", () => {
++	assert.equal(runCli(["balance", "stock.csv", "--sku", "B-2"], read).stdout, ["SKU    QTY", "B-2  1,500"].join("\n"));
++});
++
+ test("history prints one SKU", () => {
+ 	assert.equal(runCli(["history", "stock.csv", "A-1"], read).stdout, "2026-01-02  +4\n2026-01-09  -1  sold");
+ });

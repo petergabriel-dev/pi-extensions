@@ -1,0 +1,56 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..dec2bc7 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -7,7 +7,7 @@ import { formatBalances, formatHistory } from "./report.ts";
+ const USAGE = `usage:
+   ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+   ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+-  ledger low <file> --threshold <n>`;
++  ledger low <file> [--threshold <n>]   (default threshold: 10)`;
+ 
+ export interface CliResult {
+ 	code: number;
+@@ -26,6 +26,7 @@ function option(args: string[], name: string): string | undefined {
+ }
+ 
+ const readFile = (file: string) => readFileSync(file, "utf8");
++const DEFAULT_THRESHOLD = 10;
+ 
+ /** Runs one command and returns its output instead of printing it, so it can be tested. */
+ export function runCli(args: string[], read: (file: string) => string = readFile): CliResult {
+@@ -48,8 +49,11 @@ export function runCli(args: string[], read: (file: string) => string = readFile
+ 			return { code: 0, stdout: formatHistory(history(movements, sku, range)), stderr: "" };
+ 		}
+ 		case "low": {
+-			const threshold = Number(option(rest, "--threshold"));
+-			if (!Number.isFinite(threshold)) return { code: 1, stdout: "", stderr: "--threshold must be a number" };
++			const given = option(rest, "--threshold");
++			const threshold = rest.includes("--threshold") ? Number(given) : DEFAULT_THRESHOLD;
++			if (rest.includes("--threshold") && (given === undefined || given.trim() === "" || !Number.isFinite(threshold))) {
++				return { code: 1, stdout: "", stderr: "--threshold must be a number" };
++			}
+ 			const totals = balances(movements);
+ 			const lines = lowStock(totals, threshold).map((sku) => `${sku} (${formatQty(totals.get(sku) ?? 0)})`);
+ 			return { code: 0, stdout: lines.join("\n"), stderr: "" };
+diff --git a/test/cli.test.ts b/test/cli.test.ts
+index 369913a..2a5e221 100644
+--- a/test/cli.test.ts
++++ b/test/cli.test.ts
+@@ -19,6 +19,16 @@ test("low lists items under the threshold with quantities", () => {
+ 	assert.equal(runCli(["low", "stock.csv", "--threshold", "10"], read).stdout, "A-1 (3)");
+ });
+ 
++test("low defaults the threshold to 10", () => {
++	assert.equal(runCli(["low", "stock.csv"], read).stdout, "A-1 (3)");
++});
++
++test("low rejects a threshold that is not a number", () => {
++	for (const args of [["--threshold", "ten"], ["--threshold"], ["--threshold", ""]]) {
++		assert.deepEqual(runCli(["low", "stock.csv", ...args], read), { code: 1, stdout: "", stderr: "--threshold must be a number" });
++	}
++});
++
+ test("missing arguments print usage", () => {
+ 	const result = runCli(["balance"], read);
+ 	assert.equal(result.code, 1);

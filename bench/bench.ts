@@ -1,13 +1,15 @@
 // Benchmark pilot runner. Rules live in bench/PROTOCOL.md; this file implements them.
 // Usage: npx --yes tsx bench/bench.ts <command> [...args]   (see `help`)
-import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import * as bridgeClient from "../agent/claude-bridge-client/pi-bridge-mcp.js";
 import { redactText } from "../agent/extensions/workflow-modes/review-redact.ts";
+import { SCRIPT_MARKER, startFakeModel, type ScriptStep } from "./fake-model.ts";
 
 export const CAP_MINUTES = 90;
 export const PI_MODEL = "openai-codex/gpt-6-luna";
@@ -530,6 +532,269 @@ export async function checkTasks(): Promise<boolean> {
 	return allOk;
 }
 
+// ---------------------------------------------------------------------------
+// Review evaluation (PROTOCOL.md section 9)
+
+const REVIEW_FIXTURE_ID = /^r[0-9]{1,3}$/;
+const REVIEW_RUN_ID = /^(r[0-9]{1,3})-(bundle|diff)-r([1-9][0-9]{0,2})$/;
+export const REVIEW_TASK_TITLE = "Implement SPEC.md";
+export const REVIEW_TICK_NOTE = "Implemented per SPEC.md.";
+const SETUP_IDENTITY = { harness: "claude", id: "bench-setup" };
+const FAKE_KEY = "bench-fake-key";
+const PI_READY_MS = 30_000;
+const SCRIPTED_TURN_MS = 120_000;
+
+interface Label { file: string; lines: [number, number]; defect: string }
+export interface ReviewFixture { id: string; dir: string; labels: Label[] }
+
+export async function loadReviewFixture(id: string): Promise<ReviewFixture> {
+	if (!REVIEW_FIXTURE_ID.test(id)) throw new Error(`review fixture id must look like r1, got ${JSON.stringify(id)}`);
+	const dir = path.join(config().benchRoot, "review", id);
+	for (const name of ["SPEC.md", "impl.patch", "labels.json"]) if (!existsSync(path.join(dir, name))) throw new Error(`${id}/${name} is missing`);
+	const labels = JSON.parse(await fs.readFile(path.join(dir, "labels.json"), "utf8"));
+	const valid = Array.isArray(labels) && labels.every((l) => typeof l?.file === "string" && Array.isArray(l.lines) && l.lines.length === 2 && l.lines.every(Number.isInteger) && l.lines[0] <= l.lines[1] && typeof l.defect === "string");
+	if (!valid) throw new Error(`${id}/labels.json must be a list of { file, lines: [a, b], defect }`);
+	return { id, dir, labels };
+}
+
+// The implementation's files: impl.patch applied to the working tree, read, then reverted.
+async function implementationFiles(repo: string, patch: string): Promise<Array<{ path: string; content: string }>> {
+	await gitOk(repo, ["apply", "--whitespace=nowarn", patch]);
+	const status = (await gitOk(repo, ["status", "--porcelain=v1", "-uall"])).split("\n").filter(Boolean);
+	const files: Array<{ path: string; content: string; untracked: boolean }> = [];
+	for (const line of status) {
+		const code = line.slice(0, 2);
+		const rel = line.slice(3);
+		if (!/^( M|\?\?)$/.test(code)) throw new Error(`impl.patch may only modify or add files; got "${code}" for ${rel}`);
+		files.push({ path: rel, content: await fs.readFile(path.join(repo, rel), "utf8"), untracked: code === "??" });
+	}
+	await gitOk(repo, ["checkout", "--", "."]);
+	for (const file of files) if (file.untracked) await fs.rm(path.join(repo, file.path));
+	return files.sort((a, b) => (a.path < b.path ? -1 : 1)).map(({ path: p, content }) => ({ path: p, content }));
+}
+
+export function diffPrompt(spec: string, diff: string): string {
+	return [
+		"You are reviewing a change to the repository in the current directory. Do not modify any file.",
+		"",
+		"The change is the latest commit. It was meant to implement SPEC.md, shown below. Look for defects: anything that makes the change wrong or incomplete against SPEC.md, or that breaks existing behavior.",
+		"",
+		"Reply with only a JSON array of findings and nothing else. Each finding is an object with:",
+		'- "file": repository-relative path of the file with the defect',
+		'- "line": line number in the changed version of that file',
+		'- "severity": "high", "medium", or "low"',
+		'- "text": what is wrong',
+		'- "fix" (optional): how to fix it',
+		'- "repro" (optional): how to reproduce it',
+		"If you find no defects, reply with [].",
+		"",
+		"## SPEC.md",
+		"",
+		spec.trim(),
+		"",
+		"## Diff",
+		"",
+		"```diff",
+		diff.trimEnd(),
+		"```",
+		"",
+	].join("\n");
+}
+
+function oneTaskPlan(files: string[]): string {
+	return [
+		"# Review fixture plan",
+		"",
+		"## Section 4 — Tasks",
+		"",
+		`- [ ] ${REVIEW_TASK_TITLE}`,
+		"  - **Given** the repository at its current commit **When** the change described in SPEC.md is implemented **Then** SPEC.md's requirements hold",
+		`  - **Files:** ${files.map((file) => `\`${file}\``).join(", ")}`,
+		"",
+	].join("\n");
+}
+
+interface PiProcess { child: ChildProcessWithoutNullStreams; notices: string[]; dialogs: string[]; stderr: string; prompt: (message: string) => void }
+
+// RPC driver as in test-bridge-e2e.mjs: JSONL out, commands in, Pi's own dialogs answered.
+function startPi(repo: string, agentDir: string, sessionId: string, env: Env): PiProcess {
+	const cli = path.join(config().repoRoot, "agent/extensions/subagents/node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+	if (!existsSync(cli)) throw new Error(`bundled Pi CLI missing at ${cli}; run npm run bootstrap first`);
+	const child = spawn(process.execPath, [cli, "--mode", "rpc", "--no-extensions", "-e", config().repoRoot, "--session-dir", path.join(agentDir, "sessions"), "--session-id", sessionId, "--model", "bench-fake/fake"], { cwd: repo, env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] });
+	const pi: PiProcess = { child, notices: [], dialogs: [], stderr: "", prompt: (message) => child.stdin.write(`${JSON.stringify({ id: randomUUID(), type: "prompt", message })}\n`) };
+	let buffer = "";
+	child.stdout.setEncoding("utf8");
+	child.stdout.on("data", (chunk: string) => {
+		buffer += chunk;
+		let newline;
+		while ((newline = buffer.indexOf("\n")) >= 0) {
+			const line = buffer.slice(0, newline);
+			buffer = buffer.slice(newline + 1);
+			let record: any;
+			try { record = JSON.parse(line); } catch { continue; }
+			if (record?.type !== "extension_ui_request") continue;
+			if (record.method === "notify" && typeof record.message === "string") pi.notices.push(record.message);
+			if (record.method !== "confirm" && record.method !== "select") continue;
+			pi.dialogs.push(String(record.title ?? record.method));
+			const reply = record.method === "confirm" ? { confirmed: true } : { value: record.options?.[0] };
+			child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: record.id, ...reply })}\n`);
+		}
+	});
+	child.stderr.setEncoding("utf8");
+	child.stderr.on("data", (chunk: string) => { pi.stderr = (pi.stderr + chunk).slice(-8_000); });
+	return pi;
+}
+
+async function stopPi(pi: PiProcess): Promise<void> {
+	if (pi.child.exitCode !== null || pi.child.signalCode !== null) return;
+	const closed = new Promise((resolve) => pi.child.once("close", resolve));
+	pi.child.stdin.end();
+	pi.child.kill("SIGTERM");
+	await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+	if (pi.child.exitCode === null && pi.child.signalCode === null) pi.child.kill("SIGKILL");
+}
+
+async function waitFor<T>(check: () => T | Promise<T>, label: string, timeoutMs: number, pi?: PiProcess): Promise<T> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const value = await check();
+		if (value) return value;
+		if (pi && (pi.child.exitCode !== null || pi.child.signalCode !== null)) throw new Error(`Pi exited while waiting for ${label}: ${pi.stderr.slice(-600)}`);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	throw new Error(`timed out waiting for ${label}${pi ? `; Pi stderr: ${pi.stderr.slice(-600)}` : ""}`);
+}
+
+export interface ReviewHandle { runId: string; runDir: string; repo: string; implTree: string; bundleId?: string; bundlePath?: string; sessionId?: string; stop: () => Promise<void> }
+
+export async function reviewPrepare(fixtureId: string, condition: string, rep: string): Promise<ReviewHandle> {
+	if (condition !== "bundle" && condition !== "diff") throw new Error("condition must be bundle or diff");
+	if (!/^[1-9][0-9]{0,2}$/.test(rep)) throw new Error("rep must be a positive integer");
+	const fixture = await loadReviewFixture(fixtureId);
+	const cfg = config();
+	const runsDir = await safeRunsDir();
+	const runId = `${fixtureId}-${condition}-r${rep}`;
+	const runDir = path.join(runsDir, runId);
+	try { await fs.mkdir(runDir, { mode: 0o700 }); } catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`run ${runId} already exists; use a new rep id (PROTOCOL.md section 9)`);
+		throw error;
+	}
+	const repo = path.join(runDir, "repo");
+	const dated = { ...GIT_IDENTITY, GIT_AUTHOR_DATE: FIXED_DATE, GIT_COMMITTER_DATE: FIXED_DATE };
+	await fs.cp(path.join(cfg.benchRoot, "fixture", "app"), repo, { recursive: true, errorOnExist: true, force: false });
+	await gitOk(repo, ["init", "-q", "-b", "main"]);
+	await fs.copyFile(path.join(fixture.dir, "SPEC.md"), path.join(repo, "SPEC.md"));
+	const ignore = path.join(repo, ".gitignore");
+	const current = existsSync(ignore) ? await fs.readFile(ignore, "utf8") : "";
+	if (!current.split("\n").includes(".pi/")) await fs.writeFile(ignore, `${current}${current && !current.endsWith("\n") ? "\n" : ""}.pi/\n`);
+	await gitOk(repo, ["add", "-A"]);
+	await gitOk(repo, ["commit", "-q", "-m", "Start state"], dated);
+	await gitOk(repo, ["tag", "start"]);
+	const files = await implementationFiles(repo, path.join(fixture.dir, "impl.patch"));
+	const runJson: Record<string, unknown> = { schema: 1, kind: "review", runId, fixture: fixtureId, condition, rep: Number(rep), createdAt: new Date().toISOString(), cursorModel: CURSOR_MODEL ?? "unpinned" };
+
+	if (condition === "diff") {
+		for (const file of files) await fs.writeFile(path.join(repo, file.path), file.content);
+		await gitOk(repo, ["add", "-A"]);
+		await gitOk(repo, ["commit", "-q", "-m", REVIEW_TASK_TITLE], dated);
+		const implTree = (await gitOk(repo, ["rev-parse", "HEAD^{tree}"])).trim();
+		const diff = await gitOk(repo, ["diff", "--no-color", "--no-ext-diff", "start", "HEAD"]);
+		await fs.writeFile(path.join(runDir, "diff.patch"), diff, { mode: 0o600 });
+		await fs.writeFile(path.join(runDir, "prompt.md"), diffPrompt(await fs.readFile(path.join(repo, "SPEC.md"), "utf8"), diff), { mode: 0o600 });
+		Object.assign(runJson, { implCommit: (await gitOk(repo, ["rev-parse", "HEAD"])).trim(), implTree });
+		await fs.writeFile(path.join(runDir, "run.json"), `${JSON.stringify(runJson, null, 2)}\n`, { mode: 0o600 });
+		return { runId, runDir, repo, implTree, stop: async () => {} };
+	}
+
+	// bundle: a real Pi Build, driven by a scripted fake model, records the evidence.
+	const agentDir = path.join(runDir, "agent");
+	await fs.mkdir(agentDir, { mode: 0o700 });
+	// The bridge finds its project by the nearest .pi/ marker.
+	await fs.mkdir(path.join(repo, ".pi"));
+	const script: ScriptStep[] = [
+		...files.map((file): ScriptStep => ({ call: { name: "write", args: { path: file.path, content: file.content } } })),
+		{ call: { name: "bash", args: { command: "npm test" } } },
+		{ call: { name: "bash", args: { command: "git add -A" } } },
+		{ call: { name: "bash", args: { command: `git commit -q -m "${REVIEW_TASK_TITLE}"` } } },
+		{ call: { name: "bash", args: { command: "git rev-parse HEAD" } } },
+		{ call: { name: "workflow_plan_tick", args: (last) => ({ title: REVIEW_TASK_TITLE, note: REVIEW_TICK_NOTE, ...(/[0-9a-f]{40}/.exec(last) ? { commit: /[0-9a-f]{40}/.exec(last)![0] } : {}) }) } },
+		{ text: "Done." },
+	];
+	const fake = await startFakeModel(script, FAKE_KEY);
+	let pi: PiProcess | undefined;
+	const stop = async () => {
+		if (pi) await stopPi(pi);
+		await fake.close();
+	};
+	try {
+		await fs.writeFile(path.join(agentDir, "models.json"), JSON.stringify({
+			providers: { "bench-fake": { name: "Bench scripted model", api: "openai-completions", baseUrl: fake.baseUrl, apiKey: FAKE_KEY, models: [{ id: "fake", name: "fake", input: ["text"], reasoning: false, contextWindow: 65_536, maxTokens: 4_096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } },
+		}), { mode: 0o600 });
+		const sessionId = randomUUID();
+		pi = startPi(repo, agentDir, sessionId, { ...scrubEnv(), PI_CODING_AGENT_DIR: agentDir, ...dated });
+		const namespace = path.join(repo, ".pi", "memory", "bridge", "sessions", sessionId);
+		await waitFor(() => existsSync(path.join(namespace, "presence.json")) && existsSync(path.join(namespace, "inflight")), "Pi bridge presence", PI_READY_MS, pi);
+		const call = async (name: string, args: Record<string, unknown> = {}) => {
+			const result = await bridgeClient.callTool(name, { ...args, cwd: repo, sessionId: SETUP_IDENTITY.id, harness: SETUP_IDENTITY.harness });
+			return result.structuredContent ?? JSON.parse(result.content[0].text);
+		};
+		await call("save_plan", { planText: oneTaskPlan(files.map((file) => file.path)), confirmed: true, planId: "review" });
+		pi.prompt("/mode build");
+		await waitFor(() => pi!.notices.some((notice) => /Mode: Build/.test(notice)), "Build mode", PI_READY_MS, pi);
+		pi.prompt(SCRIPT_MARKER);
+		const evidenceDir = path.join(agentDir, "plans", sessionId, "evidence");
+		const bundleFile = await waitFor(async () => {
+			if (!fake.state.done) return undefined;
+			const names = existsSync(evidenceDir) ? (await fs.readdir(evidenceDir)).filter((name) => name.endsWith(".json")) : [];
+			return names.length === 1 ? path.join(evidenceDir, names[0]) : undefined;
+		}, "scripted Build turn and evidence bundle", SCRIPTED_TURN_MS, pi);
+		if (fake.state.errors.length) throw new Error(`fake model errors: ${fake.state.errors.join("; ")}`);
+		const implTree = (await gitOk(repo, ["rev-parse", "HEAD^{tree}"])).trim();
+		const bundleId = path.basename(bundleFile, ".json");
+		Object.assign(runJson, { sessionId, bundleId, implCommit: (await gitOk(repo, ["rev-parse", "HEAD"])).trim(), implTree });
+		await fs.writeFile(path.join(runDir, "run.json"), `${JSON.stringify(runJson, null, 2)}\n`, { mode: 0o600 });
+		return { runId, runDir, repo, implTree, bundleId, bundlePath: bundleFile, sessionId, stop };
+	} catch (error) {
+		await stop();
+		throw error;
+	}
+}
+
+async function reviewPrepareCommand(fixtureId: string, condition: string, rep: string): Promise<number> {
+	const handle = await reviewPrepare(fixtureId, condition, rep);
+	if (condition === "diff") {
+		console.log(`Review run ${handle.runId} prepared (diff only).\nPrompt: ${path.join(handle.runDir, "prompt.md")}\nReviewer works in: ${handle.repo}`);
+		return 0;
+	}
+	const pidFile = path.join(handle.runDir, "review.pid");
+	await fs.writeFile(pidFile, `${process.pid}\n`, { mode: 0o600 });
+	console.log(`Review run ${handle.runId} prepared: evidence bundle ${handle.bundleId}.\nPi is running for the reviewer in ${handle.repo}; keep this terminal open.\nStop with: npx --yes tsx bench/bench.ts review-stop ${handle.runId}   (or Ctrl-C)`);
+	await new Promise<void>((resolve) => {
+		process.once("SIGINT", () => resolve());
+		process.once("SIGTERM", () => resolve());
+	});
+	await handle.stop();
+	await fs.rm(pidFile, { force: true });
+	console.log(`Pi stopped for ${handle.runId}.`);
+	return 0;
+}
+
+export async function reviewStop(runId: string): Promise<void> {
+	if (!REVIEW_RUN_ID.test(runId)) throw new Error(`review run id must look like r1-bundle-r1, got ${JSON.stringify(runId)}`);
+	const pidFile = path.join(config().runsDir, runId, "review.pid");
+	if (!existsSync(pidFile)) {
+		console.log(`No running Pi for ${runId}.`);
+		return;
+	}
+	const pid = Number((await fs.readFile(pidFile, "utf8")).trim());
+	if (!Number.isInteger(pid) || pid <= 1) throw new Error(`${pidFile} does not hold a valid pid`);
+	try { process.kill(pid, "SIGTERM"); } catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		await fs.rm(pidFile, { force: true });
+	}
+	console.log(`Asked review-prepare (pid ${pid}) to stop Pi for ${runId}.`);
+}
+
 const HELP = `bench.ts — benchmark pilot runner (rules: bench/PROTOCOL.md)
 
   prepare <task> <A|B|C> <rep>      Create run <task>-<wf>-r<rep> outside the repo and print launch steps
@@ -538,6 +803,9 @@ const HELP = `bench.ts — benchmark pilot runner (rules: bench/PROTOCOL.md)
                                     abandon text may start with harness-error or tooling-failure
   score <run>                       Run hidden tests on the scored commit and append a results row
   check-tasks                       Verify every task: hidden tests fail on start, pass on solution
+  review-prepare <rN> <bundle|diff> <rep>
+                                    Build review run <rN>-<condition>-r<rep>; bundle keeps Pi running
+  review-stop <run>                 Stop the Pi that review-prepare keeps running for a bundle run
 
 Env: PI_BENCH_HOME (runs dir, default ~/.pi-bench/runs), PI_CODING_AGENT_DIR (host Pi dir for auth),
      CLAUDE_CONFIG_DIR (Claude Code dir for transcripts).`;
@@ -560,6 +828,13 @@ export async function main(argv: string[]): Promise<number> {
 				return 0;
 			case "check-tasks":
 				return (await checkTasks()) ? 0 : 1;
+			case "review-prepare":
+				if (args.length !== 3) throw new Error("usage: review-prepare <rN> <bundle|diff> <rep>");
+				return await reviewPrepareCommand(args[0], args[1], args[2]);
+			case "review-stop":
+				if (args.length !== 1) throw new Error("usage: review-stop <run>");
+				await reviewStop(args[0]);
+				return 0;
 			case undefined:
 			case "help":
 			case "--help":

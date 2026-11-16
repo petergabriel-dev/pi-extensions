@@ -6,9 +6,33 @@ import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CAP_MINUTES, checkTasks, claudeSlug, config, estimateCost, note, parseTap, prepare, scrubEnv, score } from "./bench.ts";
+import * as bridgeClient from "../agent/claude-bridge-client/pi-bridge-mcp.js";
+import { CAP_MINUTES, checkTasks, claudeSlug, config, estimateCost, loadReviewFixture, note, parseTap, prepare, REVIEW_TICK_NOTE, reviewPrepare, reviewStop, scrubEnv, score } from "./bench.ts";
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(BENCH_DIR, "..");
+
+// Bundles of one fixture differ only by attempt id and timing. Timings also shift where the
+// byte-bounded output tail starts, so tails are compared on the whole lines both end with.
+function assertSameBundle(a: any, aRepo: string, b: any, bRepo: string) {
+	const clean = (bundle: any, repo: string) => {
+		const { attemptId: _attemptId, ...rest } = bundle;
+		rest.commands = rest.commands.map(({ ms: _ms, ...command }: any) => ({
+			...command,
+			tail: String(command.tail).split(repo).join("<repo>").replace(/\(\d+(?:\.\d+)?ms\)/g, "(Nms)").replace(/duration_ms \d+(?:\.\d+)?/g, "duration_ms N").split("\n").slice(1),
+		}));
+		return rest;
+	};
+	const x = clean(a, aRepo);
+	const y = clean(b, bRepo);
+	x.commands.forEach((command: any, index: number) => {
+		const other = y.commands[index];
+		const keep = Math.min(command.tail.length, other?.tail.length ?? 0);
+		command.tail = command.tail.slice(-keep || command.tail.length);
+		if (other) other.tail = other.tail.slice(-keep || other.tail.length);
+	});
+	assert.deepEqual(x, y, "bundle content repeats except attempt id and timing");
+}
 const SK_TOKEN = `sk-benchtest${"Z9".repeat(10)}`;
 
 async function write(file: string, text: string) {
@@ -179,6 +203,38 @@ async function main() {
 		await fs.rename(path.join(t2, "hidden", "test", "t1-hidden.test.ts"), path.join(t2, "hidden", "test", "t2-hidden.test.ts"));
 		await fs.writeFile(path.join(t2, "hidden", "test", "t2-hidden.test.ts"), 'import { test } from "node:test";\nimport assert from "node:assert/strict";\ntest("R1 trivially", () => assert.ok(true));\ntest("R2 trivially", () => assert.ok(true));\n');
 		assert.equal(await checkTasks(), false, "hidden tests passing on start must fail check-tasks");
+
+		// Review fixtures: the real bench/review set, runs in a temp runs dir, scripted model only.
+		process.env.BENCH_ROOT = BENCH_DIR;
+		process.env.PI_BENCH_HOME = path.join(root, "review-runs");
+		const fixture = await loadReviewFixture("r1");
+		const first = await reviewPrepare("r1", "bundle", "1");
+		let second;
+		try {
+			const bundle = JSON.parse(await fs.readFile(first.bundlePath!, "utf8"));
+			const npmTest = bundle.commands.find((c: any) => c.cmd === "npm test");
+			assert.ok(npmTest && npmTest.exit !== 0 && npmTest.exit !== null, "seeded fixture records a failing npm test");
+			assert.equal(bundle.tickedBy, "pi");
+			assert.deepEqual(bundle.warnings, []);
+			const overview = await bridgeClient.callTool("recall_memory", { mode: "review", query: "review", cwd: first.repo, sessionId: "bench-test-reviewer", harness: "cursor" });
+			const task = JSON.parse(overview.content[0].text).result.review.tasks[0];
+			assert.equal(task.note, REVIEW_TICK_NOTE, "tick note is neutral");
+			assert.equal(task.bundleId, first.bundleId);
+			await rejects(() => reviewPrepare("r1", "bundle", "1"), /already exists/);
+			second = await reviewPrepare("r1", "bundle", "2");
+			const again = JSON.parse(await fs.readFile(second.bundlePath!, "utf8"));
+			assertSameBundle(bundle, first.repo, again, second.repo);
+		} finally {
+			await first.stop();
+			await second?.stop();
+		}
+		const diff = await reviewPrepare("r1", "diff", "1");
+		assert.equal(diff.implTree, first.implTree, "both conditions review the same implementation tree");
+		const prompt = await fs.readFile(path.join(diff.runDir, "prompt.md"), "utf8");
+		assert.ok(prompt.includes("totalShipped") && prompt.includes("```diff"), "prompt carries SPEC and diff");
+		for (const label of fixture.labels) assert.ok(!prompt.includes(label.defect), "labels never enter the prompt");
+		assert.equal(gitIn(diff.repo, ["ls-files", "labels.json"]), "");
+		await reviewStop("r1-bundle-r1");
 		console.log("test-bench passed");
 	} finally {
 		for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
