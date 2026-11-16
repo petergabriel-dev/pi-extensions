@@ -1,0 +1,10 @@
+{
+  "asOf": null,
+  "source": null,
+  "unit": "USD per 1M tokens",
+  "note": "Fill from each provider's official pricing page before reporting, then set asOf (YYYY-MM-DD) and source. A null price makes that model's cost unavailable; never estimate a price. Keys are <provider>/<model> as recorded in Pi session logs and Claude Code transcripts (anthropic/<model>).",
+  "models": {
+    "openai-codex/gpt-6-luna": { "input": null, "output": null, "cacheRead": null, "cacheWrite": null },
+    "anthropic/claude-opus-5-5": { "input": null, "output": null, "cacheRead": null, "cacheWrite": null }
+  }
+}
