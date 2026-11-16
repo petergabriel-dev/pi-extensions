@@ -29,7 +29,11 @@ const HIDDEN_TIMEOUT_MS = 5 * 60_000;
 const FIXED_DATE = "2026-01-01T00:00:00Z";
 const GIT_IDENTITY = { GIT_AUTHOR_NAME: "bench", GIT_AUTHOR_EMAIL: "bench@example.invalid", GIT_COMMITTER_NAME: "bench", GIT_COMMITTER_EMAIL: "bench@example.invalid" };
 const TASK_ID = /^t[0-9]{1,3}$/;
-const RUN_ID = /^(t[0-9]{1,3})-([ABC])-r([1-9][0-9]{0,2})$/;
+// Rep ids: r1, r2, ... for pilot runs; s1, s2, ... for shakedown runs (excluded from verdicts).
+const RUN_ID = /^(t[0-9]{1,3})-([ABC])-([rs][1-9][0-9]{0,2})$/;
+const REP = /^s?[1-9][0-9]{0,2}$/;
+const repId = (rep: string) => (rep.startsWith("s") ? rep : `r${rep}`);
+export const isShakedown = (runId: string) => /-s[1-9][0-9]{0,2}$/.test(runId);
 const REQ_ID = /^R[1-9][0-9]{0,2}$/;
 
 type Workflow = "A" | "B" | "C";
@@ -168,13 +172,13 @@ async function safeRunsDir(): Promise<string> {
 
 export async function prepare(taskId: string, workflow: string, rep: string): Promise<{ runId: string; runDir: string }> {
 	if (!["A", "B", "C"].includes(workflow)) throw new Error("workflow must be A, B, or C");
-	if (!/^[1-9][0-9]{0,2}$/.test(rep)) throw new Error("rep must be a positive integer");
+	if (!REP.test(rep)) throw new Error("rep must be a positive integer, or s<n> for a shakedown run");
 	const task = await loadTask(taskId);
 	const cfg = config();
 	const hostAuth = path.join(cfg.hostAgentDir, "auth.json");
 	if (!existsSync(hostAuth)) throw new Error(`no Pi login at ${hostAuth}; log in to Pi first (or set PI_CODING_AGENT_DIR)`);
 	const runsDir = await safeRunsDir();
-	const runId = `${taskId}-${workflow}-r${rep}`;
+	const runId = `${taskId}-${workflow}-${repId(rep)}`;
 	const runDir = path.join(runsDir, runId);
 	try { await fs.mkdir(runDir, { mode: 0o700 }); } catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`run ${runId} already exists; use a new rep id (PROTOCOL.md section 11)`);
@@ -200,7 +204,7 @@ export async function prepare(taskId: string, workflow: string, rep: string): Pr
 	if (installed.version !== repoPackage.version) warnings.push(`installed pi-extensions ${installed.version ?? "unavailable"} differs from repo ${repoPackage.version ?? "unavailable"}`);
 	if (workflow === "C" && !CURSOR_MODEL) warnings.push("Cursor model not pinned yet; set CURSOR_MODEL in bench/bench.ts at shakedown (PROTOCOL.md Amendments)");
 	const runJson = {
-		schema: 1, runId, task: taskId, workflow, rep: Number(rep), createdAt: new Date().toISOString(), startCommit,
+		schema: 1, runId, task: taskId, workflow, rep: repId(rep), createdAt: new Date().toISOString(), startCommit,
 		repoCommit: repoHead.ok ? repoHead.stdout.trim() : "unavailable", repoDirty: repoStatus.ok ? repoStatus.stdout.trim() !== "" : null,
 		versions: { pi: await version("pi"), piPackageInstalled: installed.version ?? "unavailable", piPackageRepo: repoPackage.version ?? "unavailable", claude: await version("claude"), cursorAgent: await version("cursor-agent"), node: process.version },
 		models: { pi: PI_MODEL, piThinking: PI_THINKING, claude: CLAUDE_MODEL, cursor: CURSOR_MODEL ?? "unpinned" },
@@ -538,7 +542,7 @@ export async function checkTasks(): Promise<boolean> {
 // Review evaluation (PROTOCOL.md section 9)
 
 const REVIEW_FIXTURE_ID = /^r[0-9]{1,3}$/;
-const REVIEW_RUN_ID = /^(r[0-9]{1,3})-(bundle|diff)-r([1-9][0-9]{0,2})$/;
+const REVIEW_RUN_ID = /^(r[0-9]{1,3})-(bundle|diff)-([rs][1-9][0-9]{0,2})$/;
 export const REVIEW_TASK_TITLE = "Implement SPEC.md";
 export const REVIEW_TICK_NOTE = "Implemented per SPEC.md.";
 const SETUP_IDENTITY = { harness: "claude", id: "bench-setup" };
@@ -671,11 +675,11 @@ export interface ReviewHandle { runId: string; runDir: string; repo: string; imp
 
 export async function reviewPrepare(fixtureId: string, condition: string, rep: string): Promise<ReviewHandle> {
 	if (condition !== "bundle" && condition !== "diff") throw new Error("condition must be bundle or diff");
-	if (!/^[1-9][0-9]{0,2}$/.test(rep)) throw new Error("rep must be a positive integer");
+	if (!REP.test(rep)) throw new Error("rep must be a positive integer, or s<n> for a shakedown run");
 	const fixture = await loadReviewFixture(fixtureId);
 	const cfg = config();
 	const runsDir = await safeRunsDir();
-	const runId = `${fixtureId}-${condition}-r${rep}`;
+	const runId = `${fixtureId}-${condition}-${repId(rep)}`;
 	const runDir = path.join(runsDir, runId);
 	try { await fs.mkdir(runDir, { mode: 0o700 }); } catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`run ${runId} already exists; use a new rep id (PROTOCOL.md section 9)`);
@@ -693,7 +697,7 @@ export async function reviewPrepare(fixtureId: string, condition: string, rep: s
 	await gitOk(repo, ["commit", "-q", "-m", "Start state"], dated);
 	await gitOk(repo, ["tag", "start"]);
 	const files = await implementationFiles(repo, path.join(fixture.dir, "impl.patch"));
-	const runJson: Record<string, unknown> = { schema: 1, kind: "review", runId, fixture: fixtureId, condition, rep: Number(rep), createdAt: new Date().toISOString(), cursorModel: CURSOR_MODEL ?? "unpinned" };
+	const runJson: Record<string, unknown> = { schema: 1, kind: "review", runId, fixture: fixtureId, condition, rep: repId(rep), createdAt: new Date().toISOString(), cursorModel: CURSOR_MODEL ?? "unpinned" };
 
 	if (condition === "diff") {
 		for (const file of files) await fs.writeFile(path.join(repo, file.path), file.content);
@@ -966,9 +970,161 @@ export async function reviewScore(runId: string): Promise<Record<string, unknown
 	return row;
 }
 
+// ---------------------------------------------------------------------------
+// Report (PROTOCOL.md sections 7, 8, 11)
+
+export const REPORT_START = "<!-- bench:generated:start (bench.ts report rewrites this block; edit outside it) -->";
+export const REPORT_END = "<!-- bench:generated:end -->";
+const WORKFLOWS = ["A", "B", "C"] as const;
+const PAIRS = [["A", "B"], ["A", "C"], ["B", "C"]] as const;
+
+async function readRows(file: string): Promise<any[]> {
+	if (!existsSync(file)) return [];
+	const latest = new Map<string, any>();
+	for (const line of (await fs.readFile(file, "utf8")).split("\n").filter(Boolean)) {
+		const row = JSON.parse(line);
+		latest.set(row.runId, row);
+	}
+	return [...latest.values()];
+}
+
+const median = (values: number[]): number | null => {
+	if (values.length === 0) return null;
+	const sorted = [...values].sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+const minutes = (ms: number | null) => (ms === null ? "—" : (ms / 60_000).toFixed(1));
+const totalTokens = (value: unknown): number | null => (value && typeof value === "object" ? Object.values(value as ModelUsage).reduce((sum, u) => sum + u.input + u.output + u.cacheRead + u.cacheWrite, 0) : null);
+
+// X beats Y only if X wins by >= 2 passes in total and out-passes Y on >= 2 tasks.
+export function verdict(rows: any[], x: string, y: string): string {
+	const tasks = [...new Set(rows.map((row) => row.task))];
+	const passes = (wf: string, task: string) => rows.filter((row) => row.workflow === wf && row.task === task && row.pass === true).length;
+	const decide = (a: string, b: string) => {
+		const d = tasks.map((task) => passes(a, task) - passes(b, task));
+		return d.reduce((sum, v) => sum + v, 0) >= 2 && d.filter((v) => v > 0).length >= 2;
+	};
+	if (decide(x, y)) return `${x} beats ${y}`;
+	if (decide(y, x)) return `${y} beats ${x}`;
+	return "no meaningful difference";
+}
+
+function table(header: string[], rows: string[][]): string {
+	return [`| ${header.join(" | ")} |`, `|${header.map(() => "---").join("|")}|`, ...rows.map((row) => `| ${row.join(" | ")} |`)].join("\n");
+}
+
+export function renderReport(codingRows: any[], reviewRows: any[], incomplete: string[], pricesAsOf: string | null): string {
+	const coding = codingRows.filter((row) => !isShakedown(row.runId));
+	const review = reviewRows.filter((row) => !isShakedown(row.runId));
+	const shakedown = [...codingRows, ...reviewRows].filter((row) => isShakedown(row.runId)).map((row) => row.runId).sort();
+	const tasks = [...new Set(coding.map((row) => row.task))].sort();
+	const byWf = (wf: string, rows = coding) => rows.filter((row) => row.workflow === wf);
+	const out: string[] = [];
+	out.push(`Coding runs scored: ${coding.length}. Review runs scored: ${review.length}. Every row is included; counts are descriptive, and nothing here is a claim of statistical significance (PROTOCOL.md section 8).`, "");
+
+	out.push("### Hidden-test passes (passing runs / runs)", "");
+	out.push(table(["Task", "Category", ...WORKFLOWS], tasks.map((task) => {
+		const category = coding.find((row) => row.task === task)?.category ?? "";
+		return [task, category, ...WORKFLOWS.map((wf) => {
+			const runs = coding.filter((row) => row.task === task && row.workflow === wf);
+			return runs.length ? `${runs.filter((row) => row.pass === true).length}/${runs.length}` : "—";
+		})];
+	})), "");
+	const passCount = (wf: string) => byWf(wf).filter((row) => row.pass === true).length;
+	out.push("```mermaid", "xychart-beta", '  title "Hidden-test passes per workflow"', "  x-axis [A, B, C]", `  y-axis "Passing runs" 0 --> ${Math.max(1, ...WORKFLOWS.map((wf) => byWf(wf).length))}`, `  bar [${WORKFLOWS.map(passCount).join(", ")}]`, "```", "");
+
+	out.push("### Success-rule verdicts", "");
+	const clean = coding.filter((row) => !row.contamination?.flagged);
+	out.push(table(["Pair", "All runs", "Without contaminated runs", "Robust"], PAIRS.map(([x, y]) => {
+		const all = verdict(coding, x, y);
+		const without = verdict(clean, x, y);
+		return [`${x}–${y}`, all, without, all === without ? "yes" : "no"];
+	})), "");
+
+	out.push("### Requirements failed (task × workflow, count of runs)", "");
+	out.push(table(["Task", ...WORKFLOWS], tasks.map((task) => [task, ...WORKFLOWS.map((wf) => {
+		const counts = new Map<string, number>();
+		for (const row of coding.filter((r) => r.task === task && r.workflow === wf)) {
+			for (const [req, ok] of Object.entries(row.requirements ?? {})) if (!ok) counts.set(req, (counts.get(req) ?? 0) + 1);
+		}
+		return counts.size ? [...counts].map(([req, n]) => `${req}×${n}`).join(", ") : "—";
+	})])), "");
+
+	out.push("### Time (median minutes)", "");
+	out.push(table(["Workflow", "Runs", "Wall clock", "Agent time", "Hand-off wait"], WORKFLOWS.map((wf) => {
+		const runs = byWf(wf);
+		return [wf, String(runs.length), minutes(median(runs.map((r) => r.wallClockMs))), minutes(median(runs.map((r) => r.agentMs))), minutes(median(runs.map((r) => r.handoffWaitMs)))];
+	})), "");
+
+	out.push("### Tokens and estimated cost", "");
+	out.push(`Medians over the runs where the value is available. Tokens include input, output, and cache tokens. Costs are estimates from list prices ${pricesAsOf ? `dated ${pricesAsOf}` : "that are not filled in yet"} (PROTOCOL.md section 7).`, "");
+	const roleCell = (runs: any[], role: string, value: (row: any) => number | null) => {
+		if (runs.every((row) => row.tokens?.[role] === "not-used")) return "not used";
+		const values = runs.map(value).filter((v): v is number => typeof v === "number");
+		const m = median(values);
+		return m === null ? `unavailable (0 of ${runs.length})` : `${m.toLocaleString("en-US", { maximumFractionDigits: 4 })} (${values.length} of ${runs.length})`;
+	};
+	out.push(table(["Workflow", "Pi tokens", "Claude Code tokens", "Cursor tokens", "Pi est. USD", "Claude Code est. USD"], WORKFLOWS.map((wf) => {
+		const runs = byWf(wf);
+		return [wf, roleCell(runs, "pi", (r) => totalTokens(r.tokens?.pi)), roleCell(runs, "claude", (r) => totalTokens(r.tokens?.claude)), roleCell(runs, "cursor", (r) => totalTokens(r.tokens?.cursor)), roleCell(runs, "pi", (r) => (typeof r.cost?.pi === "number" ? r.cost.pi : null)), roleCell(runs, "claude", (r) => (typeof r.cost?.claude === "number" ? r.cost.claude : null))];
+	})), "");
+
+	out.push("### Human involvement, failures, and context", "");
+	out.push(table(["Workflow", "Gates", "Interventions", "Context misses", "Workflow failures"], WORKFLOWS.map((wf) => {
+		const runs = byWf(wf);
+		const failures = new Map<string, number>();
+		for (const row of runs) for (const kind of row.workflowFailures ?? []) failures.set(kind, (failures.get(kind) ?? 0) + 1);
+		const sum = (key: string) => String(runs.reduce((n, row) => n + (row[key]?.length ?? 0), 0));
+		return [wf, sum("gates"), sum("interventions"), sum("contextMisses"), failures.size ? [...failures].map(([k, n]) => `${k}×${n}`).join(", ") : "—"];
+	})), "");
+	const contaminated = coding.filter((row) => row.contamination?.flagged).map((row) => row.runId).sort();
+	out.push(`Contaminated runs: ${contaminated.length ? contaminated.join(", ") : "none"}.`, "");
+
+	out.push("### Review evaluation (valid reviews only)", "");
+	out.push(table(["Condition", "Valid / all", "True pos.", "False pos.", "False neg.", "Duplicates", "Recall", "Precision", "False pos. on correct fixtures"], ["bundle", "diff"].map((condition) => {
+		const all = review.filter((row) => row.condition === condition);
+		const valid = all.filter((row) => row.valid);
+		const sum = (key: string, rows = valid) => rows.reduce((n, row) => n + (row[key] ?? 0), 0);
+		const tp = sum("tp"), fp = sum("fp"), fn = sum("fn");
+		const ratio = (num: number, den: number) => (den ? (num / den).toFixed(2) : "n/a");
+		return [condition, `${valid.length} / ${all.length}`, String(tp), String(fp), String(fn), String(sum("duplicates")), ratio(tp, tp + fn), ratio(tp, tp + fp), String(sum("fp", valid.filter((row) => row.labels === 0)))];
+	})), "");
+	const invalid = review.filter((row) => !row.valid).map((row) => `${row.runId} (${row.invalidReason ?? "invalid"})`);
+	const interactive = review.filter((row) => row.mode === "interactive").map((row) => row.runId);
+	out.push(`Invalid reviews: ${invalid.length ? invalid.join(", ") : "none"}. Interactive reviews: ${interactive.length ? interactive.join(", ") : "none"}.`, "");
+
+	out.push("### Incomplete and shakedown runs", "");
+	out.push(`Prepared but not scored: ${incomplete.length ? incomplete.join(", ") : "none"}.`, "");
+	out.push(`Shakedown runs (excluded from the tables above): ${shakedown.length ? shakedown.join(", ") : "none"}.`);
+	return out.join("\n");
+}
+
+export async function report(): Promise<string> {
+	const cfg = config();
+	const file = path.join(cfg.benchRoot, "REPORT.md");
+	if (!existsSync(file)) throw new Error(`${file} is missing`);
+	const text = await fs.readFile(file, "utf8");
+	const start = text.indexOf(REPORT_START);
+	const end = text.indexOf(REPORT_END);
+	if (start < 0 || end < start || text.indexOf(REPORT_START, start + 1) >= 0) throw new Error("REPORT.md must contain exactly one generated block between its start and end markers");
+	const coding = await readRows(path.join(cfg.resultsDir, "coding.jsonl"));
+	const reviews = await readRows(path.join(cfg.resultsDir, "review.jsonl"));
+	const scored = new Set([...coding, ...reviews].map((row) => row.runId));
+	const runIds = existsSync(cfg.runsDir) ? (await fs.readdir(cfg.runsDir)).filter((name) => (RUN_ID.test(name) || REVIEW_RUN_ID.test(name)) && existsSync(path.join(cfg.runsDir, name, "run.json"))) : [];
+	const incomplete = runIds.filter((id) => !scored.has(id)).sort();
+	const prices = await readJson(path.join(cfg.benchRoot, "prices.json")).catch(() => null);
+	const body = renderReport(coding, reviews, incomplete, prices?.asOf ?? null);
+	const next = `${text.slice(0, start + REPORT_START.length)}\n\n${body}\n\n${text.slice(end)}`;
+	await fs.writeFile(file, next);
+	console.log(`REPORT.md regenerated from ${coding.length} coding and ${reviews.length} review rows; ${incomplete.length} incomplete run(s).`);
+	return next;
+}
+
 const HELP = `bench.ts — benchmark pilot runner (rules: bench/PROTOCOL.md)
 
   prepare <task> <A|B|C> <rep>      Create run <task>-<wf>-r<rep> outside the repo and print launch steps
+                                    (rep s1, s2, ... makes a shakedown run <task>-<wf>-s<n>)
   note <run> <kind> [text]          Record ${NOTE_KINDS.join("|")}
                                     handoff text starts with 'wait' or 'go'; context-miss with R<n>;
                                     abandon text may start with harness-error or tooling-failure
@@ -981,6 +1137,7 @@ const HELP = `bench.ts — benchmark pilot runner (rules: bench/PROTOCOL.md)
                                     before CURSOR_MODEL is pinned
   review-score <run>                Match findings to hidden labels, append a review row, stop Pi.
                                     Interactive fallback: diff runs read findings.json in the run dir
+  report                            Rewrite the generated block of bench/REPORT.md from results
 
 Env: PI_BENCH_HOME (runs dir, default ~/.pi-bench/runs), PI_CODING_AGENT_DIR (host Pi dir for auth),
      CLAUDE_CONFIG_DIR (Claude Code dir for transcripts).`;
@@ -1019,6 +1176,10 @@ export async function main(argv: string[]): Promise<number> {
 			case "review-score":
 				if (args.length !== 1) throw new Error("usage: review-score <run>");
 				await reviewScore(args[0]);
+				return 0;
+			case "report":
+				if (args.length !== 0) throw new Error("usage: report");
+				await report();
 				return 0;
 			case undefined:
 			case "help":

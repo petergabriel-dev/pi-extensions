@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as bridgeClient from "../agent/claude-bridge-client/pi-bridge-mcp.js";
-import { CAP_MINUTES, checkTasks, claudeSlug, config, cursorModelFor, estimateCost, loadReviewFixture, matchFindings, note, parseDiffFindings, parseTap, prepare, REVIEW_TICK_NOTE, reviewPrepare, reviewRun, reviewScore, reviewStop, scrubEnv, score } from "./bench.ts";
+import { CAP_MINUTES, checkTasks, claudeSlug, config, cursorModelFor, estimateCost, loadReviewFixture, matchFindings, note, parseDiffFindings, parseTap, prepare, report, REPORT_END, REPORT_START, REVIEW_TICK_NOTE, reviewPrepare, reviewRun, reviewScore, reviewStop, scrubEnv, score, verdict } from "./bench.ts";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(BENCH_DIR, "..");
@@ -302,6 +302,52 @@ async function main() {
 		assert.equal(reviewRows.length, 3);
 		assert.ok(!reviewRows.join("\n").includes(homedir()), "review rows carry no home paths");
 		assert.equal(existsSync(path.join(BENCH_DIR, "results")), false, "the test never writes results into the repository");
+
+		// Report: success-rule edges, robustness, shakedown and incomplete runs, hand-written text kept.
+		const mk = (runId: string, pass: boolean, extra: Record<string, unknown> = {}) => {
+			const [task, workflow] = runId.split("-");
+			return { runId, task, workflow, category: `${task} category`, pass, requirements: { R1: pass }, wallClockMs: 600_000, agentMs: 540_000, handoffWaitMs: 60_000, tokens: { pi: { "p/m": { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 } }, claude: "not-used", cursor: "not-used" }, cost: { pi: "unavailable", claude: "not-used", cursor: "not-used" }, gates: [], interventions: [], contextMisses: [], contamination: { flagged: false }, workflowFailures: [], ...extra };
+		};
+		const signal = [mk("t1-A-r1", true), mk("t1-A-r2", true), mk("t2-A-r1", true), mk("t2-A-r2", false), mk("t1-B-r1", true), mk("t1-B-r2", false), mk("t2-B-r1", false), mk("t2-B-r2", false)];
+		assert.equal(verdict(signal, "A", "B"), "A beats B", "2 of 8 across 2 tasks is a signal");
+		const oneTask = [mk("t1-A-r1", true), mk("t1-A-r2", true), mk("t2-A-r1", true), mk("t2-A-r2", false), mk("t1-B-r1", false), mk("t1-B-r2", false), mk("t2-B-r1", true), mk("t2-B-r2", false)];
+		assert.equal(verdict(oneTask, "A", "B"), "no meaningful difference", "2 of 8 within one task is not");
+		assert.equal(verdict(signal, "B", "A"), "A beats B");
+
+		const reportRoot = path.join(root, "bench-report");
+		await fs.mkdir(path.join(reportRoot, "results"), { recursive: true });
+		const skeleton = (await fs.readFile(path.join(BENCH_DIR, "REPORT.md"), "utf8")).replace("*To be written after the pilot.* Every failed", "HAND-WRITTEN failure notes. Every failed");
+		await fs.writeFile(path.join(reportRoot, "REPORT.md"), skeleton);
+		await fs.writeFile(path.join(reportRoot, "prices.json"), JSON.stringify({ asOf: "2026-11-16", models: {} }));
+		// Contaminated A run is what makes A beat B; without it the verdict flips, so it is not robust.
+		const codingRows = [signal[0], mk("t1-A-r2", true, { contamination: { flagged: true } }), ...signal.slice(2), mk("t1-A-s1", false, { workflowFailures: ["timeout"] })];
+		await fs.writeFile(path.join(reportRoot, "results", "coding.jsonl"), [mk("t1-A-r1", false), ...codingRows].map((r) => JSON.stringify(r)).join("\n") + "\n");
+		await fs.writeFile(path.join(reportRoot, "results", "review.jsonl"), [
+			{ runId: "r1-bundle-r1", condition: "bundle", valid: true, labels: 1, tp: 1, fp: 1, fn: 0, duplicates: 0, mode: "headless" },
+			{ runId: "r5-bundle-r1", condition: "bundle", valid: true, labels: 0, tp: 0, fp: 2, fn: 0, duplicates: 0, mode: "headless" },
+			{ runId: "r1-diff-r1", condition: "diff", valid: false, invalidReason: "x", labels: 1, tp: 0, fp: 0, fn: 1, duplicates: 0, mode: "interactive" },
+		].map((r) => JSON.stringify(r)).join("\n") + "\n");
+		const reportRuns = path.join(root, "report-runs");
+		await write(path.join(reportRuns, "t3-C-r1", "run.json"), "{}");
+		await write(path.join(reportRuns, "t1-A-r1", "run.json"), "{}");
+		process.env.BENCH_ROOT = reportRoot;
+		process.env.PI_BENCH_HOME = reportRuns;
+		const rendered = await report();
+		const generated = rendered.slice(rendered.indexOf(REPORT_START), rendered.indexOf(REPORT_END));
+		assert.match(generated, /\| t1 \| t1 category \| 2\/2 \| 1\/2 \| — \|/, "latest row per run wins and shakedown runs are excluded");
+		assert.match(generated, /\| A–B \| A beats B \| no meaningful difference \| no \|/);
+		assert.match(generated, /Contaminated runs: t1-A-r2\./);
+		assert.match(generated, /Prepared but not scored: t3-C-r1\./);
+		assert.match(generated, /Shakedown runs \(excluded from the tables above\): t1-A-s1\./);
+		assert.match(generated, /\| bundle \| 2 \/ 2 \| 1 \| 3 \| 0 \| 0 \| 1\.00 \| 0\.25 \| 2 \|/);
+		assert.match(generated, /Invalid reviews: r1-diff-r1 \(x\)/);
+		assert.match(generated, /bar \[3, 1, 0\]/);
+		assert.doesNotMatch(generated, /statistically significant(?! \(PROTOCOL)/);
+		const outside = (text: string) => text.slice(0, text.indexOf(REPORT_START)) + text.slice(text.indexOf(REPORT_END));
+		assert.equal(outside(rendered), outside(skeleton), "hand-written text outside the markers is untouched");
+		assert.equal(await report(), rendered, "regenerating is stable");
+		await fs.writeFile(path.join(reportRoot, "REPORT.md"), "# no markers\n");
+		await rejects(() => report(), /exactly one generated block/);
 		console.log("test-bench passed");
 	} finally {
 		for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
