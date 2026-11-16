@@ -414,7 +414,8 @@ export async function score(runId: string): Promise<Record<string, unknown>> {
 	const noCommit = scoredCommit === runJson.startCommit;
 	const timeout = events.some((e) => e.kind === "timeout") || commitsAfterCap > 0;
 	const abandon = events.find((e) => e.kind === "abandon");
-	const lastNoteMs = Math.max(...events.map((e) => Date.parse(e.at)));
+	// context-miss notes are written after the run ends (README), so they never set the end time.
+	const lastNoteMs = Math.max(...events.filter((e) => e.kind !== "context-miss").map((e) => Date.parse(e.at)));
 	const endMs = timeout ? capMs : !noCommit && inCap ? inCap.ms : Math.min(abandon ? Date.parse(abandon.at) : lastNoteMs, capMs);
 	const wallClockMs = Math.max(0, endMs - startMs);
 	const handoffWaitMs = handoffWait(events, startMs, endMs);

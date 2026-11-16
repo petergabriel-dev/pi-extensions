@@ -299,6 +299,17 @@
 - **Notification protocol depends on terminal environment.** Windows Terminal, Kitty, and OSC-777 terminals use different paths; unsupported terminals may show nothing or render escape sequences.
 - **`agent_end` may fire during automated/non-interactive work.** Notification output is side effect, not proof verification succeeded.
 
+## Benchmark pilot
+
+- **The run path keys Claude Code state.** Claude Code keeps project memory and transcripts under `~/.claude/projects/<run path, non-alphanumerics as ->`. A unique run path gives each run fresh memory, and `score` finds transcripts by that path, so never move or rename a run dir before scoring.
+- **The Pi login is shared by symlink.** Pi writes `auth.json` through the symlink but locks the symlink's own path (`proper-lockfile`, `realpath: false`), so a token refresh by another Pi session is not serialized with the run. Run no other Pi session during a benchmark run.
+- **Agents can find the repository.** Pi runs with `-e <repo>`, and extension and skill paths reveal the checkout, so an agent could open `bench/tasks/`. `score` scans Pi and Claude Code logs for the bench path and hidden test names and flags the run; Cursor logs are not scanned (`unscanned: ["cursor"]`).
+- **Only committed work is scored.** The scored commit is the last first-parent commit dated within the cap; uncommitted changes are ignored.
+- **Headless Pi needs a `.pi/` marker.** Without `.pi/` in the run repo, the bridge never writes presence and `review-prepare` times out waiting for it.
+- **Evidence bundle ids do not repeat.** A bundle includes a random `attemptId` and per-command `ms`, so a scripted review build gets a new id each time. Compare content without those fields, and compare output tails on their shared whole lines, because timings shift where the byte-bounded tail starts.
+- **Task patches carry significant whitespace.** `git diff --check` flags `bench/tasks/*/*.patch` and `bench/review/*/impl.patch` because blank diff context lines are a single space. Never strip it; `check-tasks` fails if a patch is corrupted.
+- **tsx compiles `bench/` as CommonJS.** Top-level `await` fails with `Top-level await is currently not supported with the "cjs" output format`; entry points use `main().then(...)`.
+
 ## Cleanup
 
 - **Foreground exit is safest.** Use `/quit` or interrupt, wait for process, then remove ignored bridge state.

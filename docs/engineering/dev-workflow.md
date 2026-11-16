@@ -213,6 +213,7 @@ This runs:
 2. Focused ask-user-question queue test, bridge request-queue and recall-ranking tests (`test:claude-bridge`), bridge client tests (`test:bridge-client`), the cross-process bridge e2e (`test:bridge-e2e`), then CCC, engineering-docs, personal-memory, subagent RPC/timeout/lifecycle, and workflow-mode tests.
 3. Configured TypeScript checks.
 4. Cursor read-only hook and neutral Cursor-kit tests.
+5. The benchmark runner test (`test:bench`; see Benchmark pilot).
 
 `test:bridge-e2e` (`agent/claude-bridge-client/test-bridge-e2e.mjs`, ~16 s) starts the bootstrap-installed Pi CLI in RPC mode in a temp project and drives it through the real MCP client: pairing, plan save and task reads, a Build lease approved through Pi's own confirm dialog, ticks, the read-only hook decision, duplicates, `/bridge-health`, and injected faults (paused Pi, oversized request, crash with a claimed request, after which the Build lease must be released). It does not check that the saved plan survives the crash restart: with no model calls Pi never writes the session file (see traps). It needs `npm run bootstrap` and fails if a model is called. Apart from that headless Pi, the gate does not call a model, run the live interactive bridge protocol test, exercise file-change rollback interactively, or verify terminal notification rendering.
 
@@ -300,6 +301,15 @@ done
 Automated coverage: `npm --prefix agent/extensions/workflow-modes test` (`test_review_redact`, `test_tick_commit`, `test_review_store`, `test_review_capture`, `test_review_bundle`, `test_review_state`, `test_review_read`, `test_review_write`, `test_review_command`, and the seeded-defect `test_review_fixture`), `npm run test:claude-bridge` (`test_review_payloads`), the subagents `test_run_summary`, the review steps in `npm run test:bridge-e2e`, and the review cases in `npm run test:security`.
 
 Live acceptance passed on 2026-11-13. Claude Code planned, Pi built, and the Cursor CLI reviewed a scratch seeded-defect fixture (cursor-agent updated itself from 2026.10.22 to 2026.11.11 during the session; run 2 and the rework loop ran on 2026.11.11, and run 1's review version was not recorded); the bar was at least two of the three seeded defects with valid references. Cursor reported all three in two findings (`add` subtracts and `npm test` fails; the config script prints the env token and a hardcoded key), with references Pi accepted. The bundle showed the token as `[REDACTED:env]` and the key as `[REDACTED:pattern]` in command output and hunks; neither raw value reached a bundle or `reviews.jsonl`. The loop completed: a human approved both findings as verified, Pi ticked a rework task citing them, and Cursor, not the fix author, resolved both with the fix commit. Caveats: Cursor's `conversation_id` was supplied by hand (see traps); Pi's tick note said the test failure was expected, so Cursor knew defects existed, though it located and cited each one itself; and in the first run Pi fixed the seed files instead of installing them, leaving nothing to find. To repeat it, plan a task that installs the seed files byte for byte and changes nothing else, expect Pi Build to refuse credential-printing fixture code until the owner states the values are fake and authorizes it, and review from a fresh Cursor chat. Cursor commands now get their id from the hook's first refusal; the 2026-11-13 run supplied it by hand.
+
+## Benchmark pilot
+
+`bench/` holds a pre-registered pilot that compares Pi alone, Claude Code planning for Pi, and that plus Cursor review (`bench/PROTOCOL.md`). It has a fixture app, four coding tasks with hidden tests, six review fixtures with hidden labels, and the runner `bench/bench.ts`; operator steps are in `bench/README.md`. It is not part of the package (`package.json` `files`).
+
+- `npm run test:bench` (part of `npm test`) runs `bench/test-bench.ts` in temp dirs with stub `pi`, `claude`, and `cursor-agent` commands. Its review part starts the bootstrap-installed Pi CLI in RPC mode against a loopback scripted model (`bench/fake-model.ts`), so it needs `npm run bootstrap`; no real model is called.
+- `npx --yes tsx bench/bench.ts check-tasks` checks that each task's hidden tests fail on its start state and pass on its reference solution.
+- Runs live outside the repository in `$PI_BENCH_HOME` (default `~/.pi-bench/runs`, mode 0700), each with a disposable Pi agent dir whose `auth.json` is a symlink to the host login. Only redacted rows and artifacts under `bench/results/` are committed; raw logs stay in run dirs.
+- `npx --yes tsx bench/bench.ts report` rewrites only the marked block in `bench/REPORT.md`.
 
 ## Harness Build leases
 
