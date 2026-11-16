@@ -1,0 +1,5 @@
+{
+  "category": "behavior-preserving refactor",
+  "budgetMinutes": 90,
+  "requirements": ["R1", "R2", "R3"]
+}

@@ -1,0 +1,1 @@
+[{ "file": "src/cli.ts", "lines": [46, 46], "defect": "Extra files are read without error handling, so an unreadable file throws instead of printing cannot read <file>." }]

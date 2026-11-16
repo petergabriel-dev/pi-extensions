@@ -1,0 +1,191 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..bf020fa 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -3,11 +3,16 @@ import { pathToFileURL } from "node:url";
+ import { balances, history, lowStock } from "./ledger.ts";
+ import { parseCsv } from "./parse.ts";
+ import { formatBalances, formatHistory } from "./report.ts";
++import type { Movement } from "./types.ts";
+ 
+ const USAGE = `usage:
+-  ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+-  ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+-  ledger low <file> --threshold <n>`;
++  ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--lenient]
++  ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--lenient]
++  ledger low <file> --threshold <n> [--lenient]
++
++Bad CSV lines are printed to stderr and exit with code 2; --lenient reports them and continues.`;
++
++const COMMANDS = new Set(["balance", "history", "low"]);
+ 
+ export interface CliResult {
+ 	code: number;
+@@ -30,14 +35,21 @@ const readFile = (file: string) => readFileSync(file, "utf8");
+ /** Runs one command and returns its output instead of printing it, so it can be tested. */
+ export function runCli(args: string[], read: (file: string) => string = readFile): CliResult {
+ 	const [command, file, ...rest] = args;
+-	if (!command || !file) return { code: 1, stdout: "", stderr: USAGE };
++	if (!command || !file || !COMMANDS.has(command)) return { code: 1, stdout: "", stderr: USAGE };
+ 	let text: string;
+ 	try {
+ 		text = read(file);
+ 	} catch {
+ 		return { code: 1, stdout: "", stderr: `cannot read ${file}` };
+ 	}
+-	const movements = parseCsv(text);
++	const { movements, errors } = parseCsv(text);
++	const problems = errors.map((error) => `line ${error.line}: ${error.message}`).join("\n");
++	if (errors.length > 0 && !rest.includes("--lenient")) return { code: 2, stdout: "", stderr: problems };
++	const result = run(command, rest, movements);
++	return problems ? { ...result, stderr: [problems, result.stderr].filter(Boolean).join("\n") } : result;
++}
++
++function run(command: string, rest: string[], movements: Movement[]): CliResult {
+ 	const range = { from: option(rest, "--from"), to: option(rest, "--to") };
+ 	switch (command) {
+ 		case "balance":
+diff --git a/src/parse.ts b/src/parse.ts
+index 3c1fa99..6cfb301 100644
+--- a/src/parse.ts
++++ b/src/parse.ts
+@@ -1,25 +1,46 @@
+-import type { Movement } from "./types.ts";
++import { isValidDate } from "./dates.ts";
++import type { Movement, ParseError } from "./types.ts";
+ 
+ const HEADER = "date,sku,qty,note";
++const WHOLE_NUMBER = /^[+-]?\d+$/;
++
++export interface ParseResult {
++	movements: Movement[];
++	errors: ParseError[];
++}
+ 
+ /** Canonical form of an item code: trimmed and upper-case. */
+ export function normalizeSku(sku: string): string {
+ 	return sku.trim().toUpperCase();
+ }
+ 
++function problem(fields: string[]): string | undefined {
++	if (fields.length < 3) return "expected date,sku,qty[,note]";
++	const [date, sku, qty] = fields.map((field) => field.trim());
++	if (!isValidDate(date)) return `invalid date "${date}"`;
++	if (!sku) return "missing item code";
++	if (!WHOLE_NUMBER.test(qty) || Number(qty) === 0) return `quantity must be a non-zero whole number, got "${qty}"`;
++	return undefined;
++}
++
+ /**
+- * Parses ledger CSV text into movements.
+- * A header line and blank lines are skipped. Lines that cannot be read are skipped too.
++ * Parses ledger CSV text. The header line and blank lines are skipped.
++ * Every other line becomes a movement or, if it cannot be read, an error with its line number.
+  */
+-export function parseCsv(text: string): Movement[] {
++export function parseCsv(text: string): ParseResult {
+ 	const movements: Movement[] = [];
+-	for (const raw of text.split(/\r?\n/)) {
++	const errors: ParseError[] = [];
++	text.split(/\r?\n/).forEach((raw, index) => {
+ 		const line = raw.trim();
+-		if (!line || line.toLowerCase() === HEADER) continue;
+-		const [date, sku, qty, ...note] = line.split(",");
+-		const amount = Number(qty);
+-		if (!date || !sku || qty === undefined || qty.trim() === "" || Number.isNaN(amount)) continue;
+-		movements.push({ date: date.trim(), sku: normalizeSku(sku), qty: amount, note: note.join(",").trim() });
+-	}
+-	return movements;
++		if (!line || line.toLowerCase() === HEADER) return;
++		const fields = line.split(",");
++		const message = problem(fields);
++		if (message) {
++			errors.push({ line: index + 1, message });
++			return;
++		}
++		const [date, sku, qty, ...note] = fields;
++		movements.push({ date: date.trim(), sku: normalizeSku(sku), qty: Number(qty.trim()), note: note.join(",").trim() });
++	});
++	return { movements, errors };
+ }
+diff --git a/src/types.ts b/src/types.ts
+index f0aa0fb..6c8f79d 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -15,3 +15,10 @@ export interface DateRange {
+ 	from?: string;
+ 	to?: string;
+ }
++
++/** A CSV line that could not be read. */
++export interface ParseError {
++	/** 1-based line number in the input text. */
++	line: number;
++	message: string;
++}
+diff --git a/test/cli.test.ts b/test/cli.test.ts
+index 369913a..4368988 100644
+--- a/test/cli.test.ts
++++ b/test/cli.test.ts
+@@ -25,6 +25,18 @@ test("missing arguments print usage", () => {
+ 	assert.match(result.stderr, /usage/);
+ });
+ 
++test("bad lines exit 2 unless --lenient", () => {
++	const bad = () => "date,sku,qty,note\n2026-01-02,A-1,4,\n2026-13-01,A-1,1,\n";
++	const strict = runCli(["balance", "stock.csv"], bad);
++	assert.equal(strict.code, 2);
++	assert.equal(strict.stdout, "");
++	assert.match(strict.stderr, /^line 3: /);
++	const lenient = runCli(["balance", "stock.csv", "--lenient"], bad);
++	assert.equal(lenient.code, 0);
++	assert.equal(lenient.stdout, ["SKU  QTY", "A-1    4"].join("\n"));
++	assert.match(lenient.stderr, /^line 3: /);
++});
++
+ test("unreadable files are reported", () => {
+ 	const result = runCli(["balance", "missing.csv"], () => {
+ 		throw new Error("ENOENT");
+diff --git a/test/parse.test.ts b/test/parse.test.ts
+index d3c7334..5671698 100644
+--- a/test/parse.test.ts
++++ b/test/parse.test.ts
+@@ -3,23 +3,31 @@ import { test } from "node:test";
+ import { normalizeSku, parseCsv } from "../src/parse.ts";
+ 
+ test("parses rows after the header", () => {
+-	const rows = parseCsv("date,sku,qty,note\n2026-01-02,ABC-1,5,first delivery\n2026-01-03,ABC-1,-2,");
+-	assert.deepEqual(rows, [
++	const { movements, errors } = parseCsv("date,sku,qty,note\n2026-01-02,ABC-1,5,first delivery\n2026-01-03,ABC-1,-2,");
++	assert.deepEqual(movements, [
+ 		{ date: "2026-01-02", sku: "ABC-1", qty: 5, note: "first delivery" },
+ 		{ date: "2026-01-03", sku: "ABC-1", qty: -2, note: "" },
+ 	]);
++	assert.deepEqual(errors, []);
+ });
+ 
+ test("skips blank lines and keeps commas inside notes", () => {
+-	const rows = parseCsv("\n2026-01-02,XY-9,3,box 1, box 2\n\n");
+-	assert.equal(rows.length, 1);
+-	assert.equal(rows[0].note, "box 1, box 2");
++	const { movements } = parseCsv("\n2026-01-02,XY-9,3,box 1, box 2\n\n");
++	assert.equal(movements.length, 1);
++	assert.equal(movements[0].note, "box 1, box 2");
+ });
+ 
+ test("accepts Windows line endings", () => {
+-	assert.equal(parseCsv("date,sku,qty,note\r\n2026-01-02,XY-9,3,\r\n").length, 1);
++	assert.equal(parseCsv("date,sku,qty,note\r\n2026-01-02,XY-9,3,\r\n").movements.length, 1);
+ });
+ 
+ test("trims SKUs", () => {
+ 	assert.equal(normalizeSku("  ABC-1 "), "ABC-1");
+ });
++
++test("reports each bad line with its line number", () => {
++	const { movements, errors } = parseCsv("date,sku,qty,note\n2026-02-30,A-1,1,\n2026-01-02,,1,\n2026-01-03,A-1,0,\n2026-01-04,A-1\n2026-01-05,A-1,2,ok\n");
++	assert.deepEqual(errors.map((error) => error.line), [2, 3, 4, 5]);
++	assert.ok(errors.every((error) => error.message.length > 0));
++	assert.deepEqual(movements.map((m) => m.qty), [2]);
++});

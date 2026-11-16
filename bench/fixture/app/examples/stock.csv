@@ -1,0 +1,8 @@
+date,sku,qty,note
+2026-01-02,ABC-1,40,first delivery
+2026-01-02,XYZ-7,1200,pallet
+2026-01-09,ABC-1,-3,order 1001
+2026-01-15,XYZ-7,-450,order 1002, split shipment
+2026-02-03,ABC-1,-30,order 1003
+2026-02-11,QRS-4,8,sample stock
+2026-02-20,XYZ-7,-700,order 1004

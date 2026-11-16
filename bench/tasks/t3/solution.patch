@@ -1,0 +1,52 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..849e86c 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -1,5 +1,6 @@
+ import { readFileSync } from "node:fs";
+ import { pathToFileURL } from "node:url";
++import { formatQty } from "./format.ts";
+ import { balances, history, lowStock } from "./ledger.ts";
+ import { parseCsv } from "./parse.ts";
+ import { formatBalances, formatHistory } from "./report.ts";
+@@ -15,11 +16,6 @@ export interface CliResult {
+ 	stderr: string;
+ }
+ 
+-function formatQty(qty: number): string {
+-	const sign = qty < 0 ? "-" : "";
+-	return sign + Math.abs(qty).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+-}
+-
+ function option(args: string[], name: string): string | undefined {
+ 	const index = args.indexOf(name);
+ 	return index === -1 ? undefined : args[index + 1];
+diff --git a/src/format.ts b/src/format.ts
+new file mode 100644
+index 0000000..d2294f9
+--- /dev/null
++++ b/src/format.ts
+@@ -0,0 +1,6 @@
++/** Whole quantity with `,` thousands separators and a leading `-` when negative. */
++export function formatQty(qty: number): string {
++	const sign = qty < 0 ? "-" : "";
++	const digits = Math.abs(qty).toString();
++	return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
++}
+diff --git a/src/report.ts b/src/report.ts
+index 9a448e8..fc6cbc0 100644
+--- a/src/report.ts
++++ b/src/report.ts
+@@ -1,11 +1,6 @@
++import { formatQty } from "./format.ts";
+ import type { Movement } from "./types.ts";
+ 
+-function formatQty(qty: number): string {
+-	const sign = qty < 0 ? "-" : "";
+-	const digits = Math.abs(qty).toString();
+-	return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+-}
+-
+ /** Two-column balance table: SKU left-aligned, quantity right-aligned. */
+ export function formatBalances(totals: Map<string, number>): string {
+ 	const rows = [...totals.entries()].map(([sku, qty]) => [sku, formatQty(qty)]);

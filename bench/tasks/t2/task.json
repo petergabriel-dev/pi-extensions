@@ -1,0 +1,5 @@
+{
+  "category": "feature with required tests",
+  "budgetMinutes": 90,
+  "requirements": ["R1", "R2", "R3", "R4"]
+}

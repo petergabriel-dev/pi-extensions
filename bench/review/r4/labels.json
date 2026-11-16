@@ -1,0 +1,1 @@
+[{ "file": "src/ledger.ts", "lines": [21, 21], "defect": "history still calls inRange with positional dates after its signature changed, so --from/--to are ignored." }]

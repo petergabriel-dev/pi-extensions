@@ -1,0 +1,39 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index ec4f1e6..d4ab7dc 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -7,7 +7,8 @@ import { formatBalances, formatHistory } from "./report.ts";
+ const USAGE = `usage:
+   ledger balance <file> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+   ledger history <file> <sku> [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+-  ledger low <file> --threshold <n>`;
++  ledger low <file> --threshold <n>
++  ledger skus <file>`;
+ 
+ export interface CliResult {
+ 	code: number;
+@@ -54,6 +55,8 @@ export function runCli(args: string[], read: (file: string) => string = readFile
+ 			const lines = lowStock(totals, threshold).map((sku) => `${sku} (${formatQty(totals.get(sku) ?? 0)})`);
+ 			return { code: 0, stdout: lines.join("\n"), stderr: "" };
+ 		}
++		case "skus":
++			return { code: 0, stdout: [...balances(movements).keys()].join("\n"), stderr: "" };
+ 		default:
+ 			return { code: 1, stdout: "", stderr: USAGE };
+ 	}
+diff --git a/test/cli.test.ts b/test/cli.test.ts
+index 369913a..f3bd420 100644
+--- a/test/cli.test.ts
++++ b/test/cli.test.ts
+@@ -19,6 +19,11 @@ test("low lists items under the threshold with quantities", () => {
+ 	assert.equal(runCli(["low", "stock.csv", "--threshold", "10"], read).stdout, "A-1 (3)");
+ });
+ 
++test("skus lists each item code once, sorted", () => {
++	const result = runCli(["skus", "stock.csv"], () => `${csv}2026-01-11,b-2,-1,\n`);
++	assert.deepEqual(result, { code: 0, stdout: "A-1\nB-2", stderr: "" });
++});
++
+ test("missing arguments print usage", () => {
+ 	const result = runCli(["balance"], read);
+ 	assert.equal(result.code, 1);

@@ -1,0 +1,1 @@
+[{ "file": "src/ledger.ts", "lines": [36, 36], "defect": "Adds negative quantities, so the total is negative instead of positive." }]

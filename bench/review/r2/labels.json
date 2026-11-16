@@ -1,0 +1,1 @@
+[{ "file": "src/cli.ts", "lines": [46, 46], "defect": "--sku is compared without upper-casing, so lower-case codes match nothing." }]
