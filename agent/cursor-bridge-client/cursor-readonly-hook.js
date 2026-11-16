@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * Cursor hook for Pi projects. Zero Pi imports.
- * Enforces read-only client behavior for any cwd under a .pi marker.
+ * Enforces read-only client behavior for any Cursor workspace under a .pi marker.
  */
 
 const fs = require("node:fs");
@@ -84,7 +84,8 @@ function isHomeDir(dir, homeReal) {
 }
 
 function findPiProjectRoot(start) {
-	let dir = path.resolve(start || process.cwd());
+	if (!start) return null;
+	let dir = path.resolve(start);
 	let homeReal = null;
 	try { homeReal = fs.realpathSync(os.homedir()); } catch { /* no home exclusion */ }
 	while (true) {
@@ -100,8 +101,36 @@ function readStdinJson() {
 	return raw.trim() ? JSON.parse(raw) : {};
 }
 
-function hookCwd(input) {
-	return input.cwd || input.workspaceRoot || input.workspace_root || input.projectRoot || input.project_root || process.cwd();
+function absolutePath(value) {
+	return typeof value === "string" && value.trim() !== "" && path.isAbsolute(value) ? value : null;
+}
+
+function realpathOrSelf(p) {
+	try { return fs.realpathSync(p); } catch { return p; }
+}
+
+// cursor-agent 2026.11.13 sends cwd "" (shell, preToolUse) or omits it (MCP), names the
+// workspace only in workspace_roots, and runs user-level hooks from ~/.cursor, so the hook
+// process cwd says nothing about the workspace and is never used. Returns the session's Pi
+// root (or null outside Pi) plus the bases relative tool paths resolve against, or an error
+// to deny with when the workspace is unknown or spans several Pi projects.
+function resolveLocation(input) {
+	const cwd = absolutePath(input.cwd);
+	if (cwd) return { root: findPiProjectRoot(cwd), bases: [cwd] };
+	const roots = (Array.isArray(input.workspace_roots) ? input.workspace_roots : []).map(absolutePath).filter(Boolean);
+	if (roots.length === 0) {
+		return { error: "Pi Cursor hook denied: the hook input has no absolute cwd or workspace_roots, so it cannot tell whether this is a Pi project. Update @lopezpetergabriel/pi-extensions, or remove the hook in Pi with /harness → Cursor → Uninstall." };
+	}
+	const piRoots = new Map();
+	for (const root of roots) {
+		const piRoot = findPiProjectRoot(root);
+		if (piRoot) piRoots.set(realpathOrSelf(piRoot), piRoot);
+	}
+	if (piRoots.size > 1) {
+		return { error: `Pi Cursor hook denied: this Cursor workspace spans several Pi projects (${[...piRoots.values()].join(", ")}); Pi rules and Build leases are per project. Open one Pi project per Cursor session.` };
+	}
+	const [piRoot = null] = piRoots.values();
+	return { root: piRoot, bases: piRoot ? [piRoot] : roots };
 }
 
 function eventName(input) {
@@ -359,11 +388,17 @@ function toolType(input) {
 	return String(tool).trim();
 }
 
+// cursor-agent 2026.11.13 also fires preToolUse for MCP calls as "MCP:<tool>", without a
+// server name; beforeMCPExecution follows and decides, so pass them through like "mcp".
+function isPassthroughTool(normalized) {
+	return PRE_TOOL_PASSTHROUGH_TOOLS.has(normalized) || normalized.startsWith("mcp:");
+}
+
 function classifyTool(input) {
 	const tool = toolType(input);
 	if (!tool) return { permission: "deny", reason: "preToolUse is missing tool type." };
 	const normalized = tool.toLowerCase();
-	if (PRE_TOOL_READ_TOOLS.has(normalized) || PRE_TOOL_PASSTHROUGH_TOOLS.has(normalized)) return { permission: "allow" };
+	if (PRE_TOOL_READ_TOOLS.has(normalized) || isPassthroughTool(normalized)) return { permission: "allow" };
 	return { permission: "deny", reason: `${tool} tool is not allowlisted as read-only.` };
 }
 
@@ -380,19 +415,27 @@ function toolTargetPath(input) {
 	return null;
 }
 
-function preToolUseTargetDecision(input, cwdRoot) {
+function preToolUseTargetDecision(input, location) {
 	const tool = toolType(input).toLowerCase();
-	if (!tool || PRE_TOOL_READ_TOOLS.has(tool) || PRE_TOOL_PASSTHROUGH_TOOLS.has(tool)) return null;
+	if (!tool || PRE_TOOL_READ_TOOLS.has(tool) || isPassthroughTool(tool)) return null;
 	const target = toolTargetPath(input);
 	if (!target) return null;
 	const bridgeClient = require("../claude-bridge-client/pi-bridge-mcp.js");
-	const targetRoot = bridgeClient.targetPiProjectRoot(target, hookCwd(input));
-	if (!targetRoot) return null;
-	if (cwdRoot && bridgeClient.realpathDeepest(cwdRoot) === targetRoot) return null;
+	const sessionRoot = location.root ? bridgeClient.realpathDeepest(location.root) : null;
+	// Several non-Pi roots leave a relative target ambiguous, so check it against each root.
+	const targetRoots = new Set();
+	for (const base of location.bases) {
+		const targetRoot = bridgeClient.targetPiProjectRoot(target, base);
+		if (targetRoot && targetRoot !== sessionRoot) targetRoots.add(targetRoot);
+	}
+	if (targetRoots.size === 0) return null;
 	const conversationId = input.conversation_id;
-	if (bridgeClient.isSafeId(conversationId)
-		&& bridgeClient.holdsBuildLease(targetRoot, { harness: "cursor", id: conversationId })) return allow();
-	return deny(`${toolType(input)} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${nextStep(targetRoot, conversationId, `Request a Build lease with /pi-build in ${targetRoot}, then approve it in Pi with /build-lease approve.`)}`);
+	for (const targetRoot of targetRoots) {
+		if (bridgeClient.isSafeId(conversationId)
+			&& bridgeClient.holdsBuildLease(targetRoot, { harness: "cursor", id: conversationId })) continue;
+		return deny(`${toolType(input)} is blocked: target is in Pi project ${targetRoot}, and this session has no Build lease there. ${nextStep(targetRoot, conversationId, `Request a Build lease with /pi-build in ${targetRoot}, then approve it in Pi with /build-lease approve.`)}`);
+	}
+	return allow();
 }
 
 // Another session's writer claim wins over the generic next step: a lease request
@@ -407,10 +450,12 @@ function nextStep(projectRoot, conversationId, fallback) {
 }
 
 function handle(input) {
-	const projectRoot = findPiProjectRoot(hookCwd(input));
+	const location = resolveLocation(input);
+	if (location.error) return deny(location.error);
+	const projectRoot = location.root;
 	const event = eventName(input);
 	if (event === "preToolUse") {
-		const target = preToolUseTargetDecision(input, projectRoot);
+		const target = preToolUseTargetDecision(input, location);
 		if (target) return target;
 	}
 	if (!projectRoot) return allow();

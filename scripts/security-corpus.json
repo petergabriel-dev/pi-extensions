@@ -611,6 +611,15 @@
       "expect": { "cursor": "allow" }
     },
     {
+      "id": "cursor-tool-mcp-prefixed-passthrough",
+      "class": "read",
+      "kind": "tool",
+      "columns": ["cursor"],
+      "tool": "MCP:recall_memory",
+      "input": { "query": "x", "sessionId": "cursor-security-seed", "harness": "cursor" },
+      "expect": { "cursor": "allow" }
+    },
+    {
       "id": "cursor-mcp-foreign-write",
       "class": "write",
       "kind": "mcp",
